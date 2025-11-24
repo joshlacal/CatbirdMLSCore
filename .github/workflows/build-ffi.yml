@@ -1,0 +1,105 @@
+name: Build and Release FFI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-xcframework:
+    name: Build MLSFFICore.xcframework
+    runs-on: macos-14
+    steps:
+      - name: Checkout mls-ffi
+        uses: actions/checkout@v4
+        with:
+          repository: joshlacal/mls-ffi
+          path: mls-ffi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Install cargo-lipo
+        run: cargo install cargo-lipo
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mls-ffi/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build XCFramework
+        working-directory: mls-ffi
+        run: |
+          chmod +x create-xcframework.sh
+          ./create-xcframework.sh
+
+      - name: Verify XCFramework
+        working-directory: mls-ffi
+        run: |
+          ls -lh MLSFFICore.xcframework/
+          file MLSFFICore.xcframework/*/libMLSFFICore.a
+
+      - name: Create archive
+        working-directory: mls-ffi
+        run: |
+          zip -r MLSFFICore.xcframework.zip MLSFFICore.xcframework
+
+      - name: Generate checksum
+        working-directory: mls-ffi
+        run: |
+          shasum -a 256 MLSFFICore.xcframework.zip > MLSFFICore.xcframework.zip.sha256
+          cat MLSFFICore.xcframework.zip.sha256
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## MLSFFICore.xcframework Release
+
+            Pre-built XCFramework from [joshlacal/mls-ffi](https://github.com/joshlacal/mls-ffi).
+
+            ### Installation
+
+            1. Download `MLSFFICore.xcframework.zip`
+            2. Verify checksum: `shasum -a 256 -c MLSFFICore.xcframework.zip.sha256`
+            3. Unzip to `Sources/MLSFFICore.xcframework`
+            4. Build with `swift build`
+
+            ### Checksums
+
+            ```
+            $(cat mls-ffi/MLSFFICore.xcframework.zip.sha256)
+            ```
+          files: |
+            mls-ffi/MLSFFICore.xcframework.zip
+            mls-ffi/MLSFFICore.xcframework.zip.sha256
+            mls-ffi/build/bindings/MLSFFI.swift
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

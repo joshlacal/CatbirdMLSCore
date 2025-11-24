@@ -1,0 +1,42 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+xcuserdata/
+*.xcworkspace
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build
+build/
+
+# Swift
+*.swiftmodule
+*.swiftdoc
+
+# Temporary files
+*.orig
+*~
+.swp
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# FFI Binary Framework (built by CI/CD, download from releases)
+Sources/MLSFFICore.xcframework/
