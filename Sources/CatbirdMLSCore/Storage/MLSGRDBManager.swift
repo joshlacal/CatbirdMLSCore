@@ -225,11 +225,26 @@ public actor MLSGRDBManager {
       // Set encryption key using quoted hex literal format
       try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
 
-      // Configure SQLCipher 4 parameters
+      // Try SQLCipher 4 settings first
       try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
       try db.execute(sql: "PRAGMA kdf_iter = 256000;")
       try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
       try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+
+      // Test if database can be read with these settings
+      do {
+        _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
+      } catch {
+        // If SQLCipher 4 settings fail, try SQLCipher 3 compatibility mode
+        // This handles existing databases created with older settings
+        try db.execute(sql: "PRAGMA cipher_page_size = 1024;")
+        try db.execute(sql: "PRAGMA kdf_iter = 64000;")
+        try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA1;")
+        try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA1;")
+
+        // Verify it works now
+        _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
+      }
 
       // Enable WAL mode for better concurrency
       try db.execute(sql: "PRAGMA journal_mode = WAL;")
@@ -238,9 +253,6 @@ public actor MLSGRDBManager {
 
       // Enable foreign keys
       try db.execute(sql: "PRAGMA foreign_keys = ON;")
-
-      // Verify encryption by accessing database
-      _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
     }
 
     // Create DatabaseQueue
@@ -600,6 +612,10 @@ public actor MLSGRDBManager {
 
   /// Set iOS Data Protection on database file
   private func setFileProtection(for fileURL: URL) throws {
+    #if targetEnvironment(macCatalyst)
+    // Skip file protection on Mac Catalyst - macOS has its own security model (FileVault, etc.)
+    logger.debug("Skipping file protection on Mac Catalyst")
+    #else
     do {
       try FileManager.default.setAttributes(
         [.protectionKey: FileProtectionType.complete],
@@ -608,6 +624,7 @@ public actor MLSGRDBManager {
     } catch {
       throw MLSSQLCipherError.fileProtectionFailed(underlying: error)
     }
+    #endif
   }
 
   /// Exclude database from iCloud/iTunes backup

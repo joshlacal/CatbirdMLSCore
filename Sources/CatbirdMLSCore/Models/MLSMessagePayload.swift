@@ -8,7 +8,7 @@ import Foundation
 /// This structure is encoded to JSON and then encrypted
 public struct MLSMessagePayload: Codable {
   /// Protocol version for future compatibility
-  public let version: Int = 1
+  public let version: Int
 
   /// Message text content
   public let text: String
@@ -16,7 +16,8 @@ public struct MLSMessagePayload: Codable {
   /// Optional embed data (record, link, or GIF)
   public let embed: MLSEmbedData?
 
-  public init(text: String, embed: MLSEmbedData? = nil) {
+  public init(text: String, embed: MLSEmbedData? = nil, version: Int = 1) {
+    self.version = version
     self.text = text
     self.embed = embed
   }

@@ -173,7 +173,7 @@ public actor MLSConsumptionTracker {
   public func clearHistory() async throws {
     let db = try await dbManager.getDatabaseQueue(for: userDID)
 
-    try await db.write { database in
+    _ = try await db.write { database in
       try MLSConsumptionRecordModel
         .forUser(userDID)
         .deleteAll(database)

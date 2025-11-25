@@ -18,6 +18,10 @@ public enum MLSError: LocalizedError {
     case ignoredOldEpochMessage
     case invalidContent(String)
     case invalidCredential(String)
+    /// GroupInfo has expired and cannot be used for External Commit
+    case staleGroupInfo(convoId: String, message: String)
+    /// GroupInfo is invalid (too small, wrong format, or encoding issues)
+    case invalidGroupInfo(convoId: String, message: String)
 
     public var errorDescription: String? {
         switch self {
@@ -47,6 +51,16 @@ public enum MLSError: LocalizedError {
             // Defensive: Copy string to ensure it's valid and retained
             let safeCopy = String(describing: message)
             return "Invalid credential: \(safeCopy)"
+        case .staleGroupInfo(let convoId, let message):
+            // Defensive: Copy strings to ensure they're valid and retained
+            let safeConvoId = String(describing: convoId)
+            let safeMessage = String(describing: message)
+            return "Stale GroupInfo for \(safeConvoId): \(safeMessage)"
+        case .invalidGroupInfo(let convoId, let message):
+            // Defensive: Copy strings to ensure they're valid and retained
+            let safeConvoId = String(describing: convoId)
+            let safeMessage = String(describing: message)
+            return "Invalid GroupInfo for \(safeConvoId): \(safeMessage)"
         }
     }
 }

@@ -183,7 +183,7 @@ public actor MLSEpochKeyRetentionManager {
         let startTime = Date()
         logger.info("🧹 Starting epoch key cleanup...")
 
-        var deletedCount = 0
+        let deletedCount = 0
 
         // Get all conversations that have epoch keys stored
         // Note: This requires tracking which conversations have keys

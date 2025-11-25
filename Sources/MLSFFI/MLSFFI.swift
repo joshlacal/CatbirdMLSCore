@@ -622,6 +622,18 @@ public protocol MlsContextProtocol: AnyObject {
 
     func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret
 
+    /**
+     * Force flush all pending database writes to disk
+     *
+     * This executes a SQLite WAL checkpoint to ensure all pending writes are
+     * durably persisted to the main database file. Call this after batch operations
+     * like creating multiple key packages to ensure they survive app restart.
+     *
+     * - Returns: Nothing on success
+     * - Throws: MLSError if flush fails
+     */
+    func flushStorage() throws
+
     func getEpoch(groupId: Data) throws -> UInt64
 
     /**
@@ -1041,6 +1053,21 @@ open class MlsContext:
                                                               FfiConverterData.lower(context),
                                                               FfiConverterUInt64.lower(keyLength), $0)
         })
+    }
+
+    /**
+     * Force flush all pending database writes to disk
+     *
+     * This executes a SQLite WAL checkpoint to ensure all pending writes are
+     * durably persisted to the main database file. Call this after batch operations
+     * like creating multiple key packages to ensure they survive app restart.
+     *
+     * - Returns: Nothing on success
+     * - Throws: MLSError if flush fails
+     */
+    open func flushStorage() throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_mls_ffi_fn_method_mlscontext_flush_storage(self.uniffiClonePointer(), $0)
+    }
     }
 
     open func getEpoch(groupId: Data) throws -> UInt64 {
@@ -3028,7 +3055,7 @@ public protocol EpochSecretStorage: AnyObject {
      * - secret_data: Serialized epoch secret material
      * Returns true if stored successfully
      */
-    func storeEpochSecret(conversationId: String, epoch: UInt64, secretData: Data) -> Bool
+    func storeEpochSecret(conversationId: String, epoch: UInt64, secretData: Data) async -> Bool
 
     /**
      * Retrieve epoch secret for a conversation
@@ -3036,7 +3063,7 @@ public protocol EpochSecretStorage: AnyObject {
      * - epoch: Epoch number
      * Returns serialized epoch secret material if found
      */
-    func getEpochSecret(conversationId: String, epoch: UInt64) -> Data?
+    func getEpochSecret(conversationId: String, epoch: UInt64) async -> Data?
 
     /**
      * Delete epoch secret (called during retention cleanup)
@@ -3044,7 +3071,7 @@ public protocol EpochSecretStorage: AnyObject {
      * - epoch: Epoch number
      * Returns true if deleted successfully
      */
-    func deleteEpochSecret(conversationId: String, epoch: UInt64) -> Bool
+    func deleteEpochSecret(conversationId: String, epoch: UInt64) async -> Bool
 }
 
 // Magic number for the Rust proxy to call using the same mechanism as every other method,
@@ -3065,77 +3092,134 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
             conversationId: RustBuffer,
             epoch: UInt64,
             secretData: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteI8,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws -> Bool in
+                () async throws -> Bool in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.storeEpochSecret(
+                return try await uniffiObj.storeEpochSecret(
                     conversationId: FfiConverterString.lift(conversationId),
                     epoch: FfiConverterUInt64.lift(epoch),
                     secretData: FfiConverterData.lift(secretData)
                 )
             }
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (returnValue: Bool) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructI8(
+                        returnValue: FfiConverterBool.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructI8(
+                        returnValue: 0,
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsync(
                 makeCall: makeCall,
-                writeReturn: writeReturn
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         getEpochSecret: { (
             uniffiHandle: UInt64,
             conversationId: RustBuffer,
             epoch: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteRustBuffer,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws -> Data? in
+                () async throws -> Data? in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.getEpochSecret(
+                return try await uniffiObj.getEpochSecret(
                     conversationId: FfiConverterString.lift(conversationId),
                     epoch: FfiConverterUInt64.lift(epoch)
                 )
             }
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (returnValue: Data?) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructRustBuffer(
+                        returnValue: FfiConverterOptionData.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructRustBuffer(
+                        returnValue: RustBuffer.empty(),
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsync(
                 makeCall: makeCall,
-                writeReturn: writeReturn
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         deleteEpochSecret: { (
             uniffiHandle: UInt64,
             conversationId: RustBuffer,
             epoch: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteI8,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws -> Bool in
+                () async throws -> Bool in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.deleteEpochSecret(
+                return try await uniffiObj.deleteEpochSecret(
                     conversationId: FfiConverterString.lift(conversationId),
                     epoch: FfiConverterUInt64.lift(epoch)
                 )
             }
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (returnValue: Bool) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructI8(
+                        returnValue: FfiConverterBool.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructI8(
+                        returnValue: 0,
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsync(
                 makeCall: makeCall,
-                writeReturn: writeReturn
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         uniffiFree: { (uniffiHandle: UInt64) in
             let result = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.remove(handle: uniffiHandle)
@@ -3196,11 +3280,11 @@ extension FfiConverterCallbackInterfaceEpochSecretStorage: FfiConverter {
 }
 
 public protocol KeychainAccess: AnyObject {
-    func read(key: String) throws -> Data?
+    func read(key: String) async throws -> Data?
 
-    func write(key: String, value: Data) throws
+    func write(key: String, value: Data) async throws
 
-    func delete(key: String) throws
+    func delete(key: String) async throws
 }
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
@@ -3211,76 +3295,129 @@ private enum UniffiCallbackInterfaceKeychainAccess {
         read: { (
             uniffiHandle: UInt64,
             key: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteRustBuffer,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws -> Data? in
+                () async throws -> Data? in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.read(
+                return try await uniffiObj.read(
                     key: FfiConverterString.lift(key)
                 )
             }
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (returnValue: Data?) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructRustBuffer(
+                        returnValue: FfiConverterOptionData.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructRustBuffer(
+                        returnValue: RustBuffer.empty(),
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsyncWithError(
                 makeCall: makeCall,
-                writeReturn: writeReturn,
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError,
                 lowerError: FfiConverterTypeMLSError.lower
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         write: { (
             uniffiHandle: UInt64,
             key: RustBuffer,
             value: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteVoid,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws in
+                () async throws in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.write(
+                return try await uniffiObj.write(
                     key: FfiConverterString.lift(key),
                     value: FfiConverterData.lift(value)
                 )
             }
 
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (_: ()) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructVoid(
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructVoid(
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsyncWithError(
                 makeCall: makeCall,
-                writeReturn: writeReturn,
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError,
                 lowerError: FfiConverterTypeMLSError.lower
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         delete: { (
             uniffiHandle: UInt64,
             key: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteVoid,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws in
+                () async throws in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.delete(
+                return try await uniffiObj.delete(
                     key: FfiConverterString.lift(key)
                 )
             }
 
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (_: ()) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructVoid(
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructVoid(
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsyncWithError(
                 makeCall: makeCall,
-                writeReturn: writeReturn,
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError,
                 lowerError: FfiConverterTypeMLSError.lower
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         uniffiFree: { (uniffiHandle: UInt64) in
             let result = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.remove(handle: uniffiHandle)
@@ -3346,7 +3483,7 @@ public protocol MlsLogger: AnyObject {
      * - level: "debug", "info", "warning", "error"
      * - message: The log message
      */
-    func log(level: String, message: String)
+    func log(level: String, message: String) async
 }
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
@@ -3358,26 +3495,43 @@ private enum UniffiCallbackInterfaceMLSLogger {
             uniffiHandle: UInt64,
             level: RustBuffer,
             message: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteVoid,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () throws in
+                () async throws in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceMlsLogger.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.log(
+                return try await uniffiObj.log(
                     level: FfiConverterString.lift(level),
                     message: FfiConverterString.lift(message)
                 )
             }
 
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
+            let uniffiHandleSuccess = { (_: ()) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructVoid(
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructVoid(
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsync(
                 makeCall: makeCall,
-                writeReturn: writeReturn
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError
             )
+            uniffiOutReturn.pointee = uniffiForeignFuture
         },
         uniffiFree: { (uniffiHandle: UInt64) in
             let result = try? FfiConverterCallbackInterfaceMlsLogger.handleMap.remove(handle: uniffiHandle)
@@ -3635,6 +3789,119 @@ private struct FfiConverterSequenceTypeUpdateProposalInfo: FfiConverterRustBuffe
     }
 }
 
+private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
+private let UNIFFI_RUST_FUTURE_POLL_MAYBE_READY: Int8 = 1
+
+private let uniffiContinuationHandleMap = UniffiHandleMap<UnsafeContinuation<Int8, Never>>()
+
+private func uniffiRustCallAsync<F, T>(
+    rustFutureFunc: () -> UInt64,
+    pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> Void,
+    completeFunc: (UInt64, UnsafeMutablePointer<RustCallStatus>) -> F,
+    freeFunc: (UInt64) -> Void,
+    liftFunc: (F) throws -> T,
+    errorHandler: ((RustBuffer) throws -> Swift.Error)?
+) async throws -> T {
+    // Make sure to call uniffiEnsureInitialized() since future creation doesn't have a
+    // RustCallStatus param, so doesn't use makeRustCall()
+    uniffiEnsureInitialized()
+    let rustFuture = rustFutureFunc()
+    defer {
+        freeFunc(rustFuture)
+    }
+    var pollResult: Int8
+    repeat {
+        pollResult = await withUnsafeContinuation {
+            pollFunc(
+                rustFuture,
+                uniffiFutureContinuationCallback,
+                uniffiContinuationHandleMap.insert(obj: $0)
+            )
+        }
+    } while pollResult != UNIFFI_RUST_FUTURE_POLL_READY
+
+    return try liftFunc(makeRustCall(
+        { completeFunc(rustFuture, $0) },
+        errorHandler: errorHandler
+    ))
+}
+
+// Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
+// lift the return value or error and resume the suspended function.
+private func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) {
+    if let continuation = try? uniffiContinuationHandleMap.remove(handle: handle) {
+        continuation.resume(returning: pollResult)
+    } else {
+        print("uniffiFutureContinuationCallback invalid handle")
+    }
+}
+
+private func uniffiTraitInterfaceCallAsync<T>(
+    makeCall: @escaping () async throws -> T,
+    handleSuccess: @escaping (T) -> Void,
+    handleError: @escaping (Int8, RustBuffer) -> Void
+) -> UniffiForeignFuture {
+    let task = Task {
+        do {
+            try handleSuccess(await makeCall())
+        } catch {
+            handleError(CALL_UNEXPECTED_ERROR, FfiConverterString.lower(String(describing: error)))
+        }
+    }
+    let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
+    return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+}
+
+private func uniffiTraitInterfaceCallAsyncWithError<T, E>(
+    makeCall: @escaping () async throws -> T,
+    handleSuccess: @escaping (T) -> Void,
+    handleError: @escaping (Int8, RustBuffer) -> Void,
+    lowerError: @escaping (E) -> RustBuffer
+) -> UniffiForeignFuture {
+    let task = Task {
+        do {
+            try handleSuccess(await makeCall())
+        } catch let error as E {
+            handleError(CALL_ERROR, lowerError(error))
+        } catch {
+            handleError(CALL_UNEXPECTED_ERROR, FfiConverterString.lower(String(describing: error)))
+        }
+    }
+    let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
+    return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+}
+
+// Borrow the callback handle map implementation to store foreign future handles
+// TODO: consolidate the handle-map code (https://github.com/mozilla/uniffi-rs/pull/1823)
+private var UNIFFI_FOREIGN_FUTURE_HANDLE_MAP = UniffiHandleMap<UniffiForeignFutureTask>()
+
+// Protocol for tasks that handle foreign futures.
+//
+// Defining a protocol allows all tasks to be stored in the same handle map.  This can't be done
+// with the task object itself, since has generic parameters.
+protocol UniffiForeignFutureTask {
+    func cancel()
+}
+
+extension Task: UniffiForeignFutureTask {}
+
+private func uniffiForeignFutureFree(handle: UInt64) {
+    do {
+        let task = try UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.remove(handle: handle)
+        // Set the cancellation flag on the task.  If it's still running, the code can check the
+        // cancellation flag or call `Task.checkCancellation()`.  If the task has completed, this is
+        // a no-op.
+        task.cancel()
+    } catch {
+        print("uniffiForeignFutureFree: handle missing from handlemap")
+    }
+}
+
+// For testing
+public func uniffiForeignFutureHandleCountMlsFfi() -> Int {
+    UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.count
+}
+
 /**
  * Compute the hash reference for a serialized KeyPackage
  * Accepts either an MlsMessage-wrapped KeyPackage or raw KeyPackage bytes
@@ -3764,6 +4031,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_export_secret() != 25912 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_flush_storage() != 36619 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_get_epoch() != 52081 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3821,25 +4091,25 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_constructor_mlscontext_new() != 23112 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_epochsecretstorage_store_epoch_secret() != 37088 {
+    if uniffi_mls_ffi_checksum_method_epochsecretstorage_store_epoch_secret() != 33043 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_epochsecretstorage_get_epoch_secret() != 50138 {
+    if uniffi_mls_ffi_checksum_method_epochsecretstorage_get_epoch_secret() != 42117 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_epochsecretstorage_delete_epoch_secret() != 32180 {
+    if uniffi_mls_ffi_checksum_method_epochsecretstorage_delete_epoch_secret() != 15099 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_keychainaccess_read() != 14055 {
+    if uniffi_mls_ffi_checksum_method_keychainaccess_read() != 3271 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_keychainaccess_write() != 6838 {
+    if uniffi_mls_ffi_checksum_method_keychainaccess_write() != 5316 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_keychainaccess_delete() != 19824 {
+    if uniffi_mls_ffi_checksum_method_keychainaccess_delete() != 2937 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlslogger_log() != 33345 {
+    if uniffi_mls_ffi_checksum_method_mlslogger_log() != 45548 {
         return InitializationResult.apiChecksumMismatch
     }
 

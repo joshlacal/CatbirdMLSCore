@@ -19,7 +19,7 @@ public class MLSLoggerImplementation: MlsLogger {
   public init() {}
 
   /// Receive log messages from Rust FFI and forward to OSLog
-  public func log(level: String, message: String) {
+  public func log(level: String, message: String) async {
     // Suppress repetitive non-critical logs
     if shouldSuppressLog(message) {
       return

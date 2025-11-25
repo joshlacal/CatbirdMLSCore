@@ -12,6 +12,7 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
   case record(MLSRecordEmbed)
   case link(MLSLinkEmbed)
   case gif(MLSGIFEmbed)
+  case post(MLSPostEmbed)
 
   // MARK: - Codable
 
@@ -24,6 +25,7 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case record
     case link
     case gif
+    case post
   }
 
   public init(from decoder: Decoder) throws {
@@ -40,6 +42,9 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case .gif:
       let gif = try container.decode(MLSGIFEmbed.self, forKey: .data)
       self = .gif(gif)
+    case .post:
+      let post = try container.decode(MLSPostEmbed.self, forKey: .data)
+      self = .post(post)
     }
   }
 
@@ -56,6 +61,9 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case .gif(let gif):
       try container.encode(EmbedType.gif, forKey: .type)
       try container.encode(gif, forKey: .data)
+    case .post(let post):
+      try container.encode(EmbedType.post, forKey: .type)
+      try container.encode(post, forKey: .data)
     }
   }
 }
@@ -141,6 +149,80 @@ public struct MLSGIFEmbed: Codable, Sendable, Hashable {
     case thumbnailURL = "thumbnail_url"
     case width
     case height
+  }
+}
+
+// MARK: - Post Embed
+
+/// Bluesky post embed for sharing posts in MLS messages
+public struct MLSPostEmbed: Codable, Sendable, Hashable {
+  public let uri: String
+  public let cid: String
+  public let authorDid: String
+  public let authorHandle: String?
+  public let authorDisplayName: String?
+  public let authorAvatar: URL?
+  public let text: String
+  public let createdAt: Date
+  public let likeCount: Int?
+  public let replyCount: Int?
+  public let repostCount: Int?
+  public let images: [MLSPostImage]?
+
+  public init(
+    uri: String,
+    cid: String,
+    authorDid: String,
+    authorHandle: String? = nil,
+    authorDisplayName: String? = nil,
+    authorAvatar: URL? = nil,
+    text: String,
+    createdAt: Date,
+    likeCount: Int? = nil,
+    replyCount: Int? = nil,
+    repostCount: Int? = nil,
+    images: [MLSPostImage]? = nil
+  ) {
+    self.uri = uri
+    self.cid = cid
+    self.authorDid = authorDid
+    self.authorHandle = authorHandle
+    self.authorDisplayName = authorDisplayName
+    self.authorAvatar = authorAvatar
+    self.text = text
+    self.createdAt = createdAt
+    self.likeCount = likeCount
+    self.replyCount = replyCount
+    self.repostCount = repostCount
+    self.images = images
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case uri
+    case cid
+    case authorDid = "author_did"
+    case authorHandle = "author_handle"
+    case authorDisplayName = "author_display_name"
+    case authorAvatar = "author_avatar"
+    case text
+    case createdAt = "created_at"
+    case likeCount = "like_count"
+    case replyCount = "reply_count"
+    case repostCount = "repost_count"
+    case images
+  }
+}
+
+/// Image attachment in a post embed
+public struct MLSPostImage: Codable, Sendable, Hashable {
+  public let thumb: URL
+  public let fullsize: URL?
+  public let alt: String?
+
+  public init(thumb: URL, fullsize: URL? = nil, alt: String? = nil) {
+    self.thumb = thumb
+    self.fullsize = fullsize
+    self.alt = alt
   }
 }
 

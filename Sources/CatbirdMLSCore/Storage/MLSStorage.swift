@@ -66,7 +66,7 @@ public final class MLSStorage: @unchecked Sendable {
         throw MLSStorageError.invalidGroupID(groupID)
       }
 
-      var conversation = MLSConversationModel(
+      let conversation = MLSConversationModel(
         conversationID: conversationID,
         currentUserDID: userDID,
         groupID: groupIDData,
@@ -140,12 +140,14 @@ public final class MLSStorage: @unchecked Sendable {
     logger.info("💾 Caching plaintext: \(messageID) (epoch: \(epoch), seq: \(sequenceNumber), hasEmbed: \(embed != nil), hasError: \(processingError != nil))")
 
     // Encode embed data if provided
-    var embedDataEncoded: Data?
+    let embedDataEncoded: Data?
     if let embed = embed {
       let encoder = JSONEncoder()
       encoder.dateEncodingStrategy = .iso8601
       embedDataEncoded = try encoder.encode(embed)
       logger.debug("Encoded embed data (\(embedDataEncoded?.count ?? 0) bytes)")
+    } else {
+      embedDataEncoded = nil
     }
 
     try await database.write { db in
@@ -187,7 +189,7 @@ public final class MLSStorage: @unchecked Sendable {
         logger.debug("Updated existing message with plaintext cache")
       } else {
         // Create new message
-        var message = MLSMessageModel(
+        let message = MLSMessageModel(
           messageID: messageID,
           currentUserDID: currentUserDID,
           conversationID: conversationID,
@@ -416,7 +418,7 @@ public final class MLSStorage: @unchecked Sendable {
 
     do {
       try await database.write { db in
-        var epochKey = MLSEpochKeyModel(
+        let epochKey = MLSEpochKeyModel(
           epochKeyID: "\(conversationID)-\(epoch)",
           conversationID: conversationID,
           currentUserDID: userDID,
@@ -516,7 +518,7 @@ public final class MLSStorage: @unchecked Sendable {
   ) async throws {
 
     try await database.write { db in
-      var epochKey = MLSEpochKeyModel(
+      let epochKey = MLSEpochKeyModel(
         epochKeyID: "\(conversationID)-\(epoch)",
         conversationID: conversationID,
         currentUserDID: userDID,
@@ -688,6 +690,39 @@ public final class MLSStorage: @unchecked Sendable {
         .order(MLSMemberModel.Columns.addedAt)
         .fetchAll(db)
     }
+  }
+
+  /// Upsert members for a conversation (replaces existing members)
+  /// - Parameters:
+  ///   - members: Array of member models to persist
+  ///   - conversationID: Conversation identifier
+  ///   - currentUserDID: Current user DID
+  ///   - database: DatabaseQueue to use for operations
+  /// - Throws: MLSStorageError if operation fails
+  public func upsertMembers(
+    _ members: [MLSMemberModel],
+    conversationID: String,
+    currentUserDID: String,
+    database: DatabaseQueue
+  ) async throws {
+    try await database.write { db in
+      // Mark all existing members as inactive first
+      try db.execute(
+        sql: """
+          UPDATE MLSMemberModel
+          SET isActive = 0, removedAt = ?, updatedAt = ?
+          WHERE conversationID = ? AND currentUserDID = ? AND isActive = 1
+          """,
+        arguments: [Date(), Date(), conversationID, currentUserDID]
+      )
+
+      // Insert or update the provided members
+      for member in members {
+        try member.save(db)
+      }
+    }
+
+    logger.info("✅ Upserted \(members.count) members for conversation: \(conversationID)")
   }
 
   // MARK: - Reports (Feature Removed - Admin roster and reports not implemented)

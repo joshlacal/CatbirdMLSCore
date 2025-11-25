@@ -10,7 +10,14 @@
       "Bash(gh repo create:*)",
       "Bash(git push:*)",
       "Bash(git rm:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(git remote add:*)",
+      "Bash(swift build:*)",
+      "WebSearch",
+      "WebFetch(domain:mozilla.github.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo check:*)",
+      "Bash(./Scripts/rebuild-ffi.sh:*)"
     ],
     "deny": [],
     "ask": []
