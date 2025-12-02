@@ -2,285 +2,309 @@
 //  MLSGRDBManager.swift
 //  Catbird
 //
-//  GRDB DatabaseQueue manager with SQLCipher encryption for MLS storage
-//  Works with SQLiteData for SwiftUI integration
+//  GRDB DatabasePool manager with SQLCipher encryption for MLS storage.
+//  Uses DatabasePool for concurrent read access and serialized writes.
+//  Actor isolation ensures thread-safe access with Swift 6 concurrency.
 //
 
 import Foundation
 import GRDB
 import OSLog
 
-/// Manages encrypted GRDB DatabaseQueue instances with per-user isolation
-/// Actor provides thread-safe access and automatic isolation
+/// Manages encrypted GRDB DatabasePool instances with per-user isolation.
+/// Actor provides thread-safe access and automatic isolation.
+/// Uses DatabasePool for better read concurrency (multiple concurrent readers, single writer).
 public actor MLSGRDBManager {
 
-  // MARK: - Properties
+    // MARK: - Properties
 
-  /// Shared singleton instance
-  public static let shared = MLSGRDBManager()
+    /// Shared singleton instance
+    public static let shared = MLSGRDBManager()
 
-  /// Logger for database operations
-  private let logger = Logger(subsystem: "Catbird", category: "MLSGRDBManager")
+    /// Logger for database operations
+    private let logger = Logger(subsystem: "Catbird", category: "MLSGRDBManager")
 
-  /// Active database queues per user DID
-  private var databases: [String: DatabaseQueue] = [:]
+    /// Active database pools per user DID (upgraded from DatabaseQueue for better concurrency)
+    private var databases: [String: DatabasePool] = [:]
 
-  /// Encryption manager
-  private let encryption = MLSSQLCipherEncryption.shared
+    /// Encryption manager
+    private let encryption = MLSSQLCipherEncryption.shared
 
-  /// Base directory for all user databases
-  private let databaseDirectory: URL
+    /// Base directory for all user databases
+    private let databaseDirectory: URL
 
-  /// Database file extension
-  private let fileExtension = "db"
+    /// Database file extension
+    private let fileExtension = "db"
 
-  // MARK: - Initialization
+    // MARK: - Initialization
 
-  private init() {
-    // Create base directory for MLS databases
-    let appSupport: URL
-    if let sharedContainer = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared")
-    {
-      appSupport = sharedContainer
-    } else {
-      appSupport =
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    }
-    self.databaseDirectory = appSupport.appendingPathComponent("MLS", isDirectory: true)
+    private init() {
+        // Create base directory for MLS databases
+        let appSupport: URL
+        if let sharedContainer = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared")
+        {
+            appSupport = sharedContainer
+        } else {
+            appSupport =
+                FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        }
+        self.databaseDirectory = appSupport.appendingPathComponent("MLS", isDirectory: true)
 
-    // Create directory if it doesn't exist
-    do {
-      try FileManager.default.createDirectory(
-        at: databaseDirectory, withIntermediateDirectories: true)
-    } catch {
-      logger.error("Failed to create database directory: \(error.localizedDescription)")
-    }
-  }
-
-  // MARK: - Public API
-
-  /// Get or create encrypted DatabaseQueue for a user (actor isolation)
-  /// - Parameter userDID: User's decentralized identifier
-  /// - Returns: Encrypted GRDB DatabaseQueue
-  /// - Throws: MLSSQLCipherError if creation fails
-  public func getDatabaseQueue(for userDID: String) async throws -> DatabaseQueue {
-    // Check cache first (actor isolation provides thread-safety)
-    if let existingDatabase = databases[userDID] {
-      return existingDatabase
+        // Create directory if it doesn't exist
+        do {
+            try FileManager.default.createDirectory(
+                at: databaseDirectory, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create database directory: \(error.localizedDescription)")
+        }
     }
 
-    // Check if database file already exists
-    let dbPath = databasePath(for: userDID)
-    let isNewDatabase = !FileManager.default.fileExists(atPath: dbPath.path)
+    // MARK: - Public API
 
-    // Create/open database (runs off main thread)
-    do {
-      let database = try await createDatabase(for: userDID)
+    /// Get or create encrypted DatabasePool for a user (actor isolation)
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: Encrypted GRDB DatabasePool
+    /// - Throws: MLSSQLCipherError if creation fails
+    public func getDatabasePool(for userDID: String) async throws -> DatabasePool {
+        // Check cache first (actor isolation provides thread-safety)
+        if let existingDatabase = databases[userDID] {
+            return existingDatabase
+        }
 
-      // Cache the database (actor isolation provides thread-safety)
-      databases[userDID] = database
+        // Check if database file already exists
+        let dbPath = databasePath(for: userDID)
+        let isNewDatabase = !FileManager.default.fileExists(atPath: dbPath.path)
 
-      if isNewDatabase {
-        logger.info("✨ Created new database for user: \(userDID, privacy: .private)")
-      } else {
-        logger.info("📂 Opened existing database for user: \(userDID, privacy: .private)")
-      }
+        // Create/open database (runs off main thread via actor isolation)
+        do {
+            let database = try await createDatabase(for: userDID)
 
-      return database
-    } catch {
-      // If database creation fails with corruption error, attempt repair
-      let errorDescription = error.localizedDescription
-      if errorDescription.contains("out of memory") || errorDescription.contains("SQLITE") {
-        logger.warning("⚠️ Database creation failed, attempting repair: \(errorDescription)")
+            // Cache the database (actor isolation provides thread-safety)
+            databases[userDID] = database
 
-        // Attempt repair
-        try? repairDatabase(for: userDID)
+            if isNewDatabase {
+                logger.info("✨ Created new database pool for user: \(userDID, privacy: .private)")
+            } else {
+                logger.info("📂 Opened existing database pool for user: \(userDID, privacy: .private)")
+            }
 
-        // Retry opening database after repair
-        let database = try await createDatabase(for: userDID)
+            return database
+        } catch {
+            // If database creation fails with corruption error, attempt repair
+            let errorDescription = error.localizedDescription
+            if errorDescription.contains("out of memory") || errorDescription.contains("SQLITE") {
+                logger.warning("⚠️ Database creation failed, attempting repair: \(errorDescription)")
 
-        databases[userDID] = database
+                // Attempt repair
+                try? repairDatabase(for: userDID)
 
-        logger.info("✅ Database recovered and reopened after repair for user: \(userDID, privacy: .private)")
+                // Retry opening database after repair
+                let database = try await createDatabase(for: userDID)
+
+                databases[userDID] = database
+
+                logger.info("✅ Database recovered and reopened after repair for user: \(userDID, privacy: .private)")
+
+                return database
+            }
+
+            // Re-throw if not a recoverable error
+            throw error
+        }
+    }
+    
+    /// Legacy method for backwards compatibility - returns DatabaseQueue interface
+    /// New code should use getDatabasePool(for:) instead
+    @available(*, deprecated, renamed: "getDatabasePool(for:)", message: "Use getDatabasePool for better concurrency")
+    public func getDatabaseQueue(for userDID: String) async throws -> DatabasePool {
+        return try await getDatabasePool(for: userDID)
+    }
+
+    /// Close database for a user
+    /// - Parameter userDID: User's decentralized identifier
+    public func closeDatabase(for userDID: String) {
+        if databases.removeValue(forKey: userDID) != nil {
+            logger.info("Closed database for user: \(userDID, privacy: .private)")
+        }
+    }
+
+    /// Close all databases
+    func closeAllDatabases() {
+        let userDIDs = Array(databases.keys)
+        for userDID in userDIDs {
+            databases.removeValue(forKey: userDID)
+        }
+        logger.info("Closed all databases")
+    }
+
+    /// Delete database file for a user (when removing account)
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Throws: MLSSQLCipherError if deletion fails
+    public func deleteDatabase(for userDID: String) async throws {
+        // Close database first
+        closeDatabase(for: userDID)
+
+        // Delete database file
+        let dbPath = databasePath(for: userDID)
+
+        if FileManager.default.fileExists(atPath: dbPath.path) {
+            do {
+                try FileManager.default.removeItem(at: dbPath)
+                logger.info("Deleted database for user: \(userDID, privacy: .private)")
+            } catch {
+                throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
+            }
+        }
+
+        // Delete encryption key
+        try await encryption.deleteKey(for: userDID)
+    }
+
+    /// Repair corrupted database by removing WAL and SHM files
+    /// Call this if you get SQLITE_NOMEM or other corruption errors
+    /// - Parameter userDID: User's decentralized identifier
+    func repairDatabase(for userDID: String) throws {
+        logger.warning("⚠️ Attempting to repair database for user: \(userDID, privacy: .private)")
+
+        // Close database first
+        closeDatabase(for: userDID)
+
+        let dbPath = databasePath(for: userDID)
+        let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
+        let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
+
+        // Delete WAL and SHM files (will be recreated)
+        for path in [walPath, shmPath] {
+            if FileManager.default.fileExists(atPath: path.path) {
+                do {
+                    try FileManager.default.removeItem(at: path)
+                    logger.info("Deleted corrupted file: \(path.lastPathComponent)")
+                } catch {
+                    logger.error("Failed to delete \(path.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+        }
+
+        logger.info("✅ Database repair completed for user: \(userDID, privacy: .private)")
+    }
+
+    /// Check if database exists for user
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: True if database file exists
+    func databaseExists(for userDID: String) -> Bool {
+        let dbPath = databasePath(for: userDID)
+        return FileManager.default.fileExists(atPath: dbPath.path)
+    }
+
+    /// Get database file size
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: Size in bytes, or nil if database doesn't exist
+    func databaseSize(for userDID: String) -> Int64? {
+        let dbPath = databasePath(for: userDID)
+
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: dbPath.path),
+              let fileSize = attributes[.size] as? Int64
+        else {
+            return nil
+        }
+
+        return fileSize
+    }
+
+    // MARK: - Private Methods
+
+    /// Create new encrypted database with GRDB DatabasePool (runs off main thread via actor isolation)
+    private func createDatabase(for userDID: String) async throws -> DatabasePool {
+        // Get or create encryption key
+        let encryptionKey = try await encryption.getOrCreateKey(for: userDID)
+
+        // Get database file path
+        let dbPath = databasePath(for: userDID)
+
+        // Configure GRDB with SQLCipher encryption
+        var config = Configuration()
+        
+        // Enable busyMode for better concurrency handling
+        config.busyMode = .timeout(5.0)  // Wait up to 5 seconds for locks
+        
+        // Note: defaultTransactionKind is automatically managed by GRDB
+        
+        // Enable readonly connections for readers (DatabasePool feature)
+        config.readonly = false
+
+        // Set QoS to userInitiated to match main thread priority
+        // This prevents priority inversion when UI threads await database operations
+        config.qos = .userInitiated
+
+        // Configure encryption using GRDB's prepareDatabase
+        config.prepareDatabase { db in
+            // Convert key to hex string for SQLCipher
+            // SQLCipher expects: PRAGMA key = "x'hexstring'"
+            let hexKey = encryptionKey.map { String(format: "%02x", $0) }.joined()
+
+            // Set encryption key using quoted hex literal format
+            try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
+
+            // Try SQLCipher 4 settings first
+            try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
+            try db.execute(sql: "PRAGMA kdf_iter = 256000;")
+            try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
+            try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+
+            // Test if database can be read with these settings
+            do {
+                _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
+            } catch {
+                // If SQLCipher 4 settings fail, try SQLCipher 3 compatibility mode
+                // This handles existing databases created with older settings
+                try db.execute(sql: "PRAGMA cipher_page_size = 1024;")
+                try db.execute(sql: "PRAGMA kdf_iter = 64000;")
+                try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA1;")
+                try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA1;")
+
+                // Verify it works now
+                _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
+            }
+
+            // Enable WAL mode for better concurrency (critical for DatabasePool)
+            try db.execute(sql: "PRAGMA journal_mode = WAL;")
+            try db.execute(sql: "PRAGMA wal_autocheckpoint = 1000;")
+            try db.execute(sql: "PRAGMA synchronous = NORMAL;")  // NORMAL is sufficient with WAL
+
+            // Enable foreign keys
+            try db.execute(sql: "PRAGMA foreign_keys = ON;")
+            
+            // Enable memory-mapped I/O for better read performance
+            try db.execute(sql: "PRAGMA mmap_size = 268435456;")  // 256MB
+        }
+
+        // Create DatabasePool for concurrent reads
+        let database: DatabasePool
+        do {
+            database = try DatabasePool(path: dbPath.path, configuration: config)
+        } catch {
+            throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
+        }
+
+        // Set file protection (iOS Data Protection)
+        try setFileProtection(for: dbPath)
+
+        // Exclude from backups
+        try excludeFromBackup(dbPath)
+
+        // Run migrations
+        try runMigrations(database)
 
         return database
-      }
-
-      // Re-throw if not a recoverable error
-      throw error
-    }
-  }
-
-  /// Close database for a user
-  /// - Parameter userDID: User's decentralized identifier
-  public func closeDatabase(for userDID: String) {
-    if databases.removeValue(forKey: userDID) != nil {
-      logger.info("Closed database for user: \(userDID, privacy: .private)")
-    }
-  }
-
-  /// Close all databases
-  func closeAllDatabases() {
-    let userDIDs = Array(databases.keys)
-    for userDID in userDIDs {
-      databases.removeValue(forKey: userDID)
-    }
-    logger.info("Closed all databases")
-  }
-
-  /// Delete database file for a user (when removing account)
-  /// - Parameter userDID: User's decentralized identifier
-  /// - Throws: MLSSQLCipherError if deletion fails
-  public func deleteDatabase(for userDID: String) async throws {
-    // Close database first
-    closeDatabase(for: userDID)
-
-    // Delete database file
-    let dbPath = databasePath(for: userDID)
-
-    if FileManager.default.fileExists(atPath: dbPath.path) {
-      do {
-        try FileManager.default.removeItem(at: dbPath)
-        logger.info("Deleted database for user: \(userDID, privacy: .private)")
-      } catch {
-        throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
-      }
     }
 
-    // Delete encryption key
-    try await encryption.deleteKey(for: userDID)
-  }
+    /// Run database migrations using DatabaseMigrator
+    private func runMigrations(_ db: DatabasePool) throws {
+        var migrator = DatabaseMigrator()
 
-  /// Repair corrupted database by removing WAL and SHM files
-  /// Call this if you get SQLITE_NOMEM or other corruption errors
-  /// - Parameter userDID: User's decentralized identifier
-  func repairDatabase(for userDID: String) throws {
-    logger.warning("⚠️ Attempting to repair database for user: \(userDID, privacy: .private)")
-
-    // Close database first
-    closeDatabase(for: userDID)
-
-    let dbPath = databasePath(for: userDID)
-    let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
-    let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
-
-    // Delete WAL and SHM files (will be recreated)
-    for path in [walPath, shmPath] {
-      if FileManager.default.fileExists(atPath: path.path) {
-        do {
-          try FileManager.default.removeItem(at: path)
-          logger.info("Deleted corrupted file: \(path.lastPathComponent)")
-        } catch {
-          logger.error("Failed to delete \(path.lastPathComponent): \(error.localizedDescription)")
-        }
-      }
-    }
-
-    logger.info("✅ Database repair completed for user: \(userDID, privacy: .private)")
-  }
-
-  /// Check if database exists for user
-  /// - Parameter userDID: User's decentralized identifier
-  /// - Returns: True if database file exists
-  func databaseExists(for userDID: String) -> Bool {
-    let dbPath = databasePath(for: userDID)
-    return FileManager.default.fileExists(atPath: dbPath.path)
-  }
-
-  /// Get database file size
-  /// - Parameter userDID: User's decentralized identifier
-  /// - Returns: Size in bytes, or nil if database doesn't exist
-  func databaseSize(for userDID: String) -> Int64? {
-    let dbPath = databasePath(for: userDID)
-
-    guard let attributes = try? FileManager.default.attributesOfItem(atPath: dbPath.path),
-      let fileSize = attributes[.size] as? Int64
-    else {
-      return nil
-    }
-
-    return fileSize
-  }
-
-  // MARK: - Private Methods
-
-  /// Create new encrypted database with GRDB (runs off main thread via actor isolation)
-  private func createDatabase(for userDID: String) async throws -> DatabaseQueue {
-    // Get or create encryption key
-    let encryptionKey = try await encryption.getOrCreateKey(for: userDID)
-
-    // Get database file path
-    let dbPath = databasePath(for: userDID)
-
-    // Configure GRDB with SQLCipher encryption
-    var config = Configuration()
-
-    // Configure encryption using GRDB's prepareDatabase
-    config.prepareDatabase { db in
-      // Convert key to hex string for SQLCipher
-      // SQLCipher expects: PRAGMA key = "x'hexstring'"
-      let hexKey = encryptionKey.map { String(format: "%02x", $0) }.joined()
-
-      // Set encryption key using quoted hex literal format
-      try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
-
-      // Try SQLCipher 4 settings first
-      try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
-      try db.execute(sql: "PRAGMA kdf_iter = 256000;")
-      try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
-      try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
-
-      // Test if database can be read with these settings
-      do {
-        _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
-      } catch {
-        // If SQLCipher 4 settings fail, try SQLCipher 3 compatibility mode
-        // This handles existing databases created with older settings
-        try db.execute(sql: "PRAGMA cipher_page_size = 1024;")
-        try db.execute(sql: "PRAGMA kdf_iter = 64000;")
-        try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA1;")
-        try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA1;")
-
-        // Verify it works now
-        _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master;")
-      }
-
-      // Enable WAL mode for better concurrency
-      try db.execute(sql: "PRAGMA journal_mode = WAL;")
-      try db.execute(sql: "PRAGMA wal_autocheckpoint = 1000;")
-      try db.execute(sql: "PRAGMA synchronous = FULL;")
-
-      // Enable foreign keys
-      try db.execute(sql: "PRAGMA foreign_keys = ON;")
-    }
-
-    // Create DatabaseQueue
-    let database: DatabaseQueue
-    do {
-      database = try DatabaseQueue(path: dbPath.path, configuration: config)
-    } catch {
-      throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
-    }
-
-    // Set file protection (iOS Data Protection)
-    try setFileProtection(for: dbPath)
-
-    // Exclude from backups
-    try excludeFromBackup(dbPath)
-
-    // Run migrations
-    try runMigrations(database)
-
-    return database
-  }
-
-  /// Run database migrations using DatabaseMigrator
-  private func runMigrations(_ db: DatabaseQueue) throws {
-    var migrator = DatabaseMigrator()
-
-    // MARK: v1 - Initial schema
-    migrator.registerMigration("v1_initial_schema") { db in
+        // MARK: v1 - Initial schema
+        migrator.registerMigration("v1_initial_schema") { db in
       // Create all MLS tables using GRDB's native table creation
       try db.create(table: "MLSConversationModel") { t in
         t.primaryKey("conversationID", .text).notNull()
@@ -664,92 +688,92 @@ public actor MLSGRDBManager {
 // MARK: - Debug Helpers
 
 #if DEBUG
-  extension MLSGRDBManager {
-    /// List all database files
-    func listDatabases() -> [String] {
-      guard let files = try? FileManager.default.contentsOfDirectory(atPath: databaseDirectory.path)
-      else {
-        return []
-      }
+    extension MLSGRDBManager {
+        /// List all database files
+        func listDatabases() -> [String] {
+            guard let files = try? FileManager.default.contentsOfDirectory(atPath: databaseDirectory.path)
+            else {
+                return []
+            }
 
-      return files.filter { $0.hasSuffix(".\(fileExtension)") }
-    }
-
-    /// Get table statistics for a user's database
-    func getTableStats(for userDID: String) async throws -> [String: Int] {
-      let db = try await getDatabaseQueue(for: userDID)
-
-      return try await db.read { database in
-        var stats: [String: Int] = [:]
-
-        // Get all table names
-        let tables = try String.fetchAll(
-          database,
-          sql: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
-        )
-
-        // Count rows in each table
-        for table in tables {
-          if let count = try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM \(table);") {
-            stats[table] = count
-          }
+            return files.filter { $0.hasSuffix(".\(fileExtension)") }
         }
 
-        return stats
-      }
-    }
+        /// Get table statistics for a user's database
+        func getTableStats(for userDID: String) async throws -> [String: Int] {
+            let db = try await getDatabasePool(for: userDID)
 
-    /// Export database to unencrypted file (for debugging only)
-    func exportUnencrypted(for userDID: String, to destinationPath: String) async throws {
-      let db = try await getDatabaseQueue(for: userDID)
+            return try await db.read { database in
+                var stats: [String: Int] = [:]
 
-      try await db.write { database in
-        // Use SQLCipher's ATTACH and export
-        try database.execute(
-          sql: """
-              ATTACH DATABASE '\(destinationPath)' AS plaintext KEY '';
-              SELECT sqlcipher_export('plaintext');
-              DETACH DATABASE plaintext;
-            """)
-      }
+                // Get all table names
+                let tables = try String.fetchAll(
+                    database,
+                    sql: "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
+                )
 
-      logger.warning(
-        "⚠️ Exported UNENCRYPTED database to \(destinationPath) - DELETE after debugging!")
-    }
+                // Count rows in each table
+                for table in tables {
+                    if let count = try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM \(table);") {
+                        stats[table] = count
+                    }
+                }
 
-    /// Verify database encryption
-    func verifyEncryption(for userDID: String) async throws -> Bool {
-      let db = try await getDatabaseQueue(for: userDID)
-
-      // Try to query sqlite_master (should succeed with correct key)
-      return try await db.read { database in
-        _ = try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sqlite_master;")
-        return true
-      }
-    }
-
-    /// Run integrity check on database
-    func checkIntegrity(for userDID: String) async throws -> Bool {
-      let db = try await getDatabaseQueue(for: userDID)
-
-      return try await db.read { database in
-        if let result = try String.fetchOne(database, sql: "PRAGMA integrity_check;") {
-          return result == "ok"
+                return stats
+            }
         }
-        return false
-      }
+
+        /// Export database to unencrypted file (for debugging only)
+        func exportUnencrypted(for userDID: String, to destinationPath: String) async throws {
+            let db = try await getDatabasePool(for: userDID)
+
+            try await db.write { database in
+                // Use SQLCipher's ATTACH and export
+                try database.execute(
+                    sql: """
+                        ATTACH DATABASE '\(destinationPath)' AS plaintext KEY '';
+                        SELECT sqlcipher_export('plaintext');
+                        DETACH DATABASE plaintext;
+                      """)
+            }
+
+            logger.warning(
+                "⚠️ Exported UNENCRYPTED database to \(destinationPath) - DELETE after debugging!")
+        }
+
+        /// Verify database encryption
+        func verifyEncryption(for userDID: String) async throws -> Bool {
+            let db = try await getDatabasePool(for: userDID)
+
+            // Try to query sqlite_master (should succeed with correct key)
+            return try await db.read { database in
+                _ = try Int.fetchOne(database, sql: "SELECT COUNT(*) FROM sqlite_master;")
+                return true
+            }
+        }
+
+        /// Run integrity check on database
+        func checkIntegrity(for userDID: String) async throws -> Bool {
+            let db = try await getDatabasePool(for: userDID)
+
+            return try await db.read { database in
+                if let result = try String.fetchOne(database, sql: "PRAGMA integrity_check;") {
+                    return result == "ok"
+                }
+                return false
+            }
+        }
+
+        /// Optimize database (vacuum and analyze)
+        func optimize(for userDID: String) async throws {
+            let db = try await getDatabasePool(for: userDID)
+
+            try await db.write { database in
+                try database.execute(sql: "VACUUM;")
+                try database.execute(sql: "ANALYZE;")
+            }
+
+            logger.info("Optimized database for user: \(userDID, privacy: .private)")
+        }
     }
-
-    /// Optimize database (vacuum and analyze)
-    func optimize(for userDID: String) async throws {
-      let db = try await getDatabaseQueue(for: userDID)
-
-      try await db.write { database in
-        try database.execute(sql: "VACUUM;")
-        try database.execute(sql: "ANALYZE;")
-      }
-
-      logger.info("Optimized database for user: \(userDID, privacy: .private)")
-    }
-  }
 #endif

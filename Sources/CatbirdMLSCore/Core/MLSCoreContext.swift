@@ -202,62 +202,68 @@ public actor MLSCoreContext {
     sequenceNumber: Int64?,
     senderID: String?
   ) async throws -> DecryptionOutcome {
-    let database = try await MLSGRDBManager.shared.getDatabaseQueue(for: userDid)
+    // Wrap database operations in Task to prevent priority inversion
+    // when called from high-priority contexts like @MainActor
+    return try await Task(priority: .userInitiated) {
+      let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDid)
 
-    if let cachedPlaintext = try await storage.fetchPlaintextForMessage(messageID,
-      currentUserDID: userDid,
-      database: database
-    ) {
-      let cachedEmbed = try await storage.fetchEmbedForMessage(messageID,
+      // Check cache first
+      if let cachedPlaintext = try await storage.fetchPlaintextForMessage(messageID,
         currentUserDID: userDid,
         database: database
+      ) {
+        let cachedEmbed = try await storage.fetchEmbedForMessage(messageID,
+          currentUserDID: userDid,
+          database: database
+        )
+        logger.debug("[DECRYPT] Cache hit for \(messageID) - skipping MLS ratchet decrypt")
+        return DecryptionOutcome(plaintext: cachedPlaintext, embed: cachedEmbed)
+      }
+
+      // Get context (must be done in actor context)
+      let context = try await getContext(for: userDid)
+
+      logger.debug("[DECRYPT] Performing MLS decrypt for message: \(messageID)")
+
+      let result = try context.decryptMessage(groupId: groupId, ciphertext: ciphertext)
+      let payloadData = result.plaintext
+
+      let payload = try? MLSMessagePayload.decodeFromJSON(payloadData)
+      let plaintext = payload?.text ?? (String(data: payloadData, encoding: .utf8) ?? "")
+      let embedData = payload?.embed
+
+      let actualEpoch = epoch ?? Int64(result.epoch)
+      let actualSeq = sequenceNumber ?? Int64(result.sequenceNumber)
+      let actualSender = senderID ?? "unknown"
+
+      logger.info(
+        "[DECRYPT] Decrypted: epoch=\(actualEpoch), seq=\(actualSeq), sender=\(actualSender == "unknown" ? "unknown" : actualSender.prefix(20)), hasEmbed=\(embedData != nil), \(plaintext.count) chars"
       )
-      logger.debug("[DECRYPT] Cache hit for \(messageID) - skipping MLS ratchet decrypt")
-      return DecryptionOutcome(plaintext: cachedPlaintext, embed: cachedEmbed)
-    }
 
-    let context = try await getContext(for: userDid)
+      try await storage.ensureConversationExists(userDID: userDid,
+        conversationID: conversationID,
+        groupID: groupId.hexEncodedString(),
+        database: database
+      )
 
-    logger.debug("[DECRYPT] Performing MLS decrypt for message: \(messageID)")
+      let embedJSON = try embedData?.toJSONData()
 
-    let result = try context.decryptMessage(groupId: groupId, ciphertext: ciphertext)
-    let payloadData = result.plaintext
+      try await MLSStorageHelpers.savePlaintext(
+        in: database,
+        messageID: messageID,
+        conversationID: conversationID,
+        currentUserDID: userDid,
+        plaintext: plaintext,
+        senderID: actualSender,
+        embedDataJSON: embedJSON,
+        epoch: actualEpoch,
+        sequenceNumber: actualSeq
+      )
 
-    let payload = try? MLSMessagePayload.decodeFromJSON(payloadData)
-    let plaintext = payload?.text ?? (String(data: payloadData, encoding: .utf8) ?? "")
-    let embedData = payload?.embed
+      logger.info("[DECRYPT] Stored plaintext for message: \(messageID)")
 
-    let actualEpoch = epoch ?? Int64(result.epoch)
-    let actualSeq = sequenceNumber ?? Int64(result.sequenceNumber)
-    let actualSender = senderID ?? "unknown"
-
-    logger.info(
-      "[DECRYPT] Decrypted: epoch=\(actualEpoch), seq=\(actualSeq), sender=\(actualSender == "unknown" ? "unknown" : actualSender.prefix(20)), hasEmbed=\(embedData != nil), \(plaintext.count) chars"
-    )
-
-    try await storage.ensureConversationExists(userDID: userDid,
-      conversationID: conversationID,
-      groupID: groupId.hexEncodedString(),
-      database: database
-    )
-
-    let embedJSON = try embedData?.toJSONData()
-
-    try await MLSStorageHelpers.savePlaintext(
-      in: database,
-      messageID: messageID,
-      conversationID: conversationID,
-      currentUserDID: userDid,
-      plaintext: plaintext,
-      senderID: actualSender,
-      embedDataJSON: embedJSON,
-      epoch: actualEpoch,
-      sequenceNumber: actualSeq
-    )
-
-    logger.info("[DECRYPT] Stored plaintext for message: \(messageID)")
-
-    return DecryptionOutcome(plaintext: plaintext, embed: embedData)
+      return DecryptionOutcome(plaintext: plaintext, embed: embedData)
+    }.value
   }
 
   // MARK: - Main Decryption Method
@@ -291,11 +297,15 @@ public actor MLSCoreContext {
     sequenceNumber: Int64? = nil,
     senderID: String? = nil
   ) async throws -> String {
+    // Capture logger before async work
+    let logger = self.logger
+
     logger.debug(
       "[DECRYPT] Starting decryption: message=\(messageID), hasMetadata=\(epoch != nil && sequenceNumber != nil && senderID != nil)"
     )
 
     do {
+      // decryptOnce calls performDecryption which already uses Task.detached
       let outcome = try await decryptOnce(
         userDid: userDid,
         groupId: groupId,
@@ -339,11 +349,15 @@ public actor MLSCoreContext {
     sequenceNumber: Int64? = nil,
     senderID: String? = nil
   ) async throws -> (plaintext: String, embed: MLSEmbedData?) {
+    // Capture logger before async work
+    let logger = self.logger
+
     logger.debug(
       "[DECRYPT+EMBED] Starting decryption: message=\(messageID), hasMetadata=\(epoch != nil && sequenceNumber != nil && senderID != nil)"
     )
 
     do {
+      // decryptOnce calls performDecryption which already uses Task.detached
       let outcome = try await decryptOnce(
         userDid: userDid,
         groupId: groupId,
@@ -378,10 +392,15 @@ public actor MLSCoreContext {
     groupId: Data,
     messages: [(ciphertext: Data, conversationID: String, messageID: String)]
   ) async throws -> [String] {
+    // Capture logger before async work
+    let logger = self.logger
+
     logger.info("[DECRYPT-BATCH] Decrypting \(messages.count) messages")
 
     var plaintexts: [String] = []
 
+    // Each decryptAndStore call uses Task.detached internally via performDecryption
+    // This prevents priority inversion for the entire batch
     for (ciphertext, conversationID, messageID) in messages {
       do {
         let plaintext = try await decryptAndStore(

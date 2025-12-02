@@ -49,7 +49,7 @@ public actor MLSConsumptionTracker {
     )
 
     // Store in database
-    let db = try await dbManager.getDatabaseQueue(for: userDID)
+    let db = try await dbManager.getDatabasePool(for: userDID)
 
     try await db.write { database in
       let model = MLSConsumptionRecordModel(from: record, userDID: userDID)
@@ -64,7 +64,7 @@ public actor MLSConsumptionTracker {
 
   /// Get consumption statistics for the tracked period
   public func getStatistics(currentInventory: Int? = nil) async throws -> ConsumptionStatistics {
-    let db = try await dbManager.getDatabaseQueue(for: userDID)
+    let db = try await dbManager.getDatabasePool(for: userDID)
 
     return try await db.read { database in
       // Get all recent records
@@ -123,7 +123,7 @@ public actor MLSConsumptionTracker {
 
   /// Get consumption rate (packages per day) over the specified window
   public func getConsumptionRate(days: Int = 7) async throws -> Double {
-    let db = try await dbManager.getDatabaseQueue(for: userDID)
+    let db = try await dbManager.getDatabasePool(for: userDID)
 
     return try await db.read { database in
       let total = try MLSConsumptionRecordModel.totalConsumption(
@@ -159,7 +159,7 @@ public actor MLSConsumptionTracker {
 
   /// Get all consumption records (for debugging/analysis)
   public func getAllRecords() async throws -> [ConsumptionRecord] {
-    let db = try await dbManager.getDatabaseQueue(for: userDID)
+    let db = try await dbManager.getDatabasePool(for: userDID)
 
     return try await db.read { database in
       try MLSConsumptionRecordModel
@@ -171,7 +171,7 @@ public actor MLSConsumptionTracker {
 
   /// Clear all consumption history
   public func clearHistory() async throws {
-    let db = try await dbManager.getDatabaseQueue(for: userDID)
+    let db = try await dbManager.getDatabasePool(for: userDID)
 
     _ = try await db.write { database in
       try MLSConsumptionRecordModel
@@ -187,7 +187,7 @@ public actor MLSConsumptionTracker {
   /// Remove records older than retention period
   private func cleanupOldRecords() async {
     do {
-      let db = try await dbManager.getDatabaseQueue(for: userDID)
+      let db = try await dbManager.getDatabasePool(for: userDID)
       let cutoffDate = Date().addingTimeInterval(-TimeInterval(retentionDays * 24 * 60 * 60))
 
       try await db.write { database in
@@ -211,7 +211,7 @@ public actor MLSConsumptionTracker {
 public extension MLSConsumptionTracker {
   /// Get consumption breakdown by operation type
   func getConsumptionByOperation(days: Int = 30) async throws -> [ConsumptionOperation: Int] {
-    let db = try await dbManager.getDatabaseQueue(for: userDID)
+    let db = try await dbManager.getDatabasePool(for: userDID)
 
     return try await db.read { database in
       let records = try MLSConsumptionRecordModel

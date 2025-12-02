@@ -25,6 +25,11 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 "MLSFFI",
                 "MLSFFICore"
+            ],
+            swiftSettings: [
+                // Keep Swift 5 mode for UniFFI bindings compatibility
+                // UniFFI generates mutable global state that isn't Swift 6 compatible
+                .swiftLanguageMode(.v5)
             ]
         ),
         .target(

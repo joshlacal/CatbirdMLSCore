@@ -33,7 +33,7 @@ public struct MLSStorageHelpers {
   ///   - epoch: MLS epoch number
   ///   - sequenceNumber: Message sequence in epoch
   public static func savePlaintext(
-    in database: DatabaseQueue,
+    in database: MLSDatabase,
     messageID: String,
     conversationID: String,
     currentUserDID: String,
@@ -126,7 +126,7 @@ public struct MLSStorageHelpers {
   ///   - olderThan: Expire messages older than this date
   ///   - conversationID: Optional conversation filter
   public static func markPlaintextExpired(
-    in database: DatabaseQueue,
+    in database: MLSDatabase,
     olderThan date: Date,
     conversationID: String? = nil
   ) async throws {
@@ -162,7 +162,7 @@ public struct MLSStorageHelpers {
   ///   - database: GRDB DatabaseQueue
   ///   - messages: Array of messages to insert
   public static func batchInsertMessages(
-    in database: DatabaseQueue,
+    in database: MLSDatabase,
     messages: [MLSMessageModel]
   ) async throws {
     try await database.write { db in
@@ -178,7 +178,7 @@ public struct MLSStorageHelpers {
   ///   - database: GRDB DatabaseQueue
   ///   - members: Array of members to insert
   public static func batchInsertMembers(
-    in database: DatabaseQueue,
+    in database: MLSDatabase,
     members: [MLSMemberModel]
   ) async throws {
     try await database.write { db in
@@ -199,7 +199,7 @@ public struct MLSStorageHelpers {
   ///   - limit: Maximum number of messages
   /// - Returns: Array of messages with plaintext
   public static func fetchDecryptedMessages(
-    from database: DatabaseQueue,
+    from database: MLSDatabase,
     conversationID: String,
     currentUserDID: String,
     limit: Int = 50
@@ -222,7 +222,7 @@ public struct MLSStorageHelpers {
   ///   - currentUserDID: Current user DID
   /// - Returns: Number of unread messages
   public static func getUnreadCount(
-    from database: DatabaseQueue,
+    from database: MLSDatabase,
     conversationID: String,
     currentUserDID: String
   ) async throws -> Int {
@@ -241,7 +241,7 @@ public struct MLSStorageHelpers {
   ///   - currentUserDID: Current user DID
   /// - Returns: Array of active conversations
   public static func fetchActiveConversations(
-    from database: DatabaseQueue,
+    from database: MLSDatabase,
     currentUserDID: String
   ) async throws -> [MLSConversationModel] {
     try await database.read { db in
@@ -260,7 +260,7 @@ public struct MLSStorageHelpers {
   ///   - database: GRDB DatabaseQueue
   ///   - block: Transaction block
   public static func transaction<T: Sendable>(
-    in database: DatabaseQueue,
+    in database: MLSDatabase,
     _ block: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
     try await database.write { db in

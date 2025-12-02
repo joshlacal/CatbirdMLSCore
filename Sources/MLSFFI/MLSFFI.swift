@@ -522,6 +522,11 @@ public protocol MlsContextProtocol: AnyObject {
     func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult
 
     /**
+     * Async variant of add_members - offloads crypto work to avoid blocking
+     */
+    func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult
+
+    /**
      * Clear pending commit for a group
      * This should be called when a commit is rejected by the delivery service
      * to clean up pending state in OpenMLS
@@ -552,6 +557,11 @@ public protocol MlsContextProtocol: AnyObject {
 
     func createGroup(identityBytes: Data, config: GroupConfig?) throws -> GroupCreationResult
 
+    /**
+     * Async variant of create_group - offloads crypto work to avoid blocking
+     */
+    func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws -> GroupCreationResult
+
     func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult
 
     /**
@@ -569,6 +579,11 @@ public protocol MlsContextProtocol: AnyObject {
     func debugGroupMembers(groupId: Data) throws -> GroupDebugInfo
 
     func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult
+
+    /**
+     * Async variant of decrypt_message - offloads crypto work to avoid blocking
+     */
+    func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws -> DecryptResult
 
     /**
      * Delete an MLS group from storage
@@ -590,6 +605,11 @@ public protocol MlsContextProtocol: AnyObject {
     func deleteKeyPackageBundles(hashRefs: [Data]) throws -> UInt64
 
     func encryptMessage(groupId: Data, plaintext: Data) throws -> EncryptResult
+
+    /**
+     * Async variant of encrypt_message - offloads crypto work to avoid blocking
+     */
+    func encryptMessageAsync(groupId: Data, plaintext: Data) async throws -> EncryptResult
 
     /**
      * Manually export epoch secret for a group
@@ -729,7 +749,82 @@ public protocol MlsContextProtocol: AnyObject {
 
     func processMessage(groupId: Data, messageData: Data) throws -> ProcessedContent
 
+    /**
+     * Async variant of process_message - offloads crypto work to avoid blocking
+     */
+    func processMessageAsync(groupId: Data, messageData: Data) async throws -> ProcessedContent
+
     func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws -> WelcomeResult
+
+    /**
+     * Propose adding a member (does not commit)
+     *
+     * Creates a proposal that can be committed later with commit_pending_proposals.
+     * This enables multi-admin workflows where proposals accumulate before commit.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     * * `key_package_data` - Serialized key package of member to add
+     *
+     * # Returns
+     * ProposeResult containing proposal message to send and reference for tracking
+     */
+    func proposeAddMember(groupId: Data, keyPackageData: Data) throws -> ProposeResult
+
+    /**
+     * Propose removing a member (does not commit)
+     *
+     * Creates a proposal that can be committed later with commit_pending_proposals.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     * * `member_identity` - DID bytes of member to remove
+     *
+     * # Returns
+     * ProposeResult containing proposal message to send and reference for tracking
+     *
+     * # Errors
+     * * `MemberNotFound` - Member not in group
+     */
+    func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws -> ProposeResult
+
+    /**
+     * Propose self-update (does not commit)
+     *
+     * Creates a proposal to update your own leaf node. Can be committed later
+     * with commit_pending_proposals, or by another group member.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     *
+     * # Returns
+     * ProposeResult containing proposal message to send and reference for tracking
+     */
+    func proposeSelfUpdate(groupId: Data) throws -> ProposeResult
+
+    /**
+     * Remove members from the group (cryptographically secure)
+     *
+     * Creates a commit with Remove proposals. Follows send-then-merge pattern:
+     * caller must send commit to server and call merge_pending_commit() after ACK.
+     *
+     * # Security Note
+     * This is the ONLY secure way to remove members. Server-side removal
+     * does not revoke cryptographic access until the epoch advances.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     * * `member_identities` - Array of member credentials (DID bytes) to remove
+     *
+     * # Returns
+     * Commit data to send to server (no welcome for removals)
+     *
+     * # Errors
+     * * `InvalidInput` - No valid members found to remove
+     * * `GroupNotFound` - Group does not exist
+     * * `OpenMLSError` - OpenMLS operation failed
+     */
+    func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data
 
     /**
      * Remove a proposal from the proposal queue
@@ -776,6 +871,33 @@ public protocol MlsContextProtocol: AnyObject {
      * The application should inspect the proposal before storing it
      */
     func storeProposal(groupId: Data, proposalRef: ProposalRef) throws
+
+    /**
+     * 🔒 FIX #2: Force database synchronization
+     *
+     * Forces a full WAL checkpoint to ensure all MLS state is durably persisted.
+     * Call this after critical state transitions (Welcome processing, Commit merge)
+     * to prevent SecretReuseError from incomplete persistence.
+     *
+     * - Returns: Ok(()) on success
+     * - Throws: MLSError if flush fails
+     */
+    func syncDatabase() throws
+
+    /**
+     * 🔒 FIX #3: Validate GroupInfo format before upload
+     *
+     * Verifies that a GroupInfo blob can be successfully deserialized.
+     * Call this before uploading to server to catch corruption early.
+     *
+     * The GroupInfo is serialized as an MlsMessageOut wrapper containing the actual
+     * VerifiableGroupInfo. This function handles both the wrapped and unwrapped formats.
+     *
+     * - Parameters:
+     * - group_info_bytes: The serialized GroupInfo (MlsMessageOut wrapper)
+     * - Returns: true if valid, false otherwise (with error logging)
+     */
+    func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool
 }
 
 /**
@@ -863,6 +985,26 @@ open class MlsContext:
     }
 
     /**
+     * Async variant of add_members - offloads crypto work to avoid blocking
+     */
+    open func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_mls_ffi_fn_method_mlscontext_add_members_async(
+                        self.uniffiClonePointer(),
+                        FfiConverterData.lower(groupId), FfiConverterSequenceTypeKeyPackageData.lower(keyPackages)
+                    )
+                },
+                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterTypeAddMembersResult.lift,
+                errorHandler: FfiConverterTypeMLSError.lift
+            )
+    }
+
+    /**
      * Clear pending commit for a group
      * This should be called when a commit is rejected by the delivery service
      * to clean up pending state in OpenMLS
@@ -926,6 +1068,26 @@ open class MlsContext:
         })
     }
 
+    /**
+     * Async variant of create_group - offloads crypto work to avoid blocking
+     */
+    open func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws -> GroupCreationResult {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_mls_ffi_fn_method_mlscontext_create_group_async(
+                        self.uniffiClonePointer(),
+                        FfiConverterData.lower(identityBytes), FfiConverterOptionTypeGroupConfig.lower(config)
+                    )
+                },
+                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterTypeGroupCreationResult.lift,
+                errorHandler: FfiConverterTypeMLSError.lift
+            )
+    }
+
     open func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult {
         return try FfiConverterTypeKeyPackageResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_mls_ffi_fn_method_mlscontext_create_key_package(self.uniffiClonePointer(),
@@ -958,6 +1120,26 @@ open class MlsContext:
                                                                 FfiConverterData.lower(groupId),
                                                                 FfiConverterData.lower(ciphertext), $0)
         })
+    }
+
+    /**
+     * Async variant of decrypt_message - offloads crypto work to avoid blocking
+     */
+    open func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws -> DecryptResult {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_mls_ffi_fn_method_mlscontext_decrypt_message_async(
+                        self.uniffiClonePointer(),
+                        FfiConverterData.lower(groupId), FfiConverterData.lower(ciphertext)
+                    )
+                },
+                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterTypeDecryptResult.lift,
+                errorHandler: FfiConverterTypeMLSError.lift
+            )
     }
 
     /**
@@ -994,6 +1176,26 @@ open class MlsContext:
                                                                 FfiConverterData.lower(groupId),
                                                                 FfiConverterData.lower(plaintext), $0)
         })
+    }
+
+    /**
+     * Async variant of encrypt_message - offloads crypto work to avoid blocking
+     */
+    open func encryptMessageAsync(groupId: Data, plaintext: Data) async throws -> EncryptResult {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_mls_ffi_fn_method_mlscontext_encrypt_message_async(
+                        self.uniffiClonePointer(),
+                        FfiConverterData.lower(groupId), FfiConverterData.lower(plaintext)
+                    )
+                },
+                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterTypeEncryptResult.lift,
+                errorHandler: FfiConverterTypeMLSError.lift
+            )
     }
 
     /**
@@ -1226,12 +1428,125 @@ open class MlsContext:
         })
     }
 
+    /**
+     * Async variant of process_message - offloads crypto work to avoid blocking
+     */
+    open func processMessageAsync(groupId: Data, messageData: Data) async throws -> ProcessedContent {
+        return
+            try await uniffiRustCallAsync(
+                rustFutureFunc: {
+                    uniffi_mls_ffi_fn_method_mlscontext_process_message_async(
+                        self.uniffiClonePointer(),
+                        FfiConverterData.lower(groupId), FfiConverterData.lower(messageData)
+                    )
+                },
+                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+                liftFunc: FfiConverterTypeProcessedContent.lift,
+                errorHandler: FfiConverterTypeMLSError.lift
+            )
+    }
+
     open func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws -> WelcomeResult {
         return try FfiConverterTypeWelcomeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_mls_ffi_fn_method_mlscontext_process_welcome(self.uniffiClonePointer(),
                                                                 FfiConverterData.lower(welcomeBytes),
                                                                 FfiConverterData.lower(identityBytes),
                                                                 FfiConverterOptionTypeGroupConfig.lower(config), $0)
+        })
+    }
+
+    /**
+     * Propose adding a member (does not commit)
+     *
+     * Creates a proposal that can be committed later with commit_pending_proposals.
+     * This enables multi-admin workflows where proposals accumulate before commit.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     * * `key_package_data` - Serialized key package of member to add
+     *
+     * # Returns
+     * ProposeResult containing proposal message to send and reference for tracking
+     */
+    open func proposeAddMember(groupId: Data, keyPackageData: Data) throws -> ProposeResult {
+        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_propose_add_member(self.uniffiClonePointer(),
+                                                                   FfiConverterData.lower(groupId),
+                                                                   FfiConverterData.lower(keyPackageData), $0)
+        })
+    }
+
+    /**
+     * Propose removing a member (does not commit)
+     *
+     * Creates a proposal that can be committed later with commit_pending_proposals.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     * * `member_identity` - DID bytes of member to remove
+     *
+     * # Returns
+     * ProposeResult containing proposal message to send and reference for tracking
+     *
+     * # Errors
+     * * `MemberNotFound` - Member not in group
+     */
+    open func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws -> ProposeResult {
+        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_propose_remove_member(self.uniffiClonePointer(),
+                                                                      FfiConverterData.lower(groupId),
+                                                                      FfiConverterData.lower(memberIdentity), $0)
+        })
+    }
+
+    /**
+     * Propose self-update (does not commit)
+     *
+     * Creates a proposal to update your own leaf node. Can be committed later
+     * with commit_pending_proposals, or by another group member.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     *
+     * # Returns
+     * ProposeResult containing proposal message to send and reference for tracking
+     */
+    open func proposeSelfUpdate(groupId: Data) throws -> ProposeResult {
+        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_propose_self_update(self.uniffiClonePointer(),
+                                                                    FfiConverterData.lower(groupId), $0)
+        })
+    }
+
+    /**
+     * Remove members from the group (cryptographically secure)
+     *
+     * Creates a commit with Remove proposals. Follows send-then-merge pattern:
+     * caller must send commit to server and call merge_pending_commit() after ACK.
+     *
+     * # Security Note
+     * This is the ONLY secure way to remove members. Server-side removal
+     * does not revoke cryptographic access until the epoch advances.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier
+     * * `member_identities` - Array of member credentials (DID bytes) to remove
+     *
+     * # Returns
+     * Commit data to send to server (no welcome for removals)
+     *
+     * # Errors
+     * * `InvalidInput` - No valid members found to remove
+     * * `GroupNotFound` - Group does not exist
+     * * `OpenMLSError` - OpenMLS operation failed
+     */
+    open func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_remove_members(self.uniffiClonePointer(),
+                                                               FfiConverterData.lower(groupId),
+                                                               FfiConverterSequenceData.lower(memberIdentities), $0)
         })
     }
 
@@ -1302,6 +1617,41 @@ open class MlsContext:
                                                            FfiConverterData.lower(groupId),
                                                            FfiConverterTypeProposalRef.lower(proposalRef), $0)
     }
+    }
+
+    /**
+     * 🔒 FIX #2: Force database synchronization
+     *
+     * Forces a full WAL checkpoint to ensure all MLS state is durably persisted.
+     * Call this after critical state transitions (Welcome processing, Commit merge)
+     * to prevent SecretReuseError from incomplete persistence.
+     *
+     * - Returns: Ok(()) on success
+     * - Throws: MLSError if flush fails
+     */
+    open func syncDatabase() throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_mls_ffi_fn_method_mlscontext_sync_database(self.uniffiClonePointer(), $0)
+    }
+    }
+
+    /**
+     * 🔒 FIX #3: Validate GroupInfo format before upload
+     *
+     * Verifies that a GroupInfo blob can be successfully deserialized.
+     * Call this before uploading to server to catch corruption early.
+     *
+     * The GroupInfo is serialized as an MlsMessageOut wrapper containing the actual
+     * VerifiableGroupInfo. This function handles both the wrapped and unwrapped formats.
+     *
+     * - Parameters:
+     * - group_info_bytes: The serialized GroupInfo (MlsMessageOut wrapper)
+     * - Returns: true if valid, false otherwise (with error logging)
+     */
+    open func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool {
+        return try! FfiConverterBool.lift(try! rustCall {
+            uniffi_mls_ffi_fn_method_mlscontext_validate_group_info_format(self.uniffiClonePointer(),
+                                                                           FfiConverterData.lower(groupInfoBytes), $0)
+        })
     }
 }
 
@@ -2381,6 +2731,84 @@ public func FfiConverterTypeProposalRef_lower(_ value: ProposalRef) -> RustBuffe
     return FfiConverterTypeProposalRef.lower(value)
 }
 
+/**
+ * Result type for proposal creation operations
+ * Contains the proposal message to send and a reference for tracking
+ */
+public struct ProposeResult {
+    /**
+     * MlsMessageOut to send to server (serialized proposal)
+     */
+    public var proposalMessage: Data
+    /**
+     * ProposalRef for local tracking (serialized reference)
+     */
+    public var proposalRef: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * MlsMessageOut to send to server (serialized proposal)
+         */ proposalMessage: Data,
+        /**
+            * ProposalRef for local tracking (serialized reference)
+            */ proposalRef: Data
+    ) {
+        self.proposalMessage = proposalMessage
+        self.proposalRef = proposalRef
+    }
+}
+
+extension ProposeResult: Equatable, Hashable {
+    public static func == (lhs: ProposeResult, rhs: ProposeResult) -> Bool {
+        if lhs.proposalMessage != rhs.proposalMessage {
+            return false
+        }
+        if lhs.proposalRef != rhs.proposalRef {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(proposalMessage)
+        hasher.combine(proposalRef)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProposeResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProposeResult {
+        return
+            try ProposeResult(
+                proposalMessage: FfiConverterData.read(from: &buf),
+                proposalRef: FfiConverterData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ProposeResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.proposalMessage, into: &buf)
+        FfiConverterData.write(value.proposalRef, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProposeResult_lift(_ buf: RustBuffer) throws -> ProposeResult {
+    return try FfiConverterTypeProposeResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProposeResult_lower(_ value: ProposeResult) -> RustBuffer {
+    return FfiConverterTypeProposeResult.lower(value)
+}
+
 public struct RemoveProposalInfo {
     public var removedIndex: UInt32
 
@@ -2760,6 +3188,14 @@ public enum MlsError {
     case StorageError(message: String)
 
     case StorageFailed(message: String)
+
+    case MemberNotFound(message: String)
+
+    case CannotRemoveLastAdmin(message: String)
+
+    case InsufficientPermissions(message: String)
+
+    case InvalidProposalRef(message: String)
 }
 
 #if swift(>=5.8)
@@ -2855,6 +3291,22 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 22: return try .MemberNotFound(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 23: return try .CannotRemoveLastAdmin(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 24: return try .InsufficientPermissions(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 25: return try .InvalidProposalRef(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -2903,6 +3355,14 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(20))
         case .StorageFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(21))
+        case .MemberNotFound(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(22))
+        case .CannotRemoveLastAdmin(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(23))
+        case .InsufficientPermissions(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(24))
+        case .InvalidProposalRef(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(25))
         }
     }
 }
@@ -3980,6 +4440,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_add_members() != 7911 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_add_members_async() != 30297 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_clear_pending_commit() != 41903 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3998,6 +4461,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_create_group() != 24270 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_create_group_async() != 31343 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_create_key_package() != 46265 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4007,6 +4473,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message() != 31578 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message_async() != 5191 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_delete_group() != 145 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4014,6 +4483,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_encrypt_message() != 31493 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_encrypt_message_async() != 2609 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_export_epoch_secret() != 4955 {
@@ -4070,7 +4542,22 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_process_message() != 3909 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_process_message_async() != 28819 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_process_welcome() != 3091 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_propose_add_member() != 37433 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_propose_remove_member() != 56664 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_propose_self_update() != 42903 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_remove_members() != 46844 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_remove_proposal() != 4954 {
@@ -4086,6 +4573,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_store_proposal() != 52869 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_sync_database() != 34401 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_validate_group_info_format() != 48990 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_constructor_mlscontext_new() != 23112 {

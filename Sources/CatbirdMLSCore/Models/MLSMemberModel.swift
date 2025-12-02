@@ -22,6 +22,8 @@ public struct MLSMemberModel: Codable, Sendable, Hashable, Identifiable {
   public   let addedAt: Date
   public   let updatedAt: Date
   public   let removedAt: Date?
+  public   let removedBy: String?
+  public   let removalReason: String?
   public   let isActive: Bool
   public   let role: Role
   public   let capabilitiesData: Data?
@@ -69,6 +71,8 @@ extension MLSMemberModel: FetchableRecord, PersistableRecord {
     public static let addedAt = Column("addedAt")
     public static let updatedAt = Column("updatedAt")
     public static let removedAt = Column("removedAt")
+    public static let removedBy = Column("removedBy")
+    public static let removalReason = Column("removalReason")
     public static let isActive = Column("isActive")
     public static let role = Column("role")
     public static let capabilitiesData = Column("capabilities")
@@ -87,6 +91,8 @@ extension MLSMemberModel: FetchableRecord, PersistableRecord {
     case addedAt
     case updatedAt
     case removedAt
+    case removedBy
+    case removalReason
     case isActive
     case role
     case capabilitiesData = "capabilities"
@@ -111,6 +117,8 @@ extension MLSMemberModel {
     addedAt: Date = Date(),
     updatedAt: Date = Date(),
     removedAt: Date? = nil,
+    removedBy: String? = nil,
+    removalReason: String? = nil,
     isActive: Bool = true,
     role: Role = .member,
     capabilities: [String]? = nil
@@ -127,6 +135,8 @@ extension MLSMemberModel {
     self.addedAt = addedAt
     self.updatedAt = updatedAt
     self.removedAt = removedAt
+    self.removedBy = removedBy
+    self.removalReason = removalReason
     self.isActive = isActive
     self.role = role
     self.capabilitiesData = Self.encodeCapabilities(capabilities)
@@ -135,7 +145,7 @@ extension MLSMemberModel {
   // MARK: - Update Methods
 
   /// Create copy marked as removed
-  func withRemoved(at date: Date = Date()) -> MLSMemberModel {
+  func withRemoved(at date: Date = Date(), by: String? = nil, reason: String? = nil) -> MLSMemberModel {
     MLSMemberModel(
       memberID: memberID,
       conversationID: conversationID,
@@ -149,6 +159,8 @@ extension MLSMemberModel {
       addedAt: addedAt,
       updatedAt: date,
       removedAt: date,
+      removedBy: by,
+      removalReason: reason,
       isActive: false,
       role: role,
       capabilities: capabilities
@@ -170,6 +182,8 @@ extension MLSMemberModel {
       addedAt: addedAt,
       updatedAt: Date(),
       removedAt: removedAt,
+      removedBy: removedBy,
+      removalReason: removalReason,
       isActive: isActive,
       role: role,
       capabilities: capabilities

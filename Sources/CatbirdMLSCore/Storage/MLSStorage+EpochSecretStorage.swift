@@ -2,7 +2,8 @@
 //  MLSStorage+EpochSecretStorage.swift
 //  CatbirdMLSCore
 //
-//  Epoch secret storage bridge for MLS FFI
+//  Epoch secret storage bridge for MLS FFI.
+//  Uses DatabasePool for better read concurrency.
 //
 
 import Foundation
@@ -30,7 +31,7 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
         logger.debug("[EPOCH-STORAGE] storeEpochSecret called: conversation=\(conversationId), epoch=\(epoch), \(secretData.count) bytes")
 
         do {
-            let database = try await MLSGRDBManager.shared.getDatabaseQueue(for: userDID)
+            let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
 
             // Ensure conversation exists BEFORE storing epoch secret
             try await storage.ensureConversationExists(
@@ -59,7 +60,7 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
         logger.debug("[EPOCH-STORAGE] getEpochSecret called: conversation=\(conversationId), epoch=\(epoch)")
 
         do {
-            let database = try await MLSGRDBManager.shared.getDatabaseQueue(for: userDID)
+            let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
             let data = try await storage.getEpochSecret(
                 userDID: userDID,
                 conversationID: conversationId,
@@ -83,7 +84,7 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
         logger.debug("[EPOCH-STORAGE] deleteEpochSecret called: conversation=\(conversationId), epoch=\(epoch)")
 
         do {
-            let database = try await MLSGRDBManager.shared.getDatabaseQueue(for: userDID)
+            let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
             try await storage.deleteEpochSecret(
                 userDID: userDID,
                 conversationID: conversationId,
