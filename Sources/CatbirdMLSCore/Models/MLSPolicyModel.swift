@@ -16,14 +16,14 @@ import GRDB
 /// - Rejoin policies and windows
 /// - Admin protection rules
 public struct MLSPolicyModel: Codable, Sendable, Hashable, Identifiable {
-    let policyID: String
-    let conversationID: String
-    let allowExternalCommits: Bool
-    let requireInviteForJoin: Bool
-    let allowRejoin: Bool
-    let rejoinWindowDays: Int?
-    let preventRemovingLastAdmin: Bool
-    let updatedAt: Date
+    public let policyID: String
+    public let conversationID: String
+    public let allowExternalCommits: Bool
+    public let requireInviteForJoin: Bool
+    public let allowRejoin: Bool
+    public let rejoinWindowDays: Int?
+    public let preventRemovingLastAdmin: Bool
+    public let updatedAt: Date
 
     public var id: String { policyID }
 

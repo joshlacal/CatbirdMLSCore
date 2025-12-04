@@ -19,6 +19,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let createdAt: Date
   public let updatedAt: Date
   public let lastMessageAt: Date?
+  public let lastMembershipChangeAt: Date?
+  public let unacknowledgedMemberChanges: Int
   public let isActive: Bool
   public let needsRejoin: Bool
   public let rejoinRequestedAt: Date?
@@ -39,6 +41,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     createdAt: Date = Date(),
     updatedAt: Date = Date(),
     lastMessageAt: Date? = nil,
+    lastMembershipChangeAt: Date? = nil,
+    unacknowledgedMemberChanges: Int = 0,
     isActive: Bool = true,
     needsRejoin: Bool = false,
     rejoinRequestedAt: Date? = nil,
@@ -54,6 +58,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.createdAt = createdAt
     self.updatedAt = updatedAt
     self.lastMessageAt = lastMessageAt
+    self.lastMembershipChangeAt = lastMembershipChangeAt
+    self.unacknowledgedMemberChanges = unacknowledgedMemberChanges
     self.isActive = isActive
     self.needsRejoin = needsRejoin
     self.rejoinRequestedAt = rejoinRequestedAt
@@ -75,6 +81,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
@@ -95,6 +103,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: timestamp,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
@@ -115,6 +125,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: active,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
@@ -135,6 +147,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
@@ -155,6 +169,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
@@ -175,6 +191,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
@@ -195,11 +213,57 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       createdAt: createdAt,
       updatedAt: updatedAt,
       lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: 0
+    )
+  }
+
+  /// Create updated copy with membership change tracking
+  func withMembershipChange(timestamp: Date, unacknowledged: Int = 1) -> MLSConversationModel {
+    MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      groupID: groupID,
+      epoch: epoch,
+      title: title,
+      avatarURL: avatarURL,
+      createdAt: createdAt,
+      updatedAt: Date(),
+      lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: timestamp,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges + unacknowledged,
+      isActive: isActive,
+      needsRejoin: needsRejoin,
+      rejoinRequestedAt: rejoinRequestedAt,
+      lastRecoveryAttempt: lastRecoveryAttempt,
+      consecutiveFailures: consecutiveFailures
+    )
+  }
+
+  /// Create updated copy with membership change badge cleared
+  func clearMembershipChangeBadge() -> MLSConversationModel {
+    MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      groupID: groupID,
+      epoch: epoch,
+      title: title,
+      avatarURL: avatarURL,
+      createdAt: createdAt,
+      updatedAt: Date(),
+      lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: 0,
+      isActive: isActive,
+      needsRejoin: needsRejoin,
+      rejoinRequestedAt: rejoinRequestedAt,
+      lastRecoveryAttempt: lastRecoveryAttempt,
+      consecutiveFailures: consecutiveFailures
     )
   }
 }
@@ -218,6 +282,8 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let createdAt = Column("createdAt")
     public static let updatedAt = Column("updatedAt")
     public static let lastMessageAt = Column("lastMessageAt")
+    public static let lastMembershipChangeAt = Column("lastMembershipChangeAt")
+    public static let unacknowledgedMemberChanges = Column("unacknowledgedMemberChanges")
     public static let isActive = Column("isActive")
     public static let needsRejoin = Column("needsRejoin")
     public static let rejoinRequestedAt = Column("rejoinRequestedAt")
@@ -235,6 +301,8 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case createdAt
     case updatedAt
     case lastMessageAt
+    case lastMembershipChangeAt
+    case unacknowledgedMemberChanges
     case isActive
     case needsRejoin
     case rejoinRequestedAt

@@ -189,4 +189,44 @@ extension MLSMemberModel {
       capabilities: capabilities
     )
   }
+
+  // MARK: - Display Helpers
+
+  /// Member status for display purposes
+  public enum MemberStatus: String, Sendable {
+    case active
+    case removedRecently  // Removed in last 24h
+    case removed
+  }
+
+  /// Computed status based on removal state
+  public var displayStatus: MemberStatus {
+    guard !isActive else { return .active }
+    guard let removed = removedAt else { return .removed }
+    if Date().timeIntervalSince(removed) < 86400 {
+      return .removedRecently
+    }
+    return .removed
+  }
+
+  /// Whether the member joined recently (within last hour)
+  public var joinedRecently: Bool {
+    Date().timeIntervalSince(addedAt) < 3600
+  }
+
+  /// Display text for removal status
+  public var removalDisplayText: String {
+    guard !isActive, removedAt != nil else { return "" }
+    let name = displayName ?? handle ?? shortDID(did)
+    return "\(name) left"
+  }
+
+  /// Helper to create short DID for display
+  private func shortDID(_ did: String) -> String {
+    let components = did.split(separator: ":")
+    if let last = components.last, last.count > 8 {
+      return String(last.suffix(8))
+    }
+    return String(did.suffix(8))
+  }
 }

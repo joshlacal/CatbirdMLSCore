@@ -15,15 +15,15 @@ import GRDB
 /// - Optional expiration and usage limits
 /// - Tracking of who created the invite and for which conversation
 public struct MLSInviteModel: Codable, Sendable, Hashable, Identifiable {
-    let inviteID: String
-    let conversationID: String
-    let createdBy: String
-    let targetDID: String?
-    let createdAt: Date
-    let expiresAt: Date?
-    let maxUses: Int?
-    let usesCount: Int
-    let revoked: Bool
+    public let inviteID: String
+    public let conversationID: String
+    public let createdBy: String
+    public let targetDID: String?
+    public let createdAt: Date
+    public let expiresAt: Date?
+    public let maxUses: Int?
+    public let usesCount: Int
+    public let revoked: Bool
 
     public var id: String { inviteID }
 
@@ -178,14 +178,14 @@ extension MLSInviteModel: FetchableRecord, PersistableRecord {
     public static let databaseTableName = "MLSInviteModel"
 
     public enum Columns {
-        static let inviteID = Column("inviteID")
-        static let conversationID = Column("conversationID")
-        static let createdBy = Column("createdBy")
-        static let targetDID = Column("targetDID")
-        static let createdAt = Column("createdAt")
-        static let expiresAt = Column("expiresAt")
-        static let maxUses = Column("maxUses")
-        static let usesCount = Column("usesCount")
-        static let revoked = Column("revoked")
+        public static let inviteID = Column("inviteID")
+        public static let conversationID = Column("conversationID")
+        public static let createdBy = Column("createdBy")
+        public static let targetDID = Column("targetDID")
+        public static let createdAt = Column("createdAt")
+        public static let expiresAt = Column("expiresAt")
+        public static let maxUses = Column("maxUses")
+        public static let usesCount = Column("usesCount")
+        public static let revoked = Column("revoked")
     }
 }

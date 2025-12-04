@@ -893,6 +893,115 @@ public final class MLSStorage: @unchecked Sendable {
         .fetchOne(db)
     }
   }
+
+  // MARK: - Membership History
+
+  /// Record a membership event in the audit log
+  public func recordMembershipEvent(
+    _ event: MLSMembershipEventModel,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      try event.save(db)
+    }
+    logger.info("✅ Recorded membership event: \(event.eventType.rawValue) for \(event.memberDID.prefix(20))")
+  }
+
+  /// Fetch membership history for a conversation
+  public func fetchMembershipHistory(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase,
+    limit: Int = 100
+  ) async throws -> [MLSMembershipEventModel] {
+    return try await database.read { db in
+      try MLSMembershipEventModel
+        .filter(MLSMembershipEventModel.Columns.conversationID == conversationID)
+        .filter(MLSMembershipEventModel.Columns.currentUserDID == currentUserDID)
+        .order(MLSMembershipEventModel.Columns.timestamp.desc)
+        .limit(limit)
+        .fetchAll(db)
+    }
+  }
+
+  /// Fetch members including removed ones (for history view)
+  public func fetchAllMembers(
+    conversationID: String,
+    currentUserDID: String,
+    includeRemoved: Bool = false,
+    database: MLSDatabase
+  ) async throws -> [MLSMemberModel] {
+    return try await database.read { db in
+      var query = MLSMemberModel
+        .filter(MLSMemberModel.Columns.conversationID == conversationID)
+        .filter(MLSMemberModel.Columns.currentUserDID == currentUserDID)
+
+      if !includeRemoved {
+        query = query.filter(MLSMemberModel.Columns.isActive == true)
+      }
+
+      return try query
+        .order(MLSMemberModel.Columns.addedAt.desc)
+        .fetchAll(db)
+    }
+  }
+
+  /// Update conversation's last membership change timestamp
+  public func updateConversationMembershipTimestamp(
+    conversationID: String,
+    currentUserDID: String,
+    timestamp: Date = Date(),
+    incrementBadge: Bool = true,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      if var conversation = try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
+        .fetchOne(db) {
+
+        let updated = conversation.withMembershipChange(
+          timestamp: timestamp,
+          unacknowledged: incrementBadge ? 1 : 0
+        )
+        try updated.update(db)
+      }
+    }
+  }
+
+  /// Clear membership change badge for a conversation
+  public func clearMembershipChangeBadge(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      if var conversation = try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
+        .fetchOne(db) {
+
+        let updated = conversation.clearMembershipChangeBadge()
+        try updated.update(db)
+      }
+    }
+  }
+
+  /// Fetch recent membership changes (last 24 hours) across all conversations
+  public func fetchRecentMembershipChanges(
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> [MLSMembershipEventModel] {
+    let cutoff = Date().addingTimeInterval(-86400)  // 24 hours ago
+
+    return try await database.read { db in
+      try MLSMembershipEventModel
+        .filter(MLSMembershipEventModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMembershipEventModel.Columns.timestamp > cutoff)
+        .order(MLSMembershipEventModel.Columns.timestamp.desc)
+        .fetchAll(db)
+    }
+  }
 }
 
 // MARK: - Errors

@@ -164,7 +164,7 @@ public actor MLSGRDBManager {
     /// Repair corrupted database by removing WAL and SHM files
     /// Call this if you get SQLITE_NOMEM or other corruption errors
     /// - Parameter userDID: User's decentralized identifier
-    func repairDatabase(for userDID: String) throws {
+    public func repairDatabase(for userDID: String) throws {
         logger.warning("⚠️ Attempting to repair database for user: \(userDID, privacy: .private)")
 
         // Close database first
@@ -187,6 +187,23 @@ public actor MLSGRDBManager {
         }
 
         logger.info("✅ Database repair completed for user: \(userDID, privacy: .private)")
+    }
+    
+    /// Force a WAL checkpoint to consolidate the WAL file into the main database
+    /// This can help prevent memory exhaustion by reducing the size of auxiliary files
+    /// - Parameter userDID: User's decentralized identifier
+    public func checkpointDatabase(for userDID: String) async throws {
+        guard let database = databases[userDID] else {
+            logger.debug("No active database for checkpoint: \(userDID, privacy: .private)")
+            return
+        }
+        
+        try await database.write { db in
+            // TRUNCATE mode checkpoints and then truncates the WAL file
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+        }
+        
+        logger.info("✅ Database checkpoint completed for user: \(userDID, privacy: .private)")
     }
 
     /// Check if database exists for user
@@ -236,6 +253,12 @@ public actor MLSGRDBManager {
         // Set QoS to userInitiated to match main thread priority
         // This prevents priority inversion when UI threads await database operations
         config.qos = .userInitiated
+        
+        // CRITICAL FIX: Limit maximum reader connections to prevent memory exhaustion
+        // iOS has limited file descriptors and memory; too many concurrent readers
+        // can exhaust SQLite's resources causing "out of memory" errors
+        // Default is 5, but we limit to 4 to leave headroom for the writer
+        config.maximumReaderCount = 4
 
         // Configure encryption using GRDB's prepareDatabase
         config.prepareDatabase { db in
@@ -269,14 +292,24 @@ public actor MLSGRDBManager {
 
             // Enable WAL mode for better concurrency (critical for DatabasePool)
             try db.execute(sql: "PRAGMA journal_mode = WAL;")
+            // Reduce checkpoint threshold to prevent WAL file from growing too large
+            // (1000 pages * 4KB = 4MB threshold before automatic checkpoint)
             try db.execute(sql: "PRAGMA wal_autocheckpoint = 1000;")
             try db.execute(sql: "PRAGMA synchronous = NORMAL;")  // NORMAL is sufficient with WAL
+            
+            // Limit SQLite's page cache to prevent memory bloat
+            // Negative value = KB, so -2000 = 2MB cache per connection
+            // With 4 reader connections + 1 writer = ~10MB total cache (reasonable for iOS)
+            try db.execute(sql: "PRAGMA cache_size = -2000;")
 
             // Enable foreign keys
             try db.execute(sql: "PRAGMA foreign_keys = ON;")
             
-            // Enable memory-mapped I/O for better read performance
-            try db.execute(sql: "PRAGMA mmap_size = 268435456;")  // 256MB
+            // Memory-mapped I/O disabled to prevent "out of memory" errors on iOS
+            // iOS has strict memory limits; large mmap regions can exhaust available memory
+            // especially when multiple database connections are open during polling/sync
+            // The default mmap_size of 0 (disabled) is safe and performant enough
+            // try db.execute(sql: "PRAGMA mmap_size = 268435456;")  // DISABLED - was 256MB
         }
 
         // Create DatabasePool for concurrent reads
@@ -627,6 +660,166 @@ public actor MLSGRDBManager {
         sql: """
             CREATE INDEX IF NOT EXISTS idx_message_processing_error
             ON MLSMessageModel(conversationID, processingError);
+          """)
+    }
+
+    // MARK: v6 - Membership history and visibility tracking
+    migrator.registerMigration("v6_membership_history") { db in
+      // Add membership change tracking to MLSConversationModel
+      try db.execute(
+        sql: """
+            ALTER TABLE MLSConversationModel
+            ADD COLUMN lastMembershipChangeAt DATETIME;
+          """)
+
+      try db.execute(
+        sql: """
+            ALTER TABLE MLSConversationModel
+            ADD COLUMN unacknowledgedMemberChanges INTEGER NOT NULL DEFAULT 0;
+          """)
+
+      // Check if MLSMemberModel needs removedBy and removalReason columns
+      // (these were added in Phase 1.2, but migration handles databases without them)
+      let hasRemovedBy = try db.columns(in: "MLSMemberModel")
+        .contains { $0.name == "removedBy" }
+      let hasRemovalReason = try db.columns(in: "MLSMemberModel")
+        .contains { $0.name == "removalReason" }
+
+      if !hasRemovedBy {
+        try db.execute(
+          sql: """
+              ALTER TABLE MLSMemberModel
+              ADD COLUMN removedBy TEXT;
+            """)
+      }
+
+      if !hasRemovalReason {
+        try db.execute(
+          sql: """
+              ALTER TABLE MLSMemberModel
+              ADD COLUMN removalReason TEXT;
+            """)
+      }
+
+      // Create membership event audit log table
+      try db.create(table: "MLSMembershipEventModel") { t in
+        t.primaryKey("id", .text).notNull()
+        t.column("conversationID", .text).notNull()
+          .references("MLSConversationModel", onDelete: .cascade)
+        t.column("currentUserDID", .text).notNull()
+        t.column("memberDID", .text).notNull()
+        t.column("eventType", .text).notNull()
+        t.column("timestamp", .datetime).notNull()
+        t.column("actorDID", .text)
+        t.column("epoch", .integer).notNull()
+        t.column("metadata", .blob)
+      }
+
+      // Create indexes for membership event queries
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_membership_events_conversation_timestamp
+            ON MLSMembershipEventModel(conversationID, timestamp DESC);
+          """)
+
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_membership_events_member
+            ON MLSMembershipEventModel(memberDID, timestamp DESC);
+          """)
+    }
+
+    // MARK: v7 - Roster snapshots and tree hash pinning for E2EE validation
+    migrator.registerMigration("v7_validation_hardening") { db in
+      // Create roster snapshot table for membership change detection
+      try db.create(table: "MLSRosterSnapshotModel") { t in
+        t.primaryKey("snapshotID", .text).notNull()
+        t.column("conversationID", .text).notNull()
+          .references("MLSConversationModel", onDelete: .cascade)
+        t.column("epoch", .integer).notNull()
+        t.column("memberDIDs", .blob).notNull()  // JSON-encoded [String]
+        t.column("treeHash", .blob)
+        t.column("timestamp", .datetime).notNull()
+        t.column("previousSnapshotID", .text)
+      }
+
+      // Create indexes for roster snapshot queries
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_roster_snapshots_conversation_epoch
+            ON MLSRosterSnapshotModel(conversationID, epoch DESC);
+          """)
+
+      try db.execute(
+        sql: """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_roster_snapshots_conversation_epoch_unique
+            ON MLSRosterSnapshotModel(conversationID, epoch);
+          """)
+
+      // Create tree hash pin table for state divergence detection
+      try db.create(table: "MLSTreeHashPinModel") { t in
+        t.primaryKey("pinID", .text).notNull()
+        t.column("conversationID", .text).notNull()
+          .references("MLSConversationModel", onDelete: .cascade)
+        t.column("epoch", .integer).notNull()
+        t.column("treeHash", .blob).notNull()
+        t.column("pinnedAt", .datetime).notNull()
+        t.column("source", .text).notNull()
+        t.column("verified", .boolean).notNull().defaults(to: false)
+      }
+
+      // Create indexes for tree hash pin queries
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_tree_hash_pins_conversation_epoch
+            ON MLSTreeHashPinModel(conversationID, epoch DESC);
+          """)
+
+      try db.execute(
+        sql: """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_tree_hash_pins_conversation_epoch_unique
+            ON MLSTreeHashPinModel(conversationID, epoch);
+          """)
+
+      // Create validation audit log table for security decisions
+      try db.create(table: "MLSValidationAuditLog") { t in
+        t.primaryKey("id", .text).notNull()
+        t.column("conversationID", .text).notNull()
+        t.column("timestamp", .datetime).notNull()
+        t.column("operationType", .text).notNull()
+        t.column("credentialDID", .text)
+        t.column("epoch", .integer).notNull()
+        t.column("decision", .text).notNull()  // "allowed", "denied", "requires_approval"
+        t.column("reason", .text)
+        t.column("metadata", .blob)
+      }
+
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_validation_audit_conversation_timestamp
+            ON MLSValidationAuditLog(conversationID, timestamp DESC);
+          """)
+    }
+
+    // MARK: v8 - Add deletedAt to MLSEpochKeyModel
+    migrator.registerMigration("v8_add_deleted_at_to_epoch_keys") { db in
+      // Add deletedAt column to MLSEpochKeyModel if it doesn't exist
+      let hasDeletedAt = try db.columns(in: "MLSEpochKeyModel")
+        .contains { $0.name == "deletedAt" }
+
+      if !hasDeletedAt {
+        try db.execute(
+          sql: """
+              ALTER TABLE MLSEpochKeyModel
+              ADD COLUMN deletedAt DATETIME;
+            """)
+      }
+
+      // Add index for cleanup queries
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_epoch_deleted
+            ON MLSEpochKeyModel(currentUserDID, deletedAt);
           """)
     }
 

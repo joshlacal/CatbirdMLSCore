@@ -565,6 +565,22 @@ public protocol MlsContextProtocol: AnyObject {
     func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult
 
     /**
+     * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
+     *
+     * This checks the manifest storage (KeyPackageBundle cache) which is the source of truth
+     * for which key packages this device can use to process Welcome messages.
+     *
+     * NOTE: This only checks the manifest, not OpenMLS internal storage. The manifest
+     * is what we control and what should contain all bundles we've created.
+     *
+     * - Parameters:
+     * - hash_hex: Hex-encoded hash reference to search for (raw bytes, not TLS-encoded)
+     * - Returns: true if found in manifest, false otherwise
+     * - Throws: MLSError if context is not initialized or hex is invalid
+     */
+    func debugCheckKeyPackageHash(hashHex: String) throws -> Bool
+
+    /**
      * Get detailed debug information about all group members
      *
      * Returns information about each member including their leaf index,
@@ -577,6 +593,18 @@ public protocol MlsContextProtocol: AnyObject {
      * - Throws: MLSError if group not found
      */
     func debugGroupMembers(groupId: Data) throws -> GroupDebugInfo
+
+    /**
+     * 🔍 DEBUG: List all key package hashes from manifest storage
+     *
+     * Returns hex-encoded hash references for all key packages stored in the manifest.
+     * This is useful for diagnosing NoMatchingKeyPackage errors by comparing with
+     * the hash used in a Welcome message.
+     *
+     * - Returns: Array of hex-encoded hash references
+     * - Throws: MLSError if context is not initialized
+     */
+    func debugListKeyPackageHashes() throws -> [String]
 
     func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult
 
@@ -700,6 +728,12 @@ public protocol MlsContextProtocol: AnyObject {
      * - Throws: MLSError if context is not initialized
      */
     func getKeyPackageBundleCount() throws -> UInt64
+
+    /**
+     * Get the tree hash for a group at its current epoch
+     * Used for tree hash pinning to detect state divergence
+     */
+    func getTreeHash(groupId: Data) throws -> TreeHashData
 
     /**
      * Check if a group exists in local storage
@@ -846,6 +880,14 @@ public protocol MlsContextProtocol: AnyObject {
      * This uses the send-then-merge pattern - caller must merge after server ACK
      */
     func selfUpdate(groupId: Data) throws -> AddMembersResult
+
+    /**
+     * Set the credential validator callback for client-side validation
+     *
+     * This enables the Swift layer to validate credentials before accepting
+     * group state changes. The validator is called before merging commits.
+     */
+    func setCredentialValidator(validator: CredentialValidator) throws
 
     /**
      * Set the epoch secret storage backend
@@ -1096,6 +1138,27 @@ open class MlsContext:
     }
 
     /**
+     * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
+     *
+     * This checks the manifest storage (KeyPackageBundle cache) which is the source of truth
+     * for which key packages this device can use to process Welcome messages.
+     *
+     * NOTE: This only checks the manifest, not OpenMLS internal storage. The manifest
+     * is what we control and what should contain all bundles we've created.
+     *
+     * - Parameters:
+     * - hash_hex: Hex-encoded hash reference to search for (raw bytes, not TLS-encoded)
+     * - Returns: true if found in manifest, false otherwise
+     * - Throws: MLSError if context is not initialized or hex is invalid
+     */
+    open func debugCheckKeyPackageHash(hashHex: String) throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_debug_check_key_package_hash(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(hashHex), $0)
+        })
+    }
+
+    /**
      * Get detailed debug information about all group members
      *
      * Returns information about each member including their leaf index,
@@ -1111,6 +1174,22 @@ open class MlsContext:
         return try FfiConverterTypeGroupDebugInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_mls_ffi_fn_method_mlscontext_debug_group_members(self.uniffiClonePointer(),
                                                                     FfiConverterData.lower(groupId), $0)
+        })
+    }
+
+    /**
+     * 🔍 DEBUG: List all key package hashes from manifest storage
+     *
+     * Returns hex-encoded hash references for all key packages stored in the manifest.
+     * This is useful for diagnosing NoMatchingKeyPackage errors by comparing with
+     * the hash used in a Welcome message.
+     *
+     * - Returns: Array of hex-encoded hash references
+     * - Throws: MLSError if context is not initialized
+     */
+    open func debugListKeyPackageHashes() throws -> [String] {
+        return try FfiConverterSequenceString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_debug_list_key_package_hashes(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -1335,6 +1414,17 @@ open class MlsContext:
     open func getKeyPackageBundleCount() throws -> UInt64 {
         return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_mls_ffi_fn_method_mlscontext_get_key_package_bundle_count(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Get the tree hash for a group at its current epoch
+     * Used for tree hash pinning to detect state divergence
+     */
+    open func getTreeHash(groupId: Data) throws -> TreeHashData {
+        return try FfiConverterTypeTreeHashData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_mls_ffi_fn_method_mlscontext_get_tree_hash(self.uniffiClonePointer(),
+                                                              FfiConverterData.lower(groupId), $0)
         })
     }
 
@@ -1579,6 +1669,18 @@ open class MlsContext:
             uniffi_mls_ffi_fn_method_mlscontext_self_update(self.uniffiClonePointer(),
                                                             FfiConverterData.lower(groupId), $0)
         })
+    }
+
+    /**
+     * Set the credential validator callback for client-side validation
+     *
+     * This enables the Swift layer to validate credentials before accepting
+     * group state changes. The validator is called before merging commits.
+     */
+    open func setCredentialValidator(validator: CredentialValidator) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_mls_ffi_fn_method_mlscontext_set_credential_validator(self.uniffiClonePointer(),
+                                                                     FfiConverterCallbackInterfaceCredentialValidator.lower(validator), $0)
+    }
     }
 
     /**
@@ -2620,12 +2722,16 @@ public func FfiConverterTypeMemberCredential_lower(_ value: MemberCredential) ->
 public struct ProcessCommitResult {
     public var newEpoch: UInt64
     public var updateProposals: [UpdateProposalInfo]
+    public var addProposals: [AddProposalInfo]
+    public var removeProposals: [RemoveProposalInfo]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(newEpoch: UInt64, updateProposals: [UpdateProposalInfo]) {
+    public init(newEpoch: UInt64, updateProposals: [UpdateProposalInfo], addProposals: [AddProposalInfo], removeProposals: [RemoveProposalInfo]) {
         self.newEpoch = newEpoch
         self.updateProposals = updateProposals
+        self.addProposals = addProposals
+        self.removeProposals = removeProposals
     }
 }
 
@@ -2637,12 +2743,20 @@ extension ProcessCommitResult: Equatable, Hashable {
         if lhs.updateProposals != rhs.updateProposals {
             return false
         }
+        if lhs.addProposals != rhs.addProposals {
+            return false
+        }
+        if lhs.removeProposals != rhs.removeProposals {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(newEpoch)
         hasher.combine(updateProposals)
+        hasher.combine(addProposals)
+        hasher.combine(removeProposals)
     }
 }
 
@@ -2654,13 +2768,17 @@ public struct FfiConverterTypeProcessCommitResult: FfiConverterRustBuffer {
         return
             try ProcessCommitResult(
                 newEpoch: FfiConverterUInt64.read(from: &buf),
-                updateProposals: FfiConverterSequenceTypeUpdateProposalInfo.read(from: &buf)
+                updateProposals: FfiConverterSequenceTypeUpdateProposalInfo.read(from: &buf),
+                addProposals: FfiConverterSequenceTypeAddProposalInfo.read(from: &buf),
+                removeProposals: FfiConverterSequenceTypeRemoveProposalInfo.read(from: &buf)
             )
     }
 
     public static func write(_ value: ProcessCommitResult, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.newEpoch, into: &buf)
         FfiConverterSequenceTypeUpdateProposalInfo.write(value.updateProposals, into: &buf)
+        FfiConverterSequenceTypeAddProposalInfo.write(value.addProposals, into: &buf)
+        FfiConverterSequenceTypeRemoveProposalInfo.write(value.removeProposals, into: &buf)
     }
 }
 
@@ -3024,6 +3142,70 @@ public func FfiConverterTypeStagedWelcomeInfo_lower(_ value: StagedWelcomeInfo) 
     return FfiConverterTypeStagedWelcomeInfo.lower(value)
 }
 
+/**
+ * Tree hash data for epoch state verification
+ */
+public struct TreeHashData {
+    public var epoch: UInt64
+    public var treeHash: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(epoch: UInt64, treeHash: Data) {
+        self.epoch = epoch
+        self.treeHash = treeHash
+    }
+}
+
+extension TreeHashData: Equatable, Hashable {
+    public static func == (lhs: TreeHashData, rhs: TreeHashData) -> Bool {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.treeHash != rhs.treeHash {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(epoch)
+        hasher.combine(treeHash)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTreeHashData: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TreeHashData {
+        return
+            try TreeHashData(
+                epoch: FfiConverterUInt64.read(from: &buf),
+                treeHash: FfiConverterData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: TreeHashData, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterData.write(value.treeHash, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTreeHashData_lift(_ buf: RustBuffer) throws -> TreeHashData {
+    return try FfiConverterTypeTreeHashData.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTreeHashData_lower(_ value: TreeHashData) -> RustBuffer {
+    return FfiConverterTypeTreeHashData.lower(value)
+}
+
 public struct UpdateProposalInfo {
     public var leafIndex: UInt32
     public var oldCredential: CredentialData
@@ -3091,6 +3273,78 @@ public func FfiConverterTypeUpdateProposalInfo_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeUpdateProposalInfo_lower(_ value: UpdateProposalInfo) -> RustBuffer {
     return FfiConverterTypeUpdateProposalInfo.lower(value)
+}
+
+/**
+ * Validation context passed to CredentialValidator
+ */
+public struct ValidationContext {
+    public var conversationId: String
+    public var operationType: OperationType
+    public var currentEpoch: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(conversationId: String, operationType: OperationType, currentEpoch: UInt64) {
+        self.conversationId = conversationId
+        self.operationType = operationType
+        self.currentEpoch = currentEpoch
+    }
+}
+
+extension ValidationContext: Equatable, Hashable {
+    public static func == (lhs: ValidationContext, rhs: ValidationContext) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.operationType != rhs.operationType {
+            return false
+        }
+        if lhs.currentEpoch != rhs.currentEpoch {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(operationType)
+        hasher.combine(currentEpoch)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeValidationContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ValidationContext {
+        return
+            try ValidationContext(
+                conversationId: FfiConverterString.read(from: &buf),
+                operationType: FfiConverterTypeOperationType.read(from: &buf),
+                currentEpoch: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ValidationContext, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterTypeOperationType.write(value.operationType, into: &buf)
+        FfiConverterUInt64.write(value.currentEpoch, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeValidationContext_lift(_ buf: RustBuffer) throws -> ValidationContext {
+    return try FfiConverterTypeValidationContext.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeValidationContext_lower(_ value: ValidationContext) -> RustBuffer {
+    return FfiConverterTypeValidationContext.lower(value)
 }
 
 public struct WelcomeResult {
@@ -3377,6 +3631,79 @@ extension MlsError: Foundation.LocalizedError {
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Operation type for credential validation context
+ */
+
+public enum OperationType {
+    case join
+    case add
+    case update
+    case remove
+    case decrypt
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOperationType: FfiConverterRustBuffer {
+    typealias SwiftType = OperationType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OperationType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .join
+
+        case 2: return .add
+
+        case 3: return .update
+
+        case 4: return .remove
+
+        case 5: return .decrypt
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: OperationType, into buf: inout [UInt8]) {
+        switch value {
+        case .join:
+            writeInt(&buf, Int32(1))
+
+        case .add:
+            writeInt(&buf, Int32(2))
+
+        case .update:
+            writeInt(&buf, Int32(3))
+
+        case .remove:
+            writeInt(&buf, Int32(4))
+
+        case .decrypt:
+            writeInt(&buf, Int32(5))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOperationType_lift(_ buf: RustBuffer) throws -> OperationType {
+    return try FfiConverterTypeOperationType.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOperationType_lower(_ value: OperationType) -> RustBuffer {
+    return FfiConverterTypeOperationType.lower(value)
+}
+
+extension OperationType: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum ProcessedContent {
     case applicationMessage(plaintext: Data, sender: CredentialData)
@@ -3507,6 +3834,134 @@ public func FfiConverterTypeProposalInfo_lower(_ value: ProposalInfo) -> RustBuf
 
 extension ProposalInfo: Equatable, Hashable {}
 
+/**
+ * Credential validator callback trait for Swift-side policy enforcement
+ * Allows the client to validate credentials before accepting group state changes
+ */
+public protocol CredentialValidator: AnyObject {
+    /**
+     * Validate a credential in the context of a specific operation
+     * Returns true if the credential is valid and the operation should proceed
+     * Returns false to reject the credential and abort the operation
+     */
+    func validateCredential(credential: CredentialData, context: ValidationContext) async -> Bool
+}
+
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+private enum UniffiCallbackInterfaceCredentialValidator {
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceCredentialValidator = .init(
+        validateCredential: { (
+            uniffiHandle: UInt64,
+            credential: RustBuffer,
+            context: RustBuffer,
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteI8,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
+        ) in
+            let makeCall = {
+                () async throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceCredentialValidator.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try await uniffiObj.validateCredential(
+                    credential: FfiConverterTypeCredentialData.lift(credential),
+                    context: FfiConverterTypeValidationContext.lift(context)
+                )
+            }
+
+            let uniffiHandleSuccess = { (returnValue: Bool) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructI8(
+                        returnValue: FfiConverterBool.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { statusCode, errorBuf in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructI8(
+                        returnValue: 0,
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsync(
+                makeCall: makeCall,
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError
+            )
+            uniffiOutReturn.pointee = uniffiForeignFuture
+        },
+        uniffiFree: { (uniffiHandle: UInt64) in
+            let result = try? FfiConverterCallbackInterfaceCredentialValidator.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface CredentialValidator: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitCredentialValidator() {
+    uniffi_mls_ffi_fn_init_callback_vtable_credentialvalidator(&UniffiCallbackInterfaceCredentialValidator.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private enum FfiConverterCallbackInterfaceCredentialValidator {
+    fileprivate static var handleMap = UniffiHandleMap<CredentialValidator>()
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceCredentialValidator: FfiConverter {
+    typealias SwiftType = CredentialValidator
+    typealias FfiType = UInt64
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
 public protocol EpochSecretStorage: AnyObject {
     /**
      * Store epoch secret for a conversation
@@ -3533,14 +3988,6 @@ public protocol EpochSecretStorage: AnyObject {
      */
     func deleteEpochSecret(conversationId: String, epoch: UInt64) async -> Bool
 }
-
-// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-private let IDX_CALLBACK_FREE: Int32 = 0
-// Callback return codes
-private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
-private let UNIFFI_CALLBACK_ERROR: Int32 = 1
-private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
 private enum UniffiCallbackInterfaceEpochSecretStorage {
@@ -4102,6 +4549,31 @@ private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]
+
+    public static func write(_ value: [String], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterString.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [String]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceData: FfiConverterRustBuffer {
     typealias SwiftType = [Data]
 
@@ -4119,6 +4591,31 @@ private struct FfiConverterSequenceData: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterData.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeAddProposalInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [AddProposalInfo]
+
+    public static func write(_ value: [AddProposalInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAddProposalInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AddProposalInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AddProposalInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeAddProposalInfo.read(from: &buf))
         }
         return seq
     }
@@ -4219,6 +4716,31 @@ private struct FfiConverterSequenceTypeProposalRef: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeProposalRef.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeRemoveProposalInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [RemoveProposalInfo]
+
+    public static func write(_ value: [RemoveProposalInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRemoveProposalInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RemoveProposalInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RemoveProposalInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeRemoveProposalInfo.read(from: &buf))
         }
         return seq
     }
@@ -4467,7 +4989,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_create_key_package() != 46265 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_debug_check_key_package_hash() != 56561 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_debug_group_members() != 31412 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_debug_list_key_package_hashes() != 59032 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message() != 31578 {
@@ -4518,6 +5046,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_get_key_package_bundle_count() != 20966 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_get_tree_hash() != 18516 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_group_exists() != 30707 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4566,6 +5097,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_method_mlscontext_self_update() != 49396 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_mls_ffi_checksum_method_mlscontext_set_credential_validator() != 37116 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_mls_ffi_checksum_method_mlscontext_set_epoch_secret_storage() != 44820 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4582,6 +5116,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_constructor_mlscontext_new() != 23112 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_credentialvalidator_validate_credential() != 39416 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_epochsecretstorage_store_epoch_secret() != 33043 {
@@ -4606,6 +5143,7 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitCredentialValidator()
     uniffiCallbackInitEpochSecretStorage()
     uniffiCallbackInitKeychainAccess()
     uniffiCallbackInitMLSLogger()

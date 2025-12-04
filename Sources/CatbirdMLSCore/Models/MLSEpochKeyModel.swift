@@ -18,6 +18,7 @@ public struct MLSEpochKeyModel: Codable, Sendable, Hashable, Identifiable {
   public   let createdAt: Date
   public   let expiresAt: Date?
   public   let isActive: Bool
+  public   let deletedAt: Date?
 
   public var id: String { epochKeyID }
 
@@ -31,7 +32,8 @@ public struct MLSEpochKeyModel: Codable, Sendable, Hashable, Identifiable {
     keyMaterial: Data,
     createdAt: Date = Date(),
     expiresAt: Date? = nil,
-    isActive: Bool = true
+    isActive: Bool = true,
+    deletedAt: Date? = nil
   ) {
     self.epochKeyID = epochKeyID
     self.conversationID = conversationID
@@ -41,6 +43,7 @@ public struct MLSEpochKeyModel: Codable, Sendable, Hashable, Identifiable {
     self.createdAt = createdAt
     self.expiresAt = expiresAt
     self.isActive = isActive
+    self.deletedAt = deletedAt
   }
 
   // MARK: - Update Methods
@@ -55,7 +58,8 @@ public struct MLSEpochKeyModel: Codable, Sendable, Hashable, Identifiable {
       keyMaterial: keyMaterial,
       createdAt: createdAt,
       expiresAt: expiresAt,
-      isActive: false
+      isActive: false,
+      deletedAt: deletedAt
     )
   }
 
@@ -91,5 +95,6 @@ extension MLSEpochKeyModel: FetchableRecord, PersistableRecord {
     static let createdAt = Column("createdAt")
     static let expiresAt = Column("expiresAt")
     static let isActive = Column("isActive")
+    static let deletedAt = Column("deletedAt")
   }
 }

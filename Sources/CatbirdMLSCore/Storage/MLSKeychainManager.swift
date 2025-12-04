@@ -297,8 +297,9 @@ public final class MLSKeychainManager: @unchecked Sendable {
     epoch: Int64
   ) throws {
     let keychainKey = KeychainKey.privateKey(conversationID: conversationID, epoch: epoch)
+    // Use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly for Notification Service Extension access
     try store(
-      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored private key for conversation: \(conversationID), epoch: \(epoch)")
   }
 
@@ -339,8 +340,9 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Store signature private key for a conversation
   public func storeSignatureKey(_ key: Data, forConversationID conversationID: String) throws {
     let keychainKey = KeychainKey.signatureKey(conversationID: conversationID)
+    // Use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly for Notification Service Extension access
     try store(
-      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored signature key for conversation: \(conversationID)")
   }
 
@@ -362,8 +364,9 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Store encryption key for a conversation
   public func storeEncryptionKey(_ key: Data, forConversationID conversationID: String) throws {
     let keychainKey = KeychainKey.encryptionKey(conversationID: conversationID)
+    // Use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly for Notification Service Extension access
     try store(
-      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored encryption key for conversation: \(conversationID)")
   }
 
@@ -426,8 +429,9 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Store HPKE private key for a key package
   public func storeHPKEPrivateKey(_ key: Data, forKeyPackageID keyPackageID: String) throws {
     let keychainKey = KeychainKey.hpkePrivateKey(keyPackageID: keyPackageID)
+    // Use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly for Notification Service Extension access
     try store(
-      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+      key, forKey: keychainKey.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored HPKE private key for key package: \(keyPackageID)")
   }
 
@@ -467,7 +471,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
   public func store(
     _ data: Data,
     forKey key: String,
-    accessible: CFString = kSecAttrAccessibleAfterFirstUnlock
+    accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
   ) throws {
     // Delete existing item first
     try? delete(forKey: key)
