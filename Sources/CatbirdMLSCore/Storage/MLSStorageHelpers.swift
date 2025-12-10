@@ -235,6 +235,31 @@ public struct MLSStorageHelpers {
     }
   }
 
+  /// Mark all messages in a conversation as read
+  /// - Parameters:
+  ///   - database: GRDB DatabaseQueue
+  ///   - conversationID: Conversation identifier
+  ///   - currentUserDID: Current user DID
+  /// - Returns: Number of messages marked as read
+  @discardableResult
+  public static func markAllMessagesAsRead(
+    in database: MLSDatabase,
+    conversationID: String,
+    currentUserDID: String
+  ) async throws -> Int {
+    try await database.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSMessageModel
+          SET isRead = 1
+          WHERE conversationID = ? AND currentUserDID = ? AND isRead = 0
+          """,
+        arguments: [conversationID, currentUserDID]
+      )
+      return db.changesCount
+    }
+  }
+
   /// Fetch active conversations sorted by last message
   /// - Parameters:
   ///   - database: GRDB DatabaseQueue

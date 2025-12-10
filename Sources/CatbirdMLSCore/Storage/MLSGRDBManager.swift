@@ -145,15 +145,23 @@ public actor MLSGRDBManager {
     
     // MARK: - Connection Health & Recovery
     
-    /// Check if an error is a recoverable SQLCipher codec error
+    /// Check if an error is a recoverable SQLCipher/SQLite error
     /// These errors often manifest as "out of memory" but are really codec context failures
+    /// Also includes disk I/O errors and database malformation
     /// - Parameter error: The error to check
-    /// - Returns: True if the error is a recoverable codec error
+    /// - Returns: True if the error is a recoverable database error
     public nonisolated func isRecoverableCodecError(_ error: Error) -> Bool {
         let description = error.localizedDescription.lowercased()
-        // SQLite error 7 (SQLITE_NOMEM) during PRAGMA operations indicates codec issues
+        // SQLite error 7 (SQLITE_NOMEM) - out of memory / codec issues
+        // SQLite error 10 (SQLITE_IOERR) - disk I/O error
+        // SQLite error 11 (SQLITE_CORRUPT) - database disk image is malformed
         return description.contains("out of memory") ||
                description.contains("sqlite error 7") ||
+               description.contains("sqlite error 10") ||
+               description.contains("disk i/o error") ||
+               description.contains("sqlite error 11") ||
+               description.contains("database disk image is malformed") ||
+               description.contains("database is malformed") ||
                (description.contains("sqlite") && description.contains("pragma"))
     }
     
@@ -178,6 +186,7 @@ public actor MLSGRDBManager {
     
     /// Force reconnection to the database, closing any existing connection
     /// Use this after detecting a codec error to recover the connection
+    /// Uses progressive repair strategy: WAL/SHM repair first, then full reset if needed
     /// - Parameter userDID: User's decentralized identifier
     /// - Returns: Fresh database pool
     /// - Throws: MLSSQLCipherError if reconnection fails
@@ -187,11 +196,8 @@ public actor MLSGRDBManager {
         // Close existing connection
         closeDatabase(for: userDID)
         
-        // Repair WAL/SHM files which may be corrupted
-        try? repairDatabase(for: userDID)
-        
-        // Create fresh connection
-        return try await getDatabasePool(for: userDID)
+        // Use progressive repair which applies escalating strategies
+        return try await progressiveRepair(for: userDID)
     }
     
     /// Execute a database operation with automatic recovery on codec errors
@@ -264,6 +270,15 @@ public actor MLSGRDBManager {
         try await encryption.deleteKey(for: userDID)
     }
 
+    /// Tracks repair attempts per user to prevent infinite repair loops
+    private var repairAttempts: [String: (count: Int, lastAttempt: Date)] = [:]
+    
+    /// Maximum number of repair attempts before forcing a full database reset
+    private let maxRepairAttempts = 3
+    
+    /// Cooldown period between repair attempts (15 minutes)
+    private let repairCooldown: TimeInterval = 900
+    
     /// Repair corrupted database by removing WAL and SHM files
     /// Call this if you get SQLITE_NOMEM or other corruption errors
     /// - Parameter userDID: User's decentralized identifier
@@ -290,6 +305,137 @@ public actor MLSGRDBManager {
         }
 
         logger.info("✅ Database repair completed for user: \(userDID, privacy: .private)")
+    }
+    
+    /// Full database reset - deletes the main database file and all auxiliary files
+    /// Use this when the database is severely corrupted beyond WAL/SHM repair
+    /// NOTE: This will lose all local MLS state and require re-syncing from server
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Throws: Error if deletion fails
+    public func resetDatabase(for userDID: String) async throws {
+        logger.error("🚨 Performing FULL DATABASE RESET for user: \(userDID, privacy: .private)")
+        logger.warning("   ⚠️ All local MLS state will be lost and must be re-synced from server")
+        
+        // Close database first
+        closeDatabase(for: userDID)
+        
+        let dbPath = databasePath(for: userDID)
+        let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
+        let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
+        let journalPath = URL(fileURLWithPath: dbPath.path + "-journal")
+        
+        // Delete all database files
+        var deletedFiles: [String] = []
+        for path in [dbPath, walPath, shmPath, journalPath] {
+            if FileManager.default.fileExists(atPath: path.path) {
+                do {
+                    try FileManager.default.removeItem(at: path)
+                    deletedFiles.append(path.lastPathComponent)
+                } catch {
+                    logger.error("Failed to delete \(path.lastPathComponent): \(error.localizedDescription)")
+                    throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
+                }
+            }
+        }
+        
+        // Reset repair attempts counter for this user
+        repairAttempts.removeValue(forKey: userDID)
+        
+        logger.info("🗑️ Deleted database files: \(deletedFiles.joined(separator: ", "))")
+        logger.info("✅ Database reset completed for user: \(userDID, privacy: .private)")
+    }
+    
+    /// Attempt progressive database recovery - starts with WAL/SHM repair, escalates to full reset if needed
+    /// Tracks attempts and applies exponential backoff between retries
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: Fresh database pool if recovery was successful
+    /// - Throws: MLSSQLCipherError if all recovery options fail
+    public func progressiveRepair(for userDID: String) async throws -> DatabasePool {
+        // Check current repair state
+        let currentState = repairAttempts[userDID] ?? (count: 0, lastAttempt: .distantPast)
+        let timeSinceLastAttempt = Date().timeIntervalSince(currentState.lastAttempt)
+        
+        // Apply cooldown if we've had recent failures (exponential backoff)
+        let requiredCooldown = min(repairCooldown * pow(2.0, Double(max(0, currentState.count - 1))), 3600) // Max 1 hour
+        if currentState.count > 0 && timeSinceLastAttempt < requiredCooldown {
+            let remaining = Int(requiredCooldown - timeSinceLastAttempt)
+            logger.warning("⏳ Database repair on cooldown for \(remaining) more seconds (attempt \(currentState.count)/\(self.maxRepairAttempts))")
+            throw MLSSQLCipherError.databaseCreationFailed(underlying: NSError(
+                domain: "MLSGRDBManager",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Database repair on cooldown (\(remaining)s remaining). Please try again later."]
+            ))
+        }
+        
+        // Increment attempt counter
+        repairAttempts[userDID] = (count: currentState.count + 1, lastAttempt: Date())
+        let attemptNumber = currentState.count + 1
+        
+        logger.info("🔄 Progressive repair attempt \(attemptNumber)/\(self.maxRepairAttempts) for user: \(userDID, privacy: .private)")
+        
+        // Strategy based on attempt number:
+        // Attempt 1-2: Try WAL/SHM repair
+        // Attempt 3+: Full database reset
+        
+        if attemptNumber <= 2 {
+            // Try standard WAL/SHM repair
+            logger.info("📝 Strategy: WAL/SHM file repair (attempt \(attemptNumber))")
+            try? repairDatabase(for: userDID)
+            
+            // Try to open the database
+            do {
+                let db = try await createDatabase(for: userDID)
+                databases[userDID] = db
+                
+                // Verify it's actually working
+                _ = try await db.read { database in
+                    try Int.fetchOne(database, sql: "SELECT count(*) FROM sqlite_master;")
+                }
+                
+                // Success! Reset the counter
+                repairAttempts.removeValue(forKey: userDID)
+                logger.info("✅ Database recovered via WAL/SHM repair")
+                return db
+            } catch {
+                logger.error("❌ WAL/SHM repair failed: \(error.localizedDescription)")
+                // Continue to escalate on next attempt
+                throw error
+            }
+        } else {
+            // Escalate to full database reset
+            logger.warning("📝 Strategy: FULL DATABASE RESET (attempt \(attemptNumber) - max repairs exceeded)")
+            try await resetDatabase(for: userDID)
+            
+            // Create fresh database
+            do {
+                let db = try await createDatabase(for: userDID)
+                databases[userDID] = db
+                
+                // Reset counter on successful recovery
+                repairAttempts.removeValue(forKey: userDID)
+                logger.info("✅ Database recovered via full reset - will need to re-sync from server")
+                return db
+            } catch {
+                logger.error("❌ Even full database reset failed: \(error.localizedDescription)")
+                throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
+            }
+        }
+    }
+    
+    /// Check if database is in a failed state requiring reset
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: True if database has exceeded repair attempts and needs manual intervention
+    public nonisolated func isInFailedState(for userDID: String) async -> Bool {
+        let state = await repairAttempts[userDID]
+        return state?.count ?? 0 >= maxRepairAttempts
+    }
+    
+    /// Clear the repair attempt counter for a user (call after successful operation)
+    /// - Parameter userDID: User's decentralized identifier
+    public func clearRepairState(for userDID: String) {
+        if repairAttempts.removeValue(forKey: userDID) != nil {
+            logger.info("🧹 Cleared repair state for user: \(userDID, privacy: .private)")
+        }
     }
     
     /// Force a WAL checkpoint to consolidate the WAL file into the main database
