@@ -69,7 +69,21 @@ public actor MLSGRDBManager {
     public func getDatabasePool(for userDID: String) async throws -> DatabasePool {
         // Check cache first (actor isolation provides thread-safety)
         if let existingDatabase = databases[userDID] {
-            return existingDatabase
+            // Validate the cached connection is still healthy
+            // This catches stale connections that may have codec errors
+            do {
+                _ = try await await existingDatabase.read { db in
+                    try Int.fetchOne(db, sql: "SELECT 1;")
+                }
+                return existingDatabase
+            } catch {
+                // Connection is unhealthy, remove from cache and recreate
+                logger.warning("⚠️ Cached database connection unhealthy, reconnecting: \(error.localizedDescription)")
+                databases.removeValue(forKey: userDID)
+                
+                // Repair WAL/SHM files
+                try? repairDatabase(for: userDID)
+            }
         }
 
         // Check if database file already exists
@@ -127,6 +141,95 @@ public actor MLSGRDBManager {
         if databases.removeValue(forKey: userDID) != nil {
             logger.info("Closed database for user: \(userDID, privacy: .private)")
         }
+    }
+    
+    // MARK: - Connection Health & Recovery
+    
+    /// Check if an error is a recoverable SQLCipher codec error
+    /// These errors often manifest as "out of memory" but are really codec context failures
+    /// - Parameter error: The error to check
+    /// - Returns: True if the error is a recoverable codec error
+    public nonisolated func isRecoverableCodecError(_ error: Error) -> Bool {
+        let description = error.localizedDescription.lowercased()
+        // SQLite error 7 (SQLITE_NOMEM) during PRAGMA operations indicates codec issues
+        return description.contains("out of memory") ||
+               description.contains("sqlite error 7") ||
+               (description.contains("sqlite") && description.contains("pragma"))
+    }
+    
+    /// Validate that a database connection is healthy by running a simple query
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: True if the connection is healthy
+    public func validateConnection(for userDID: String) async -> Bool {
+        guard let database = databases[userDID] else {
+            return false
+        }
+        
+        do {
+            _ = try await database.read { db in
+                try Int.fetchOne(db, sql: "SELECT 1;")
+            }
+            return true
+        } catch {
+            logger.warning("⚠️ Connection validation failed for user: \(userDID, privacy: .private) - \(error.localizedDescription)")
+            return false
+        }
+    }
+    
+    /// Force reconnection to the database, closing any existing connection
+    /// Use this after detecting a codec error to recover the connection
+    /// - Parameter userDID: User's decentralized identifier
+    /// - Returns: Fresh database pool
+    /// - Throws: MLSSQLCipherError if reconnection fails
+    public func reconnectDatabase(for userDID: String) async throws -> DatabasePool {
+        logger.warning("🔄 Force reconnecting database for user: \(userDID, privacy: .private)")
+        
+        // Close existing connection
+        closeDatabase(for: userDID)
+        
+        // Repair WAL/SHM files which may be corrupted
+        try? repairDatabase(for: userDID)
+        
+        // Create fresh connection
+        return try await getDatabasePool(for: userDID)
+    }
+    
+    /// Execute a database operation with automatic recovery on codec errors
+    /// - Parameters:
+    ///   - userDID: User's decentralized identifier
+    ///   - maxRetries: Maximum number of retry attempts (default: 2)
+    ///   - operation: The async database operation to execute
+    /// - Returns: The result of the operation
+    /// - Throws: The original error if all retries fail
+    public func executeWithRecovery<T>(
+        for userDID: String,
+        maxRetries: Int = 2,
+        operation: @escaping (DatabasePool) async throws -> T
+    ) async throws -> T {
+        var lastError: Error?
+        
+        for attempt in 0...maxRetries {
+            do {
+                let database = try await getDatabasePool(for: userDID)
+                return try await operation(database)
+            } catch {
+                lastError = error
+                
+                if isRecoverableCodecError(error) && attempt < maxRetries {
+                    logger.warning("⚠️ Codec error detected (attempt \(attempt + 1)/\(maxRetries + 1)), attempting recovery...")
+                    
+                    // Force reconnection
+                    _ = try? await reconnectDatabase(for: userDID)
+                    
+                    // Small delay before retry
+                    try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+                } else {
+                    throw error
+                }
+            }
+        }
+        
+        throw lastError ?? MLSSQLCipherError.databaseCreationFailed(underlying: NSError(domain: "MLSGRDBManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unknown error after retries"]))
     }
 
     /// Close all databases
@@ -257,8 +360,8 @@ public actor MLSGRDBManager {
         // CRITICAL FIX: Limit maximum reader connections to prevent memory exhaustion
         // iOS has limited file descriptors and memory; too many concurrent readers
         // can exhaust SQLite's resources causing "out of memory" errors
-        // Default is 5, but we limit to 4 to leave headroom for the writer
-        config.maximumReaderCount = 4
+        // Reduced from 4 to 2 to minimize connection pool pressure on SQLCipher codec
+        config.maximumReaderCount = 2
 
         // Configure encryption using GRDB's prepareDatabase
         config.prepareDatabase { db in
@@ -293,14 +396,19 @@ public actor MLSGRDBManager {
             // Enable WAL mode for better concurrency (critical for DatabasePool)
             try db.execute(sql: "PRAGMA journal_mode = WAL;")
             // Reduce checkpoint threshold to prevent WAL file from growing too large
-            // (1000 pages * 4KB = 4MB threshold before automatic checkpoint)
-            try db.execute(sql: "PRAGMA wal_autocheckpoint = 1000;")
+            // (500 pages * 4KB = 2MB threshold before automatic checkpoint)
+            // Lower threshold means more frequent checkpoints, reducing memory pressure
+            try db.execute(sql: "PRAGMA wal_autocheckpoint = 500;")
             try db.execute(sql: "PRAGMA synchronous = NORMAL;")  // NORMAL is sufficient with WAL
             
             // Limit SQLite's page cache to prevent memory bloat
-            // Negative value = KB, so -2000 = 2MB cache per connection
-            // With 4 reader connections + 1 writer = ~10MB total cache (reasonable for iOS)
-            try db.execute(sql: "PRAGMA cache_size = -2000;")
+            // Negative value = KB, so -1000 = 1MB cache per connection
+            // With 2 reader connections + 1 writer = ~3MB total cache (conservative for iOS)
+            try db.execute(sql: "PRAGMA cache_size = -1000;")
+            
+            // Limit temp store to memory with size constraint
+            try db.execute(sql: "PRAGMA temp_store = MEMORY;")
+            try db.execute(sql: "PRAGMA temp_store_directory = '';")  // Use in-memory temp
 
             // Enable foreign keys
             try db.execute(sql: "PRAGMA foreign_keys = ON;")

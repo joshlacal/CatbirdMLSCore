@@ -1002,6 +1002,141 @@ public final class MLSStorage: @unchecked Sendable {
         .fetchAll(db)
     }
   }
+  
+  // MARK: - Reaction Persistence
+  
+  /// Save a reaction to local storage
+  /// Reactions arrive via SSE and must be persisted locally since the server doesn't store them
+  /// - Parameters:
+  ///   - reaction: The reaction model to save
+  ///   - database: Database to write to
+  public func saveReaction(
+    _ reaction: MLSReactionModel,
+    database: MLSDatabase
+  ) async throws {
+    logger.debug("💾 Saving reaction: \(reaction.emoji) on \(reaction.messageID) by \(reaction.actorDID)")
+    
+    try await database.write { db in
+      // Use insertOrReplace to handle duplicate reactions gracefully
+      try reaction.save(db, onConflict: .ignore)
+    }
+    
+    logger.debug("✅ Reaction saved: \(reaction.reactionID)")
+  }
+  
+  /// Delete a reaction from local storage
+  /// Called when a user removes their reaction via SSE event
+  /// - Parameters:
+  ///   - messageID: The message the reaction was on
+  ///   - actorDID: The DID of the user who removed the reaction
+  ///   - emoji: The emoji that was removed
+  ///   - currentUserDID: Current authenticated user's DID
+  ///   - database: Database to write to
+  public func deleteReaction(
+    messageID: String,
+    actorDID: String,
+    emoji: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws {
+    logger.debug("🗑️ Deleting reaction: \(emoji) on \(messageID) by \(actorDID)")
+    
+    let deletedCount = try await database.write { db -> Int in
+      try MLSReactionModel
+        .filter(MLSReactionModel.Columns.messageID == messageID)
+        .filter(MLSReactionModel.Columns.actorDID == actorDID)
+        .filter(MLSReactionModel.Columns.emoji == emoji)
+        .filter(MLSReactionModel.Columns.currentUserDID == currentUserDID)
+        .deleteAll(db)
+    }
+    
+    logger.debug("✅ Deleted \(deletedCount) reaction(s)")
+  }
+  
+  /// Fetch all reactions for a conversation
+  /// Used when opening a conversation to restore cached reactions
+  /// - Parameters:
+  ///   - conversationID: The conversation to fetch reactions for
+  ///   - currentUserDID: Current authenticated user's DID
+  ///   - database: Database to read from
+  /// - Returns: Dictionary mapping messageID to array of reactions
+  public func fetchReactionsForConversation(
+    _ conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> [String: [MLSReactionModel]] {
+    logger.debug("🔍 Fetching reactions for conversation: \(conversationID)")
+    
+    let reactions = try await database.read { db in
+      try MLSReactionModel
+        .filter(MLSReactionModel.Columns.conversationID == conversationID)
+        .filter(MLSReactionModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSReactionModel.Columns.action == "add")
+        .order(MLSReactionModel.Columns.timestamp.asc)
+        .fetchAll(db)
+    }
+    
+    // Group by messageID
+    let grouped = Dictionary(grouping: reactions) { $0.messageID }
+    
+    logger.debug("✅ Found \(reactions.count) reactions across \(grouped.count) messages")
+    return grouped
+  }
+  
+  /// Fetch reactions for specific messages
+  /// Used for efficiently loading reactions for visible messages
+  /// - Parameters:
+  ///   - messageIDs: Array of message IDs to fetch reactions for
+  ///   - currentUserDID: Current authenticated user's DID
+  ///   - database: Database to read from
+  /// - Returns: Dictionary mapping messageID to array of reactions
+  public func fetchReactionsForMessages(
+    _ messageIDs: [String],
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> [String: [MLSReactionModel]] {
+    guard !messageIDs.isEmpty else { return [:] }
+    
+    logger.debug("🔍 Fetching reactions for \(messageIDs.count) messages")
+    
+    let reactions = try await database.read { db in
+      try MLSReactionModel
+        .filter(messageIDs.contains(MLSReactionModel.Columns.messageID))
+        .filter(MLSReactionModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSReactionModel.Columns.action == "add")
+        .order(MLSReactionModel.Columns.timestamp.asc)
+        .fetchAll(db)
+    }
+    
+    // Group by messageID
+    let grouped = Dictionary(grouping: reactions) { $0.messageID }
+    
+    logger.debug("✅ Found \(reactions.count) reactions for requested messages")
+    return grouped
+  }
+  
+  /// Delete all reactions for a conversation
+  /// Used when leaving a conversation or for cleanup
+  /// - Parameters:
+  ///   - conversationID: The conversation to delete reactions for
+  ///   - currentUserDID: Current authenticated user's DID
+  ///   - database: Database to write to
+  public func deleteReactionsForConversation(
+    _ conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws {
+    logger.debug("🗑️ Deleting all reactions for conversation: \(conversationID)")
+    
+    let deletedCount = try await database.write { db -> Int in
+      try MLSReactionModel
+        .filter(MLSReactionModel.Columns.conversationID == conversationID)
+        .filter(MLSReactionModel.Columns.currentUserDID == currentUserDID)
+        .deleteAll(db)
+    }
+    
+    logger.debug("✅ Deleted \(deletedCount) reactions")
+  }
 }
 
 // MARK: - Errors

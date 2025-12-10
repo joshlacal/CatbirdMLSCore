@@ -22,6 +22,8 @@ public enum MLSError: LocalizedError {
     case staleGroupInfo(convoId: String, message: String)
     /// GroupInfo is invalid (too small, wrong format, or encoding issues)
     case invalidGroupInfo(convoId: String, message: String)
+    /// Member is already in the MLS group (duplicate add attempt)
+    case memberAlreadyInGroup(member: String)
 
     public var errorDescription: String? {
         switch self {
@@ -61,6 +63,9 @@ public enum MLSError: LocalizedError {
             let safeConvoId = String(describing: convoId)
             let safeMessage = String(describing: message)
             return "Invalid GroupInfo for \(safeConvoId): \(safeMessage)"
+        case .memberAlreadyInGroup(let member):
+            let safeMember = String(describing: member)
+            return "Member \(safeMember) is already in the MLS group"
         }
     }
 }

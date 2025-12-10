@@ -22,7 +22,13 @@ public struct MLSConfiguration: Sendable {
   /// Maximum number of past epochs to retain for forward secrecy
   /// - 0: Delete immediately after epoch change (maximum forward secrecy)
   /// - 1-5: Retain recent epochs for late joiners or message delivery
-  /// - Default: 2 (balance between security and usability)
+  /// - Default: 5 (increased from 2 to handle SSE event reordering)
+  /// 
+  /// NOTE: This value was increased from 2 to 5 to address forward secrecy race
+  /// conditions where SSE events arrive out of causal order. With real-time SSE,
+  /// a commit message may be processed (advancing the epoch) before application
+  /// messages from the previous epoch arrive. Without retaining past epoch keys,
+  /// these late-arriving messages would fail to decrypt.
   public let maxPastEpochs: Int
 
   /// Number of out-of-order messages tolerated in sender ratchet
@@ -66,7 +72,7 @@ public struct MLSConfiguration: Sendable {
 
   /// Initialize MLS configuration with custom values
   public init(
-    maxPastEpochs: Int = 2,
+    maxPastEpochs: Int = 5,  // Increased from 2 to handle SSE event reordering
     outOfOrderTolerance: Int = 10,
     maximumForwardDistance: Int = 2000,
     useCiphertext: Bool = true,
