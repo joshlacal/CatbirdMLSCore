@@ -7,8 +7,8 @@
 //
 
 import Foundation
-import OSLog
 import GRDB
+import OSLog
 
 /// Type alias for database writer - supports both DatabaseQueue and DatabasePool
 public typealias MLSDatabase = any DatabaseWriter
@@ -20,39 +20,49 @@ public typealias MLSDatabase = any DatabaseWriter
 /// Uses `@unchecked Sendable` because GRDB handles its own thread-safety internally.
 public final class MLSStorage: @unchecked Sendable {
 
-    // MARK: - Properties
+  // MARK: - Properties
 
-    public static let shared = MLSStorage()
+  public static let shared = MLSStorage()
 
-    private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSStorage")
+  private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSStorage")
 
-    // MARK: - Initialization
+  // MARK: - Initialization
 
-    private init() {
-        logger.info("MLSStorage initialized with SQLCipher backend (DatabasePool)")
-    }
+  private init() {
+    logger.info("MLSStorage initialized with SQLCipher backend (DatabasePool)")
+  }
 
-    // MARK: - Conversation Operations
+  // MARK: - DID Normalization
 
-    /// Ensure a conversation exists in database, creating it if necessary (idempotent)
-    /// - Parameters:
-    ///   - conversationID: Conversation identifier
-    ///   - groupID: MLS group ID (hex-encoded string)
-    ///   - database: DatabaseWriter (DatabaseQueue or DatabasePool) to use for operations
-    /// - Throws: MLSStorageError if creation fails
-    @discardableResult
-    public func ensureConversationExists(
-        userDID: String,
-        conversationID: String,
-        groupID: String,
-        database: MLSDatabase
-    ) async throws -> String {
+  /// Normalize a DID for consistent database storage and lookup
+  /// Uses the shared implementation from MLSStorageHelpers
+  private func normalizeDID(_ did: String) -> String {
+    return MLSStorageHelpers.normalizeDID(did)
+  }
 
-        // Check if conversation already exists
-        let exists = try await database.read { db in
-            let count = try MLSConversationModel
+  // MARK: - Conversation Operations
+
+  /// Ensure a conversation exists in database, creating it if necessary (idempotent)
+  /// - Parameters:
+  ///   - conversationID: Conversation identifier
+  ///   - groupID: MLS group ID (hex-encoded string)
+  ///   - database: DatabaseWriter (DatabaseQueue or DatabasePool) to use for operations
+  /// - Throws: MLSStorageError if creation fails
+  @discardableResult
+  public func ensureConversationExists(
+    userDID: String,
+    conversationID: String,
+    groupID: String,
+    database: MLSDatabase
+  ) async throws -> String {
+    let normalizedUserDID = normalizeDID(userDID)
+
+    // Check if conversation already exists
+    let exists = try await database.read { db in
+      let count =
+        try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationID)
-        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
+        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
         .fetchCount(db)
       return count > 0
     }
@@ -71,7 +81,7 @@ public final class MLSStorage: @unchecked Sendable {
 
       let conversation = MLSConversationModel(
         conversationID: conversationID,
-        currentUserDID: userDID,
+        currentUserDID: normalizedUserDID,
         groupID: groupIDData,
         createdAt: Date(),
         updatedAt: Date()
@@ -83,13 +93,104 @@ public final class MLSStorage: @unchecked Sendable {
     return conversationID
   }
 
+  /// Ensure a conversation exists, creating a placeholder if necessary
+  ///
+  /// **CRITICAL FOR NSE**: This method is designed for the Notification Service Extension
+  /// where we need to save decrypted plaintext immediately, but may not have the
+  /// full conversation metadata yet.
+  ///
+  /// If the conversation doesn't exist, this creates a minimal "placeholder" record
+  /// with `isPlaceholder = true`. The main app will heal this placeholder with full
+  /// metadata on the next sync.
+  ///
+  /// - Parameters:
+  ///   - userDID: User's DID
+  ///   - conversationID: Conversation identifier
+  ///   - groupID: MLS group ID (hex-encoded string)
+  ///   - senderDID: Optional sender DID (used as placeholder title if available)
+  ///   - database: DatabaseWriter to use for operations
+  /// - Returns: True if the conversation already existed (not a placeholder)
+  @discardableResult
+  public func ensureConversationExistsOrPlaceholder(
+    userDID: String,
+    conversationID: String,
+    groupID: String,
+    senderDID: String? = nil,
+    database: MLSDatabase
+  ) async throws -> Bool {
+    let normalizedUserDID = normalizeDID(userDID)
+
+    // Check if conversation already exists
+    let existing = try await database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)
+    }
+
+    if let existing = existing {
+      logger.debug(
+        "Conversation already exists: \(conversationID) (isPlaceholder=\(existing.isPlaceholder))")
+      return !existing.isPlaceholder  // Return true only if it's a real conversation
+    }
+
+    // Create placeholder conversation
+    // The main app will overwrite this with real metadata during listConvos sync
+    try await database.write { db in
+      guard let groupIDData = Data(hexEncoded: groupID) else {
+        throw MLSStorageError.invalidGroupID(groupID)
+      }
+
+      // Use sender DID as a placeholder title, or "New Conversation" if unknown
+      let placeholderTitle: String?
+      if let senderDID = senderDID {
+        // Extract just the handle portion if it's a full DID
+        if senderDID.hasPrefix("did:plc:") {
+          placeholderTitle = "Chat with \(senderDID.suffix(8))..."
+        } else {
+          placeholderTitle = senderDID
+        }
+      } else {
+        placeholderTitle = "New Conversation"
+      }
+
+      let placeholder = MLSConversationModel(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        groupID: groupIDData,
+        epoch: 0,  // Will be updated when main app syncs
+        joinMethod: .unknown,
+        joinEpoch: 0,
+        title: placeholderTitle,
+        avatarURL: nil,
+        createdAt: Date(),
+        updatedAt: Date(),
+        lastMessageAt: Date(),  // There's a message coming, so set this
+        lastMembershipChangeAt: nil,
+        unacknowledgedMemberChanges: 0,
+        isActive: true,
+        needsRejoin: false,
+        rejoinRequestedAt: nil,
+        lastRecoveryAttempt: nil,
+        consecutiveFailures: 0,
+        isPlaceholder: true  // 🚨 Mark as placeholder for later healing
+      )
+      try placeholder.insert(db)
+    }
+
+    logger.warning(
+      "🆕 [NSE-FK-FIX] Created PLACEHOLDER conversation: \(conversationID) - will be healed on next sync"
+    )
+    return false  // It's a placeholder, not a real conversation
+  }
+
   /// Fetch a persisted conversation for the current user if it exists
   /// - Parameters:
   ///   - conversationID: Conversation identifier
   ///   - currentUserDID: Current authenticated user's DID
   ///   - database: Database queue to read from
   /// - Returns: Stored `MLSConversationModel` or `nil` when missing
-  public   func fetchConversation(
+  public func fetchConversation(
     conversationID: String,
     currentUserDID: String,
     database: MLSDatabase
@@ -126,7 +227,7 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - timestamp: Message timestamp
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if save fails
-  public   func savePlaintextForMessage(
+  public func savePlaintextForMessage(
     messageID: String,
     conversationID: String,
     plaintext: String,
@@ -140,7 +241,9 @@ public final class MLSStorage: @unchecked Sendable {
     processingError: String? = nil,
     validationFailureReason: String? = nil
   ) async throws {
-    logger.info("💾 Caching plaintext: \(messageID) (epoch: \(epoch), seq: \(sequenceNumber), hasEmbed: \(embed != nil), hasError: \(processingError != nil))")
+    logger.info(
+      "💾 Caching plaintext: \(messageID) (epoch: \(epoch), seq: \(sequenceNumber), hasEmbed: \(embed != nil), hasError: \(processingError != nil))"
+    )
 
     // Encode embed data if provided
     let embedDataEncoded: Data?
@@ -155,7 +258,8 @@ public final class MLSStorage: @unchecked Sendable {
 
     try await database.write { db in
       // Check if message exists
-      let count = try MLSMessageModel
+      let count =
+        try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
         .fetchCount(db)
@@ -163,31 +267,33 @@ public final class MLSStorage: @unchecked Sendable {
 
       if exists {
         // Update existing message
-        try db.execute(sql: """
-          UPDATE MLSMessageModel
-          SET plaintext = ?,
-              embedData = ?,
-              senderID = ?,
-              epoch = ?,
-              sequenceNumber = ?,
-              timestamp = ?,
-              plaintextExpired = 0,
-              processingError = ?,
-              processingAttempts = processingAttempts + 1,
-              validationFailureReason = ?
-          WHERE messageID = ? AND currentUserDID = ?;
-        """, arguments: [
-          plaintext,
-          embedDataEncoded,
-          senderID,
-          epoch,
-          sequenceNumber,
-          timestamp,
-          processingError,
-          validationFailureReason,
-          messageID,
-          currentUserDID
-        ])
+        try db.execute(
+          sql: """
+              UPDATE MLSMessageModel
+              SET plaintext = ?,
+                  embedData = ?,
+                  senderID = ?,
+                  epoch = ?,
+                  sequenceNumber = ?,
+                  timestamp = ?,
+                  plaintextExpired = 0,
+                  processingError = ?,
+                  processingAttempts = processingAttempts + 1,
+                  validationFailureReason = ?
+              WHERE messageID = ? AND currentUserDID = ?;
+            """,
+          arguments: [
+            plaintext,
+            embedDataEncoded,
+            senderID,
+            epoch,
+            sequenceNumber,
+            timestamp,
+            processingError,
+            validationFailureReason,
+            messageID,
+            currentUserDID,
+          ])
 
         logger.debug("Updated existing message with plaintext cache")
       } else {
@@ -238,17 +344,18 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - database: MLSDatabase to use for operations
   /// - Returns: Cached plaintext if available, nil otherwise
   /// - Throws: MLSStorageError if fetch fails
-  public   func fetchPlaintextForMessage(
+  public func fetchPlaintextForMessage(
     _ messageID: String,
     currentUserDID: String,
     database: MLSDatabase
   ) async throws -> String? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
     logger.debug("Fetching plaintext: \(messageID)")
 
     let plaintext = try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .fetchOne(db)?.plaintext
     }
 
@@ -271,17 +378,18 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - database: MLSDatabase to use for operations
   /// - Returns: Cached embed data if available, nil otherwise
   /// - Throws: MLSStorageError if fetch fails
-  public   func fetchEmbedForMessage(
+  public func fetchEmbedForMessage(
     _ messageID: String,
     currentUserDID: String,
     database: MLSDatabase
   ) async throws -> MLSEmbedData? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
     logger.debug("Fetching embed: \(messageID)")
 
     let embed = try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .fetchOne(db)?.parsedEmbed
     }
 
@@ -302,17 +410,18 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - database: MLSDatabase to use for operations
   /// - Returns: Sender DID if available, nil otherwise
   /// - Throws: MLSStorageError if fetch fails
-  public   func fetchSenderForMessage(
+  public func fetchSenderForMessage(
     _ messageID: String,
     currentUserDID: String,
     database: MLSDatabase
   ) async throws -> String? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
     logger.debug("Fetching sender: \(messageID)")
 
     let senderID = try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .fetchOne(db)?.senderID
     }
 
@@ -338,18 +447,21 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - limit: Maximum number of messages to return (default: 50)
   /// - Returns: Array of cached messages sorted from oldest to newest
   /// - Throws: MLSStorageError if fetch fails
-  public   func fetchMessagesForConversation(
+  public func fetchMessagesForConversation(
     _ conversationID: String,
     currentUserDID: String,
     database: MLSDatabase,
     limit: Int = 50
   ) async throws -> [MLSMessageModel] {
-    logger.info("🔍 [DB] Fetching cached messages - conversationID: \(conversationID), currentUserDID: \(currentUserDID), limit: \(limit)")
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    logger.info(
+      "🔍 [DB] Fetching cached messages - conversationID: \(conversationID), currentUserDID: \(normalizedUserDID), limit: \(limit)"
+    )
 
     let messages = try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
         .limit(limit)
         .fetchAll(db)
@@ -358,7 +470,9 @@ public final class MLSStorage: @unchecked Sendable {
     logger.info("📦 [DB] Query returned \(messages.count) messages")
     if !messages.isEmpty {
       for msg in messages {
-        logger.debug("  - Message \(msg.messageID): epoch=\(msg.epoch), seq=\(msg.sequenceNumber), hasPlaintext=\(msg.plaintext != nil), sender=\(msg.senderID)")
+        logger.debug(
+          "  - Message \(msg.messageID): epoch=\(msg.epoch), seq=\(msg.sequenceNumber), hasPlaintext=\(msg.plaintext != nil), sender=\(msg.senderID)"
+        )
       }
     }
 
@@ -368,7 +482,7 @@ public final class MLSStorage: @unchecked Sendable {
   }
 
   /// Fetch messages older than a specific epoch/sequence for pagination
-  public   func fetchMessagesBeforeSequence(
+  public func fetchMessagesBeforeSequence(
     conversationId: String,
     currentUserDID: String,
     beforeEpoch: Int64,
@@ -376,15 +490,19 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase,
     limit: Int = 50
   ) async throws -> [MLSMessageModel] {
-    logger.info("🔍 [DB] Fetching older messages - conversationID: \(conversationId), currentUserDID: \(currentUserDID), beforeEpoch: \(beforeEpoch), beforeSeq: \(beforeSeq), limit: \(limit)")
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    logger.info(
+      "🔍 [DB] Fetching older messages - conversationID: \(conversationId), currentUserDID: \(normalizedUserDID), beforeEpoch: \(beforeEpoch), beforeSeq: \(beforeSeq), limit: \(limit)"
+    )
 
     let messages = try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationId)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(
-          MLSMessageModel.Columns.epoch < beforeEpoch ||
-          (MLSMessageModel.Columns.epoch == beforeEpoch && MLSMessageModel.Columns.sequenceNumber < beforeSeq)
+          MLSMessageModel.Columns.epoch < beforeEpoch
+            || (MLSMessageModel.Columns.epoch == beforeEpoch
+              && MLSMessageModel.Columns.sequenceNumber < beforeSeq)
         )
         .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
         .limit(limit)
@@ -394,7 +512,9 @@ public final class MLSStorage: @unchecked Sendable {
     logger.info("📦 [DB] Query returned \(messages.count) older messages")
     if !messages.isEmpty {
       for msg in messages {
-        logger.debug("  - Older message \(msg.messageID): epoch=\(msg.epoch), seq=\(msg.sequenceNumber), hasPlaintext=\(msg.plaintext != nil)")
+        logger.debug(
+          "  - Older message \(msg.messageID): epoch=\(msg.epoch), seq=\(msg.sequenceNumber), hasPlaintext=\(msg.plaintext != nil)"
+        )
       }
     }
 
@@ -412,19 +532,21 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - secretData: Epoch secret key material
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if save fails
-  public   func saveEpochSecret(userDID: String, 
+  public func saveEpochSecret(
+    userDID: String,
     conversationID: String,
     epoch: UInt64,
     secretData: Data,
     database: MLSDatabase
   ) async throws {
+    let normalizedUserDID = normalizeDID(userDID)
 
     do {
       try await database.write { db in
         let epochKey = MLSEpochKeyModel(
           epochKeyID: "\(conversationID)-\(epoch)",
           conversationID: conversationID,
-          currentUserDID: userDID,
+          currentUserDID: normalizedUserDID,
           epoch: Int64(epoch),
           keyMaterial: secretData,  // Actual epoch secret
           createdAt: Date(),
@@ -437,13 +559,17 @@ public final class MLSStorage: @unchecked Sendable {
         try epochKey.save(db)
       }
 
-      logger.info("✅ Saved epoch secret: \(conversationID) epoch \(epoch), \(secretData.count) bytes")
+      logger.info(
+        "✅ Saved epoch secret: \(conversationID) epoch \(epoch), \(secretData.count) bytes")
     } catch let error as DatabaseError {
       // ⭐ FIXED: Foreign key violations should NEVER occur now that we create
       // the SQLCipher conversation record BEFORE creating the MLS group
       if error.resultCode == .SQLITE_CONSTRAINT && error.message?.contains("FOREIGN KEY") == true {
-        logger.error("❌ [EPOCH-STORAGE] CRITICAL: Foreign key violation storing epoch secret - conversation \(conversationID.prefix(16))... not found. This indicates a bug in conversation creation order!")
-        throw MLSStorageError.foreignKeyViolation("Conversation \(conversationID) must exist before storing epoch secrets")
+        logger.error(
+          "❌ [EPOCH-STORAGE] CRITICAL: Foreign key violation storing epoch secret - conversation \(conversationID.prefix(16))... not found. This indicates a bug in conversation creation order!"
+        )
+        throw MLSStorageError.foreignKeyViolation(
+          "Conversation \(conversationID) must exist before storing epoch secrets")
       }
       // Re-throw all database errors
       throw error
@@ -456,16 +582,18 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - epoch: MLS epoch number
   ///   - database: MLSDatabase to use for operations
   /// - Returns: Epoch secret data if found, nil otherwise
-  public   func getEpochSecret(userDID: String, 
+  public func getEpochSecret(
+    userDID: String,
     conversationID: String,
     epoch: UInt64,
     database: MLSDatabase
   ) async throws -> Data? {
+    let normalizedUserDID = normalizeDID(userDID)
 
     let secret = try await database.read { db in
       try MLSEpochKeyModel
         .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
-        .filter(MLSEpochKeyModel.Columns.currentUserDID == userDID)
+        .filter(MLSEpochKeyModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSEpochKeyModel.Columns.epoch == Int64(epoch))
         .filter(MLSEpochKeyModel.Columns.isActive == true)
         .fetchOne(db)?
@@ -473,7 +601,8 @@ public final class MLSStorage: @unchecked Sendable {
     }
 
     if let secret = secret {
-      logger.debug("Retrieved epoch secret: \(conversationID) epoch \(epoch), \(secret.count) bytes")
+      logger.debug(
+        "Retrieved epoch secret: \(conversationID) epoch \(epoch), \(secret.count) bytes")
     } else {
       logger.debug("No epoch secret found: \(conversationID) epoch \(epoch)")
     }
@@ -487,19 +616,22 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - epoch: MLS epoch number
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if deletion fails
-  public   func deleteEpochSecret(userDID: String, 
+  public func deleteEpochSecret(
+    userDID: String,
     conversationID: String,
     epoch: UInt64,
     database: MLSDatabase
   ) async throws {
+    let normalizedUserDID = normalizeDID(userDID)
 
     try await database.write { db in
       let now = Date()
-      try db.execute(sql: """
-        UPDATE MLSEpochKeyModel
-        SET deletedAt = ?, isActive = ?
-        WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
-      """, arguments: [now, false, conversationID, userDID, Int64(epoch)])
+      try db.execute(
+        sql: """
+            UPDATE MLSEpochKeyModel
+            SET deletedAt = ?, isActive = ?
+            WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
+          """, arguments: [now, false, conversationID, normalizedUserDID, Int64(epoch)])
     }
 
     logger.info("Deleted epoch secret: \(conversationID) epoch \(epoch)")
@@ -513,7 +645,7 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if save fails
   @available(*, deprecated, message: "Use saveEpochSecret instead")
-  public   func recordEpochKey(
+  public func recordEpochKey(
     conversationID: String,
     epoch: Int64,
     userDID: String,
@@ -526,7 +658,7 @@ public final class MLSStorage: @unchecked Sendable {
         conversationID: conversationID,
         currentUserDID: userDID,
         epoch: epoch,
-        keyMaterial: Data(), // Placeholder - actual key material should be provided
+        keyMaterial: Data(),  // Placeholder - actual key material should be provided
         createdAt: Date(),
         expiresAt: nil,
         isActive: true
@@ -544,7 +676,7 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - keepLast: Number of recent keys to keep
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if deletion fails
-  public   func deleteOldEpochKeys(
+  public func deleteOldEpochKeys(
     conversationID: String,
     userDID: String,
     keepLast: Int,
@@ -553,7 +685,8 @@ public final class MLSStorage: @unchecked Sendable {
 
     try await database.write { db in
       // Get all epoch keys for this conversation
-      let allKeys = try MLSEpochKeyModel
+      let allKeys =
+        try MLSEpochKeyModel
         .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
         .filter(MLSEpochKeyModel.Columns.currentUserDID == userDID)
         .filter(MLSEpochKeyModel.Columns.isActive == true)
@@ -570,11 +703,12 @@ public final class MLSStorage: @unchecked Sendable {
       let now = Date()
 
       for key in keysToDelete {
-        try db.execute(sql: """
-          UPDATE MLSEpochKeyModel
-          SET deletedAt = ?
-          WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
-        """, arguments: [now, conversationID, userDID, key.epoch])
+        try db.execute(
+          sql: """
+              UPDATE MLSEpochKeyModel
+              SET deletedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
+            """, arguments: [now, conversationID, userDID, key.epoch])
       }
 
       logger.info("Marked \(keysToDelete.count) epoch keys for deletion")
@@ -587,17 +721,18 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - date: Delete messages older than this date
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if deletion fails
-  public   func cleanupMessageKeys(
+  public func cleanupMessageKeys(
     userDID: String,
     olderThan date: Date,
     database: MLSDatabase
   ) async throws {
 
     let deletedCount = try await database.write { db -> Int in
-      try db.execute(sql: """
-        DELETE FROM MLSMessageModel
-        WHERE currentUserDID = ? AND timestamp < ?;
-      """, arguments: [userDID, date])
+      try db.execute(
+        sql: """
+            DELETE FROM MLSMessageModel
+            WHERE currentUserDID = ? AND timestamp < ?;
+          """, arguments: [userDID, date])
 
       return db.changesCount
     }
@@ -610,16 +745,17 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - userDID: User's decentralized identifier
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if deletion fails
-  public   func deleteMarkedEpochKeys(
+  public func deleteMarkedEpochKeys(
     userDID: String,
     database: MLSDatabase
   ) async throws {
 
     let deletedCount = try await database.write { db -> Int in
-      try db.execute(sql: """
-        DELETE FROM MLSEpochKeyModel
-        WHERE currentUserDID = ? AND deletedAt IS NOT NULL;
-      """, arguments: [userDID])
+      try db.execute(
+        sql: """
+            DELETE FROM MLSEpochKeyModel
+            WHERE currentUserDID = ? AND deletedAt IS NOT NULL;
+          """, arguments: [userDID])
 
       return db.changesCount
     }
@@ -632,17 +768,18 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - userDID: User's decentralized identifier
   ///   - database: MLSDatabase to use for operations
   /// - Throws: MLSStorageError if deletion fails
-  public   func deleteExpiredKeyPackages(
+  public func deleteExpiredKeyPackages(
     userDID: String,
     database: MLSDatabase
   ) async throws {
 
     let now = Date()
     let deletedCount = try await database.write { db -> Int in
-      try db.execute(sql: """
-        DELETE FROM MLSKeyPackageModel
-        WHERE currentUserDID = ? AND expiresAt IS NOT NULL AND expiresAt < ?;
-      """, arguments: [userDID, now])
+      try db.execute(
+        sql: """
+            DELETE FROM MLSKeyPackageModel
+            WHERE currentUserDID = ? AND expiresAt IS NOT NULL AND expiresAt < ?;
+          """, arguments: [userDID, now])
 
       return db.changesCount
     }
@@ -659,7 +796,7 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - database: MLSDatabase to use for operations
   /// - Returns: Number of active members
   /// - Throws: MLSStorageError if query fails
-  public   func getMemberCount(
+  public func getMemberCount(
     conversationID: String,
     currentUserDID: String,
     database: MLSDatabase
@@ -740,10 +877,13 @@ public final class MLSStorage: @unchecked Sendable {
   public func fetchConversationsWithMembers(
     currentUserDID: String,
     database: MLSDatabase
-  ) async throws -> (conversations: [MLSConversationModel], membersByConvoID: [String: [MLSMemberModel]]) {
+  ) async throws -> (
+    conversations: [MLSConversationModel], membersByConvoID: [String: [MLSMemberModel]]
+  ) {
     return try await database.read { db in
       // Fetch all active conversations
-      let conversations = try MLSConversationModel
+      let conversations =
+        try MLSConversationModel
         .filter(MLSConversationModel.Columns.isActive == true)
         .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
         .order(MLSConversationModel.Columns.lastMessageAt.desc)
@@ -755,7 +895,8 @@ public final class MLSStorage: @unchecked Sendable {
 
       // Batch fetch all members for these conversations in ONE query
       let conversationIDs = conversations.map { $0.conversationID }
-      let allMembers = try MLSMemberModel
+      let allMembers =
+        try MLSMemberModel
         .filter(conversationIDs.contains(MLSMemberModel.Columns.conversationID))
         .filter(MLSMemberModel.Columns.currentUserDID == currentUserDID)
         .filter(MLSMemberModel.Columns.isActive == true)
@@ -844,7 +985,8 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws -> [MLSReportModel] {
     try await database.read { db in
-      var request = MLSReportModel
+      var request =
+        MLSReportModel
         .filter(MLSReportModel.Columns.conversationID == conversationID)
         .order(MLSReportModel.Columns.createdAt.desc)
 
@@ -863,7 +1005,8 @@ public final class MLSStorage: @unchecked Sendable {
   /// Remove all cached reports for a conversation
   public func deleteReports(conversationID: String, database: MLSDatabase) async throws {
     try await database.write { db in
-      _ = try MLSReportModel
+      _ =
+        try MLSReportModel
         .filter(MLSReportModel.Columns.conversationID == conversationID)
         .deleteAll(db)
     }
@@ -904,7 +1047,8 @@ public final class MLSStorage: @unchecked Sendable {
     try await database.write { db in
       try event.save(db)
     }
-    logger.info("✅ Recorded membership event: \(event.eventType.rawValue) for \(event.memberDID.prefix(20))")
+    logger.info(
+      "✅ Recorded membership event: \(event.eventType.rawValue) for \(event.memberDID.prefix(20))")
   }
 
   /// Fetch membership history for a conversation
@@ -932,7 +1076,8 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws -> [MLSMemberModel] {
     return try await database.read { db in
-      var query = MLSMemberModel
+      var query =
+        MLSMemberModel
         .filter(MLSMemberModel.Columns.conversationID == conversationID)
         .filter(MLSMemberModel.Columns.currentUserDID == currentUserDID)
 
@@ -940,13 +1085,34 @@ public final class MLSStorage: @unchecked Sendable {
         query = query.filter(MLSMemberModel.Columns.isActive == true)
       }
 
-      return try query
+      return
+        try query
         .order(MLSMemberModel.Columns.addedAt.desc)
         .fetchAll(db)
     }
   }
 
   /// Update conversation's last membership change timestamp
+  public func updateConversationJoinInfo(
+    conversationID: String,
+    currentUserDID: String,
+    joinMethod: MLSJoinMethod,
+    joinEpoch: Int64,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      if var conversation =
+        try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
+        .fetchOne(db)
+      {
+        let updated = conversation.withJoinInfo(method: joinMethod, epoch: joinEpoch)
+        try updated.update(db)
+      }
+    }
+  }
+
   public func updateConversationMembershipTimestamp(
     conversationID: String,
     currentUserDID: String,
@@ -955,10 +1121,12 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws {
     try await database.write { db in
-      if var conversation = try MLSConversationModel
+      if var conversation =
+        try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationID)
         .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
-        .fetchOne(db) {
+        .fetchOne(db)
+      {
 
         let updated = conversation.withMembershipChange(
           timestamp: timestamp,
@@ -976,10 +1144,12 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws {
     try await database.write { db in
-      if var conversation = try MLSConversationModel
+      if var conversation =
+        try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationID)
         .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
-        .fetchOne(db) {
+        .fetchOne(db)
+      {
 
         let updated = conversation.clearMembershipChangeBadge()
         try updated.update(db)
@@ -1002,9 +1172,9 @@ public final class MLSStorage: @unchecked Sendable {
         .fetchAll(db)
     }
   }
-  
+
   // MARK: - Reaction Persistence
-  
+
   /// Save a reaction to local storage
   /// Reactions arrive via SSE and must be persisted locally since the server doesn't store them
   /// - Parameters:
@@ -1014,16 +1184,17 @@ public final class MLSStorage: @unchecked Sendable {
     _ reaction: MLSReactionModel,
     database: MLSDatabase
   ) async throws {
-    logger.debug("💾 Saving reaction: \(reaction.emoji) on \(reaction.messageID) by \(reaction.actorDID)")
-    
+    logger.debug(
+      "💾 Saving reaction: \(reaction.emoji) on \(reaction.messageID) by \(reaction.actorDID)")
+
     try await database.write { db in
       // Use insertOrReplace to handle duplicate reactions gracefully
       try reaction.save(db, onConflict: .ignore)
     }
-    
+
     logger.debug("✅ Reaction saved: \(reaction.reactionID)")
   }
-  
+
   /// Delete a reaction from local storage
   /// Called when a user removes their reaction via SSE event
   /// - Parameters:
@@ -1040,7 +1211,7 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws {
     logger.debug("🗑️ Deleting reaction: \(emoji) on \(messageID) by \(actorDID)")
-    
+
     let deletedCount = try await database.write { db -> Int in
       try MLSReactionModel
         .filter(MLSReactionModel.Columns.messageID == messageID)
@@ -1049,10 +1220,10 @@ public final class MLSStorage: @unchecked Sendable {
         .filter(MLSReactionModel.Columns.currentUserDID == currentUserDID)
         .deleteAll(db)
     }
-    
+
     logger.debug("✅ Deleted \(deletedCount) reaction(s)")
   }
-  
+
   /// Fetch all reactions for a conversation
   /// Used when opening a conversation to restore cached reactions
   /// - Parameters:
@@ -1066,7 +1237,7 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws -> [String: [MLSReactionModel]] {
     logger.debug("🔍 Fetching reactions for conversation: \(conversationID)")
-    
+
     let reactions = try await database.read { db in
       try MLSReactionModel
         .filter(MLSReactionModel.Columns.conversationID == conversationID)
@@ -1075,14 +1246,14 @@ public final class MLSStorage: @unchecked Sendable {
         .order(MLSReactionModel.Columns.timestamp.asc)
         .fetchAll(db)
     }
-    
+
     // Group by messageID
     let grouped = Dictionary(grouping: reactions) { $0.messageID }
-    
+
     logger.debug("✅ Found \(reactions.count) reactions across \(grouped.count) messages")
     return grouped
   }
-  
+
   /// Fetch reactions for specific messages
   /// Used for efficiently loading reactions for visible messages
   /// - Parameters:
@@ -1096,9 +1267,9 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws -> [String: [MLSReactionModel]] {
     guard !messageIDs.isEmpty else { return [:] }
-    
+
     logger.debug("🔍 Fetching reactions for \(messageIDs.count) messages")
-    
+
     let reactions = try await database.read { db in
       try MLSReactionModel
         .filter(messageIDs.contains(MLSReactionModel.Columns.messageID))
@@ -1107,14 +1278,14 @@ public final class MLSStorage: @unchecked Sendable {
         .order(MLSReactionModel.Columns.timestamp.asc)
         .fetchAll(db)
     }
-    
+
     // Group by messageID
     let grouped = Dictionary(grouping: reactions) { $0.messageID }
-    
+
     logger.debug("✅ Found \(reactions.count) reactions for requested messages")
     return grouped
   }
-  
+
   /// Delete all reactions for a conversation
   /// Used when leaving a conversation or for cleanup
   /// - Parameters:
@@ -1127,14 +1298,14 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase
   ) async throws {
     logger.debug("🗑️ Deleting all reactions for conversation: \(conversationID)")
-    
+
     let deletedCount = try await database.write { db -> Int in
       try MLSReactionModel
         .filter(MLSReactionModel.Columns.conversationID == conversationID)
         .filter(MLSReactionModel.Columns.currentUserDID == currentUserDID)
         .deleteAll(db)
     }
-    
+
     logger.debug("✅ Deleted \(deletedCount) reactions")
   }
 }

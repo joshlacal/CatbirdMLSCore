@@ -19,6 +19,10 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
 
   /// Database encryption key is invalid or missing
   case invalidEncryptionKey(reason: String)
+  
+  /// Database encryption key mismatch (HMAC failure during decryption)
+  /// This typically occurs during account switching race conditions when the wrong key is used
+  case encryptionKeyMismatch(message: String)
 
   /// Database is locked by another process
   case databaseLocked
@@ -120,6 +124,8 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Database is corrupted"
     case .invalidEncryptionKey:
       return "Invalid encryption key"
+    case .encryptionKeyMismatch:
+      return "Encryption key mismatch"
     case .databaseLocked:
       return "Database is locked"
     case .schemaVersionMismatch:
@@ -177,6 +183,8 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Try deleting the database and starting fresh. Your encrypted messages will be lost."
     case .invalidEncryptionKey:
       return "Check that the encryption key is properly stored in Keychain."
+    case .encryptionKeyMismatch:
+      return "Wait for account switching to complete and retry. If the issue persists, restart the app."
     case .databaseLocked:
       return "Close other connections to the database and retry."
     case .schemaVersionMismatch:
@@ -226,6 +234,8 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Database corrupted: \(details)"
     case .invalidEncryptionKey(let reason):
       return "Invalid encryption key: \(reason)"
+    case .encryptionKeyMismatch(let message):
+      return "Encryption key mismatch (HMAC failure): \(message)"
     case .databaseLocked:
       return "Database is locked by another process"
     case .schemaVersionMismatch(let expected, let found):

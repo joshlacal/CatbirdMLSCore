@@ -7,6 +7,7 @@
 
 import Foundation
 import Security
+import OSLog
 
 /// Manages encryption keys for SQLCipher databases with secure Keychain storage
 /// Actor provides thread-safe access to keychain operations
@@ -23,6 +24,19 @@ public actor MLSSQLCipherEncryption {
   /// Keychain service identifier for SQLCipher database keys
   private let keychainService = "blue.catbird.mls.sqlcipher"
 
+  /// Logger for debugging keychain operations
+  private let logger = Logger(subsystem: "blue.catbird.mls", category: "SQLCipherEncryption")
+
+  /// Shared keychain access group for App/Extension sharing
+  /// Uses the same pattern as MLSKeychainManager
+  private var keychainAccessGroup: String? {
+    #if targetEnvironment(simulator)
+    return nil
+    #else
+    return MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
+    #endif
+  }
+
   // MARK: - Initialization
 
   private init() {}
@@ -35,16 +49,21 @@ public actor MLSSQLCipherEncryption {
   /// - Throws: MLSSQLCipherError if key generation or retrieval fails
   func getOrCreateKey(for userDID: String) throws -> Data {
     let keychainKey = makeKeychainKey(for: userDID)
+    
+    logger.debug("[SQLCipher] getOrCreateKey for user: \(userDID.prefix(24))..., accessGroup=\(self.keychainAccessGroup ?? "default")")
 
     // Try to retrieve existing key from Keychain
     if let existingKey = try? retrieveKey(keychainKey: keychainKey) {
       guard existingKey.count == keySize else {
+        logger.error("[SQLCipher] Key size mismatch: expected \(self.keySize) bytes, got \(existingKey.count)")
         throw MLSSQLCipherError.invalidEncryptionKey(reason: "Key size mismatch: expected \(keySize) bytes, got \(existingKey.count)")
       }
+      logger.debug("[SQLCipher] Retrieved existing key for user")
       return existingKey
     }
 
     // Generate new key if none exists
+    logger.info("[SQLCipher] No existing key found, generating new key for user: \(userDID.prefix(24))...")
     let newKey = try generateKey()
     try storeKey(newKey, keychainKey: keychainKey)
     return newKey
@@ -65,17 +84,25 @@ public actor MLSSQLCipherEncryption {
   func deleteKey(for userDID: String) throws {
     let keychainKey = makeKeychainKey(for: userDID)
 
-    let query: [String: Any] = [
+    var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: keychainService,
       kSecAttrAccount as String: keychainKey
     ]
+    
+    // Add shared access group for consistency
+    if let accessGroup = keychainAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+    }
 
     let status = SecItemDelete(query as CFDictionary)
 
     guard status == errSecSuccess || status == errSecItemNotFound else {
+      logger.error("[SQLCipher] Delete failed with status: \(status)")
       throw MLSSQLCipherError.keychainAccessFailed(operation: "delete", status: status)
     }
+    
+    logger.debug("[SQLCipher] Key deleted for user: \(userDID.prefix(24))...")
   }
 
   /// Rotate encryption key for a user (generates new key, returns both old and new)
@@ -124,8 +151,9 @@ public actor MLSSQLCipherEncryption {
   }
 
   /// Store key in Keychain with maximum security
+  /// Uses shared access group when available for App/Extension sharing
   private func storeKey(_ key: Data, keychainKey: String, update: Bool = false) throws {
-    let query: [String: Any] = [
+    var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: keychainService,
       kSecAttrAccount as String: keychainKey,
@@ -135,14 +163,24 @@ public actor MLSSQLCipherEncryption {
       kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
       kSecAttrSynchronizable as String: false // NEVER sync to iCloud
     ]
+    
+    // Add shared access group for App/Extension keychain sharing
+    if let accessGroup = keychainAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+      logger.debug("[SQLCipher] Storing key with accessGroup: \(accessGroup)")
+    }
 
     if update {
       // Try to update existing key
-      let updateQuery: [String: Any] = [
+      var updateQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: keychainService,
         kSecAttrAccount as String: keychainKey
       ]
+      
+      if let accessGroup = keychainAccessGroup {
+        updateQuery[kSecAttrAccessGroup as String] = accessGroup
+      }
 
       let updateAttributes: [String: Any] = [
         kSecValueData as String: key
@@ -151,10 +189,12 @@ public actor MLSSQLCipherEncryption {
       let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
 
       if updateStatus == errSecSuccess {
+        logger.debug("[SQLCipher] Key updated successfully")
         return
       } else if updateStatus == errSecItemNotFound {
         // Fall through to insert new item
       } else {
+        logger.error("[SQLCipher] Update failed with status: \(updateStatus)")
         throw MLSSQLCipherError.keychainAccessFailed(operation: "update", status: updateStatus)
       }
     }
@@ -163,11 +203,15 @@ public actor MLSSQLCipherEncryption {
     let status = SecItemAdd(query as CFDictionary, nil)
 
     if status == errSecDuplicateItem {
-      let updateQuery: [String: Any] = [
+      var updateQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: keychainService,
         kSecAttrAccount as String: keychainKey
       ]
+      
+      if let accessGroup = keychainAccessGroup {
+        updateQuery[kSecAttrAccessGroup as String] = accessGroup
+      }
 
       let updateAttributes: [String: Any] = [
         kSecValueData as String: key,
@@ -177,6 +221,7 @@ public actor MLSSQLCipherEncryption {
       let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
 
       if updateStatus == errSecSuccess {
+        logger.debug("[SQLCipher] Key updated (was duplicate)")
         return
       }
 
@@ -185,37 +230,57 @@ public actor MLSSQLCipherEncryption {
       let retryStatus = SecItemAdd(query as CFDictionary, nil)
 
       guard retryStatus == errSecSuccess else {
+        logger.error("[SQLCipher] Store retry failed with status: \(retryStatus)")
         throw MLSSQLCipherError.keychainAccessFailed(operation: "store", status: retryStatus)
       }
 
+      logger.debug("[SQLCipher] Key stored after delete+add")
       return
     }
 
     guard status == errSecSuccess else {
+      logger.error("[SQLCipher] Store failed with status: \(status)")
       throw MLSSQLCipherError.keychainAccessFailed(operation: "store", status: status)
     }
+    
+    logger.debug("[SQLCipher] Key stored successfully")
   }
 
   /// Retrieve key from Keychain
+  /// Uses shared access group when available for App/Extension sharing
   private func retrieveKey(keychainKey: String) throws -> Data {
-    let query: [String: Any] = [
+    var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: keychainService,
       kSecAttrAccount as String: keychainKey,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne
     ]
+    
+    // Add shared access group for App/Extension keychain sharing
+    if let accessGroup = keychainAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+      logger.debug("[SQLCipher] Retrieving key with accessGroup: \(accessGroup)")
+    }
 
     var result: AnyObject?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
 
     guard status == errSecSuccess else {
+      if status == errSecItemNotFound {
+        logger.debug("[SQLCipher] Key not found in keychain (this may be expected for first-time setup)")
+      } else {
+        logger.error("[SQLCipher] Retrieve failed with status: \(status) - this may indicate keychain access issues in extension context")
+      }
       throw MLSSQLCipherError.keychainAccessFailed(operation: "retrieve", status: status)
     }
 
     guard let keyData = result as? Data else {
+      logger.error("[SQLCipher] Retrieved data is not in expected format")
       throw MLSSQLCipherError.invalidEncryptionKey(reason: "Retrieved data is not in expected format")
     }
+    
+    logger.debug("[SQLCipher] Key retrieved successfully (\(keyData.count) bytes)")
 
     return keyData
   }
@@ -234,7 +299,7 @@ extension MLSSQLCipherEncryption {
   ///   - key: Encryption key to verify
   ///   - testQuery: Optional test query to execute (defaults to SELECT count(*) FROM sqlite_master)
   /// - Returns: True if key is valid and database can be accessed
-  func verifyKey(_ key: Data, testQuery: String = "SELECT count(*) FROM sqlite_master;") -> Bool {
+  func verifyKey(_ key: Data, testQuery: String = "SELECT 1 FROM sqlite_master LIMIT 1;") -> Bool {
     // This will be implemented once we have the database connection
     // For now, just verify key size
     key.count == keySize

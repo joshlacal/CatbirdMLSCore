@@ -30,6 +30,9 @@ let package = Package(
                 // Keep Swift 5 mode for UniFFI bindings compatibility
                 // UniFFI generates mutable global state that isn't Swift 6 compatible
                 .swiftLanguageMode(.v5)
+            ],
+            linkerSettings: [
+                .linkedFramework("Security")
             ]
         ),
         .target(

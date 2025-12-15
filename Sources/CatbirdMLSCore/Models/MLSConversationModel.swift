@@ -8,12 +8,21 @@
 import Foundation
 import GRDB
 
+public enum MLSJoinMethod: String, Codable, Sendable {
+  case welcome
+  case externalCommit
+  case creator
+  case unknown
+}
+
 /// MLS group conversation model
 public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let conversationID: String
   public let currentUserDID: String
   public let groupID: Data
   public let epoch: Int64
+  public let joinMethod: MLSJoinMethod
+  public let joinEpoch: Int64
   public let title: String?
   public let avatarURL: String?
   public let createdAt: Date
@@ -26,6 +35,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let rejoinRequestedAt: Date?
   public let lastRecoveryAttempt: Date?  // When we last attempted automatic recovery
   public let consecutiveFailures: Int  // Count of consecutive decryption failures
+  public let isPlaceholder: Bool  // True if created by NSE as a placeholder (needs metadata sync)
 
   public var id: String { conversationID }
 
@@ -36,6 +46,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     currentUserDID: String,
     groupID: Data,
     epoch: Int64 = 0,
+    joinMethod: MLSJoinMethod = .unknown,
+    joinEpoch: Int64 = 0,
     title: String? = nil,
     avatarURL: String? = nil,
     createdAt: Date = Date(),
@@ -47,12 +59,15 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     needsRejoin: Bool = false,
     rejoinRequestedAt: Date? = nil,
     lastRecoveryAttempt: Date? = nil,
-    consecutiveFailures: Int = 0
+    consecutiveFailures: Int = 0,
+    isPlaceholder: Bool = false
   ) {
     self.conversationID = conversationID
     self.currentUserDID = currentUserDID
     self.groupID = groupID
     self.epoch = epoch
+    self.joinMethod = joinMethod
+    self.joinEpoch = joinEpoch
     self.title = title
     self.avatarURL = avatarURL
     self.createdAt = createdAt
@@ -65,6 +80,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.rejoinRequestedAt = rejoinRequestedAt
     self.lastRecoveryAttempt = lastRecoveryAttempt
     self.consecutiveFailures = consecutiveFailures
+    self.isPlaceholder = isPlaceholder
   }
 
   // MARK: - Update Methods
@@ -76,6 +92,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: newEpoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -87,7 +105,32 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
+    )
+  }
+
+  func withJoinInfo(method: MLSJoinMethod, epoch: Int64) -> MLSConversationModel {
+    MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      groupID: groupID,
+      epoch: self.epoch,
+      joinMethod: method,
+      joinEpoch: epoch,
+      title: title,
+      avatarURL: avatarURL,
+      createdAt: createdAt,
+      updatedAt: Date(),
+      lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
+      isActive: isActive,
+      needsRejoin: needsRejoin,
+      rejoinRequestedAt: rejoinRequestedAt,
+      lastRecoveryAttempt: lastRecoveryAttempt,
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 
@@ -98,6 +141,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -109,7 +154,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 
@@ -120,6 +166,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -131,17 +179,21 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 
   /// Create updated copy with new title and avatar
+  /// Note: Setting metadata clears the isPlaceholder flag (placeholder healed)
   func withMetadata(title: String?, avatarURL: String?) -> MLSConversationModel {
     MLSConversationModel(
       conversationID: conversationID,
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -153,7 +205,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: false  // Clear placeholder flag when metadata is set
     )
   }
 
@@ -164,6 +217,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -175,17 +230,22 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 
   /// Create updated copy with recovery state
-  func withRecoveryState(lastRecoveryAttempt: Date?, consecutiveFailures: Int) -> MLSConversationModel {
+  func withRecoveryState(lastRecoveryAttempt: Date?, consecutiveFailures: Int)
+    -> MLSConversationModel
+  {
     MLSConversationModel(
       conversationID: conversationID,
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -197,7 +257,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 
@@ -208,6 +269,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -219,7 +282,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: 0
+      consecutiveFailures: 0,
+      isPlaceholder: isPlaceholder
     )
   }
 
@@ -230,6 +294,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -241,7 +307,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 
@@ -252,6 +319,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       currentUserDID: currentUserDID,
       groupID: groupID,
       epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
       createdAt: createdAt,
@@ -263,7 +332,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       needsRejoin: needsRejoin,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
-      consecutiveFailures: consecutiveFailures
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder
     )
   }
 }
@@ -277,6 +347,8 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let currentUserDID = Column("currentUserDID")
     public static let groupID = Column("groupID")
     public static let epoch = Column("epoch")
+    public static let joinMethod = Column("joinMethod")
+    public static let joinEpoch = Column("joinEpoch")
     public static let title = Column("title")
     public static let avatarURL = Column("avatarURL")
     public static let createdAt = Column("createdAt")
@@ -289,6 +361,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let rejoinRequestedAt = Column("rejoinRequestedAt")
     public static let lastRecoveryAttempt = Column("lastRecoveryAttempt")
     public static let consecutiveFailures = Column("consecutiveFailures")
+    public static let isPlaceholder = Column("isPlaceholder")
   }
 
   enum CodingKeys: String, CodingKey {
@@ -296,6 +369,8 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case currentUserDID
     case groupID
     case epoch
+    case joinMethod
+    case joinEpoch
     case title
     case avatarURL
     case createdAt
@@ -308,5 +383,6 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case rejoinRequestedAt
     case lastRecoveryAttempt
     case consecutiveFailures
+    case isPlaceholder
   }
 }

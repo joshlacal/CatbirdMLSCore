@@ -18,6 +18,20 @@ public struct MLSStorageHelpers {
 
   private static let logger = Logger(subsystem: "Catbird", category: "MLSStorage")
 
+  // MARK: - DID Normalization
+  
+  /// Normalize a DID for consistent database storage and lookup
+  ///
+  /// CRITICAL: DIDs must be normalized to prevent lookup mismatches.
+  /// Without normalization, messages saved with "did:plc:ABC" won't be
+  /// found when looking up with "did:plc:abc".
+  ///
+  /// - Parameter did: The DID to normalize
+  /// - Returns: Normalized DID (trimmed whitespace, lowercased)
+  public static func normalizeDID(_ did: String) -> String {
+    return did.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+  }
+
   // MARK: - Critical Operations
 
   /// Save plaintext immediately after MLS decryption
@@ -44,6 +58,10 @@ public struct MLSStorageHelpers {
     sequenceNumber: Int64,
     timestamp: Date = Date()
   ) async throws {
+    // Normalize DIDs for consistent storage
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    let normalizedSenderID = normalizeDID(senderID)
+    
     try await database.write { db in
       // Update message with plaintext using GRDB QueryInterface
       if let embedDataJSON = embedDataJSON {
@@ -59,11 +77,11 @@ public struct MLSStorageHelpers {
         """, arguments: [
           plaintext,
           embedDataJSON,
-          senderID,
+          normalizedSenderID,
           epoch,
           sequenceNumber,
           messageID,
-          currentUserDID,
+          normalizedUserDID,
         ])
       } else {
         try db.execute(sql: """
@@ -76,11 +94,11 @@ public struct MLSStorageHelpers {
           WHERE messageID = ? AND currentUserDID = ?;
         """, arguments: [
           plaintext,
-          senderID,
+          normalizedSenderID,
           epoch,
           sequenceNumber,
           messageID,
-          currentUserDID,
+          normalizedUserDID,
         ])
       }
 
@@ -88,9 +106,9 @@ public struct MLSStorageHelpers {
       if db.changesCount == 0 {
         let message = MLSMessageModel(
           messageID: messageID,
-          currentUserDID: currentUserDID,
+          currentUserDID: normalizedUserDID,
           conversationID: conversationID,
-          senderID: senderID,
+          senderID: normalizedSenderID,
           plaintext: plaintext,
           embedDataJSON: embedDataJSON,
           wireFormat: nil,
@@ -204,10 +222,11 @@ public struct MLSStorageHelpers {
     currentUserDID: String,
     limit: Int = 50
   ) async throws -> [MLSMessageModel] {
-    try await database.read { db in
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.plaintextExpired == false)
         .order(MLSMessageModel.Columns.timestamp.desc)
         .limit(limit)
@@ -226,10 +245,11 @@ public struct MLSStorageHelpers {
     conversationID: String,
     currentUserDID: String
   ) async throws -> Int {
-    try await database.read { db in
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.isRead == false)
         .fetchCount(db)
     }
@@ -247,14 +267,15 @@ public struct MLSStorageHelpers {
     conversationID: String,
     currentUserDID: String
   ) async throws -> Int {
-    try await database.write { db in
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.write { db in
       try db.execute(
         sql: """
           UPDATE MLSMessageModel
           SET isRead = 1
           WHERE conversationID = ? AND currentUserDID = ? AND isRead = 0
           """,
-        arguments: [conversationID, currentUserDID]
+        arguments: [conversationID, normalizedUserDID]
       )
       return db.changesCount
     }
@@ -269,12 +290,43 @@ public struct MLSStorageHelpers {
     from database: MLSDatabase,
     currentUserDID: String
   ) async throws -> [MLSConversationModel] {
-    try await database.read { db in
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
       try MLSConversationModel
-        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSConversationModel.Columns.isActive == true)
         .order(MLSConversationModel.Columns.lastMessageAt.desc)
         .fetchAll(db)
+    }
+  }
+
+  /// Get unread message counts for all conversations in a single batch query.
+  /// More efficient than calling getUnreadCount for each conversation.
+  /// - Parameters:
+  ///   - database: GRDB DatabaseQueue
+  ///   - currentUserDID: Current user DID
+  /// - Returns: Dictionary mapping conversationID to unread count
+  public static func getUnreadCountsForAllConversations(
+    from database: MLSDatabase,
+    currentUserDID: String
+  ) async throws -> [String: Int] {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
+      // Use raw SQL for efficient GROUP BY query
+      let rows = try Row.fetchAll(db, sql: """
+        SELECT conversationID, COUNT(*) as unreadCount
+        FROM MLSMessageModel
+        WHERE currentUserDID = ? AND isRead = 0 AND senderID != ?
+        GROUP BY conversationID
+        """, arguments: [normalizedUserDID, normalizedUserDID])
+
+      var result: [String: Int] = [:]
+      for row in rows {
+        let conversationID: String = row["conversationID"]
+        let count: Int = row["unreadCount"]
+        result[conversationID] = count
+      }
+      return result
     }
   }
 

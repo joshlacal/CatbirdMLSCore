@@ -2044,13 +2044,15 @@ public struct DecryptResult {
     public var plaintext: Data
     public var epoch: UInt64
     public var sequenceNumber: UInt64
+    public var senderCredential: CredentialData
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(plaintext: Data, epoch: UInt64, sequenceNumber: UInt64) {
+    public init(plaintext: Data, epoch: UInt64, sequenceNumber: UInt64, senderCredential: CredentialData) {
         self.plaintext = plaintext
         self.epoch = epoch
         self.sequenceNumber = sequenceNumber
+        self.senderCredential = senderCredential
     }
 }
 
@@ -2065,6 +2067,9 @@ extension DecryptResult: Equatable, Hashable {
         if lhs.sequenceNumber != rhs.sequenceNumber {
             return false
         }
+        if lhs.senderCredential != rhs.senderCredential {
+            return false
+        }
         return true
     }
 
@@ -2072,6 +2077,7 @@ extension DecryptResult: Equatable, Hashable {
         hasher.combine(plaintext)
         hasher.combine(epoch)
         hasher.combine(sequenceNumber)
+        hasher.combine(senderCredential)
     }
 }
 
@@ -2084,7 +2090,8 @@ public struct FfiConverterTypeDecryptResult: FfiConverterRustBuffer {
             try DecryptResult(
                 plaintext: FfiConverterData.read(from: &buf),
                 epoch: FfiConverterUInt64.read(from: &buf),
-                sequenceNumber: FfiConverterUInt64.read(from: &buf)
+                sequenceNumber: FfiConverterUInt64.read(from: &buf),
+                senderCredential: FfiConverterTypeCredentialData.read(from: &buf)
             )
     }
 
@@ -2092,6 +2099,7 @@ public struct FfiConverterTypeDecryptResult: FfiConverterRustBuffer {
         FfiConverterData.write(value.plaintext, into: &buf)
         FfiConverterUInt64.write(value.epoch, into: &buf)
         FfiConverterUInt64.write(value.sequenceNumber, into: &buf)
+        FfiConverterTypeCredentialData.write(value.senderCredential, into: &buf)
     }
 }
 
@@ -3400,6 +3408,9 @@ public func FfiConverterTypeWelcomeResult_lower(_ value: WelcomeResult) -> RustB
     return FfiConverterTypeWelcomeResult.lower(value)
 }
 
+/**
+ * P2: Comprehensive error enum with detailed variants for better debugging
+ */
 public enum MlsError {
     case InvalidInput(message: String)
 
@@ -3450,6 +3461,53 @@ public enum MlsError {
     case InsufficientPermissions(message: String)
 
     case InvalidProposalRef(message: String)
+
+    case LockPoisoned(message: String)
+
+    /**
+     * Null pointer passed where non-null was expected
+     */
+    case NullPointer(message: String)
+
+    /**
+     * Invalid context handle
+     */
+    case InvalidContext(message: String)
+
+    /**
+     * TLS codec error with details
+     */
+    case TlsCodec(message: String)
+
+    /**
+     * OpenMLS error with details
+     */
+    case OpenMls(message: String)
+
+    /**
+     * Internal error for unexpected states
+     */
+    case Internal(message: String)
+
+    /**
+     * Invalid UTF-8 string
+     */
+    case InvalidUtf8(message: String)
+
+    /**
+     * JSON serialization error
+     */
+    case Serialization(message: String)
+
+    /**
+     * Thread safety error (lock contention, etc.)
+     */
+    case ThreadSafety(message: String)
+
+    /**
+     * Panic occurred (caught at FFI boundary)
+     */
+    case Panic(message: String)
 }
 
 #if swift(>=5.8)
@@ -3561,6 +3619,46 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 26: return try .LockPoisoned(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 27: return try .NullPointer(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 28: return try .InvalidContext(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 29: return try .TlsCodec(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 30: return try .OpenMls(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 31: return try .Internal(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 32: return try .InvalidUtf8(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 33: return try .Serialization(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 34: return try .ThreadSafety(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 35: return try .Panic(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -3617,6 +3715,26 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(24))
         case .InvalidProposalRef(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(25))
+        case .LockPoisoned(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(26))
+        case .NullPointer(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(27))
+        case .InvalidContext(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(28))
+        case .TlsCodec(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(29))
+        case .OpenMls(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(30))
+        case .Internal(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(31))
+        case .InvalidUtf8(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(32))
+        case .Serialization(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(33))
+        case .ThreadSafety(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(34))
+        case .Panic(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(35))
         }
     }
 }
@@ -4901,8 +5019,8 @@ public func mlsComputeKeyPackageHash(keyPackageBytes: Data) throws -> Data {
  * Generate a random Pre-Shared Key (PSK) for external commit authentication
  * Returns 32 random bytes (256 bits) suitable for use as a PSK
  */
-public func mlsGeneratePsk() -> Data {
-    return try! FfiConverterData.lift(try! rustCall {
+public func mlsGeneratePsk() throws -> Data {
+    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
         uniffi_mls_ffi_fn_func_mls_generate_psk($0
         )
     })
@@ -4950,7 +5068,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_mls_ffi_checksum_func_mls_compute_key_package_hash() != 37874 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_func_mls_generate_psk() != 22215 {
+    if uniffi_mls_ffi_checksum_func_mls_generate_psk() != 34785 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_func_mls_hash_psk() != 21951 {

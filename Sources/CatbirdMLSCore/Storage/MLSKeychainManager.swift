@@ -25,6 +25,58 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Format: "TeamID.com.example.group"
   public var accessGroup: String?
 
+  public static func resolvedAccessGroup(suffix: String) -> String? {
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    guard let task = SecTaskCreateFromSelf(nil) else { return nil }
+    guard
+      let value = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil),
+      let groups = value as? [String]
+    else { return nil }
+    return groups.first(where: { $0.hasSuffix(suffix) })
+    #else
+    // iOS/tvOS/watchOS: SecTask* APIs are unavailable; infer the TeamID prefix by probing the default access group.
+    let probeService = "blue.catbird.mls.accessGroupProbe"
+    let probeAccount = UUID().uuidString
+    let probeData = Data([0])
+
+    let addQuery: [CFString: Any] = [
+      kSecClass: kSecClassGenericPassword,
+      kSecAttrService: probeService,
+      kSecAttrAccount: probeAccount,
+      kSecValueData: probeData,
+      kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+    ]
+    _ = SecItemAdd(addQuery as CFDictionary, nil)
+
+    let matchQuery: [CFString: Any] = [
+      kSecClass: kSecClassGenericPassword,
+      kSecAttrService: probeService,
+      kSecAttrAccount: probeAccount,
+      kSecReturnAttributes: true,
+      kSecMatchLimit: kSecMatchLimitOne,
+    ]
+
+    defer {
+      let delQuery: [CFString: Any] = [
+        kSecClass: kSecClassGenericPassword,
+        kSecAttrService: probeService,
+        kSecAttrAccount: probeAccount,
+      ]
+      _ = SecItemDelete(delQuery as CFDictionary)
+    }
+
+    var item: CFTypeRef?
+    guard SecItemCopyMatching(matchQuery as CFDictionary, &item) == errSecSuccess,
+      let attrs = item as? [CFString: Any],
+      let accessGroup = attrs[kSecAttrAccessGroup] as? String,
+      let dot = accessGroup.firstIndex(of: ".")
+    else { return nil }
+
+    let prefix = String(accessGroup[..<accessGroup.index(after: dot)])
+    return prefix + suffix
+    #endif
+  }
+
   // MARK: - Keychain Keys
 
   private enum KeychainKey {
