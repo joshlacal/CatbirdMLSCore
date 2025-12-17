@@ -41,9 +41,25 @@ public actor MLSCoreContext {
   /// Per-user MLS context cache
   private var contexts: [String: MlsContext] = [:]
 
+  /// Per-user state version at time of context creation/reload.
+  /// Used to detect when NSE has advanced the ratchet and we need to reload.
+  private var contextVersions: [String: Int] = [:]
+
   private struct DecryptionOutcome {
     let plaintext: String
     let embed: MLSEmbedData?
+    let senderDID: String?  // Extracted from MLS credential
+  }
+  
+  /// Result of notification decryption with sender info for rich notifications
+  public struct NotificationDecryptResult: Sendable {
+    public let plaintext: String
+    public let senderDID: String?
+    
+    public init(plaintext: String, senderDID: String?) {
+      self.plaintext = plaintext
+      self.senderDID = senderDID
+    }
   }
 
   /// Deduplicate concurrent decrypt attempts for the same messageID
@@ -117,13 +133,40 @@ public actor MLSCoreContext {
 
   // MARK: - Context Management
 
-  /// Get or create MLS context for a user
+  /// Get or create MLS context for a user.
+  ///
+  /// This method includes **monotonic version checking** to detect when NSE has
+  /// advanced the MLS ratchet on disk. If the disk version is newer than our
+  /// cached context version, the context is automatically reloaded.
+  ///
   /// - Parameter userDid: User's decentralized identifier
   /// - Returns: MLS context for the user
   /// - Throws: MLSError if context creation fails
   public func getContext(for userDid: String) async throws -> MlsContext {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MONOTONIC VERSION CHECK: Detect NSE ratchet advancement
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Before returning a cached context, check if NSE has advanced the state.
+    // If diskVersion > memoryVersion, our cached context is stale and must be reloaded.
+    // This is faster than waiting for Darwin notifications.
+    // ═══════════════════════════════════════════════════════════════════════════
     if let existingContext = contexts[userDid] {
-      return existingContext
+      let memoryVersion = contextVersions[userDid] ?? 0
+      let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
+
+      if diskVersion > memoryVersion {
+        logger.warning("🔄 [CONTEXT] Stale context detected for \(userDid.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
+        logger.info("   NSE advanced the ratchet - reloading context from disk")
+
+        // Close the stale context
+        try? existingContext.flushAndPrepareClose()
+        contexts.removeValue(forKey: userDid)
+        contextVersions.removeValue(forKey: userDid)
+
+        // Fall through to create fresh context below
+      } else {
+        return existingContext
+      }
     }
 
     // Ensure keychain is configured before creating context
@@ -148,10 +191,37 @@ public actor MLSCoreContext {
       keychain: keychainBridge
     )
 
+    // Track the current disk version at context creation time
+    let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
     contexts[userDid] = newContext
-    logger.info("Created MLS context for user: \(userDid, privacy: .private)")
+    contextVersions[userDid] = currentDiskVersion
+
+    // Sync the version manager's cache
+    MLSStateVersionManager.shared.syncLastKnownVersion(for: userDid)
+
+    logger.info("Created MLS context for user: \(userDid, privacy: .private) at version \(currentDiskVersion)")
 
     return newContext
+  }
+
+  /// Force reload MLS context from disk.
+  ///
+  /// Call this when you know the disk state has changed (e.g., after Darwin notification).
+  /// This bypasses the version check and always creates a fresh context.
+  ///
+  /// - Parameter userDid: User's decentralized identifier
+  /// - Throws: MLSError if context creation fails
+  public func reloadContext(for userDid: String) async throws {
+    logger.info("🔄 [CONTEXT] Force reloading context for \(userDid.prefix(20))...")
+
+    // Close existing context if any
+    if let existingContext = contexts.removeValue(forKey: userDid) {
+      try? existingContext.flushAndPrepareClose()
+    }
+    contextVersions.removeValue(forKey: userDid)
+
+    // Create fresh context (this will update version tracking)
+    _ = try await getContext(for: userDid)
   }
 
   // MARK: - Helper Methods
@@ -186,13 +256,20 @@ public actor MLSCoreContext {
   /// Remove context for a user (e.g., on logout)
   /// - Parameter userDid: User's decentralized identifier
   public func removeContext(for userDid: String) {
-    contexts.removeValue(forKey: userDid)
+    if let context = contexts.removeValue(forKey: userDid) {
+      try? context.flushAndPrepareClose()
+    }
+    contextVersions.removeValue(forKey: userDid)
     logger.info("Removed MLS context for user: \(userDid, privacy: .private)")
   }
 
   /// Clear all contexts
   public func clearAllContexts() {
+    for (_, context) in contexts {
+      try? context.flushAndPrepareClose()
+    }
     contexts.removeAll()
+    contextVersions.removeAll()
     logger.info("Cleared all MLS contexts")
   }
 
@@ -222,7 +299,10 @@ public actor MLSCoreContext {
     // Remove stale contexts to prevent cross-account decryption issues
     if !staleContextUsers.isEmpty {
       for staleUser in staleContextUsers {
-        contexts.removeValue(forKey: staleUser)
+        if let context = contexts.removeValue(forKey: staleUser) {
+          try? context.flushAndPrepareClose()
+        }
+        contextVersions.removeValue(forKey: staleUser)
         logger.warning(
           "🔄 [ensureContext] Removed stale context for user: \(staleUser.prefix(20), privacy: .private)..."
         )
@@ -240,8 +320,11 @@ public actor MLSCoreContext {
       })?.value
 
     if existingContext != nil {
+      // Even if context exists, check version staleness
+      // (getContext handles this, but we call it to ensure version check)
+      _ = try await getContext(for: userDid)
       logger.debug(
-        "✅ [ensureContext] Context already exists for user: \(userDid.prefix(20), privacy: .private)..."
+        "✅ [ensureContext] Context validated for user: \(userDid.prefix(20), privacy: .private)..."
       )
       return
     }
@@ -333,7 +416,13 @@ public actor MLSCoreContext {
         database = try await MLSGRDBManager.shared.getDatabasePool(for: userDid)
       }
 
-      // Check cache first
+      // ═══════════════════════════════════════════════════════════════════════════
+      // CRITICAL: Second Idempotency Check (Defense in Depth)
+      // ═══════════════════════════════════════════════════════════════════════════
+      // This is the second cache check - we already checked before acquiring the lock,
+      // but NSE might have completed while we were waiting for the lock.
+      // This is our last chance to avoid the SecretReuseError.
+      // ═══════════════════════════════════════════════════════════════════════════
       if let cachedPlaintext = try await storage.fetchPlaintextForMessage(
         messageID,
         currentUserDID: userDid,
@@ -344,8 +433,14 @@ public actor MLSCoreContext {
           currentUserDID: userDid,
           database: database
         )
-        logger.debug("[DECRYPT] Cache hit for \(messageID) - skipping MLS ratchet decrypt")
-        return DecryptionOutcome(plaintext: cachedPlaintext, embed: cachedEmbed)
+        let cachedSender = try await storage.fetchSenderForMessage(
+          messageID,
+          currentUserDID: userDid,
+          database: database
+        )
+        logger.info("✅ [DECRYPT] IDEMPOTENCY HIT (post-lock): Message \(messageID.prefix(16))... already decrypted")
+        logger.info("   NSE completed while we waited for lock - using cached result")
+        return DecryptionOutcome(plaintext: cachedPlaintext, embed: cachedEmbed, senderDID: cachedSender)
       }
 
       // Get context (must be done in actor context)
@@ -363,7 +458,38 @@ public actor MLSCoreContext {
 
       logger.debug("[DECRYPT] Performing MLS decrypt for message: \(messageID)")
 
-      let result = try context.decryptMessage(groupId: groupId, ciphertext: actualCiphertext)
+      let result: DecryptResult
+      do {
+        result = try context.decryptMessage(groupId: groupId, ciphertext: actualCiphertext)
+      } catch {
+        let desc = error.localizedDescription
+        if desc.contains("SecretReuseError") || desc.contains("SecretTreeError") {
+          // Duplicate processing: attempt to use cache instead of treating as state desync.
+          if let cachedPlaintext = try? await storage.fetchPlaintextForMessage(
+            messageID,
+            currentUserDID: userDid,
+            database: database
+          ) {
+            let cachedEmbed = try? await storage.fetchEmbedForMessage(
+              messageID,
+              currentUserDID: userDid,
+              database: database
+            )
+            let cachedSender = try? await storage.fetchSenderForMessage(
+              messageID,
+              currentUserDID: userDid,
+              database: database
+            )
+            logger.info("✅ [DECRYPT] SecretReuseError → cache hit; skipping MLS decrypt")
+            return DecryptionOutcome(plaintext: cachedPlaintext, embed: cachedEmbed, senderDID: cachedSender)
+          }
+
+          logger.warning("⚠️ [DECRYPT] SecretReuseError but no cached plaintext; skipping")
+          throw MLSError.secretReuseSkipped(messageID: messageID)
+        }
+        throw error
+      }
+
       let payloadData = result.plaintext
 
       let payload = try? MLSMessagePayload.decodeFromJSON(payloadData)
@@ -462,7 +588,17 @@ public actor MLSCoreContext {
 
       logger.info("[DECRYPT] Stored plaintext for message: \(messageID)")
 
-      return DecryptionOutcome(plaintext: plaintext, embed: embedData)
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // MONOTONIC VERSION INCREMENT: Signal state change to other processes
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // After successful decryption, the MLS ratchet has advanced. Increment the
+      // state version so the main app (or NSE) knows to reload its context.
+      // ═══════════════════════════════════════════════════════════════════════════════
+      let newVersion = MLSStateVersionManager.shared.incrementVersion(for: userDid)
+      contextVersions[userDid] = newVersion
+      logger.debug("[DECRYPT] State version incremented to \(newVersion)")
+
+      return DecryptionOutcome(plaintext: plaintext, embed: embedData, senderDID: actualSender != "unknown" ? actualSender : nil)
     }.value
   }
 
@@ -471,9 +607,10 @@ public actor MLSCoreContext {
   /// Decrypt MLS message and store plaintext in database
   ///
   /// This is the primary decryption method that:
-  /// 1. Decrypts the ciphertext using the MLS context
-  /// 2. Extracts epoch and sequence number from DecryptResult
-  /// 3. Stores the plaintext in the database with proper metadata
+  /// 1. Checks if message was already decrypted (idempotency - prevents double-decrypt race)
+  /// 2. Decrypts the ciphertext using the MLS context
+  /// 3. Extracts epoch and sequence number from DecryptResult
+  /// 4. Stores the plaintext in the database with proper metadata
   ///
   /// - Parameters:
   ///   - userDid: User's decentralized identifier
@@ -497,6 +634,7 @@ public actor MLSCoreContext {
     sequenceNumber: Int64? = nil,
     senderID: String? = nil
   ) async throws -> String {
+      return try await withMLSUserPermit(for: userDid) { [self] in
     // Capture logger before async work
     let logger = self.logger
 
@@ -504,24 +642,74 @@ public actor MLSCoreContext {
       "[DECRYPT] Starting decryption: message=\(messageID), hasMetadata=\(epoch != nil && sequenceNumber != nil && senderID != nil)"
     )
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CRITICAL FIX (2024-12): Idempotency Check BEFORE File Coordination
+    // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // Problem: "Double Processing" Race Condition
+    // - NSE and Main App both receive the same message (APNS vs sync)
+    // - Both race to decrypt it
+    // - NSE wins, decrypts, deletes the one-time key (Forward Secrecy)
+    // - Main App tries to decrypt with stale state → SecretReuseError
+    //
+    // Solution: Check if message is already decrypted BEFORE acquiring the lock
+    // This prevents wasting time waiting for the lock only to find the work done.
+    //
+    // Note: We check again AFTER acquiring the lock (defense in depth) because
+    // NSE might complete between our check and lock acquisition.
+    //
+    // ═══════════════════════════════════════════════════════════════════════════
     do {
-      // decryptOnce calls performDecryption which already uses Task.detached
-      let outcome = try await decryptOnce(
-        userDid: userDid,
-        groupId: groupId,
-        ciphertext: ciphertext,
-        conversationID: conversationID,
-        messageID: messageID,
-        epoch: epoch,
-        sequenceNumber: sequenceNumber,
-        senderID: senderID
-      )
+      let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDid)
+      if let cachedPlaintext = try await storage.fetchPlaintextForMessage(
+        messageID,
+        currentUserDID: userDid,
+        database: database
+      ) {
+        logger.info("✅ [DECRYPT] IDEMPOTENCY HIT (pre-lock): Message \(messageID.prefix(16))... already decrypted")
+        logger.info("   Skipping MLS decryption to prevent SecretReuseError")
+        return cachedPlaintext
+      }
+    } catch let error as MLSSQLCipherError {
+      // Fail-closed: if storage is unavailable we must not advance the ratchet.
+      throw error
+    } catch {
+      // Non-fatal: if we can't check the cache, proceed with normal flow.
+      // The lock-protected cache check may still catch it.
+      logger.debug("[DECRYPT] Pre-lock cache check failed (continuing): \(error.localizedDescription)")
+    }
+
+    do {
+      // Phase 2 (single-writer): Acquire advisory lock so NSE/app cannot both advance ratchet.
+      let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
+      if !lockAcquired {
+        logger.warning("🔒 [DECRYPT] Advisory lock busy for \(userDid.prefix(20))... - cancelling decryption")
+        throw CancellationError()
+      }
+      defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
+
+      // CRITICAL FIX (2024-12): Use file coordination to prevent NSE conflicts
+      // The NSE may try to write to the database while the main app is decrypting.
+      // Without coordination, this causes "HMAC check failed" corruption.
+      let outcome = try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 15.0) {
+        try await self.decryptOnce(
+          userDid: userDid,
+          groupId: groupId,
+          ciphertext: ciphertext,
+          conversationID: conversationID,
+          messageID: messageID,
+          epoch: epoch,
+          sequenceNumber: sequenceNumber,
+          senderID: senderID
+        )
+      }
 
       return outcome.plaintext
 
     } catch {
       logger.error("[DECRYPT] Failed to decrypt message: \(error.localizedDescription)")
       throw error
+    }
     }
   }
 
@@ -549,6 +737,7 @@ public actor MLSCoreContext {
     sequenceNumber: Int64? = nil,
     senderID: String? = nil
   ) async throws -> (plaintext: String, embed: MLSEmbedData?) {
+    return try await withMLSUserPermit(for: userDid) {
     // Capture logger before async work
     let logger = self.logger
 
@@ -556,24 +745,60 @@ public actor MLSCoreContext {
       "[DECRYPT+EMBED] Starting decryption: message=\(messageID), hasMetadata=\(epoch != nil && sequenceNumber != nil && senderID != nil)"
     )
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CRITICAL FIX (2024-12): Idempotency Check BEFORE File Coordination
+    // See decryptAndStore() for full explanation of the Double Processing race.
+    // ═══════════════════════════════════════════════════════════════════════════
     do {
-      // decryptOnce calls performDecryption which already uses Task.detached
-      let outcome = try await decryptOnce(
-        userDid: userDid,
-        groupId: groupId,
-        ciphertext: ciphertext,
-        conversationID: conversationID,
-        messageID: messageID,
-        epoch: epoch,
-        sequenceNumber: sequenceNumber,
-        senderID: senderID
-      )
+      let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDid)
+      if let cachedPlaintext = try await storage.fetchPlaintextForMessage(
+        messageID,
+        currentUserDID: userDid,
+        database: database
+      ) {
+        let cachedEmbed = try await storage.fetchEmbedForMessage(
+          messageID,
+          currentUserDID: userDid,
+          database: database
+        )
+        logger.info("✅ [DECRYPT+EMBED] IDEMPOTENCY HIT (pre-lock): Message \(messageID.prefix(16))... already decrypted")
+        logger.info("   Skipping MLS decryption to prevent SecretReuseError")
+        return (cachedPlaintext, cachedEmbed)
+      }
+    } catch {
+      // Non-fatal: if we can't check the cache, proceed with normal flow
+      logger.debug("[DECRYPT+EMBED] Pre-lock cache check failed (continuing): \(error.localizedDescription)")
+    }
+
+    do {
+      // Phase 2 (single-writer): Acquire advisory lock so NSE/app cannot both advance ratchet.
+      let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
+      if !lockAcquired {
+        logger.warning("🔒 [DECRYPT+EMBED] Advisory lock busy for \(userDid.prefix(20))... - cancelling decryption")
+        throw CancellationError()
+      }
+      defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
+
+      // CRITICAL FIX (2024-12): Use file coordination to prevent NSE conflicts
+      let outcome = try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 15.0) {
+        try await self.decryptOnce(
+          userDid: userDid,
+          groupId: groupId,
+          ciphertext: ciphertext,
+          conversationID: conversationID,
+          messageID: messageID,
+          epoch: epoch,
+          sequenceNumber: sequenceNumber,
+          senderID: senderID
+        )
+      }
 
       return (outcome.plaintext, outcome.embed)
 
     } catch {
       logger.error("[DECRYPT+EMBED] Failed to decrypt message: \(error.localizedDescription)")
       throw error
+    }
     }
   }
 
@@ -601,7 +826,7 @@ public actor MLSCoreContext {
   ///   - ciphertext: Encrypted message data
   ///   - conversationID: Conversation identifier for database storage
   ///   - messageID: Unique message identifier for database storage
-  /// - Returns: Decrypted plaintext string
+  /// - Returns: NotificationDecryptResult containing plaintext and sender DID
   /// - Throws: MLSError or storage errors if decryption or storage fails
   public func decryptForNotification(
     userDid: String,
@@ -609,32 +834,82 @@ public actor MLSCoreContext {
     ciphertext: Data,
     conversationID: String,
     messageID: String
-  ) async throws -> String {
+  ) async throws -> NotificationDecryptResult {
+    return try await withMLSUserPermit(for: userDid) {
     let logger = self.logger
 
     logger.info("[DECRYPT-NOTIF] Starting ephemeral decryption for notification")
     logger.debug("   userDid: \(userDid.prefix(20))...")
     logger.debug("   messageID: \(messageID.prefix(16))...")
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CRITICAL FIX (2024-12): Idempotency Check BEFORE File Coordination
+    // 
+    // The NSE might be invoked multiple times for the same message (APNS retry,
+    // or the main app might have already decrypted it during a sync).
+    // Check if the message is already decrypted before acquiring the lock.
+    // ═══════════════════════════════════════════════════════════════════════════
     do {
-      let outcome = try await decryptOnce(
-        userDid: userDid,
-        groupId: groupId,
-        ciphertext: ciphertext,
-        conversationID: conversationID,
-        messageID: messageID,
-        epoch: nil,
-        sequenceNumber: nil,
-        senderID: nil,
-        useEphemeralAccess: true  // CRITICAL: Use ephemeral access
-      )
+      let database = try await MLSGRDBManager.shared.getEphemeralDatabasePool(for: userDid)
+      if let cachedPlaintext = try await storage.fetchPlaintextForMessage(
+        messageID,
+        currentUserDID: userDid,
+        database: database
+      ) {
+        // Also fetch the cached sender for rich notification display
+        let cachedSender = try await storage.fetchSenderForMessage(
+          messageID,
+          currentUserDID: userDid,
+          database: database
+        )
+        logger.info("✅ [DECRYPT-NOTIF] IDEMPOTENCY HIT: Message \(messageID.prefix(16))... already decrypted")
+        logger.info("   Returning cached plaintext, skipping MLS decryption")
+        return NotificationDecryptResult(plaintext: cachedPlaintext, senderDID: cachedSender)
+      }
+    } catch {
+      // Non-fatal: if we can't check the cache, proceed with normal flow
+      logger.debug("[DECRYPT-NOTIF] Pre-lock cache check failed (continuing): \(error.localizedDescription)")
+    }
 
-      logger.info("✅ [DECRYPT-NOTIF] Ephemeral decryption SUCCESS")
-      return outcome.plaintext
+    // CRITICAL FIX (2024-12): Use file coordination for NSE database access
+    // The NSE and main app run as separate processes. Without coordination,
+    // concurrent writes to the encrypted database can cause:
+    // - "HMAC check failed" (page corruption from simultaneous writes)
+    // - "SQLite error 7: out of memory" (file descriptor exhaustion)
+    // - Ratchet state desync (NSE advances epoch but main app doesn't know)
+    //
+    // By wrapping the entire decrypt+store operation in file coordination,
+    // we ensure exclusive access during the critical section.
+    do {
+      let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
+      if !lockAcquired {
+        logger.warning("🔒 [DECRYPT-NOTIF] Advisory lock busy for \(userDid.prefix(20))... - cancelling decryption")
+        throw CancellationError()
+      }
+      defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
+
+      let outcome = try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 15.0) {
+        try await self.decryptOnce(
+          userDid: userDid,
+          groupId: groupId,
+          ciphertext: ciphertext,
+          conversationID: conversationID,
+          messageID: messageID,
+          epoch: nil,
+          sequenceNumber: nil,
+          senderID: nil,
+          useEphemeralAccess: true  // CRITICAL: Use ephemeral access
+        )
+      }
+
+      logger.info("✅ [DECRYPT-NOTIF] Ephemeral decryption SUCCESS (with file coordination)")
+      logger.debug("   Sender DID: \(outcome.senderDID?.prefix(24) ?? "unknown")...")
+      return NotificationDecryptResult(plaintext: outcome.plaintext, senderDID: outcome.senderDID)
 
     } catch {
       logger.error("❌ [DECRYPT-NOTIF] Ephemeral decryption FAILED: \(error.localizedDescription)")
       throw error
+    }
     }
   }
 
@@ -669,35 +944,50 @@ public actor MLSCoreContext {
     groupId: Data,
     messages: [(ciphertext: Data, conversationID: String, messageID: String)]
   ) async throws -> [String] {
+    return try await withMLSUserPermit(for: userDid) {
     // Capture logger before async work
     let logger = self.logger
 
     logger.info("[DECRYPT-BATCH] Decrypting \(messages.count) messages")
 
-    var plaintexts: [String] = []
-
-    // Each decryptAndStore call uses Task.detached internally via performDecryption
-    // This prevents priority inversion for the entire batch
-    for (ciphertext, conversationID, messageID) in messages {
-      do {
-        let plaintext = try await decryptAndStore(
-          userDid: userDid,
-          groupId: groupId,
-          ciphertext: ciphertext,
-          conversationID: conversationID,
-          messageID: messageID
-        )
-        plaintexts.append(plaintext)
-      } catch {
-        logger.error(
-          "[DECRYPT-BATCH] Failed to decrypt message \(messageID): \(error.localizedDescription)")
-        throw error
-      }
+    // Phase 2 (single-writer): Acquire advisory lock so NSE/app cannot both advance ratchet.
+    let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
+    if !lockAcquired {
+      logger.warning("🔒 [DECRYPT-BATCH] Advisory lock busy for \(userDid.prefix(20))... - cancelling batch")
+      throw CancellationError()
     }
+    defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
 
-    logger.info("[DECRYPT-BATCH] Successfully decrypted \(plaintexts.count) messages")
-
-    return plaintexts
+    // CRITICAL FIX (2024-12): Use single coordination block for entire batch
+    // This is more efficient than acquiring/releasing the lock for each message
+    return try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 30.0) {
+      var plaintexts: [String] = []
+      
+      for (ciphertext, conversationID, messageID) in messages {
+        do {
+          // Call decryptOnce directly to avoid double-coordination
+          let outcome = try await self.decryptOnce(
+            userDid: userDid,
+            groupId: groupId,
+            ciphertext: ciphertext,
+            conversationID: conversationID,
+            messageID: messageID,
+            epoch: nil,
+            sequenceNumber: nil,
+            senderID: nil
+          )
+          plaintexts.append(outcome.plaintext)
+        } catch {
+          logger.error(
+            "[DECRYPT-BATCH] Failed to decrypt message \(messageID): \(error.localizedDescription)")
+          throw error
+        }
+      }
+      
+      logger.info("[DECRYPT-BATCH] Successfully decrypted \(plaintexts.count) messages")
+      return plaintexts
+    }
+    }
   }
 
   // MARK: - Context Information
@@ -760,5 +1050,39 @@ public actor MLSCoreContext {
     }
 
     return didString
+  }
+
+  // MARK: - State Version Queries
+
+  /// Get the current in-memory state version for a user.
+  ///
+  /// - Parameter userDid: User's decentralized identifier
+  /// - Returns: Memory version, or nil if no context exists
+  public func getMemoryVersion(for userDid: String) -> Int? {
+    return contextVersions[userDid]
+  }
+
+  /// Check if the cached context is stale compared to disk.
+  ///
+  /// This is a fast check (no disk I/O, just UserDefaults read).
+  /// Use this before operations that depend on fresh MLS state.
+  ///
+  /// - Parameter userDid: User's decentralized identifier
+  /// - Returns: true if context needs to be reloaded
+  public func isContextStale(for userDid: String) -> Bool {
+    guard let memoryVersion = contextVersions[userDid] else {
+      // No context = not stale (will be created fresh)
+      return false
+    }
+    return MLSStateVersionManager.shared.isContextStale(for: userDid, memoryVersion: memoryVersion)
+  }
+
+  /// Check if the MLS lock is currently held by another process.
+  ///
+  /// Use this to show a loading indicator when NSE is processing.
+  ///
+  /// - Returns: true if lock is available, false if another process holds it
+  public func isLockAvailable() -> Bool {
+    return MLSStateVersionManager.shared.isLockAvailable()
   }
 }

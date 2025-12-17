@@ -30,6 +30,12 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
   /// Database schema version mismatch
   case schemaVersionMismatch(expected: Int, found: Int)
 
+  /// Storage exists but cannot currently be used (e.g., locked, unsafe state)
+  case storageUnavailable(reason: String)
+
+  /// Manual user action is required to continue (e.g., run diagnostics reset)
+  case needsUserAction(reason: String)
+
   // MARK: - Query Errors
 
   /// SQL query execution failed
@@ -119,9 +125,9 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
   public var failureReason: String? {
     switch self {
     case .databaseCreationFailed:
-      return "Failed to create or open the database"
+      return "Failed to create or open MLS storage"
     case .databaseCorrupted:
-      return "Database is corrupted"
+      return "MLS storage may be corrupted"
     case .invalidEncryptionKey:
       return "Invalid encryption key"
     case .encryptionKeyMismatch:
@@ -130,6 +136,10 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Database is locked"
     case .schemaVersionMismatch:
       return "Schema version mismatch"
+    case .storageUnavailable(let reason):
+      return "MLS storage unavailable: \(reason)"
+    case .needsUserAction(let reason):
+      return reason
     case .queryExecutionFailed:
       return "Query execution failed"
     case .unexpectedQueryResult:
@@ -180,7 +190,7 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
   public var recoverySuggestion: String? {
     switch self {
     case .databaseCreationFailed, .databaseCorrupted:
-      return "Try deleting the database and starting fresh. Your encrypted messages will be lost."
+      return "Open Settings ▸ Diagnostics ▸ Reset MLS Storage to rebuild the local database."
     case .invalidEncryptionKey:
       return "Check that the encryption key is properly stored in Keychain."
     case .encryptionKeyMismatch:
@@ -189,6 +199,10 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Close other connections to the database and retry."
     case .schemaVersionMismatch:
       return "Database schema needs migration. Contact support."
+    case .storageUnavailable:
+      return "Wait a moment and retry. If it persists, run Reset MLS Storage from Diagnostics."
+    case .needsUserAction:
+      return "Follow the on-screen instructions in Settings ▸ Diagnostics."
     case .queryExecutionFailed:
       return "Check the query syntax and parameters."
     case .recordNotFound:
@@ -240,6 +254,10 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Database is locked by another process"
     case .schemaVersionMismatch(let expected, let found):
       return "Schema version mismatch: expected \(expected), found \(found)"
+    case .storageUnavailable(let reason):
+      return "MLS storage unavailable: \(reason)"
+    case .needsUserAction(let reason):
+      return "MLS storage requires user action: \(reason)"
     case .queryExecutionFailed(let query, let error):
       return "Query execution failed: \(query.prefix(100)) - \(error.localizedDescription)"
     case .unexpectedQueryResult(let details):

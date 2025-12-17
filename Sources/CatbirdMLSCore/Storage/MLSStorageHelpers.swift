@@ -36,6 +36,12 @@ public struct MLSStorageHelpers {
 
   /// Save plaintext immediately after MLS decryption
   /// CRITICAL: MLS ratchet burns secrets after first decrypt - must cache (upsert) immediately.
+  ///
+  /// **FOREIGN KEY FIX**: This method now ensures the conversation exists before inserting
+  /// a message. For new conversations (e.g., Welcome message processing), a placeholder
+  /// conversation is created if needed. The main app will heal this placeholder with full
+  /// metadata on the next sync.
+  ///
   /// - Parameters:
   ///   - database: GRDB DatabaseQueue
   ///   - messageID: Unique message identifier
@@ -104,6 +110,16 @@ public struct MLSStorageHelpers {
 
       // If no rows were updated, insert a new cached record so future decrypts skip MLS
       if db.changesCount == 0 {
+        // 🚨 FOREIGN KEY FIX: Ensure conversation exists before inserting message
+        // This prevents "FOREIGN KEY constraint failed" errors when processing
+        // messages from new conversations (e.g., Welcome message arrives first)
+        try ensureConversationExistsInTransaction(
+          db: db,
+          conversationID: conversationID,
+          userDID: normalizedUserDID,
+          senderDID: normalizedSenderID
+        )
+        
         let message = MLSMessageModel(
           messageID: messageID,
           currentUserDID: normalizedUserDID,
@@ -136,6 +152,116 @@ public struct MLSStorageHelpers {
 
       logger.info("💾 Cached plaintext for message: \(messageID)")
     }
+  }
+  
+  // MARK: - Foreign Key Fix Helpers
+  
+  /// Ensure a conversation exists within an active database transaction
+  ///
+  /// **CRITICAL FOR FORWARD SECRECY**: When a notification arrives for a new conversation,
+  /// the MLS layer processes the Welcome message and decrypts the first message. If we can't
+  /// save that decrypted plaintext because the conversation doesn't exist yet, the plaintext
+  /// is lost forever due to MLS forward secrecy (keys are burned after first use).
+  ///
+  /// This method creates a minimal "placeholder" conversation record that satisfies the
+  /// foreign key constraint, allowing the message to be saved. The main app will later
+  /// heal this placeholder with full metadata during the next conversation list sync.
+  ///
+  /// - Parameters:
+  ///   - db: Active GRDB database connection (within a write transaction)
+  ///   - conversationID: Conversation identifier (hex-encoded group ID)
+  ///   - userDID: Normalized user DID
+  ///   - senderDID: Normalized sender DID (used for placeholder title)
+  private static func ensureConversationExistsInTransaction(
+    db: Database,
+    conversationID: String,
+    userDID: String,
+    senderDID: String
+  ) throws {
+    // Check if conversation already exists
+    let existingCount = try MLSConversationModel
+      .filter(MLSConversationModel.Columns.conversationID == conversationID)
+      .filter(MLSConversationModel.Columns.currentUserDID == userDID)
+      .fetchCount(db)
+    
+    if existingCount > 0 {
+      // Conversation exists, nothing to do
+      return
+    }
+    
+    // Create placeholder conversation
+    // Use conversationID as groupID (they should be the same hex string)
+    guard let groupIDData = Data(hexEncoded: conversationID) else {
+      // If conversationID isn't valid hex, use it as UTF-8 bytes
+      logger.warning("⚠️ [FK-FIX] conversationID not valid hex, using UTF-8 bytes: \(conversationID.prefix(16))...")
+      let groupIDData = Data(conversationID.utf8)
+      
+      let placeholderTitle: String
+      if senderDID.hasPrefix("did:plc:") {
+        placeholderTitle = "Chat with \(senderDID.suffix(8))..."
+      } else {
+        placeholderTitle = senderDID.isEmpty ? "New Conversation" : senderDID
+      }
+      
+      let placeholder = MLSConversationModel(
+        conversationID: conversationID,
+        currentUserDID: userDID,
+        groupID: groupIDData,
+        epoch: 0,
+        joinMethod: .unknown,
+        joinEpoch: 0,
+        title: placeholderTitle,
+        avatarURL: nil,
+        createdAt: Date(),
+        updatedAt: Date(),
+        lastMessageAt: Date(),
+        lastMembershipChangeAt: nil,
+        unacknowledgedMemberChanges: 0,
+        isActive: true,
+        needsRejoin: false,
+        rejoinRequestedAt: nil,
+        lastRecoveryAttempt: nil,
+        consecutiveFailures: 0,
+        isPlaceholder: true
+      )
+      try placeholder.insert(db)
+      
+      logger.warning("🆕 [FK-FIX] Created PLACEHOLDER conversation: \(conversationID.prefix(16))... (UTF-8 groupID)")
+      return
+    }
+    
+    // Build placeholder title from sender DID
+    let placeholderTitle: String
+    if senderDID.hasPrefix("did:plc:") {
+      placeholderTitle = "Chat with \(senderDID.suffix(8))..."
+    } else {
+      placeholderTitle = senderDID.isEmpty ? "New Conversation" : senderDID
+    }
+    
+    let placeholder = MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: userDID,
+      groupID: groupIDData,
+      epoch: 0,
+      joinMethod: .unknown,
+      joinEpoch: 0,
+      title: placeholderTitle,
+      avatarURL: nil,
+      createdAt: Date(),
+      updatedAt: Date(),
+      lastMessageAt: Date(),  // There's a message coming, so set this
+      lastMembershipChangeAt: nil,
+      unacknowledgedMemberChanges: 0,
+      isActive: true,
+      needsRejoin: false,
+      rejoinRequestedAt: nil,
+      lastRecoveryAttempt: nil,
+      consecutiveFailures: 0,
+      isPlaceholder: true  // Mark as placeholder for later healing
+    )
+    try placeholder.insert(db)
+    
+    logger.warning("🆕 [FK-FIX] Created PLACEHOLDER conversation: \(conversationID.prefix(16))... - will be healed on next sync")
   }
 
   /// Mark plaintext as expired (forward secrecy enforcement)
@@ -342,6 +468,103 @@ public struct MLSStorageHelpers {
   ) async throws -> T {
     try await database.write { db in
       try block(db)
+    }
+  }
+  
+  // MARK: - Profile Enrichment for Notifications
+  
+  /// Update member profile info in the database
+  ///
+  /// This is called by the main app's profile enricher to persist fetched profile data
+  /// to the MLS member table. The NSE can then query this data to show rich notifications
+  /// with sender names instead of "New Message".
+  ///
+  /// - Parameters:
+  ///   - database: GRDB DatabaseQueue
+  ///   - did: Member's DID
+  ///   - handle: Member's handle (e.g., "alice.bsky.social")
+  ///   - displayName: Member's display name (e.g., "Alice")
+  ///   - currentUserDID: Current user's DID (for scoping updates)
+  /// - Returns: Number of rows updated
+  @discardableResult
+  public static func updateMemberProfile(
+    in database: MLSDatabase,
+    did: String,
+    handle: String?,
+    displayName: String?,
+    currentUserDID: String
+  ) async throws -> Int {
+    let normalizedDID = normalizeDID(did)
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    
+    return try await database.write { db in
+      try db.execute(sql: """
+        UPDATE MLSMemberModel
+        SET handle = ?,
+            displayName = ?,
+            updatedAt = ?
+        WHERE did = ? AND currentUserDID = ?
+      """, arguments: [
+        handle,
+        displayName,
+        Date(),
+        normalizedDID,
+        normalizedUserDID
+      ])
+      
+      let count = db.changesCount
+      if count > 0 {
+        logger.debug("👤 Updated profile for member: \(normalizedDID.prefix(24))... (\(count) rows)")
+      }
+      return count
+    }
+  }
+  
+  /// Batch update member profiles efficiently
+  ///
+  /// Updates multiple member profiles in a single transaction.
+  /// Called by the profile enricher after fetching a batch of profiles.
+  ///
+  /// - Parameters:
+  ///   - database: GRDB DatabaseQueue
+  ///   - profiles: Array of (did, handle, displayName) tuples
+  ///   - currentUserDID: Current user's DID
+  /// - Returns: Total number of rows updated
+  @discardableResult
+  public static func batchUpdateMemberProfiles(
+    in database: MLSDatabase,
+    profiles: [(did: String, handle: String?, displayName: String?)],
+    currentUserDID: String
+  ) async throws -> Int {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    
+    return try await database.write { db in
+      var totalUpdated = 0
+      
+      for profile in profiles {
+        let normalizedDID = normalizeDID(profile.did)
+        
+        try db.execute(sql: """
+          UPDATE MLSMemberModel
+          SET handle = ?,
+              displayName = ?,
+              updatedAt = ?
+          WHERE did = ? AND currentUserDID = ?
+        """, arguments: [
+          profile.handle,
+          profile.displayName,
+          Date(),
+          normalizedDID,
+          normalizedUserDID
+        ])
+        
+        totalUpdated += db.changesCount
+      }
+      
+      if totalUpdated > 0 {
+        logger.info("👤 Batch updated \(totalUpdated) member profile(s)")
+      }
+      return totalUpdated
     }
   }
 }

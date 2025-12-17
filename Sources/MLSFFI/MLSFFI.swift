@@ -671,6 +671,20 @@ public protocol MlsContextProtocol: AnyObject {
     func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret
 
     /**
+     * Flush all pending database writes and prepare for shutdown
+     *
+     * Call this method before releasing the context during account switching.
+     * This ensures:
+     * 1. All pending SQLite writes are flushed to disk
+     * 2. WAL checkpoint is performed to consolidate data
+     * 3. Database connections are in a clean state for closure
+     *
+     * CRITICAL: After calling this, the context should not be used for new operations.
+     * The Swift side should remove the context from its cache after calling this.
+     */
+    func flushAndPrepareClose() throws
+
+    /**
      * Force flush all pending database writes to disk
      *
      * This executes a SQLite WAL checkpoint to ensure all pending writes are
@@ -1334,6 +1348,23 @@ open class MlsContext:
                                                               FfiConverterData.lower(context),
                                                               FfiConverterUInt64.lower(keyLength), $0)
         })
+    }
+
+    /**
+     * Flush all pending database writes and prepare for shutdown
+     *
+     * Call this method before releasing the context during account switching.
+     * This ensures:
+     * 1. All pending SQLite writes are flushed to disk
+     * 2. WAL checkpoint is performed to consolidate data
+     * 3. Database connections are in a clean state for closure
+     *
+     * CRITICAL: After calling this, the context should not be used for new operations.
+     * The Swift side should remove the context from its cache after calling this.
+     */
+    open func flushAndPrepareClose() throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_mls_ffi_fn_method_mlscontext_flush_and_prepare_close(self.uniffiClonePointer(), $0)
+    }
     }
 
     /**
@@ -5147,6 +5178,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_export_secret() != 25912 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_mls_ffi_checksum_method_mlscontext_flush_and_prepare_close() != 22318 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_mls_ffi_checksum_method_mlscontext_flush_storage() != 36619 {
