@@ -33,13 +33,13 @@
 //  - Works even when app is suspended/backgrounded
 //
 //  ═══════════════════════════════════════════════════════════════════════════
-//  PHASE 5: Darwin Notification Handshake (2024-12)
+//  PHASE 5: Tokenized Darwin Handshake (2024-12)
 //  ═══════════════════════════════════════════════════════════════════════════
 //
 //  Enhanced coordination protocol:
-//  1. NSE posts `nseWillClose` before starting checkpoint
-//  2. Main app receives, releases readers, posts `appAcknowledged`
-//  3. NSE waits for ack (1.5s timeout), proceeds with TRUNCATE checkpoint
+//  1. NSE writes `willClose(userDID, token)` to App Group + posts Darwin `nseWillClose` doorbell
+//  2. Main app receives doorbell, releases readers, writes `ack(userDID, token)` + posts `appAcknowledged` doorbell
+//  3. NSE waits for matching ack(token) (bounded timeout/backoff), proceeds with TRUNCATE checkpoint
 //  4. NSE posts existing `stateChanged` after close
 //
 //  This ensures the main app releases its database readers before NSE
@@ -88,8 +88,9 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
   /// Callback to invoke when state change notification is received
   private var onStateChanged: (() -> Void)?
   
-  /// Callback to invoke when NSE will close notification is received (Phase 5)
-  private var onNSEWillClose: (() -> Void)?
+  /// Async handler invoked when the NSE signals it will close (tokenized handshake).
+  /// Returns true if the app successfully released readers for the request.
+  private var onNSEWillCloseRequest: (@MainActor (MLSNSEWillCloseRequest) async -> Bool)?
   
   /// Whether we're currently observing for notifications
   private var isObserving: Bool = false
@@ -111,13 +112,11 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
   /// Lock for thread-safe debounce task management
   private let debounceLock = NSLock()
   
-  // MARK: - Phase 5: Acknowledgment Tracking
-  
-  /// Flag set when we receive an acknowledgment from the app
-  private var receivedAppAcknowledgment: Bool = false
-  
-  /// Lock for thread-safe acknowledgment tracking
-  private let ackLock = NSLock()
+  // MARK: - Tokenized Handshake Debouncing
+
+  private let handshakeDebounceInterval: TimeInterval = 0.05
+  private var pendingHandshakeTask: Task<Void, Never>?
+  private let handshakeLock = NSLock()
   
   // MARK: - Initialization
   
@@ -166,15 +165,18 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
   
   // MARK: - Phase 5: Handshake Notifications
   
-  /// Post a Darwin Notification that NSE is about to close and checkpoint the database.
+  /// Tokenized handshake: the NSE is about to close and checkpoint the database.
   ///
   /// Call this from the Notification Service Extension BEFORE starting the checkpoint/close sequence.
-  /// The main app should release its database readers upon receiving this notification.
+  /// The main app should release its database readers and acknowledge the *token* via the App Group store.
   ///
   /// - Note: This is a static method so it can be called without keeping a reference
   ///   to the notifier instance (important for NSE which has limited lifecycle).
-  public static func postNSEWillClose() {
+  @discardableResult
+  public static func postNSEWillClose(userDID: String) -> UInt64 {
     let logger = Logger(subsystem: "blue.catbird.mls", category: "StateChangeNotifier")
+
+    let request = MLSAppGroupHandshakeStore.shared.issueWillCloseRequest(for: userDID)
     
     let center = CFNotificationCenterGetDarwinNotifyCenter()
     
@@ -186,12 +188,13 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
       true
     )
     
-    logger.info("📢 [Handshake] NSE posting nseWillClose")
+    logger.info("📢 [Handshake] NSE posting nseWillClose (token=\(request.token, privacy: .public))")
+    return request.token
   }
   
   /// Post a Darwin Notification that the app has acknowledged the NSE will close.
   ///
-  /// Call this from the main app AFTER releasing database readers in response to nseWillClose.
+  /// This is a doorbell only; correctness comes from `MLSAppGroupHandshakeStore`.
   ///
   /// - Note: This is a static method so it can be called without keeping a reference
   ///   to the notifier instance.
@@ -210,88 +213,26 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
     
     logger.info("📤 [Handshake] App posting appAcknowledged")
   }
-  
-  /// Wait for the app to acknowledge the NSE will close notification.
-  ///
-  /// Call this from the NSE AFTER posting nseWillClose and BEFORE starting checkpoint.
-  /// This blocks (with polling) until either:
-  /// 1. The app posts appAcknowledged
-  /// 2. The timeout expires
-  ///
-  /// - Parameter timeout: Maximum time to wait for acknowledgment (seconds)
-  /// - Returns: true if acknowledgment was received, false if timed out
-  public static func waitForAppAcknowledgment(timeout: TimeInterval) -> Bool {
-    let logger = Logger(subsystem: "blue.catbird.mls", category: "StateChangeNotifier")
-    
-    logger.info("⏳ [Handshake] NSE waiting for app acknowledgment (timeout: \(timeout)s)")
-    
-    // Reset acknowledgment flag
-    shared.ackLock.lock()
-    shared.receivedAppAcknowledgment = false
-    shared.ackLock.unlock()
-    
-    // Start observing for acknowledgment
-    let center = CFNotificationCenterGetDarwinNotifyCenter()
-    
-    CFNotificationCenterAddObserver(
-      center,
-      Unmanaged.passUnretained(shared).toOpaque(),
-      { center, observer, name, object, userInfo in
-        guard let observer = observer else { return }
-        let notifier = Unmanaged<MLSStateChangeNotifier>.fromOpaque(observer).takeUnretainedValue()
-        notifier.handleAppAcknowledgmentReceived()
-      },
-      kMLSAppAcknowledgedNotification,
-      nil,
-      .deliverImmediately
-    )
-    
-    // Poll for acknowledgment with timeout
-    let startTime = Date()
-    let pollInterval: TimeInterval = 0.05  // 50ms
-    
-    while Date().timeIntervalSince(startTime) < timeout {
-      shared.ackLock.lock()
-      let received = shared.receivedAppAcknowledgment
-      shared.ackLock.unlock()
-      
-      if received {
-        // Remove observer
-        CFNotificationCenterRemoveObserver(
-          center,
-          Unmanaged.passUnretained(shared).toOpaque(),
-          CFNotificationName(kMLSAppAcknowledgedNotification),
-          nil
-        )
-        
-        let duration = Date().timeIntervalSince(startTime)
-        let durationStr = String(format: "%.2f", duration)
-        logger.info("✅ [Handshake] NSE received acknowledgment in \(durationStr)s")
-        return true
-      }
-      
-      Thread.sleep(forTimeInterval: pollInterval)
-    }
-    
-    // Timeout - remove observer and report failure
-    CFNotificationCenterRemoveObserver(
-      center,
-      Unmanaged.passUnretained(shared).toOpaque(),
-      CFNotificationName(kMLSAppAcknowledgedNotification),
-      nil
-    )
-    
-    logger.warning("⏱️ [Handshake] App acknowledgment timeout - acknowledgment not received")
-    return false
+
+  /// Acknowledge a specific `nseWillClose` token for a user and ring the Darwin doorbell.
+  public static func acknowledgeNSEWillClose(userDID: String, token: UInt64) {
+    MLSAppGroupHandshakeStore.shared.acknowledge(userDID: userDID, token: token)
+    postAppAcknowledged()
   }
   
-  /// Handle receiving the app acknowledgment notification
-  private func handleAppAcknowledgmentReceived() {
-    ackLock.lock()
-    receivedAppAcknowledgment = true
-    ackLock.unlock()
-    
-    logger.info("📥 [Handshake] Received app acknowledgment")
+  /// Wait for the app to acknowledge a specific `nseWillClose` token.
+  ///
+  /// Call this from the NSE AFTER posting `nseWillClose` and BEFORE starting checkpoint.
+  public static func waitForAppAcknowledgment(
+    userDID: String,
+    token: UInt64,
+    timeout: Duration
+  ) async -> Bool {
+    await MLSAppGroupHandshakeStore.shared.waitForAcknowledgment(
+      userDID: userDID,
+      token: token,
+      timeout: timeout
+    )
   }
   
   // MARK: - Observing Notifications (called from Main App)
@@ -343,23 +284,22 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
     }
   }
   
-  /// Start observing for NSE will close notifications (Phase 5).
+  /// Start observing for NSE will close notifications (tokenized handshake).
   ///
   /// Call this during app initialization to enable the handshake protocol.
-  /// When the NSE is about to close and checkpoint the database, the callback
-  /// will be invoked so the app can release its database readers.
-  ///
-  /// - Parameter callback: Closure to invoke when nseWillClose is received.
-  ///   This will be called on the main queue. After releasing readers,
-  ///   call `MLSStateChangeNotifier.postAppAcknowledged()` to signal the NSE.
-  public func startObservingNSEWillClose(onNSEWillClose callback: @escaping () -> Void) {
+  /// When the NSE is about to close and checkpoint the database, the handler
+  /// is invoked with the persisted request token. If the handler returns `true`,
+  /// the notifier records an acknowledgment for the same token and rings the Darwin doorbell.
+  public func startObservingNSEWillClose(
+    onNSEWillCloseRequest handler: @escaping @MainActor (MLSNSEWillCloseRequest) async -> Bool
+  ) {
     queue.sync {
       guard !isObservingNSEWillClose else {
         logger.debug("Already observing for nseWillClose notifications")
         return
       }
       
-      self.onNSEWillClose = callback
+      self.onNSEWillCloseRequest = handler
       
       let center = CFNotificationCenterGetDarwinNotifyCenter()
       
@@ -415,7 +355,12 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
           nil
         )
         
-        onNSEWillClose = nil
+        handshakeLock.lock()
+        pendingHandshakeTask?.cancel()
+        pendingHandshakeTask = nil
+        handshakeLock.unlock()
+
+        onNSEWillCloseRequest = nil
         isObservingNSEWillClose = false
         logger.info("🔕 [Handshake] Stopped observing for nseWillClose notifications")
       }
@@ -467,18 +412,61 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
     logger.debug("   Debounce timer reset (will fire in \(self.debounceInterval)s if no more notifications)")
   }
   
-  /// Handle the nseWillClose notification (Phase 5)
+  /// Handle the nseWillClose doorbell (tokenized handshake).
   private func handleNSEWillCloseReceived() {
-    logger.info("📥 [Handshake] App received nseWillClose, releasing readers")
-    
-    // Invoke callback on main queue
-    DispatchQueue.main.async { [weak self] in
-      guard let self = self else { return }
-      
-      if let callback = self.onNSEWillClose {
-        callback()
+    logger.info("📥 [Handshake] App received nseWillClose doorbell")
+
+    handshakeLock.lock()
+    pendingHandshakeTask?.cancel()
+
+    pendingHandshakeTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+
+      do {
+        try await Task.sleep(nanoseconds: UInt64(self.handshakeDebounceInterval * 1_000_000_000))
+      } catch {
+        return
+      }
+      await self.processPendingWillCloseRequests()
+    }
+
+    handshakeLock.unlock()
+  }
+
+  @MainActor
+  private func processPendingWillCloseRequests() async {
+    guard let handler = onNSEWillCloseRequest else {
+      logger.warning("   No nseWillClose handler registered!")
+      return
+    }
+
+    let requests = MLSAppGroupHandshakeStore.shared.allRequests()
+    guard !requests.isEmpty else {
+      logger.debug("   No handshake requests found in App Group store")
+      return
+    }
+
+    // Coalesce per-user to the latest token (monotonic, so higher token supersedes).
+    var latestByUser: [String: MLSNSEWillCloseRequest] = [:]
+    for request in requests {
+      if let existing = latestByUser[request.userDID], existing.token >= request.token {
+        continue
+      }
+      latestByUser[request.userDID] = request
+    }
+
+    for request in latestByUser.values {
+      if MLSAppGroupHandshakeStore.shared.isAcknowledged(userDID: request.userDID, token: request.token) {
+        continue
+      }
+
+      logger.info("📥 [Handshake] Handling willClose token=\(request.token, privacy: .public) for \(request.userDID.prefix(20), privacy: .private)")
+
+      let released = await handler(request)
+      if released {
+        MLSStateChangeNotifier.acknowledgeNSEWillClose(userDID: request.userDID, token: request.token)
       } else {
-        self.logger.warning("   No nseWillClose callback registered!")
+        logger.warning("🚫 [Handshake] Did not release readers in time; not acknowledging token=\(request.token, privacy: .public)")
       }
     }
   }
@@ -508,25 +496,16 @@ extension MLSStateChangeNotifier {
     }
   }
   
-  /// Configure nseWillClose observation with an async handler (Phase 5).
+  /// Configure nseWillClose observation with an async handler (tokenized handshake).
   ///
   /// This is a convenience method for async/await based apps.
-  /// After releasing readers, the handler should call `MLSStateChangeNotifier.postAppAcknowledged()`.
+  /// If the handler returns `true`, the notifier records an acknowledgment for the token and
+  /// rings the Darwin `appAcknowledged` doorbell.
   ///
-  /// Usage:
-  /// ```swift
-  /// MLSStateChangeNotifier.shared.observeNSEWillCloseWithAsyncHandler {
-  ///     await appState.releaseMLSDatabaseReaders()
-  ///     MLSStateChangeNotifier.postAppAcknowledged()
-  /// }
-  /// ```
-  ///
-  /// - Parameter handler: Async closure to invoke when nseWillClose is detected.
-  public func observeNSEWillCloseWithAsyncHandler(_ handler: @escaping @MainActor () async -> Void) {
-    startObservingNSEWillClose {
-      Task { @MainActor in
-        await handler()
-      }
-    }
+  /// - Parameter handler: Async closure to invoke for each pending request.
+  public func observeNSEWillCloseWithAsyncHandler(
+    _ handler: @escaping @MainActor (MLSNSEWillCloseRequest) async -> Bool
+  ) {
+    startObservingNSEWillClose(onNSEWillCloseRequest: handler)
   }
 }

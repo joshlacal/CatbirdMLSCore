@@ -26,12 +26,12 @@ import OSLog
 
 /// Coordinates database access across the main app and Notification Service Extension
 /// to prevent corruption from concurrent writes to the encrypted SQLCipher database.
-public final class MLSDatabaseCoordinator: @unchecked Sendable {
+final class MLSDatabaseCoordinator: @unchecked Sendable {
   
   // MARK: - Singleton
   
   /// Shared coordinator instance
-  public static let shared = MLSDatabaseCoordinator()
+  static let shared = MLSDatabaseCoordinator()
   
   // MARK: - Properties
   
@@ -80,7 +80,7 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
   ///   - operation: The read operation to perform
   /// - Returns: The result of the operation
   /// - Throws: Coordination errors or errors from the operation
-  public func performRead<T: Sendable>(
+  func performRead<T: Sendable>(
     timeout: TimeInterval? = nil,
     operation: @Sendable @escaping () async throws -> T
   ) async throws -> T {
@@ -90,7 +90,7 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
   /// Perform a read operation with coordination for a specific user database.
   ///
   /// Uses a per-user lock file so unrelated accounts don't block each other.
-  public func performRead<T: Sendable>(
+  func performRead<T: Sendable>(
     for userDID: String?,
     timeout: TimeInterval? = nil,
     operation: @Sendable @escaping () async throws -> T
@@ -112,7 +112,7 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
   ///   - operation: The write operation to perform
   /// - Returns: The result of the operation
   /// - Throws: Coordination errors or errors from the operation
-  public func performWrite<T: Sendable>(
+  func performWrite<T: Sendable>(
     timeout: TimeInterval? = nil,
     operation: @Sendable @escaping () async throws -> T
   ) async throws -> T {
@@ -122,7 +122,7 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
   /// Perform a write operation with exclusive coordination for a specific user database.
   ///
   /// Uses a per-user lock file so unrelated accounts don't block each other.
-  public func performWrite<T: Sendable>(
+  func performWrite<T: Sendable>(
     for userDID: String?,
     timeout: TimeInterval? = nil,
     operation: @Sendable @escaping () async throws -> T
@@ -144,14 +144,14 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
   ///   - operation: The write operation to perform
   /// - Returns: The result of the operation
   /// - Throws: Coordination errors or errors from the operation
-  public func performWriteSync<T>(
+  func performWriteSync<T>(
     timeout: TimeInterval? = nil,
     operation: @escaping () throws -> T
   ) throws -> T {
     try performWriteSync(for: nil, timeout: timeout, operation: operation)
   }
 
-  public func performWriteSync<T>(
+  func performWriteSync<T>(
     for userDID: String?,
     timeout: TimeInterval? = nil,
     operation: @escaping () throws -> T
@@ -204,68 +204,96 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
     operation: @Sendable @escaping () async throws -> T
   ) async throws -> T {
     let coordinator = NSFileCoordinator(filePresenter: nil)
-    
+
     return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-      // Set up timeout
+      let resumeLock = NSLock()
+      var didResume = false
+      var operationTask: Task<T, Error>?
+
+      func resumeOnce(_ result: Result<T, Error>) {
+        resumeLock.lock()
+        defer { resumeLock.unlock() }
+        guard !didResume else { return }
+        didResume = true
+        operationTask?.cancel()
+
+        switch result {
+        case .success(let value):
+          continuation.resume(returning: value)
+        case .failure(let error):
+          continuation.resume(throwing: error)
+        }
+      }
+
+      // Timeout the *entire* coordinated operation (acquire + work) and ensure we only resume once.
       let timeoutWorkItem = DispatchWorkItem { [weak self] in
         self?.logger.error("❌ File coordination timed out after \(timeout)s")
-        continuation.resume(throwing: MLSDatabaseCoordinatorError.timeout)
+        resumeOnce(.failure(MLSDatabaseCoordinatorError.timeout))
       }
       DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
-      
-      var coordinatorError: NSError?
-      
-      let coordinationBlock: (URL) -> Void = { [weak self] _ in
-        // Cancel timeout since we got the lock
-        timeoutWorkItem.cancel()
-        
-        if forWriting {
-          self?.isHoldingWriteLock = true
-          self?.logger.debug("🔒 Acquired write lock")
-        } else {
-          self?.logger.debug("🔓 Acquired read lock")
-        }
-        
-        // Run the async operation
-        Task {
-          do {
-            let result = try await operation()
-            if forWriting {
-              self?.isHoldingWriteLock = false
-              self?.logger.debug("🔓 Released write lock")
-            }
-            continuation.resume(returning: result)
-          } catch {
-            if forWriting {
-              self?.isHoldingWriteLock = false
-            }
-            continuation.resume(throwing: error)
+
+      // Run coordination off the caller thread (important for main-actor callers).
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        var coordinatorError: NSError?
+
+        let coordinationBlock: (URL) -> Void = { [weak self] _ in
+          if forWriting {
+            self?.isHoldingWriteLock = true
+            self?.logger.debug("🔒 Acquired write lock")
+          } else {
+            self?.logger.debug("🔓 Acquired read lock")
           }
+
+          // Hold the coordinated access until the async operation finishes.
+          let semaphore = DispatchSemaphore(value: 0)
+          var opResult: Result<T, Error>?
+
+          let task = Task { try await operation() }
+          resumeLock.lock()
+          operationTask = task
+          resumeLock.unlock()
+
+          Task {
+            defer { semaphore.signal() }
+            do {
+              opResult = .success(try await task.value)
+            } catch {
+              opResult = .failure(error)
+            }
+          }
+
+          semaphore.wait()
+
+          if forWriting {
+            self?.isHoldingWriteLock = false
+            self?.logger.debug("🔓 Released write lock")
+          }
+
+          timeoutWorkItem.cancel()
+          resumeOnce(opResult ?? .failure(MLSDatabaseCoordinatorError.timeout))
         }
-      }
-      
-      // Coordinate access
-      if forWriting {
-        coordinator.coordinate(
-          writingItemAt: lockFileURL,
-          options: [],
-          error: &coordinatorError,
-          byAccessor: coordinationBlock
-        )
-      } else {
-        coordinator.coordinate(
-          readingItemAt: lockFileURL,
-          options: [],
-          error: &coordinatorError,
-          byAccessor: coordinationBlock
-        )
-      }
-      
-      // Handle coordination error
-      if let error = coordinatorError {
-        timeoutWorkItem.cancel()
-        logger.error("❌ File coordination failed: \(error.localizedDescription)")
-        continuation.resume(throwing: MLSDatabaseCoordinatorError.coordinationFailed(error))
+
+        if forWriting {
+          coordinator.coordinate(
+            writingItemAt: lockFileURL,
+            options: [],
+            error: &coordinatorError,
+            byAccessor: coordinationBlock
+          )
+        } else {
+          coordinator.coordinate(
+            readingItemAt: lockFileURL,
+            options: [],
+            error: &coordinatorError,
+            byAccessor: coordinationBlock
+          )
+        }
+
+        if let error = coordinatorError {
+          timeoutWorkItem.cancel()
+          self?.logger.error("❌ File coordination failed: \(error.localizedDescription)")
+          resumeOnce(.failure(MLSDatabaseCoordinatorError.coordinationFailed(error)))
+        }
       }
     }
   }
@@ -350,7 +378,7 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
 // MARK: - Errors
 
 /// Errors that can occur during database coordination
-public enum MLSDatabaseCoordinatorError: Error, LocalizedError {
+enum MLSDatabaseCoordinatorError: Error, LocalizedError {
   case timeout
   case coordinationFailed(NSError)
   case operationNotCompleted

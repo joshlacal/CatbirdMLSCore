@@ -634,7 +634,6 @@ public actor MLSCoreContext {
     sequenceNumber: Int64? = nil,
     senderID: String? = nil
   ) async throws -> String {
-      return try await withMLSUserPermit(for: userDid) { [self] in
     // Capture logger before async work
     let logger = self.logger
 
@@ -680,19 +679,12 @@ public actor MLSCoreContext {
     }
 
     do {
-      // Phase 2 (single-writer): Acquire advisory lock so NSE/app cannot both advance ratchet.
-      let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
-      if !lockAcquired {
-        logger.warning("🔒 [DECRYPT] Advisory lock busy for \(userDid.prefix(20))... - cancelling decryption")
-        throw CancellationError()
-      }
-      defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
-
-      // CRITICAL FIX (2024-12): Use file coordination to prevent NSE conflicts
-      // The NSE may try to write to the database while the main app is decrypting.
-      // Without coordination, this causes "HMAC check failed" corruption.
-      let outcome = try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 15.0) {
-        try await self.decryptOnce(
+      let outcome = try await withMLSExclusiveAccess(
+        userDID: userDid,
+        purpose: .decrypt,
+        timeout: .seconds(15)
+      ) { [self] in
+        try await decryptOnce(
           userDid: userDid,
           groupId: groupId,
           ciphertext: ciphertext,
@@ -706,10 +698,12 @@ public actor MLSCoreContext {
 
       return outcome.plaintext
 
+    } catch is MLSExclusiveAccessError {
+      logger.warning("🔒 [DECRYPT] Exclusive access busy for \(userDid.prefix(20))... - cancelling decryption")
+      throw CancellationError()
     } catch {
       logger.error("[DECRYPT] Failed to decrypt message: \(error.localizedDescription)")
       throw error
-    }
     }
   }
 
@@ -737,7 +731,6 @@ public actor MLSCoreContext {
     sequenceNumber: Int64? = nil,
     senderID: String? = nil
   ) async throws -> (plaintext: String, embed: MLSEmbedData?) {
-    return try await withMLSUserPermit(for: userDid) {
     // Capture logger before async work
     let logger = self.logger
 
@@ -771,17 +764,12 @@ public actor MLSCoreContext {
     }
 
     do {
-      // Phase 2 (single-writer): Acquire advisory lock so NSE/app cannot both advance ratchet.
-      let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
-      if !lockAcquired {
-        logger.warning("🔒 [DECRYPT+EMBED] Advisory lock busy for \(userDid.prefix(20))... - cancelling decryption")
-        throw CancellationError()
-      }
-      defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
-
-      // CRITICAL FIX (2024-12): Use file coordination to prevent NSE conflicts
-      let outcome = try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 15.0) {
-        try await self.decryptOnce(
+      let outcome = try await withMLSExclusiveAccess(
+        userDID: userDid,
+        purpose: .decrypt,
+        timeout: .seconds(15)
+      ) { [self] in
+        try await decryptOnce(
           userDid: userDid,
           groupId: groupId,
           ciphertext: ciphertext,
@@ -795,10 +783,12 @@ public actor MLSCoreContext {
 
       return (outcome.plaintext, outcome.embed)
 
+    } catch is MLSExclusiveAccessError {
+      logger.warning("🔒 [DECRYPT+EMBED] Exclusive access busy for \(userDid.prefix(20))... - cancelling decryption")
+      throw CancellationError()
     } catch {
       logger.error("[DECRYPT+EMBED] Failed to decrypt message: \(error.localizedDescription)")
       throw error
-    }
     }
   }
 
@@ -835,7 +825,6 @@ public actor MLSCoreContext {
     conversationID: String,
     messageID: String
   ) async throws -> NotificationDecryptResult {
-    return try await withMLSUserPermit(for: userDid) {
     let logger = self.logger
 
     logger.info("[DECRYPT-NOTIF] Starting ephemeral decryption for notification")
@@ -871,25 +860,13 @@ public actor MLSCoreContext {
       logger.debug("[DECRYPT-NOTIF] Pre-lock cache check failed (continuing): \(error.localizedDescription)")
     }
 
-    // CRITICAL FIX (2024-12): Use file coordination for NSE database access
-    // The NSE and main app run as separate processes. Without coordination,
-    // concurrent writes to the encrypted database can cause:
-    // - "HMAC check failed" (page corruption from simultaneous writes)
-    // - "SQLite error 7: out of memory" (file descriptor exhaustion)
-    // - Ratchet state desync (NSE advances epoch but main app doesn't know)
-    //
-    // By wrapping the entire decrypt+store operation in file coordination,
-    // we ensure exclusive access during the critical section.
     do {
-      let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
-      if !lockAcquired {
-        logger.warning("🔒 [DECRYPT-NOTIF] Advisory lock busy for \(userDid.prefix(20))... - cancelling decryption")
-        throw CancellationError()
-      }
-      defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
-
-      let outcome = try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 15.0) {
-        try await self.decryptOnce(
+      let outcome = try await withMLSExclusiveAccess(
+        userDID: userDid,
+        purpose: .decrypt,
+        timeout: .seconds(5)
+      ) { [self] in
+        try await decryptOnce(
           userDid: userDid,
           groupId: groupId,
           ciphertext: ciphertext,
@@ -902,14 +879,16 @@ public actor MLSCoreContext {
         )
       }
 
-      logger.info("✅ [DECRYPT-NOTIF] Ephemeral decryption SUCCESS (with file coordination)")
+      logger.info("✅ [DECRYPT-NOTIF] Ephemeral decryption SUCCESS")
       logger.debug("   Sender DID: \(outcome.senderDID?.prefix(24) ?? "unknown")...")
       return NotificationDecryptResult(plaintext: outcome.plaintext, senderDID: outcome.senderDID)
 
+    } catch is MLSExclusiveAccessError {
+      logger.warning("🔒 [DECRYPT-NOTIF] Exclusive access busy for \(userDid.prefix(20))... - cancelling decryption")
+      throw CancellationError()
     } catch {
       logger.error("❌ [DECRYPT-NOTIF] Ephemeral decryption FAILED: \(error.localizedDescription)")
       throw error
-    }
     }
   }
 
@@ -944,49 +923,46 @@ public actor MLSCoreContext {
     groupId: Data,
     messages: [(ciphertext: Data, conversationID: String, messageID: String)]
   ) async throws -> [String] {
-    return try await withMLSUserPermit(for: userDid) {
     // Capture logger before async work
     let logger = self.logger
 
     logger.info("[DECRYPT-BATCH] Decrypting \(messages.count) messages")
 
-    // Phase 2 (single-writer): Acquire advisory lock so NSE/app cannot both advance ratchet.
-    let lockAcquired = MLSAdvisoryLockCoordinator.shared.acquireExclusiveLock(for: userDid, timeout: 5.0)
-    if !lockAcquired {
-      logger.warning("🔒 [DECRYPT-BATCH] Advisory lock busy for \(userDid.prefix(20))... - cancelling batch")
-      throw CancellationError()
-    }
-    defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDid) }
+    do {
+      return try await withMLSExclusiveAccess(
+        userDID: userDid,
+        purpose: .decryptBatch,
+        timeout: .seconds(15)
+      ) { [self] in
+        var plaintexts: [String] = []
 
-    // CRITICAL FIX (2024-12): Use single coordination block for entire batch
-    // This is more efficient than acquiring/releasing the lock for each message
-    return try await MLSDatabaseCoordinator.shared.performWrite(for: userDid, timeout: 30.0) {
-      var plaintexts: [String] = []
-      
-      for (ciphertext, conversationID, messageID) in messages {
-        do {
-          // Call decryptOnce directly to avoid double-coordination
-          let outcome = try await self.decryptOnce(
-            userDid: userDid,
-            groupId: groupId,
-            ciphertext: ciphertext,
-            conversationID: conversationID,
-            messageID: messageID,
-            epoch: nil,
-            sequenceNumber: nil,
-            senderID: nil
-          )
-          plaintexts.append(outcome.plaintext)
-        } catch {
-          logger.error(
-            "[DECRYPT-BATCH] Failed to decrypt message \(messageID): \(error.localizedDescription)")
-          throw error
+        for (ciphertext, conversationID, messageID) in messages {
+          do {
+            // Call decryptOnce directly to avoid double-coordination
+            let outcome = try await decryptOnce(
+              userDid: userDid,
+              groupId: groupId,
+              ciphertext: ciphertext,
+              conversationID: conversationID,
+              messageID: messageID,
+              epoch: nil,
+              sequenceNumber: nil,
+              senderID: nil
+            )
+            plaintexts.append(outcome.plaintext)
+          } catch {
+            logger.error(
+              "[DECRYPT-BATCH] Failed to decrypt message \(messageID): \(error.localizedDescription)")
+            throw error
+          }
         }
+
+        logger.info("[DECRYPT-BATCH] Successfully decrypted \(plaintexts.count) messages")
+        return plaintexts
       }
-      
-      logger.info("[DECRYPT-BATCH] Successfully decrypted \(plaintexts.count) messages")
-      return plaintexts
-    }
+    } catch is MLSExclusiveAccessError {
+      logger.warning("🔒 [DECRYPT-BATCH] Exclusive access busy for \(userDid.prefix(20))... - cancelling batch")
+      throw CancellationError()
     }
   }
 

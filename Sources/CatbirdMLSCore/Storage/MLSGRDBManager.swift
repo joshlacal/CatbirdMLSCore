@@ -724,57 +724,67 @@ public actor MLSGRDBManager {
   /// - Returns: True if close completed successfully, false if timed out
   @discardableResult
   public func closeDatabaseAndDrain(for userDID: String, timeout: TimeInterval = 5.0) async -> Bool {
-    await withMLSUserPermit(for: userDID) {
-      logger.info("🛑 Closing and draining database for user: \(userDID, privacy: .private)")
+    let duration = Duration.milliseconds(Int(timeout * 1000))
 
-      // Prevent new opens while we're trying to close.
-      pendingCloseOperations.insert(userDID)
-      updateConnectionState(.closing, for: userDID)
-      defer {
-        pendingCloseOperations.remove(userDID)
-      }
+    do {
+      return try await withMLSExclusiveAccess(
+        userDID: userDID,
+        purpose: .closeAndDrain,
+        timeout: duration
+      ) { [self] in
+        logger.info("🛑 Closing and draining database for user: \(userDID, privacy: .private)")
 
-      // Clear active user if this was the active database
-      if activeUserDID == userDID {
-        activeUserDID = nil
-      }
-
-      guard let db = databases[userDID] else {
-        logger.debug("   No database to close for user: \(userDID, privacy: .private)")
-        updateConnectionState(.closed, for: userDID)
-        return true
-      }
-
-      do {
-        // Require advisory lock: never checkpoint/close while another process may be writing.
-        let lock = try requireAdvisoryLock(for: userDID, timeout: min(3.0, timeout), context: "close")
-        defer { lock.release() }
-
-        logger.info("📀 [Checkpoint] Starting TRUNCATE checkpoint for: \(userDID.prefix(20), privacy: .private)")
-        let checkpointStart = Date()
-
-        try await MLSDatabaseCoordinator.shared.performWrite(for: userDID, timeout: timeout) {
-          try db.writeWithoutTransaction { database in
-            try database.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
-          }
+        // Prevent new opens while we're trying to close.
+        pendingCloseOperations.insert(userDID)
+        updateConnectionState(.closing, for: userDID)
+        defer {
+          pendingCloseOperations.remove(userDID)
         }
 
-        let duration = Date().timeIntervalSince(checkpointStart)
-        let durationStr = String(format: "%.2f", duration)
-        logger.info("✅ [Checkpoint] TRUNCATE completed in \(durationStr)s")
+        // Clear active user if this was the active database
+        if activeUserDID == userDID {
+          activeUserDID = nil
+        }
 
-        // Fail-closed: do not interrupt in-flight queries; if close cannot complete, report busy.
-        try db.close()
-        databases.removeValue(forKey: userDID)
-        updateConnectionState(.closed, for: userDID)
-        logger.info("✅ Database closed and drained for user: \(userDID, privacy: .private)")
-        return true
+        guard let db = databases[userDID] else {
+          logger.debug("   No database to close for user: \(userDID, privacy: .private)")
+          updateConnectionState(.closed, for: userDID)
+          return true
+        }
 
-      } catch {
-        updateConnectionState(.open, for: userDID)
-        logger.warning("🚨 Database drain/checkpoint did not complete for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
-        return false
+        do {
+          logger.info("📀 [Checkpoint] Starting TRUNCATE checkpoint for: \(userDID.prefix(20), privacy: .private)")
+          let checkpointStart = Date()
+
+          try await MLSDatabaseCoordinator.shared.performWrite(for: userDID, timeout: timeout) {
+            try db.writeWithoutTransaction { database in
+              try database.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+            }
+          }
+
+          let duration = Date().timeIntervalSince(checkpointStart)
+          let durationStr = String(format: "%.2f", duration)
+          logger.info("✅ [Checkpoint] TRUNCATE completed in \(durationStr)s")
+
+          // Fail-closed: do not interrupt in-flight queries; if close cannot complete, report busy.
+          try db.close()
+          databases.removeValue(forKey: userDID)
+          updateConnectionState(.closed, for: userDID)
+          logger.info("✅ Database closed and drained for user: \(userDID, privacy: .private)")
+          return true
+
+        } catch {
+          updateConnectionState(.open, for: userDID)
+          logger.warning("🚨 Database drain/checkpoint did not complete for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
+          return false
+        }
       }
+    } catch is MLSExclusiveAccessError {
+      logger.warning("🔒 [Close] Exclusive access busy - close/drain cancelled for \(userDID.prefix(20), privacy: .private)")
+      return false
+    } catch {
+      logger.warning("🔒 [Close] Exclusive access error: \(error.localizedDescription)")
+      return false
     }
   }
   
@@ -787,31 +797,45 @@ public actor MLSGRDBManager {
   /// - Parameter userDID: User's decentralized identifier
   @discardableResult
   public func releaseConnectionWithoutCheckpoint(for userDID: String) async -> Bool {
-    logger.info("🔓 [Release] Releasing connection WITHOUT checkpoint for: \(userDID.prefix(20), privacy: .private)")
-
-    // Clear active user if this was the active database
-    if activeUserDID == userDID {
-      activeUserDID = nil
-    }
-
-    guard let db = databases[userDID] else {
-      logger.debug("   No database connection to release for user: \(userDID.prefix(20), privacy: .private)")
-      updateConnectionState(.closed, for: userDID)
-      return true
-    }
-
-    updateConnectionState(.closing, for: userDID)
-
-    // Fail-closed: do not interrupt queries. If we can't close cleanly, don't acknowledge.
     do {
-      try db.close()
-      databases.removeValue(forKey: userDID)
-      updateConnectionState(.closed, for: userDID)
-      logger.info("🔓 [Release] Connection released for: \(userDID.prefix(20), privacy: .private)")
-      return true
+      return try await withMLSExclusiveAccess(
+        userDID: userDID,
+        purpose: .closeAndDrain,
+        timeout: .seconds(2)
+      ) { [self] in
+        logger.info("🔓 [Release] Releasing connection WITHOUT checkpoint for: \(userDID.prefix(20), privacy: .private)")
+
+        // Clear active user if this was the active database
+        if activeUserDID == userDID {
+          activeUserDID = nil
+        }
+
+        guard let db = databases[userDID] else {
+          logger.debug("   No database connection to release for user: \(userDID.prefix(20), privacy: .private)")
+          updateConnectionState(.closed, for: userDID)
+          return true
+        }
+
+        updateConnectionState(.closing, for: userDID)
+
+        // Fail-closed: do not interrupt queries. If we can't close cleanly, don't acknowledge.
+        do {
+          try db.close()
+          databases.removeValue(forKey: userDID)
+          updateConnectionState(.closed, for: userDID)
+          logger.info("🔓 [Release] Connection released for: \(userDID.prefix(20), privacy: .private)")
+          return true
+        } catch {
+          updateConnectionState(.open, for: userDID)
+          logger.warning("⚠️ [Release] Could not close connection (busy): \(error.localizedDescription)")
+          return false
+        }
+      }
+    } catch is MLSExclusiveAccessError {
+      logger.warning("🔒 [Release] Exclusive access busy - not releasing connection for \(userDID.prefix(20), privacy: .private)")
+      return false
     } catch {
-      updateConnectionState(.open, for: userDID)
-      logger.warning("⚠️ [Release] Could not close connection (busy): \(error.localizedDescription)")
+      logger.warning("🔒 [Release] Exclusive access error: \(error.localizedDescription)")
       return false
     }
   }
@@ -1320,7 +1344,7 @@ public actor MLSGRDBManager {
   ///
   /// IMPORTANT: This MUST NEVER run automatically.
   public func quarantineAndResetDatabase(for userDID: String) async throws {
-    try await withMLSUserPermit(for: userDID) { [self] in
+    try await withMLSExclusiveAccess(userDID: userDID, purpose: .maintenance, timeout: .seconds(10)) { [self] in
       logger.error("🧰 [Diagnostics] Quarantining + resetting MLS storage for: \(userDID.prefix(20), privacy: .private)")
 
       // Ensure the pool is fully closed first (fail-closed; do not interrupt queries).
@@ -1609,16 +1633,17 @@ public actor MLSGRDBManager {
       return
     }
 
-    let lock = try requireAdvisoryLock(for: userDID, timeout: 3.0, context: "checkpoint")
-    defer { lock.release() }
-
-    try await MLSDatabaseCoordinator.shared.performWrite(for: userDID, timeout: 5.0) {
-      try await database.writeWithoutTransaction { db in
-        try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+    try await withMLSExclusiveAccess(userDID: userDID, purpose: .checkpoint, timeout: .seconds(5)) {
+      let checkpointStart = Date()
+      try await MLSDatabaseCoordinator.shared.performWrite(for: userDID, timeout: 5.0) {
+        try await database.writeWithoutTransaction { db in
+          try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+        }
       }
+      let duration = Date().timeIntervalSince(checkpointStart)
+      let durationStr = String(format: "%.2f", duration)
+      logger.info("✅ [Checkpoint] TRUNCATE completed in \(durationStr)s for user: \(userDID, privacy: .private)")
     }
-
-    logger.info("✅ Database checkpoint completed for user: \(userDID, privacy: .private)")
   }
 
   /// Check if database exists for user

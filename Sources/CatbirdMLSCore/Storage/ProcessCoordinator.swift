@@ -1,46 +1,47 @@
 import Foundation
 import Darwin
+import OSLog
 
 /// Cross-process coordinator using BSD flock on a shared App Group file.
 public final class ProcessCoordinator {
   public static let shared = ProcessCoordinator()
 
+  private let logger = Logger(subsystem: "blue.catbird.mls", category: "ProcessCoordinator")
   private let lockURL: URL
-  private var fd: Int32 = -1
 
   private init() {
-    let container = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared")!
-    lockURL = container.appendingPathComponent("mls_state.lock")
-  }
-
-  /// Acquire an exclusive lock (blocking).
-  private func enterExclusive() throws {
-    fd = open(lockURL.path, O_CREAT | O_RDWR, 0o666)
-    if fd < 0 {
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    if let container = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared"
+    ) {
+      lockURL = container.appendingPathComponent("mls_state.lock")
+    } else {
+      // Fallback: prevents crashes in environments without the App Group entitlement (e.g. unit tests).
+      let base =
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? FileManager.default.temporaryDirectory
+      let fallbackDir = base.appendingPathComponent("CatbirdMLSCore", isDirectory: true)
+      try? FileManager.default.createDirectory(at: fallbackDir, withIntermediateDirectories: true)
+      lockURL = fallbackDir.appendingPathComponent("mls_state.lock")
+      logger.warning("⚠️ [ProcessCoordinator] App Group container not available; using fallback lock at \(self.lockURL.path, privacy: .private)")
     }
-    if flock(fd, LOCK_EX) != 0 {
-      let code = errno
-      close(fd)
-      fd = -1
-      throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
-    }
-  }
-
-  /// Release the lock.
-  private func exitExclusive() {
-    guard fd >= 0 else { return }
-    flock(fd, LOCK_UN)
-    close(fd)
-    fd = -1
   }
 
   /// Perform an operation under exclusive lock.
   @discardableResult
   public func performExclusive<T>(_ block: () throws -> T) throws -> T {
-    try enterExclusive()
-    defer { exitExclusive() }
+    let fd = open(lockURL.path, O_CREAT | O_RDWR, 0o666)
+    if fd < 0 {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    defer {
+      flock(fd, LOCK_UN)
+      close(fd)
+    }
+
+    if flock(fd, LOCK_EX) != 0 {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+
     return try block()
   }
 

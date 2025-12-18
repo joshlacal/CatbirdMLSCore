@@ -39,11 +39,11 @@ import OSLog
 /// defer { if locked { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDID) } }
 /// // ... open database ...
 /// ```
-public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
+final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   
   // MARK: - Singleton
   
-  public static let shared = MLSAdvisoryLockCoordinator()
+  static let shared = MLSAdvisoryLockCoordinator()
   
   // MARK: - Properties
   
@@ -53,7 +53,12 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   private let lockDirectory: URL
   
   /// Active file descriptors for held locks (keyed by userDID)
-  private var heldLocks: [String: Int32] = [:]
+  private struct HeldLock {
+    var fd: Int32
+    var refCount: Int
+  }
+
+  private var heldLocks: [String: HeldLock] = [:]
   
   /// Serial queue for thread-safe lock management
   private let queue = DispatchQueue(label: "blue.catbird.mls.advisoryLockCoordinator")
@@ -93,13 +98,15 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   ///   - userDID: User's decentralized identifier
   ///   - timeout: Maximum time to wait for the lock (seconds)
   /// - Returns: true if lock was acquired, false if timed out
-  public func acquireExclusiveLock(for userDID: String, timeout: TimeInterval) -> Bool {
+  func acquireExclusiveLock(for userDID: String, timeout: TimeInterval) -> Bool {
     return queue.sync {
       logger.info("🔐 [AdvisoryLock] Acquiring exclusive lock for: \(userDID.prefix(20), privacy: .private)")
       let startTime = Date()
       
       // Check if we already hold this lock
-      if heldLocks[userDID] != nil {
+      if var held = heldLocks[userDID] {
+        held.refCount += 1
+        heldLocks[userDID] = held
         logger.debug("   Already holding lock for this user")
         return true
       }
@@ -129,7 +136,7 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
         
         if result == 0 {
           // Lock acquired successfully
-          heldLocks[userDID] = fd
+          heldLocks[userDID] = HeldLock(fd: fd, refCount: 1)
           let duration = Date().timeIntervalSince(startTime)
           let durationStr = String(format: "%.2f", duration)
           logger.info("🔐 [AdvisoryLock] Acquired exclusive lock in \(durationStr)s for: \(userDID.prefix(20), privacy: .private)")
@@ -158,10 +165,12 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   ///
   /// - Parameter userDID: User's decentralized identifier
   /// - Returns: true if lock was acquired, false if another process holds it
-  public func tryAcquireExclusiveLock(for userDID: String) -> Bool {
+  func tryAcquireExclusiveLock(for userDID: String) -> Bool {
     return queue.sync {
       // Check if we already hold this lock
-      if heldLocks[userDID] != nil {
+      if var held = heldLocks[userDID] {
+        held.refCount += 1
+        heldLocks[userDID] = held
         return true
       }
 
@@ -180,7 +189,7 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
 
       let result = fcntl(fd, F_SETLK, &lockInfo)
       if result == 0 {
-        heldLocks[userDID] = fd
+        heldLocks[userDID] = HeldLock(fd: fd, refCount: 1)
         logger.debug("🔐 [AdvisoryLock] Acquired (non-blocking) for: \(userDID.prefix(20), privacy: .private)")
         return true
       }
@@ -194,12 +203,22 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   /// Release an exclusive lock for database access.
   ///
   /// - Parameter userDID: User's decentralized identifier
-  public func releaseExclusiveLock(for userDID: String) {
+  func releaseExclusiveLock(for userDID: String) {
     queue.sync {
-      guard let fd = heldLocks.removeValue(forKey: userDID) else {
+      guard var held = heldLocks[userDID] else {
         logger.debug("🔓 [AdvisoryLock] No lock held for: \(userDID.prefix(20), privacy: .private)")
         return
       }
+
+      held.refCount -= 1
+      if held.refCount > 0 {
+        heldLocks[userDID] = held
+        logger.debug("🔓 [AdvisoryLock] Decremented refCount=\(held.refCount) for: \(userDID.prefix(20), privacy: .private)")
+        return
+      }
+
+      let fd = held.fd
+      heldLocks.removeValue(forKey: userDID)
       
       // Configure unlock structure
       var lockInfo = flock()
@@ -222,7 +241,7 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   ///
   /// - Parameter userDID: User's decentralized identifier
   /// - Returns: true if we hold the lock
-  public func isLockHeld(for userDID: String) -> Bool {
+  func isLockHeld(for userDID: String) -> Bool {
     return queue.sync {
       return heldLocks[userDID] != nil
     }
@@ -230,9 +249,10 @@ public final class MLSAdvisoryLockCoordinator: @unchecked Sendable {
   
   /// Release all held locks.
   /// Call this during cleanup/shutdown.
-  public func releaseAllLocks() {
+  func releaseAllLocks() {
     queue.sync {
-      for (userDID, fd) in heldLocks {
+      for (userDID, held) in heldLocks {
+        let fd = held.fd
         var lockInfo = flock()
         lockInfo.l_type = Int16(F_UNLCK)
         lockInfo.l_whence = Int16(SEEK_SET)
