@@ -192,4 +192,4 @@ SQLCipher-related files should live in CatbirdMLSCore **only**:
 
 ## License
 
-Proprietary - Catbird App
+MIT
