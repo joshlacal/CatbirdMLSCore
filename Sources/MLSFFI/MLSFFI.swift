@@ -8,10 +8,10 @@ import Foundation
 // might be in a separate module, or it might be compiled inline into
 // this module. This is a bit of light hackery to work with both.
 #if canImport(MLSFFICore)
-    import MLSFFICore
+import MLSFFICore
 #endif
 
-private extension RustBuffer {
+fileprivate extension RustBuffer {
     // Allocate a new buffer, copying the contents of a `UInt8` array.
     init(bytes: [UInt8]) {
         let rbuf = bytes.withUnsafeBufferPointer { ptr in
@@ -21,7 +21,7 @@ private extension RustBuffer {
     }
 
     static func empty() -> RustBuffer {
-        RustBuffer(capacity: 0, len: 0, data: nil)
+        RustBuffer(capacity: 0, len:0, data: nil)
     }
 
     static func from(_ ptr: UnsafeBufferPointer<UInt8>) -> RustBuffer {
@@ -35,7 +35,7 @@ private extension RustBuffer {
     }
 }
 
-private extension ForeignBytes {
+fileprivate extension ForeignBytes {
     init(bufferPointer: UnsafeBufferPointer<UInt8>) {
         self.init(len: Int32(bufferPointer.count), data: bufferPointer.baseAddress)
     }
@@ -48,7 +48,7 @@ private extension ForeignBytes {
 // Helper classes/extensions that don't change.
 // Someday, this will be in a library of its own.
 
-private extension Data {
+fileprivate extension Data {
     init(rustBuffer: RustBuffer) {
         self.init(
             bytesNoCopy: rustBuffer.data!,
@@ -72,15 +72,15 @@ private extension Data {
 //
 // Instead, the read() method and these helper functions input a tuple of data
 
-private func createReader(data: Data) -> (data: Data, offset: Data.Index) {
+fileprivate func createReader(data: Data) -> (data: Data, offset: Data.Index) {
     (data: data, offset: 0)
 }
 
 // Reads an integer at the current offset, in big-endian order, and advances
 // the offset on success. Throws if reading the integer would move the
 // offset past the end of the buffer.
-private func readInt<T: FixedWidthInteger>(_ reader: inout (data: Data, offset: Data.Index)) throws -> T {
-    let range = reader.offset ..< reader.offset + MemoryLayout<T>.size
+fileprivate func readInt<T: FixedWidthInteger>(_ reader: inout (data: Data, offset: Data.Index)) throws -> T {
+    let range = reader.offset..<reader.offset + MemoryLayout<T>.size
     guard reader.data.count >= range.upperBound else {
         throw UniffiInternalError.bufferOverflow
     }
@@ -90,38 +90,38 @@ private func readInt<T: FixedWidthInteger>(_ reader: inout (data: Data, offset: 
         return value as! T
     }
     var value: T = 0
-    let _ = withUnsafeMutableBytes(of: &value) { reader.data.copyBytes(to: $0, from: range) }
+    let _ = withUnsafeMutableBytes(of: &value, { reader.data.copyBytes(to: $0, from: range)})
     reader.offset = range.upperBound
     return value.bigEndian
 }
 
 // Reads an arbitrary number of bytes, to be used to read
 // raw bytes, this is useful when lifting strings
-private func readBytes(_ reader: inout (data: Data, offset: Data.Index), count: Int) throws -> [UInt8] {
-    let range = reader.offset ..< (reader.offset + count)
+fileprivate func readBytes(_ reader: inout (data: Data, offset: Data.Index), count: Int) throws -> Array<UInt8> {
+    let range = reader.offset..<(reader.offset+count)
     guard reader.data.count >= range.upperBound else {
         throw UniffiInternalError.bufferOverflow
     }
     var value = [UInt8](repeating: 0, count: count)
-    value.withUnsafeMutableBufferPointer { buffer in
+    value.withUnsafeMutableBufferPointer({ buffer in
         reader.data.copyBytes(to: buffer, from: range)
-    }
+    })
     reader.offset = range.upperBound
     return value
 }
 
 // Reads a float at the current offset.
-private func readFloat(_ reader: inout (data: Data, offset: Data.Index)) throws -> Float {
-    return try Float(bitPattern: readInt(&reader))
+fileprivate func readFloat(_ reader: inout (data: Data, offset: Data.Index)) throws -> Float {
+    return Float(bitPattern: try readInt(&reader))
 }
 
 // Reads a float at the current offset.
-private func readDouble(_ reader: inout (data: Data, offset: Data.Index)) throws -> Double {
-    return try Double(bitPattern: readInt(&reader))
+fileprivate func readDouble(_ reader: inout (data: Data, offset: Data.Index)) throws -> Double {
+    return Double(bitPattern: try readInt(&reader))
 }
 
 // Indicates if the offset has reached the end of the buffer.
-private func hasRemaining(_ reader: (data: Data, offset: Data.Index)) -> Bool {
+fileprivate func hasRemaining(_ reader: (data: Data, offset: Data.Index)) -> Bool {
     return reader.offset < reader.data.count
 }
 
@@ -129,11 +129,11 @@ private func hasRemaining(_ reader: (data: Data, offset: Data.Index)) -> Bool {
 // struct, but we use standalone functions instead in order to make external
 // types work.  See the above discussion on Readers for details.
 
-private func createWriter() -> [UInt8] {
+fileprivate func createWriter() -> [UInt8] {
     return []
 }
 
-private func writeBytes<S>(_ writer: inout [UInt8], _ byteArr: S) where S: Sequence, S.Element == UInt8 {
+fileprivate func writeBytes<S>(_ writer: inout [UInt8], _ byteArr: S) where S: Sequence, S.Element == UInt8 {
     writer.append(contentsOf: byteArr)
 }
 
@@ -141,22 +141,22 @@ private func writeBytes<S>(_ writer: inout [UInt8], _ byteArr: S) where S: Seque
 //
 // Warning: make sure what you are trying to write
 // is in the correct type!
-private func writeInt<T: FixedWidthInteger>(_ writer: inout [UInt8], _ value: T) {
+fileprivate func writeInt<T: FixedWidthInteger>(_ writer: inout [UInt8], _ value: T) {
     var value = value.bigEndian
     withUnsafeBytes(of: &value) { writer.append(contentsOf: $0) }
 }
 
-private func writeFloat(_ writer: inout [UInt8], _ value: Float) {
+fileprivate func writeFloat(_ writer: inout [UInt8], _ value: Float) {
     writeInt(&writer, value.bitPattern)
 }
 
-private func writeDouble(_ writer: inout [UInt8], _ value: Double) {
+fileprivate func writeDouble(_ writer: inout [UInt8], _ value: Double) {
     writeInt(&writer, value.bitPattern)
 }
 
 // Protocol for types that transfer other types across the FFI. This is
 // analogous to the Rust trait of the same name.
-private protocol FfiConverter {
+fileprivate protocol FfiConverter {
     associatedtype FfiType
     associatedtype SwiftType
 
@@ -167,19 +167,19 @@ private protocol FfiConverter {
 }
 
 // Types conforming to `Primitive` pass themselves directly over the FFI.
-private protocol FfiConverterPrimitive: FfiConverter where FfiType == SwiftType {}
+fileprivate protocol FfiConverterPrimitive: FfiConverter where FfiType == SwiftType { }
 
 extension FfiConverterPrimitive {
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ value: FfiType) throws -> SwiftType {
         return value
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ value: SwiftType) -> FfiType {
         return value
     }
@@ -187,12 +187,12 @@ extension FfiConverterPrimitive {
 
 // Types conforming to `FfiConverterRustBuffer` lift and lower into a `RustBuffer`.
 // Used for complex types where it's hard to write a custom lift/lower.
-private protocol FfiConverterRustBuffer: FfiConverter where FfiType == RustBuffer {}
+fileprivate protocol FfiConverterRustBuffer: FfiConverter where FfiType == RustBuffer {}
 
 extension FfiConverterRustBuffer {
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ buf: RustBuffer) throws -> SwiftType {
         var reader = createReader(data: Data(rustBuffer: buf))
         let value = try read(from: &reader)
@@ -203,19 +203,18 @@ extension FfiConverterRustBuffer {
         return value
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ value: SwiftType) -> RustBuffer {
-        var writer = createWriter()
-        write(value, into: &writer)
-        return RustBuffer(bytes: writer)
+          var writer = createWriter()
+          write(value, into: &writer)
+          return RustBuffer(bytes: writer)
     }
 }
-
 // An error type for FFI errors. These errors occur at the UniFFI level, not
 // the library level.
-private enum UniffiInternalError: LocalizedError {
+fileprivate enum UniffiInternalError: LocalizedError {
     case bufferOverflow
     case incompleteData
     case unexpectedOptionalTag
@@ -241,24 +240,24 @@ private enum UniffiInternalError: LocalizedError {
     }
 }
 
-private extension NSLock {
+fileprivate extension NSLock {
     func withLock<T>(f: () throws -> T) rethrows -> T {
-        lock()
+        self.lock()
         defer { self.unlock() }
         return try f()
     }
 }
 
-private let CALL_SUCCESS: Int8 = 0
-private let CALL_ERROR: Int8 = 1
-private let CALL_UNEXPECTED_ERROR: Int8 = 2
-private let CALL_CANCELLED: Int8 = 3
+fileprivate let CALL_SUCCESS: Int8 = 0
+fileprivate let CALL_ERROR: Int8 = 1
+fileprivate let CALL_UNEXPECTED_ERROR: Int8 = 2
+fileprivate let CALL_CANCELLED: Int8 = 3
 
-private extension RustCallStatus {
+fileprivate extension RustCallStatus {
     init() {
         self.init(
             code: CALL_SUCCESS,
-            errorBuf: RustBuffer(
+            errorBuf: RustBuffer.init(
                 capacity: 0,
                 len: 0,
                 data: nil
@@ -274,8 +273,7 @@ private func rustCall<T>(_ callback: (UnsafeMutablePointer<RustCallStatus>) -> T
 
 private func rustCallWithError<T, E: Swift.Error>(
     _ errorHandler: @escaping (RustBuffer) throws -> E,
-    _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T
-) throws -> T {
+    _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T) throws -> T {
     try makeRustCall(callback, errorHandler: errorHandler)
 }
 
@@ -284,7 +282,7 @@ private func makeRustCall<T, E: Swift.Error>(
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
     uniffiEnsureInitialized()
-    var callStatus = RustCallStatus()
+    var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
     return returnedVal
@@ -295,44 +293,44 @@ private func uniffiCheckCallStatus<E: Swift.Error>(
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws {
     switch callStatus.code {
-    case CALL_SUCCESS:
-        return
+        case CALL_SUCCESS:
+            return
 
-    case CALL_ERROR:
-        if let errorHandler = errorHandler {
-            throw try errorHandler(callStatus.errorBuf)
-        } else {
-            callStatus.errorBuf.deallocate()
-            throw UniffiInternalError.unexpectedRustCallError
-        }
+        case CALL_ERROR:
+            if let errorHandler = errorHandler {
+                throw try errorHandler(callStatus.errorBuf)
+            } else {
+                callStatus.errorBuf.deallocate()
+                throw UniffiInternalError.unexpectedRustCallError
+            }
 
-    case CALL_UNEXPECTED_ERROR:
-        // When the rust code sees a panic, it tries to construct a RustBuffer
-        // with the message.  But if that code panics, then it just sends back
-        // an empty buffer.
-        if callStatus.errorBuf.len > 0 {
-            throw try UniffiInternalError.rustPanic(FfiConverterString.lift(callStatus.errorBuf))
-        } else {
-            callStatus.errorBuf.deallocate()
-            throw UniffiInternalError.rustPanic("Rust panic")
-        }
+        case CALL_UNEXPECTED_ERROR:
+            // When the rust code sees a panic, it tries to construct a RustBuffer
+            // with the message.  But if that code panics, then it just sends back
+            // an empty buffer.
+            if callStatus.errorBuf.len > 0 {
+                throw UniffiInternalError.rustPanic(try FfiConverterString.lift(callStatus.errorBuf))
+            } else {
+                callStatus.errorBuf.deallocate()
+                throw UniffiInternalError.rustPanic("Rust panic")
+            }
 
-    case CALL_CANCELLED:
-        fatalError("Cancellation not supported yet")
+        case CALL_CANCELLED:
+            fatalError("Cancellation not supported yet")
 
-    default:
-        throw UniffiInternalError.unexpectedRustCallStatusCode
+        default:
+            throw UniffiInternalError.unexpectedRustCallStatusCode
     }
 }
 
 private func uniffiTraitInterfaceCall<T>(
     callStatus: UnsafeMutablePointer<RustCallStatus>,
     makeCall: () throws -> T,
-    writeReturn: (T) -> Void
+    writeReturn: (T) -> ()
 ) {
     do {
         try writeReturn(makeCall())
-    } catch {
+    } catch let error {
         callStatus.pointee.code = CALL_UNEXPECTED_ERROR
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
@@ -341,7 +339,7 @@ private func uniffiTraitInterfaceCall<T>(
 private func uniffiTraitInterfaceCallWithError<T, E>(
     callStatus: UnsafeMutablePointer<RustCallStatus>,
     makeCall: () throws -> T,
-    writeReturn: (T) -> Void,
+    writeReturn: (T) -> (),
     lowerError: (E) -> RustBuffer
 ) {
     do {
@@ -354,8 +352,7 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-
-private class UniffiHandleMap<T> {
+fileprivate class UniffiHandleMap<T> {
     private var map: [UInt64: T] = [:]
     private let lock = NSLock()
     private var currentHandle: UInt64 = 1
@@ -369,7 +366,7 @@ private class UniffiHandleMap<T> {
         }
     }
 
-    func get(handle: UInt64) throws -> T {
+     func get(handle: UInt64) throws -> T {
         try lock.withLock {
             guard let obj = map[handle] else {
                 throw UniffiInternalError.unexpectedStaleHandle
@@ -389,16 +386,20 @@ private class UniffiHandleMap<T> {
     }
 
     var count: Int {
-        map.count
+        get {
+            map.count
+        }
     }
 }
 
+
 // Public interface members begin here.
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterUInt32: FfiConverterPrimitive {
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
 
@@ -412,9 +413,9 @@ private struct FfiConverterUInt32: FfiConverterPrimitive {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterUInt64: FfiConverterPrimitive {
+fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
 
@@ -428,9 +429,9 @@ private struct FfiConverterUInt64: FfiConverterPrimitive {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterBool: FfiConverter {
+fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
 
@@ -452,9 +453,9 @@ private struct FfiConverterBool: FfiConverter {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterString: FfiConverter {
+fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
 
@@ -482,7 +483,7 @@ private struct FfiConverterString: FfiConverter {
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> String {
         let len: Int32 = try readInt(&buf)
-        return try String(bytes: readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!
+        return String(bytes: try readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!
     }
 
     public static func write(_ value: String, into buf: inout [UInt8]) {
@@ -493,14 +494,14 @@ private struct FfiConverterString: FfiConverter {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterData: FfiConverterRustBuffer {
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
     typealias SwiftType = Data
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
         let len: Int32 = try readInt(&buf)
-        return try Data(readBytes(&buf, count: Int(len)))
+        return Data(try readBytes(&buf, count: Int(len)))
     }
 
     public static func write(_ value: Data, into buf: inout [UInt8]) {
@@ -510,6 +511,9 @@ private struct FfiConverterData: FfiConverterRustBuffer {
     }
 }
 
+
+
+
 /**
  * MLS context wrapper for FFI
  *
@@ -518,26 +522,27 @@ private struct FfiConverterData: FfiConverterRustBuffer {
  * - Swift actor provides higher-level synchronization
  * - Per-DID contexts are isolated (no shared state across accounts)
  */
-public protocol MlsContextProtocol: AnyObject {
-    func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult
-
+public protocol MlsContextProtocol : AnyObject {
+    
+    func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws  -> AddMembersResult
+    
     /**
      * Async variant of add_members - offloads crypto work to avoid blocking
      */
-    func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult
-
+    func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws  -> AddMembersResult
+    
     /**
      * Clear pending commit for a group
      * This should be called when a commit is rejected by the delivery service
      * to clean up pending state in OpenMLS
      */
-    func clearPendingCommit(groupId: Data) throws
-
+    func clearPendingCommit(groupId: Data) throws 
+    
     /**
      * Commit all pending proposals that have been validated and stored
      */
-    func commitPendingProposals(groupId: Data) throws -> Data
-
+    func commitPendingProposals(groupId: Data) throws  -> Data
+    
     /**
      * Compute the hash reference for a serialized KeyPackage
      *
@@ -549,21 +554,21 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Hash reference bytes
      * - Throws: MLSError if deserialization or hashing fails
      */
-    func computeKeyPackageHash(keyPackageBytes: Data) throws -> Data
-
-    func createExternalCommit(groupInfoBytes: Data, identityBytes: Data) throws -> ExternalCommitResult
-
-    func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data) throws -> ExternalCommitResult
-
-    func createGroup(identityBytes: Data, config: GroupConfig?) throws -> GroupCreationResult
-
+    func computeKeyPackageHash(keyPackageBytes: Data) throws  -> Data
+    
+    func createExternalCommit(groupInfoBytes: Data, identityBytes: Data) throws  -> ExternalCommitResult
+    
+    func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data) throws  -> ExternalCommitResult
+    
+    func createGroup(identityBytes: Data, config: GroupConfig?) throws  -> GroupCreationResult
+    
     /**
      * Async variant of create_group - offloads crypto work to avoid blocking
      */
-    func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws -> GroupCreationResult
-
-    func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult
-
+    func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws  -> GroupCreationResult
+    
+    func createKeyPackage(identityBytes: Data) throws  -> KeyPackageResult
+    
     /**
      * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
      *
@@ -578,8 +583,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: true if found in manifest, false otherwise
      * - Throws: MLSError if context is not initialized or hex is invalid
      */
-    func debugCheckKeyPackageHash(hashHex: String) throws -> Bool
-
+    func debugCheckKeyPackageHash(hashHex: String) throws  -> Bool
+    
     /**
      * Get detailed debug information about all group members
      *
@@ -592,8 +597,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: GroupDebugInfo with all member details
      * - Throws: MLSError if group not found
      */
-    func debugGroupMembers(groupId: Data) throws -> GroupDebugInfo
-
+    func debugGroupMembers(groupId: Data) throws  -> GroupDebugInfo
+    
     /**
      * 🔍 DEBUG: List all key package hashes from manifest storage
      *
@@ -604,21 +609,21 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Array of hex-encoded hash references
      * - Throws: MLSError if context is not initialized
      */
-    func debugListKeyPackageHashes() throws -> [String]
-
-    func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult
-
+    func debugListKeyPackageHashes() throws  -> [String]
+    
+    func decryptMessage(groupId: Data, ciphertext: Data) throws  -> DecryptResult
+    
     /**
      * Async variant of decrypt_message - offloads crypto work to avoid blocking
      */
-    func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws -> DecryptResult
-
+    func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws  -> DecryptResult
+    
     /**
      * Delete an MLS group from storage
      * This should be called when a conversation is deleted or the user leaves
      */
-    func deleteGroup(groupId: Data) throws
-
+    func deleteGroup(groupId: Data) throws 
+    
     /**
      * Delete consumed key package bundles from storage
      *
@@ -630,24 +635,38 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Number of bundles successfully deleted
      * - Throws: MLSError if storage operation fails
      */
-    func deleteKeyPackageBundles(hashRefs: [Data]) throws -> UInt64
-
-    func encryptMessage(groupId: Data, plaintext: Data) throws -> EncryptResult
-
+    func deleteKeyPackageBundles(hashRefs: [Data]) throws  -> UInt64
+    
+    /**
+     * Discard a pending external join after server rejection
+     *
+     * CRITICAL: Call this when the delivery service rejects an external commit.
+     * Failure to call this leaves orphaned cryptographic material.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier from create_external_commit result
+     *
+     * # Returns
+     * Ok(()) on success, error if group not found
+     */
+    func discardPendingExternalJoin(groupId: Data) throws 
+    
+    func encryptMessage(groupId: Data, plaintext: Data) throws  -> EncryptResult
+    
     /**
      * Async variant of encrypt_message - offloads crypto work to avoid blocking
      */
-    func encryptMessageAsync(groupId: Data, plaintext: Data) async throws -> EncryptResult
-
+    func encryptMessageAsync(groupId: Data, plaintext: Data) async throws  -> EncryptResult
+    
     /**
      * Manually export epoch secret for a group
      * Call this after creating the conversation record in SQLCipher to ensure
      * the foreign key constraint is satisfied when storing the epoch secret
      */
-    func exportEpochSecret(groupId: Data) throws
-
-    func exportGroupInfo(groupId: Data, signerIdentityBytes: Data) throws -> Data
-
+    func exportEpochSecret(groupId: Data) throws 
+    
+    func exportGroupInfo(groupId: Data, signerIdentityBytes: Data) throws  -> Data
+    
     /**
      * Export a group's state for persistent storage
      *
@@ -659,31 +678,32 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Serialized group state bytes
      * - Throws: MLSError if group not found or serialization fails
      */
-    func exportGroupState(groupId: Data) throws -> Data
-
+    func exportGroupState(groupId: Data) throws  -> Data
+    
     /**
      * Export the identity key pair for backup/recovery
      * This allows the application to store the identity key in a separate secure location (e.g. Keychain)
      * to survive app deletion/reinstall.
      */
-    func exportIdentityKey(identity: String) throws -> Data
-
-    func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret
-
+    func exportIdentityKey(identity: String) throws  -> Data
+    
+    func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws  -> ExportedSecret
+    
     /**
-     * Flush all pending database writes and prepare for shutdown
+     * Flush all pending database writes and CLOSE the database connections.
      *
-     * Call this method before releasing the context during account switching.
-     * This ensures:
-     * 1. All pending SQLite writes are flushed to disk
-     * 2. WAL checkpoint is performed to consolidate data
-     * 3. Database connections are in a clean state for closure
+     * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
+     * is transitioning to background/inactive state. It:
+     * 1. Flushes all pending SQLite writes to disk
+     * 2. Performs WAL checkpoint to consolidate data
+     * 3. CLOSES all database connections by dropping the inner context
+     * 4. Releases all file handles so iOS doesn't kill the app
      *
-     * CRITICAL: After calling this, the context should not be used for new operations.
-     * The Swift side should remove the context from its cache after calling this.
+     * After calling this, the context is CLOSED and cannot be used for any operations.
+     * The Swift side must create a new context if MLS operations are needed again.
      */
-    func flushAndPrepareClose() throws
-
+    func flushAndPrepareClose() throws 
+    
     /**
      * Force flush all pending database writes to disk
      *
@@ -694,10 +714,10 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Nothing on success
      * - Throws: MLSError if flush fails
      */
-    func flushStorage() throws
-
-    func getEpoch(groupId: Data) throws -> UInt64
-
+    func flushStorage() throws 
+    
+    func getEpoch(groupId: Data) throws  -> UInt64
+    
     /**
      * 🔍 DIAGNOSTIC: Get detailed debug state for a group
      *
@@ -713,8 +733,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: JSON string with debug information
      * - Throws: MLSError if group not found
      */
-    func getGroupDebugState(groupId: Data) throws -> String
-
+    func getGroupDebugState(groupId: Data) throws  -> String
+    
     /**
      * Get the current member count of a group
      *
@@ -723,8 +743,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Number of members in the group
      * - Throws: MLSError if group not found
      */
-    func getGroupMemberCount(groupId: Data) throws -> UInt32
-
+    func getGroupMemberCount(groupId: Data) throws  -> UInt32
+    
     /**
      * Serialize the entire MLS storage for persistence
      *
@@ -741,22 +761,27 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Number of cached key package bundles
      * - Throws: MLSError if context is not initialized
      */
-    func getKeyPackageBundleCount() throws -> UInt64
-
+    func getKeyPackageBundleCount() throws  -> UInt64
+    
+    /**
+     * List all pending proposals for a group with details
+     */
+    func getPendingProposalDetails(groupId: Data) throws  -> [PendingProposalDetail]
+    
     /**
      * Get the tree hash for a group at its current epoch
      * Used for tree hash pinning to detect state divergence
      */
-    func getTreeHash(groupId: Data) throws -> TreeHashData
-
+    func getTreeHash(groupId: Data) throws  -> TreeHashData
+    
     /**
      * Check if a group exists in local storage
      * - Parameters:
      * - group_id: Group identifier to check
      * - Returns: true if group exists, false otherwise
      */
-    func groupExists(groupId: Data) -> Bool
-
+    func groupExists(groupId: Data)  -> Bool
+    
     /**
      * Import a group's state from persistent storage
      *
@@ -768,42 +793,55 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Group ID of the imported group
      * - Throws: MLSError if deserialization fails
      */
-    func importGroupState(stateBytes: Data) throws -> Data
-
+    func importGroupState(stateBytes: Data) throws  -> Data
+    
     /**
      * Import an identity key pair from backup/recovery
      * This restores the identity key into the current storage provider
      */
-    func importIdentityKey(identity: String, keyData: Data) throws
-
+    func importIdentityKey(identity: String, keyData: Data) throws 
+    
+    /**
+     * Check if this context has been closed.
+     * Returns true if close_database() or flush_and_prepare_close() has been called.
+     */
+    func isClosed()  -> Bool
+    
+    /**
+     * Perform a launch-time TRUNCATE checkpoint to clear leftover WAL.
+     * Call once at app startup. Safe to call even if context was just created.
+     * Tolerates SQLITE_BUSY gracefully.
+     */
+    func launchCheckpoint() throws 
+    
     /**
      * List all pending proposals for a group
      */
-    func listPendingProposals(groupId: Data) throws -> [ProposalRef]
-
+    func listPendingProposals(groupId: Data) throws  -> [ProposalRef]
+    
     /**
      * Merge a pending commit after validation
      * This should be called after the commit has been accepted by the delivery service
      */
-    func mergePendingCommit(groupId: Data) throws -> UInt64
-
+    func mergePendingCommit(groupId: Data) throws  -> UInt64
+    
     /**
      * Merge a staged commit after validation
      * This should be called after validating incoming commits from other members
      */
-    func mergeStagedCommit(groupId: Data) throws -> UInt64
-
-    func processCommit(groupId: Data, commitData: Data) throws -> ProcessCommitResult
-
-    func processMessage(groupId: Data, messageData: Data) throws -> ProcessedContent
-
+    func mergeStagedCommit(groupId: Data) throws  -> UInt64
+    
+    func processCommit(groupId: Data, commitData: Data) throws  -> ProcessCommitResult
+    
+    func processMessage(groupId: Data, messageData: Data) throws  -> ProcessedContent
+    
     /**
      * Async variant of process_message - offloads crypto work to avoid blocking
      */
-    func processMessageAsync(groupId: Data, messageData: Data) async throws -> ProcessedContent
-
-    func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws -> WelcomeResult
-
+    func processMessageAsync(groupId: Data, messageData: Data) async throws  -> ProcessedContent
+    
+    func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws  -> WelcomeResult
+    
     /**
      * Propose adding a member (does not commit)
      *
@@ -817,8 +855,8 @@ public protocol MlsContextProtocol: AnyObject {
      * # Returns
      * ProposeResult containing proposal message to send and reference for tracking
      */
-    func proposeAddMember(groupId: Data, keyPackageData: Data) throws -> ProposeResult
-
+    func proposeAddMember(groupId: Data, keyPackageData: Data) throws  -> ProposeResult
+    
     /**
      * Propose removing a member (does not commit)
      *
@@ -834,8 +872,8 @@ public protocol MlsContextProtocol: AnyObject {
      * # Errors
      * * `MemberNotFound` - Member not in group
      */
-    func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws -> ProposeResult
-
+    func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws  -> ProposeResult
+    
     /**
      * Propose self-update (does not commit)
      *
@@ -848,8 +886,8 @@ public protocol MlsContextProtocol: AnyObject {
      * # Returns
      * ProposeResult containing proposal message to send and reference for tracking
      */
-    func proposeSelfUpdate(groupId: Data) throws -> ProposeResult
-
+    func proposeSelfUpdate(groupId: Data) throws  -> ProposeResult
+    
     /**
      * Remove members from the group (cryptographically secure)
      *
@@ -872,13 +910,13 @@ public protocol MlsContextProtocol: AnyObject {
      * * `GroupNotFound` - Group does not exist
      * * `OpenMLSError` - OpenMLS operation failed
      */
-    func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data
-
+    func removeMembers(groupId: Data, memberIdentities: [Data]) throws  -> Data
+    
     /**
      * Remove a proposal from the proposal queue
      */
-    func removeProposal(groupId: Data, proposalRef: ProposalRef) throws
-
+    func removeProposal(groupId: Data, proposalRef: ProposalRef) throws 
+    
     /**
      * Create a self-update commit to refresh own leaf node
      * This forces epoch advancement and is useful for preventing ratchet desync
@@ -893,24 +931,26 @@ public protocol MlsContextProtocol: AnyObject {
      * # Note
      * This uses the send-then-merge pattern - caller must merge after server ACK
      */
-    func selfUpdate(groupId: Data) throws -> AddMembersResult
-
+    func selfUpdate(groupId: Data) throws  -> AddMembersResult
+    
     /**
      * Set the credential validator callback for client-side validation
      *
      * This enables the Swift layer to validate credentials before accepting
      * group state changes. The validator is called before merging commits.
      */
-    func setCredentialValidator(validator: CredentialValidator) throws
-
+    func setCredentialValidator(validator: CredentialValidator) throws 
+    
     /**
      * Set the epoch secret storage backend
      *
      * This MUST be called during initialization before any MLS operations.
      * The storage implementation should persist epoch secrets in encrypted storage (SQLCipher).
      */
-    func setEpochSecretStorage(storage: EpochSecretStorage) throws
-
+    func setEpochSecretStorage(storage: EpochSecretStorage) throws 
+    
+    func setExternalJoinAuthorizer(authorizer: ExternalJoinAuthorizer) throws 
+    
     /**
      * Set the global MLS logger to receive Rust logs in Swift
      *
@@ -920,14 +960,14 @@ public protocol MlsContextProtocol: AnyObject {
      * - Parameters:
      * - logger: Logger implementation conforming to MLSLogger protocol
      */
-    func setLogger(logger: MlsLogger)
-
+    func setLogger(logger: MlsLogger) 
+    
     /**
      * Store a proposal in the proposal queue after validation
      * The application should inspect the proposal before storing it
      */
-    func storeProposal(groupId: Data, proposalRef: ProposalRef) throws
-
+    func storeProposal(groupId: Data, proposalRef: ProposalRef) throws 
+    
     /**
      * 🔒 FIX #2: Force database synchronization
      *
@@ -938,8 +978,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: Ok(()) on success
      * - Throws: MLSError if flush fails
      */
-    func syncDatabase() throws
-
+    func syncDatabase() throws 
+    
     /**
      * 🔒 FIX #3: Validate GroupInfo format before upload
      *
@@ -953,7 +993,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - group_info_bytes: The serialized GroupInfo (MlsMessageOut wrapper)
      * - Returns: true if valid, false otherwise (with error logging)
      */
-    func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool
+    func validateGroupInfoFormat(groupInfoBytes: Data)  -> Bool
+    
 }
 
 /**
@@ -965,14 +1006,13 @@ public protocol MlsContextProtocol: AnyObject {
  * - Per-DID contexts are isolated (no shared state across accounts)
  */
 open class MlsContext:
-    MlsContextProtocol
-{
+    MlsContextProtocol {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public struct NoPointer {
         public init() {}
     }
@@ -980,7 +1020,7 @@ open class MlsContext:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
-    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
 
@@ -989,20 +1029,19 @@ open class MlsContext:
     //
     // - Warning:
     //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public init(noPointer _: NoPointer) {
-        pointer = nil
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
         return try! rustCall { uniffi_mls_ffi_fn_clone_mlscontext(self.pointer, $0) }
     }
-
     /**
      * Create a new context with per-DID SQLite storage
      *
@@ -1012,17 +1051,17 @@ open class MlsContext:
      * The SQLite connection is single-threaded (uses RefCell internally).
      * Synchronization is provided by Swift's actor system at a higher level.
      */
-    public convenience init(storagePath: String, encryptionKey: String, keychain: KeychainAccess) throws {
-        let pointer =
-            try rustCallWithError(FfiConverterTypeMLSError.lift) {
-                uniffi_mls_ffi_fn_constructor_mlscontext_new(
-                    FfiConverterString.lower(storagePath),
-                    FfiConverterString.lower(encryptionKey),
-                    FfiConverterCallbackInterfaceKeychainAccess.lower(keychain), $0
-                )
-            }
-        self.init(unsafeFromRawPointer: pointer)
-    }
+public convenience init(storagePath: String, encryptionKey: String, keychain: KeychainAccess)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_constructor_mlscontext_new(
+        FfiConverterString.lower(storagePath),
+        FfiConverterString.lower(encryptionKey),
+        FfiConverterCallbackInterfaceKeychainAccess.lower(keychain),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
 
     deinit {
         guard let pointer = pointer else {
@@ -1032,55 +1071,61 @@ open class MlsContext:
         try! rustCall { uniffi_mls_ffi_fn_free_mlscontext(pointer, $0) }
     }
 
-    open func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_add_members(self.uniffiClonePointer(),
-                                                            FfiConverterData.lower(groupId),
-                                                            FfiConverterSequenceTypeKeyPackageData.lower(keyPackages), $0)
-        })
-    }
+    
 
+    
+open func addMembers(groupId: Data, keyPackages: [KeyPackageData])throws  -> AddMembersResult {
+    return try  FfiConverterTypeAddMembersResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_add_members(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterSequenceTypeKeyPackageData.lower(keyPackages),$0
+    )
+})
+}
+    
     /**
      * Async variant of add_members - offloads crypto work to avoid blocking
      */
-    open func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_mls_ffi_fn_method_mlscontext_add_members_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterSequenceTypeKeyPackageData.lower(keyPackages)
-                    )
-                },
-                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
-                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
-                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeAddMembersResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
+open func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData])async throws  -> AddMembersResult {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_mls_ffi_fn_method_mlscontext_add_members_async(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(groupId),FfiConverterSequenceTypeKeyPackageData.lower(keyPackages)
+                )
+            },
+            pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAddMembersResult.lift,
+            errorHandler: FfiConverterTypeMLSError.lift
+        )
+}
+    
     /**
      * Clear pending commit for a group
      * This should be called when a commit is rejected by the delivery service
      * to clean up pending state in OpenMLS
      */
-    open func clearPendingCommit(groupId: Data) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_clear_pending_commit(self.uniffiClonePointer(),
-                                                                 FfiConverterData.lower(groupId), $0)
-    }
-    }
-
+open func clearPendingCommit(groupId: Data)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_clear_pending_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+}
+}
+    
     /**
      * Commit all pending proposals that have been validated and stored
      */
-    open func commitPendingProposals(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_commit_pending_proposals(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func commitPendingProposals(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_commit_pending_proposals(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Compute the hash reference for a serialized KeyPackage
      *
@@ -1092,65 +1137,70 @@ open class MlsContext:
      * - Returns: Hash reference bytes
      * - Throws: MLSError if deserialization or hashing fails
      */
-    open func computeKeyPackageHash(keyPackageBytes: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_compute_key_package_hash(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(keyPackageBytes), $0)
-        })
-    }
-
-    open func createExternalCommit(groupInfoBytes: Data, identityBytes: Data) throws -> ExternalCommitResult {
-        return try FfiConverterTypeExternalCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_create_external_commit(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(groupInfoBytes),
-                                                                       FfiConverterData.lower(identityBytes), $0)
-        })
-    }
-
-    open func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data) throws -> ExternalCommitResult {
-        return try FfiConverterTypeExternalCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_create_external_commit_with_psk(self.uniffiClonePointer(),
-                                                                                FfiConverterData.lower(groupInfoBytes),
-                                                                                FfiConverterData.lower(identityBytes),
-                                                                                FfiConverterData.lower(pskBytes), $0)
-        })
-    }
-
-    open func createGroup(identityBytes: Data, config: GroupConfig?) throws -> GroupCreationResult {
-        return try FfiConverterTypeGroupCreationResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_create_group(self.uniffiClonePointer(),
-                                                             FfiConverterData.lower(identityBytes),
-                                                             FfiConverterOptionTypeGroupConfig.lower(config), $0)
-        })
-    }
-
+open func computeKeyPackageHash(keyPackageBytes: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_compute_key_package_hash(self.uniffiClonePointer(),
+        FfiConverterData.lower(keyPackageBytes),$0
+    )
+})
+}
+    
+open func createExternalCommit(groupInfoBytes: Data, identityBytes: Data)throws  -> ExternalCommitResult {
+    return try  FfiConverterTypeExternalCommitResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_create_external_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupInfoBytes),
+        FfiConverterData.lower(identityBytes),$0
+    )
+})
+}
+    
+open func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data)throws  -> ExternalCommitResult {
+    return try  FfiConverterTypeExternalCommitResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_create_external_commit_with_psk(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupInfoBytes),
+        FfiConverterData.lower(identityBytes),
+        FfiConverterData.lower(pskBytes),$0
+    )
+})
+}
+    
+open func createGroup(identityBytes: Data, config: GroupConfig?)throws  -> GroupCreationResult {
+    return try  FfiConverterTypeGroupCreationResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_create_group(self.uniffiClonePointer(),
+        FfiConverterData.lower(identityBytes),
+        FfiConverterOptionTypeGroupConfig.lower(config),$0
+    )
+})
+}
+    
     /**
      * Async variant of create_group - offloads crypto work to avoid blocking
      */
-    open func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws -> GroupCreationResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_mls_ffi_fn_method_mlscontext_create_group_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(identityBytes), FfiConverterOptionTypeGroupConfig.lower(config)
-                    )
-                },
-                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
-                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
-                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeGroupCreationResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    open func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult {
-        return try FfiConverterTypeKeyPackageResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_create_key_package(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(identityBytes), $0)
-        })
-    }
-
+open func createGroupAsync(identityBytes: Data, config: GroupConfig?)async throws  -> GroupCreationResult {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_mls_ffi_fn_method_mlscontext_create_group_async(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(identityBytes),FfiConverterOptionTypeGroupConfig.lower(config)
+                )
+            },
+            pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeGroupCreationResult.lift,
+            errorHandler: FfiConverterTypeMLSError.lift
+        )
+}
+    
+open func createKeyPackage(identityBytes: Data)throws  -> KeyPackageResult {
+    return try  FfiConverterTypeKeyPackageResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_create_key_package(self.uniffiClonePointer(),
+        FfiConverterData.lower(identityBytes),$0
+    )
+})
+}
+    
     /**
      * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
      *
@@ -1165,13 +1215,14 @@ open class MlsContext:
      * - Returns: true if found in manifest, false otherwise
      * - Throws: MLSError if context is not initialized or hex is invalid
      */
-    open func debugCheckKeyPackageHash(hashHex: String) throws -> Bool {
-        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_debug_check_key_package_hash(self.uniffiClonePointer(),
-                                                                             FfiConverterString.lower(hashHex), $0)
-        })
-    }
-
+open func debugCheckKeyPackageHash(hashHex: String)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_debug_check_key_package_hash(self.uniffiClonePointer(),
+        FfiConverterString.lower(hashHex),$0
+    )
+})
+}
+    
     /**
      * Get detailed debug information about all group members
      *
@@ -1184,13 +1235,14 @@ open class MlsContext:
      * - Returns: GroupDebugInfo with all member details
      * - Throws: MLSError if group not found
      */
-    open func debugGroupMembers(groupId: Data) throws -> GroupDebugInfo {
-        return try FfiConverterTypeGroupDebugInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_debug_group_members(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func debugGroupMembers(groupId: Data)throws  -> GroupDebugInfo {
+    return try  FfiConverterTypeGroupDebugInfo.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_debug_group_members(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * 🔍 DEBUG: List all key package hashes from manifest storage
      *
@@ -1201,50 +1253,53 @@ open class MlsContext:
      * - Returns: Array of hex-encoded hash references
      * - Throws: MLSError if context is not initialized
      */
-    open func debugListKeyPackageHashes() throws -> [String] {
-        return try FfiConverterSequenceString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_debug_list_key_package_hashes(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    open func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult {
-        return try FfiConverterTypeDecryptResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_decrypt_message(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(groupId),
-                                                                FfiConverterData.lower(ciphertext), $0)
-        })
-    }
-
+open func debugListKeyPackageHashes()throws  -> [String] {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_debug_list_key_package_hashes(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func decryptMessage(groupId: Data, ciphertext: Data)throws  -> DecryptResult {
+    return try  FfiConverterTypeDecryptResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_decrypt_message(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(ciphertext),$0
+    )
+})
+}
+    
     /**
      * Async variant of decrypt_message - offloads crypto work to avoid blocking
      */
-    open func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws -> DecryptResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_mls_ffi_fn_method_mlscontext_decrypt_message_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterData.lower(ciphertext)
-                    )
-                },
-                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
-                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
-                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeDecryptResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
+open func decryptMessageAsync(groupId: Data, ciphertext: Data)async throws  -> DecryptResult {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_mls_ffi_fn_method_mlscontext_decrypt_message_async(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(groupId),FfiConverterData.lower(ciphertext)
+                )
+            },
+            pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeDecryptResult.lift,
+            errorHandler: FfiConverterTypeMLSError.lift
+        )
+}
+    
     /**
      * Delete an MLS group from storage
      * This should be called when a conversation is deleted or the user leaves
      */
-    open func deleteGroup(groupId: Data) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_delete_group(self.uniffiClonePointer(),
-                                                         FfiConverterData.lower(groupId), $0)
-    }
-    }
-
+open func deleteGroup(groupId: Data)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_delete_group(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+}
+}
+    
     /**
      * Delete consumed key package bundles from storage
      *
@@ -1256,60 +1311,83 @@ open class MlsContext:
      * - Returns: Number of bundles successfully deleted
      * - Throws: MLSError if storage operation fails
      */
-    open func deleteKeyPackageBundles(hashRefs: [Data]) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_delete_key_package_bundles(self.uniffiClonePointer(),
-                                                                           FfiConverterSequenceData.lower(hashRefs), $0)
-        })
-    }
-
-    open func encryptMessage(groupId: Data, plaintext: Data) throws -> EncryptResult {
-        return try FfiConverterTypeEncryptResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_encrypt_message(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(groupId),
-                                                                FfiConverterData.lower(plaintext), $0)
-        })
-    }
-
+open func deleteKeyPackageBundles(hashRefs: [Data])throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_delete_key_package_bundles(self.uniffiClonePointer(),
+        FfiConverterSequenceData.lower(hashRefs),$0
+    )
+})
+}
+    
+    /**
+     * Discard a pending external join after server rejection
+     *
+     * CRITICAL: Call this when the delivery service rejects an external commit.
+     * Failure to call this leaves orphaned cryptographic material.
+     *
+     * # Arguments
+     * * `group_id` - Group identifier from create_external_commit result
+     *
+     * # Returns
+     * Ok(()) on success, error if group not found
+     */
+open func discardPendingExternalJoin(groupId: Data)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_discard_pending_external_join(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+}
+}
+    
+open func encryptMessage(groupId: Data, plaintext: Data)throws  -> EncryptResult {
+    return try  FfiConverterTypeEncryptResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_encrypt_message(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(plaintext),$0
+    )
+})
+}
+    
     /**
      * Async variant of encrypt_message - offloads crypto work to avoid blocking
      */
-    open func encryptMessageAsync(groupId: Data, plaintext: Data) async throws -> EncryptResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_mls_ffi_fn_method_mlscontext_encrypt_message_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterData.lower(plaintext)
-                    )
-                },
-                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
-                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
-                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeEncryptResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
+open func encryptMessageAsync(groupId: Data, plaintext: Data)async throws  -> EncryptResult {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_mls_ffi_fn_method_mlscontext_encrypt_message_async(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(groupId),FfiConverterData.lower(plaintext)
+                )
+            },
+            pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeEncryptResult.lift,
+            errorHandler: FfiConverterTypeMLSError.lift
+        )
+}
+    
     /**
      * Manually export epoch secret for a group
      * Call this after creating the conversation record in SQLCipher to ensure
      * the foreign key constraint is satisfied when storing the epoch secret
      */
-    open func exportEpochSecret(groupId: Data) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_export_epoch_secret(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(groupId), $0)
-    }
-    }
-
-    open func exportGroupInfo(groupId: Data, signerIdentityBytes: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_export_group_info(self.uniffiClonePointer(),
-                                                                  FfiConverterData.lower(groupId),
-                                                                  FfiConverterData.lower(signerIdentityBytes), $0)
-        })
-    }
-
+open func exportEpochSecret(groupId: Data)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_export_epoch_secret(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+}
+}
+    
+open func exportGroupInfo(groupId: Data, signerIdentityBytes: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_export_group_info(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(signerIdentityBytes),$0
+    )
+})
+}
+    
     /**
      * Export a group's state for persistent storage
      *
@@ -1321,52 +1399,57 @@ open class MlsContext:
      * - Returns: Serialized group state bytes
      * - Throws: MLSError if group not found or serialization fails
      */
-    open func exportGroupState(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_export_group_state(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func exportGroupState(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_export_group_state(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Export the identity key pair for backup/recovery
      * This allows the application to store the identity key in a separate secure location (e.g. Keychain)
      * to survive app deletion/reinstall.
      */
-    open func exportIdentityKey(identity: String) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_export_identity_key(self.uniffiClonePointer(),
-                                                                    FfiConverterString.lower(identity), $0)
-        })
-    }
-
-    open func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret {
-        return try FfiConverterTypeExportedSecret.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_export_secret(self.uniffiClonePointer(),
-                                                              FfiConverterData.lower(groupId),
-                                                              FfiConverterString.lower(label),
-                                                              FfiConverterData.lower(context),
-                                                              FfiConverterUInt64.lower(keyLength), $0)
-        })
-    }
-
+open func exportIdentityKey(identity: String)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_export_identity_key(self.uniffiClonePointer(),
+        FfiConverterString.lower(identity),$0
+    )
+})
+}
+    
+open func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64)throws  -> ExportedSecret {
+    return try  FfiConverterTypeExportedSecret.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_export_secret(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterString.lower(label),
+        FfiConverterData.lower(context),
+        FfiConverterUInt64.lower(keyLength),$0
+    )
+})
+}
+    
     /**
-     * Flush all pending database writes and prepare for shutdown
+     * Flush all pending database writes and CLOSE the database connections.
      *
-     * Call this method before releasing the context during account switching.
-     * This ensures:
-     * 1. All pending SQLite writes are flushed to disk
-     * 2. WAL checkpoint is performed to consolidate data
-     * 3. Database connections are in a clean state for closure
+     * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
+     * is transitioning to background/inactive state. It:
+     * 1. Flushes all pending SQLite writes to disk
+     * 2. Performs WAL checkpoint to consolidate data
+     * 3. CLOSES all database connections by dropping the inner context
+     * 4. Releases all file handles so iOS doesn't kill the app
      *
-     * CRITICAL: After calling this, the context should not be used for new operations.
-     * The Swift side should remove the context from its cache after calling this.
+     * After calling this, the context is CLOSED and cannot be used for any operations.
+     * The Swift side must create a new context if MLS operations are needed again.
      */
-    open func flushAndPrepareClose() throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_flush_and_prepare_close(self.uniffiClonePointer(), $0)
-    }
-    }
-
+open func flushAndPrepareClose()throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_flush_and_prepare_close(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
     /**
      * Force flush all pending database writes to disk
      *
@@ -1377,18 +1460,20 @@ open class MlsContext:
      * - Returns: Nothing on success
      * - Throws: MLSError if flush fails
      */
-    open func flushStorage() throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_flush_storage(self.uniffiClonePointer(), $0)
-    }
-    }
-
-    open func getEpoch(groupId: Data) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_get_epoch(self.uniffiClonePointer(),
-                                                          FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func flushStorage()throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_flush_storage(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+open func getEpoch(groupId: Data)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_get_epoch(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * 🔍 DIAGNOSTIC: Get detailed debug state for a group
      *
@@ -1404,13 +1489,14 @@ open class MlsContext:
      * - Returns: JSON string with debug information
      * - Throws: MLSError if group not found
      */
-    open func getGroupDebugState(groupId: Data) throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_get_group_debug_state(self.uniffiClonePointer(),
-                                                                      FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func getGroupDebugState(groupId: Data)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_get_group_debug_state(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Get the current member count of a group
      *
@@ -1419,13 +1505,14 @@ open class MlsContext:
      * - Returns: Number of members in the group
      * - Throws: MLSError if group not found
      */
-    open func getGroupMemberCount(groupId: Data) throws -> UInt32 {
-        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_get_group_member_count(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func getGroupMemberCount(groupId: Data)throws  -> UInt32 {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_get_group_member_count(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Serialize the entire MLS storage for persistence
      *
@@ -1442,36 +1529,50 @@ open class MlsContext:
      * - Returns: Number of cached key package bundles
      * - Throws: MLSError if context is not initialized
      */
-    open func getKeyPackageBundleCount() throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_get_key_package_bundle_count(self.uniffiClonePointer(), $0)
-        })
-    }
-
+open func getKeyPackageBundleCount()throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_get_key_package_bundle_count(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * List all pending proposals for a group with details
+     */
+open func getPendingProposalDetails(groupId: Data)throws  -> [PendingProposalDetail] {
+    return try  FfiConverterSequenceTypePendingProposalDetail.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_get_pending_proposal_details(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Get the tree hash for a group at its current epoch
      * Used for tree hash pinning to detect state divergence
      */
-    open func getTreeHash(groupId: Data) throws -> TreeHashData {
-        return try FfiConverterTypeTreeHashData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_get_tree_hash(self.uniffiClonePointer(),
-                                                              FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func getTreeHash(groupId: Data)throws  -> TreeHashData {
+    return try  FfiConverterTypeTreeHashData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_get_tree_hash(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Check if a group exists in local storage
      * - Parameters:
      * - group_id: Group identifier to check
      * - Returns: true if group exists, false otherwise
      */
-    open func groupExists(groupId: Data) -> Bool {
-        return try! FfiConverterBool.lift(try! rustCall {
-            uniffi_mls_ffi_fn_method_mlscontext_group_exists(self.uniffiClonePointer(),
-                                                             FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func groupExists(groupId: Data) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_mls_ffi_fn_method_mlscontext_group_exists(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Import a group's state from persistent storage
      *
@@ -1483,101 +1584,131 @@ open class MlsContext:
      * - Returns: Group ID of the imported group
      * - Throws: MLSError if deserialization fails
      */
-    open func importGroupState(stateBytes: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_import_group_state(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(stateBytes), $0)
-        })
-    }
-
+open func importGroupState(stateBytes: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_import_group_state(self.uniffiClonePointer(),
+        FfiConverterData.lower(stateBytes),$0
+    )
+})
+}
+    
     /**
      * Import an identity key pair from backup/recovery
      * This restores the identity key into the current storage provider
      */
-    open func importIdentityKey(identity: String, keyData: Data) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_import_identity_key(self.uniffiClonePointer(),
-                                                                FfiConverterString.lower(identity),
-                                                                FfiConverterData.lower(keyData), $0)
-    }
-    }
-
+open func importIdentityKey(identity: String, keyData: Data)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_import_identity_key(self.uniffiClonePointer(),
+        FfiConverterString.lower(identity),
+        FfiConverterData.lower(keyData),$0
+    )
+}
+}
+    
+    /**
+     * Check if this context has been closed.
+     * Returns true if close_database() or flush_and_prepare_close() has been called.
+     */
+open func isClosed() -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_mls_ffi_fn_method_mlscontext_is_closed(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Perform a launch-time TRUNCATE checkpoint to clear leftover WAL.
+     * Call once at app startup. Safe to call even if context was just created.
+     * Tolerates SQLITE_BUSY gracefully.
+     */
+open func launchCheckpoint()throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_launch_checkpoint(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
     /**
      * List all pending proposals for a group
      */
-    open func listPendingProposals(groupId: Data) throws -> [ProposalRef] {
-        return try FfiConverterSequenceTypeProposalRef.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_list_pending_proposals(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func listPendingProposals(groupId: Data)throws  -> [ProposalRef] {
+    return try  FfiConverterSequenceTypeProposalRef.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_list_pending_proposals(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Merge a pending commit after validation
      * This should be called after the commit has been accepted by the delivery service
      */
-    open func mergePendingCommit(groupId: Data) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_merge_pending_commit(self.uniffiClonePointer(),
-                                                                     FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func mergePendingCommit(groupId: Data)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_merge_pending_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Merge a staged commit after validation
      * This should be called after validating incoming commits from other members
      */
-    open func mergeStagedCommit(groupId: Data) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_merge_staged_commit(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    open func processCommit(groupId: Data, commitData: Data) throws -> ProcessCommitResult {
-        return try FfiConverterTypeProcessCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_process_commit(self.uniffiClonePointer(),
-                                                               FfiConverterData.lower(groupId),
-                                                               FfiConverterData.lower(commitData), $0)
-        })
-    }
-
-    open func processMessage(groupId: Data, messageData: Data) throws -> ProcessedContent {
-        return try FfiConverterTypeProcessedContent.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_process_message(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(groupId),
-                                                                FfiConverterData.lower(messageData), $0)
-        })
-    }
-
+open func mergeStagedCommit(groupId: Data)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_merge_staged_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
+open func processCommit(groupId: Data, commitData: Data)throws  -> ProcessCommitResult {
+    return try  FfiConverterTypeProcessCommitResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_process_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(commitData),$0
+    )
+})
+}
+    
+open func processMessage(groupId: Data, messageData: Data)throws  -> ProcessedContent {
+    return try  FfiConverterTypeProcessedContent.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_process_message(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(messageData),$0
+    )
+})
+}
+    
     /**
      * Async variant of process_message - offloads crypto work to avoid blocking
      */
-    open func processMessageAsync(groupId: Data, messageData: Data) async throws -> ProcessedContent {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_mls_ffi_fn_method_mlscontext_process_message_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterData.lower(messageData)
-                    )
-                },
-                pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
-                completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
-                freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeProcessedContent.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    open func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws -> WelcomeResult {
-        return try FfiConverterTypeWelcomeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_process_welcome(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(welcomeBytes),
-                                                                FfiConverterData.lower(identityBytes),
-                                                                FfiConverterOptionTypeGroupConfig.lower(config), $0)
-        })
-    }
-
+open func processMessageAsync(groupId: Data, messageData: Data)async throws  -> ProcessedContent {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_mls_ffi_fn_method_mlscontext_process_message_async(
+                    self.uniffiClonePointer(),
+                    FfiConverterData.lower(groupId),FfiConverterData.lower(messageData)
+                )
+            },
+            pollFunc: ffi_mls_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_mls_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_mls_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeProcessedContent.lift,
+            errorHandler: FfiConverterTypeMLSError.lift
+        )
+}
+    
+open func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?)throws  -> WelcomeResult {
+    return try  FfiConverterTypeWelcomeResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_process_welcome(self.uniffiClonePointer(),
+        FfiConverterData.lower(welcomeBytes),
+        FfiConverterData.lower(identityBytes),
+        FfiConverterOptionTypeGroupConfig.lower(config),$0
+    )
+})
+}
+    
     /**
      * Propose adding a member (does not commit)
      *
@@ -1591,14 +1722,15 @@ open class MlsContext:
      * # Returns
      * ProposeResult containing proposal message to send and reference for tracking
      */
-    open func proposeAddMember(groupId: Data, keyPackageData: Data) throws -> ProposeResult {
-        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_propose_add_member(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(groupId),
-                                                                   FfiConverterData.lower(keyPackageData), $0)
-        })
-    }
-
+open func proposeAddMember(groupId: Data, keyPackageData: Data)throws  -> ProposeResult {
+    return try  FfiConverterTypeProposeResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_propose_add_member(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(keyPackageData),$0
+    )
+})
+}
+    
     /**
      * Propose removing a member (does not commit)
      *
@@ -1614,14 +1746,15 @@ open class MlsContext:
      * # Errors
      * * `MemberNotFound` - Member not in group
      */
-    open func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws -> ProposeResult {
-        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_propose_remove_member(self.uniffiClonePointer(),
-                                                                      FfiConverterData.lower(groupId),
-                                                                      FfiConverterData.lower(memberIdentity), $0)
-        })
-    }
-
+open func proposeRemoveMember(groupId: Data, memberIdentity: Data)throws  -> ProposeResult {
+    return try  FfiConverterTypeProposeResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_propose_remove_member(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(memberIdentity),$0
+    )
+})
+}
+    
     /**
      * Propose self-update (does not commit)
      *
@@ -1634,13 +1767,14 @@ open class MlsContext:
      * # Returns
      * ProposeResult containing proposal message to send and reference for tracking
      */
-    open func proposeSelfUpdate(groupId: Data) throws -> ProposeResult {
-        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_propose_self_update(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func proposeSelfUpdate(groupId: Data)throws  -> ProposeResult {
+    return try  FfiConverterTypeProposeResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_propose_self_update(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Remove members from the group (cryptographically secure)
      *
@@ -1663,24 +1797,26 @@ open class MlsContext:
      * * `GroupNotFound` - Group does not exist
      * * `OpenMLSError` - OpenMLS operation failed
      */
-    open func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_remove_members(self.uniffiClonePointer(),
-                                                               FfiConverterData.lower(groupId),
-                                                               FfiConverterSequenceData.lower(memberIdentities), $0)
-        })
-    }
-
+open func removeMembers(groupId: Data, memberIdentities: [Data])throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_remove_members(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterSequenceData.lower(memberIdentities),$0
+    )
+})
+}
+    
     /**
      * Remove a proposal from the proposal queue
      */
-    open func removeProposal(groupId: Data, proposalRef: ProposalRef) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_remove_proposal(self.uniffiClonePointer(),
-                                                            FfiConverterData.lower(groupId),
-                                                            FfiConverterTypeProposalRef.lower(proposalRef), $0)
-    }
-    }
-
+open func removeProposal(groupId: Data, proposalRef: ProposalRef)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_remove_proposal(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterTypeProposalRef.lower(proposalRef),$0
+    )
+}
+}
+    
     /**
      * Create a self-update commit to refresh own leaf node
      * This forces epoch advancement and is useful for preventing ratchet desync
@@ -1695,37 +1831,47 @@ open class MlsContext:
      * # Note
      * This uses the send-then-merge pattern - caller must merge after server ACK
      */
-    open func selfUpdate(groupId: Data) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_mls_ffi_fn_method_mlscontext_self_update(self.uniffiClonePointer(),
-                                                            FfiConverterData.lower(groupId), $0)
-        })
-    }
-
+open func selfUpdate(groupId: Data)throws  -> AddMembersResult {
+    return try  FfiConverterTypeAddMembersResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_self_update(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
     /**
      * Set the credential validator callback for client-side validation
      *
      * This enables the Swift layer to validate credentials before accepting
      * group state changes. The validator is called before merging commits.
      */
-    open func setCredentialValidator(validator: CredentialValidator) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_set_credential_validator(self.uniffiClonePointer(),
-                                                                     FfiConverterCallbackInterfaceCredentialValidator.lower(validator), $0)
-    }
-    }
-
+open func setCredentialValidator(validator: CredentialValidator)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_set_credential_validator(self.uniffiClonePointer(),
+        FfiConverterCallbackInterfaceCredentialValidator.lower(validator),$0
+    )
+}
+}
+    
     /**
      * Set the epoch secret storage backend
      *
      * This MUST be called during initialization before any MLS operations.
      * The storage implementation should persist epoch secrets in encrypted storage (SQLCipher).
      */
-    open func setEpochSecretStorage(storage: EpochSecretStorage) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_set_epoch_secret_storage(self.uniffiClonePointer(),
-                                                                     FfiConverterCallbackInterfaceEpochSecretStorage.lower(storage), $0)
-    }
-    }
-
+open func setEpochSecretStorage(storage: EpochSecretStorage)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_set_epoch_secret_storage(self.uniffiClonePointer(),
+        FfiConverterCallbackInterfaceEpochSecretStorage.lower(storage),$0
+    )
+}
+}
+    
+open func setExternalJoinAuthorizer(authorizer: ExternalJoinAuthorizer)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_set_external_join_authorizer(self.uniffiClonePointer(),
+        FfiConverterCallbackInterfaceExternalJoinAuthorizer.lower(authorizer),$0
+    )
+}
+}
+    
     /**
      * Set the global MLS logger to receive Rust logs in Swift
      *
@@ -1735,23 +1881,25 @@ open class MlsContext:
      * - Parameters:
      * - logger: Logger implementation conforming to MLSLogger protocol
      */
-    open func setLogger(logger: MlsLogger) { try! rustCall {
-        uniffi_mls_ffi_fn_method_mlscontext_set_logger(self.uniffiClonePointer(),
-                                                       FfiConverterCallbackInterfaceMlsLogger.lower(logger), $0)
-    }
-    }
-
+open func setLogger(logger: MlsLogger) {try! rustCall() {
+    uniffi_mls_ffi_fn_method_mlscontext_set_logger(self.uniffiClonePointer(),
+        FfiConverterCallbackInterfaceMlsLogger.lower(logger),$0
+    )
+}
+}
+    
     /**
      * Store a proposal in the proposal queue after validation
      * The application should inspect the proposal before storing it
      */
-    open func storeProposal(groupId: Data, proposalRef: ProposalRef) throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_store_proposal(self.uniffiClonePointer(),
-                                                           FfiConverterData.lower(groupId),
-                                                           FfiConverterTypeProposalRef.lower(proposalRef), $0)
-    }
-    }
-
+open func storeProposal(groupId: Data, proposalRef: ProposalRef)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_store_proposal(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterTypeProposalRef.lower(proposalRef),$0
+    )
+}
+}
+    
     /**
      * 🔒 FIX #2: Force database synchronization
      *
@@ -1762,11 +1910,12 @@ open class MlsContext:
      * - Returns: Ok(()) on success
      * - Throws: MLSError if flush fails
      */
-    open func syncDatabase() throws { try rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_method_mlscontext_sync_database(self.uniffiClonePointer(), $0)
-    }
-    }
-
+open func syncDatabase()throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_method_mlscontext_sync_database(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
     /**
      * 🔒 FIX #3: Validate GroupInfo format before upload
      *
@@ -1780,18 +1929,22 @@ open class MlsContext:
      * - group_info_bytes: The serialized GroupInfo (MlsMessageOut wrapper)
      * - Returns: true if valid, false otherwise (with error logging)
      */
-    open func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool {
-        return try! FfiConverterBool.lift(try! rustCall {
-            uniffi_mls_ffi_fn_method_mlscontext_validate_group_info_format(self.uniffiClonePointer(),
-                                                                           FfiConverterData.lower(groupInfoBytes), $0)
-        })
-    }
+open func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_mls_ffi_fn_method_mlscontext_validate_group_info_format(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupInfoBytes),$0
+    )
+})
+}
+    
+
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeMLSContext: FfiConverter {
+
     typealias FfiType = UnsafeMutableRawPointer
     typealias SwiftType = MlsContext
 
@@ -1808,7 +1961,7 @@ public struct FfiConverterTypeMLSContext: FfiConverter {
         // The Rust code won't compile if a pointer won't fit in a UInt64.
         // We have to go via `UInt` because that's the thing that's the size of a pointer.
         let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if ptr == nil {
+        if (ptr == nil) {
             throw UniffiInternalError.unexpectedNullPointer
         }
         return try lift(ptr!)
@@ -1821,19 +1974,23 @@ public struct FfiConverterTypeMLSContext: FfiConverter {
     }
 }
 
+
+
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeMLSContext_lift(_ pointer: UnsafeMutableRawPointer) throws -> MlsContext {
     return try FfiConverterTypeMLSContext.lift(pointer)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeMLSContext_lower(_ value: MlsContext) -> UnsafeMutableRawPointer {
     return FfiConverterTypeMLSContext.lower(value)
 }
+
 
 public struct AddMembersResult {
     public var commitData: Data
@@ -1847,8 +2004,10 @@ public struct AddMembersResult {
     }
 }
 
+
+
 extension AddMembersResult: Equatable, Hashable {
-    public static func == (lhs: AddMembersResult, rhs: AddMembersResult) -> Bool {
+    public static func ==(lhs: AddMembersResult, rhs: AddMembersResult) -> Bool {
         if lhs.commitData != rhs.commitData {
             return false
         }
@@ -1864,16 +2023,17 @@ extension AddMembersResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeAddMembersResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AddMembersResult {
         return
             try AddMembersResult(
-                commitData: FfiConverterData.read(from: &buf),
+                commitData: FfiConverterData.read(from: &buf), 
                 welcomeData: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: AddMembersResult, into buf: inout [UInt8]) {
@@ -1882,19 +2042,21 @@ public struct FfiConverterTypeAddMembersResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAddMembersResult_lift(_ buf: RustBuffer) throws -> AddMembersResult {
     return try FfiConverterTypeAddMembersResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAddMembersResult_lower(_ value: AddMembersResult) -> RustBuffer {
     return FfiConverterTypeAddMembersResult.lower(value)
 }
+
 
 public struct AddProposalInfo {
     public var credential: CredentialData
@@ -1908,8 +2070,10 @@ public struct AddProposalInfo {
     }
 }
 
+
+
 extension AddProposalInfo: Equatable, Hashable {
-    public static func == (lhs: AddProposalInfo, rhs: AddProposalInfo) -> Bool {
+    public static func ==(lhs: AddProposalInfo, rhs: AddProposalInfo) -> Bool {
         if lhs.credential != rhs.credential {
             return false
         }
@@ -1925,16 +2089,17 @@ extension AddProposalInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeAddProposalInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AddProposalInfo {
         return
             try AddProposalInfo(
-                credential: FfiConverterTypeCredentialData.read(from: &buf),
+                credential: FfiConverterTypeCredentialData.read(from: &buf), 
                 keyPackageRef: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: AddProposalInfo, into buf: inout [UInt8]) {
@@ -1943,19 +2108,21 @@ public struct FfiConverterTypeAddProposalInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAddProposalInfo_lift(_ buf: RustBuffer) throws -> AddProposalInfo {
     return try FfiConverterTypeAddProposalInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeAddProposalInfo_lower(_ value: AddProposalInfo) -> RustBuffer {
     return FfiConverterTypeAddProposalInfo.lower(value)
 }
+
 
 public struct CommitResult {
     public var newEpoch: UInt64
@@ -1967,8 +2134,10 @@ public struct CommitResult {
     }
 }
 
+
+
 extension CommitResult: Equatable, Hashable {
-    public static func == (lhs: CommitResult, rhs: CommitResult) -> Bool {
+    public static func ==(lhs: CommitResult, rhs: CommitResult) -> Bool {
         if lhs.newEpoch != rhs.newEpoch {
             return false
         }
@@ -1980,15 +2149,16 @@ extension CommitResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeCommitResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CommitResult {
         return
             try CommitResult(
                 newEpoch: FfiConverterUInt64.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: CommitResult, into buf: inout [UInt8]) {
@@ -1996,19 +2166,21 @@ public struct FfiConverterTypeCommitResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeCommitResult_lift(_ buf: RustBuffer) throws -> CommitResult {
     return try FfiConverterTypeCommitResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeCommitResult_lower(_ value: CommitResult) -> RustBuffer {
     return FfiConverterTypeCommitResult.lower(value)
 }
+
 
 public struct CredentialData {
     public var credentialType: String
@@ -2022,8 +2194,10 @@ public struct CredentialData {
     }
 }
 
+
+
 extension CredentialData: Equatable, Hashable {
-    public static func == (lhs: CredentialData, rhs: CredentialData) -> Bool {
+    public static func ==(lhs: CredentialData, rhs: CredentialData) -> Bool {
         if lhs.credentialType != rhs.credentialType {
             return false
         }
@@ -2039,16 +2213,17 @@ extension CredentialData: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeCredentialData: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CredentialData {
         return
             try CredentialData(
-                credentialType: FfiConverterString.read(from: &buf),
+                credentialType: FfiConverterString.read(from: &buf), 
                 identity: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: CredentialData, into buf: inout [UInt8]) {
@@ -2057,19 +2232,21 @@ public struct FfiConverterTypeCredentialData: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeCredentialData_lift(_ buf: RustBuffer) throws -> CredentialData {
     return try FfiConverterTypeCredentialData.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeCredentialData_lower(_ value: CredentialData) -> RustBuffer {
     return FfiConverterTypeCredentialData.lower(value)
 }
+
 
 public struct DecryptResult {
     public var plaintext: Data
@@ -2087,8 +2264,10 @@ public struct DecryptResult {
     }
 }
 
+
+
 extension DecryptResult: Equatable, Hashable {
-    public static func == (lhs: DecryptResult, rhs: DecryptResult) -> Bool {
+    public static func ==(lhs: DecryptResult, rhs: DecryptResult) -> Bool {
         if lhs.plaintext != rhs.plaintext {
             return false
         }
@@ -2112,18 +2291,19 @@ extension DecryptResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeDecryptResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DecryptResult {
         return
             try DecryptResult(
-                plaintext: FfiConverterData.read(from: &buf),
-                epoch: FfiConverterUInt64.read(from: &buf),
-                sequenceNumber: FfiConverterUInt64.read(from: &buf),
+                plaintext: FfiConverterData.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                sequenceNumber: FfiConverterUInt64.read(from: &buf), 
                 senderCredential: FfiConverterTypeCredentialData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: DecryptResult, into buf: inout [UInt8]) {
@@ -2134,19 +2314,21 @@ public struct FfiConverterTypeDecryptResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeDecryptResult_lift(_ buf: RustBuffer) throws -> DecryptResult {
     return try FfiConverterTypeDecryptResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeDecryptResult_lower(_ value: DecryptResult) -> RustBuffer {
     return FfiConverterTypeDecryptResult.lower(value)
 }
+
 
 public struct EncryptResult {
     public var ciphertext: Data
@@ -2158,8 +2340,10 @@ public struct EncryptResult {
     }
 }
 
+
+
 extension EncryptResult: Equatable, Hashable {
-    public static func == (lhs: EncryptResult, rhs: EncryptResult) -> Bool {
+    public static func ==(lhs: EncryptResult, rhs: EncryptResult) -> Bool {
         if lhs.ciphertext != rhs.ciphertext {
             return false
         }
@@ -2171,15 +2355,16 @@ extension EncryptResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeEncryptResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EncryptResult {
         return
             try EncryptResult(
                 ciphertext: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: EncryptResult, into buf: inout [UInt8]) {
@@ -2187,19 +2372,21 @@ public struct FfiConverterTypeEncryptResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeEncryptResult_lift(_ buf: RustBuffer) throws -> EncryptResult {
     return try FfiConverterTypeEncryptResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeEncryptResult_lower(_ value: EncryptResult) -> RustBuffer {
     return FfiConverterTypeEncryptResult.lower(value)
 }
+
 
 public struct ExportedSecret {
     public var secret: Data
@@ -2211,8 +2398,10 @@ public struct ExportedSecret {
     }
 }
 
+
+
 extension ExportedSecret: Equatable, Hashable {
-    public static func == (lhs: ExportedSecret, rhs: ExportedSecret) -> Bool {
+    public static func ==(lhs: ExportedSecret, rhs: ExportedSecret) -> Bool {
         if lhs.secret != rhs.secret {
             return false
         }
@@ -2224,15 +2413,16 @@ extension ExportedSecret: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeExportedSecret: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExportedSecret {
         return
             try ExportedSecret(
                 secret: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ExportedSecret, into buf: inout [UInt8]) {
@@ -2240,19 +2430,21 @@ public struct FfiConverterTypeExportedSecret: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeExportedSecret_lift(_ buf: RustBuffer) throws -> ExportedSecret {
     return try FfiConverterTypeExportedSecret.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeExportedSecret_lower(_ value: ExportedSecret) -> RustBuffer {
     return FfiConverterTypeExportedSecret.lower(value)
 }
+
 
 public struct ExternalCommitResult {
     public var commitData: Data
@@ -2266,8 +2458,10 @@ public struct ExternalCommitResult {
     }
 }
 
+
+
 extension ExternalCommitResult: Equatable, Hashable {
-    public static func == (lhs: ExternalCommitResult, rhs: ExternalCommitResult) -> Bool {
+    public static func ==(lhs: ExternalCommitResult, rhs: ExternalCommitResult) -> Bool {
         if lhs.commitData != rhs.commitData {
             return false
         }
@@ -2283,16 +2477,17 @@ extension ExternalCommitResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeExternalCommitResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ExternalCommitResult {
         return
             try ExternalCommitResult(
-                commitData: FfiConverterData.read(from: &buf),
+                commitData: FfiConverterData.read(from: &buf), 
                 groupId: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ExternalCommitResult, into buf: inout [UInt8]) {
@@ -2301,36 +2496,52 @@ public struct FfiConverterTypeExternalCommitResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeExternalCommitResult_lift(_ buf: RustBuffer) throws -> ExternalCommitResult {
     return try FfiConverterTypeExternalCommitResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeExternalCommitResult_lower(_ value: ExternalCommitResult) -> RustBuffer {
     return FfiConverterTypeExternalCommitResult.lower(value)
 }
 
+
 public struct GroupConfig {
     public var maxPastEpochs: UInt32
     public var outOfOrderTolerance: UInt32
     public var maximumForwardDistance: UInt32
+    /**
+     * Maximum allowed lifetime for leaf nodes in seconds.
+     * Set to 0 to disable lifetime validation.
+     * Recommended: 86400 * 90 (90 days)
+     */
+    public var maxLeafLifetimeSeconds: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(maxPastEpochs: UInt32, outOfOrderTolerance: UInt32, maximumForwardDistance: UInt32) {
+    public init(maxPastEpochs: UInt32, outOfOrderTolerance: UInt32, maximumForwardDistance: UInt32, 
+        /**
+         * Maximum allowed lifetime for leaf nodes in seconds.
+         * Set to 0 to disable lifetime validation.
+         * Recommended: 86400 * 90 (90 days)
+         */maxLeafLifetimeSeconds: UInt64) {
         self.maxPastEpochs = maxPastEpochs
         self.outOfOrderTolerance = outOfOrderTolerance
         self.maximumForwardDistance = maximumForwardDistance
+        self.maxLeafLifetimeSeconds = maxLeafLifetimeSeconds
     }
 }
 
+
+
 extension GroupConfig: Equatable, Hashable {
-    public static func == (lhs: GroupConfig, rhs: GroupConfig) -> Bool {
+    public static func ==(lhs: GroupConfig, rhs: GroupConfig) -> Bool {
         if lhs.maxPastEpochs != rhs.maxPastEpochs {
             return false
         }
@@ -2340,6 +2551,9 @@ extension GroupConfig: Equatable, Hashable {
         if lhs.maximumForwardDistance != rhs.maximumForwardDistance {
             return false
         }
+        if lhs.maxLeafLifetimeSeconds != rhs.maxLeafLifetimeSeconds {
+            return false
+        }
         return true
     }
 
@@ -2347,42 +2561,48 @@ extension GroupConfig: Equatable, Hashable {
         hasher.combine(maxPastEpochs)
         hasher.combine(outOfOrderTolerance)
         hasher.combine(maximumForwardDistance)
+        hasher.combine(maxLeafLifetimeSeconds)
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeGroupConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupConfig {
         return
             try GroupConfig(
-                maxPastEpochs: FfiConverterUInt32.read(from: &buf),
-                outOfOrderTolerance: FfiConverterUInt32.read(from: &buf),
-                maximumForwardDistance: FfiConverterUInt32.read(from: &buf)
-            )
+                maxPastEpochs: FfiConverterUInt32.read(from: &buf), 
+                outOfOrderTolerance: FfiConverterUInt32.read(from: &buf), 
+                maximumForwardDistance: FfiConverterUInt32.read(from: &buf), 
+                maxLeafLifetimeSeconds: FfiConverterUInt64.read(from: &buf)
+        )
     }
 
     public static func write(_ value: GroupConfig, into buf: inout [UInt8]) {
         FfiConverterUInt32.write(value.maxPastEpochs, into: &buf)
         FfiConverterUInt32.write(value.outOfOrderTolerance, into: &buf)
         FfiConverterUInt32.write(value.maximumForwardDistance, into: &buf)
+        FfiConverterUInt64.write(value.maxLeafLifetimeSeconds, into: &buf)
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupConfig_lift(_ buf: RustBuffer) throws -> GroupConfig {
     return try FfiConverterTypeGroupConfig.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupConfig_lower(_ value: GroupConfig) -> RustBuffer {
     return FfiConverterTypeGroupConfig.lower(value)
 }
+
 
 public struct GroupCreationResult {
     public var groupId: Data
@@ -2394,8 +2614,10 @@ public struct GroupCreationResult {
     }
 }
 
+
+
 extension GroupCreationResult: Equatable, Hashable {
-    public static func == (lhs: GroupCreationResult, rhs: GroupCreationResult) -> Bool {
+    public static func ==(lhs: GroupCreationResult, rhs: GroupCreationResult) -> Bool {
         if lhs.groupId != rhs.groupId {
             return false
         }
@@ -2407,15 +2629,16 @@ extension GroupCreationResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeGroupCreationResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupCreationResult {
         return
             try GroupCreationResult(
                 groupId: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: GroupCreationResult, into buf: inout [UInt8]) {
@@ -2423,19 +2646,21 @@ public struct FfiConverterTypeGroupCreationResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupCreationResult_lift(_ buf: RustBuffer) throws -> GroupCreationResult {
     return try FfiConverterTypeGroupCreationResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupCreationResult_lower(_ value: GroupCreationResult) -> RustBuffer {
     return FfiConverterTypeGroupCreationResult.lower(value)
 }
+
 
 public struct GroupDebugInfo {
     public var groupId: Data
@@ -2453,8 +2678,10 @@ public struct GroupDebugInfo {
     }
 }
 
+
+
 extension GroupDebugInfo: Equatable, Hashable {
-    public static func == (lhs: GroupDebugInfo, rhs: GroupDebugInfo) -> Bool {
+    public static func ==(lhs: GroupDebugInfo, rhs: GroupDebugInfo) -> Bool {
         if lhs.groupId != rhs.groupId {
             return false
         }
@@ -2478,18 +2705,19 @@ extension GroupDebugInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeGroupDebugInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupDebugInfo {
         return
             try GroupDebugInfo(
-                groupId: FfiConverterData.read(from: &buf),
-                epoch: FfiConverterUInt64.read(from: &buf),
-                totalMembers: FfiConverterUInt32.read(from: &buf),
+                groupId: FfiConverterData.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                totalMembers: FfiConverterUInt32.read(from: &buf), 
                 members: FfiConverterSequenceTypeGroupMemberDebugInfo.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: GroupDebugInfo, into buf: inout [UInt8]) {
@@ -2500,19 +2728,21 @@ public struct FfiConverterTypeGroupDebugInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupDebugInfo_lift(_ buf: RustBuffer) throws -> GroupDebugInfo {
     return try FfiConverterTypeGroupDebugInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupDebugInfo_lower(_ value: GroupDebugInfo) -> RustBuffer {
     return FfiConverterTypeGroupDebugInfo.lower(value)
 }
+
 
 public struct GroupMemberDebugInfo {
     public var leafIndex: UInt32
@@ -2528,8 +2758,10 @@ public struct GroupMemberDebugInfo {
     }
 }
 
+
+
 extension GroupMemberDebugInfo: Equatable, Hashable {
-    public static func == (lhs: GroupMemberDebugInfo, rhs: GroupMemberDebugInfo) -> Bool {
+    public static func ==(lhs: GroupMemberDebugInfo, rhs: GroupMemberDebugInfo) -> Bool {
         if lhs.leafIndex != rhs.leafIndex {
             return false
         }
@@ -2549,17 +2781,18 @@ extension GroupMemberDebugInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeGroupMemberDebugInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupMemberDebugInfo {
         return
             try GroupMemberDebugInfo(
-                leafIndex: FfiConverterUInt32.read(from: &buf),
-                credentialIdentity: FfiConverterData.read(from: &buf),
+                leafIndex: FfiConverterUInt32.read(from: &buf), 
+                credentialIdentity: FfiConverterData.read(from: &buf), 
                 credentialType: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: GroupMemberDebugInfo, into buf: inout [UInt8]) {
@@ -2569,19 +2802,21 @@ public struct FfiConverterTypeGroupMemberDebugInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupMemberDebugInfo_lift(_ buf: RustBuffer) throws -> GroupMemberDebugInfo {
     return try FfiConverterTypeGroupMemberDebugInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeGroupMemberDebugInfo_lower(_ value: GroupMemberDebugInfo) -> RustBuffer {
     return FfiConverterTypeGroupMemberDebugInfo.lower(value)
 }
+
 
 public struct KeyPackageData {
     public var data: Data
@@ -2593,8 +2828,10 @@ public struct KeyPackageData {
     }
 }
 
+
+
 extension KeyPackageData: Equatable, Hashable {
-    public static func == (lhs: KeyPackageData, rhs: KeyPackageData) -> Bool {
+    public static func ==(lhs: KeyPackageData, rhs: KeyPackageData) -> Bool {
         if lhs.data != rhs.data {
             return false
         }
@@ -2606,15 +2843,16 @@ extension KeyPackageData: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeKeyPackageData: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> KeyPackageData {
         return
             try KeyPackageData(
                 data: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: KeyPackageData, into buf: inout [UInt8]) {
@@ -2622,19 +2860,21 @@ public struct FfiConverterTypeKeyPackageData: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeKeyPackageData_lift(_ buf: RustBuffer) throws -> KeyPackageData {
     return try FfiConverterTypeKeyPackageData.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeKeyPackageData_lower(_ value: KeyPackageData) -> RustBuffer {
     return FfiConverterTypeKeyPackageData.lower(value)
 }
+
 
 public struct KeyPackageResult {
     public var keyPackageData: Data
@@ -2648,8 +2888,10 @@ public struct KeyPackageResult {
     }
 }
 
+
+
 extension KeyPackageResult: Equatable, Hashable {
-    public static func == (lhs: KeyPackageResult, rhs: KeyPackageResult) -> Bool {
+    public static func ==(lhs: KeyPackageResult, rhs: KeyPackageResult) -> Bool {
         if lhs.keyPackageData != rhs.keyPackageData {
             return false
         }
@@ -2665,16 +2907,17 @@ extension KeyPackageResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeKeyPackageResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> KeyPackageResult {
         return
             try KeyPackageResult(
-                keyPackageData: FfiConverterData.read(from: &buf),
+                keyPackageData: FfiConverterData.read(from: &buf), 
                 hashRef: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: KeyPackageResult, into buf: inout [UInt8]) {
@@ -2683,19 +2926,21 @@ public struct FfiConverterTypeKeyPackageResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeKeyPackageResult_lift(_ buf: RustBuffer) throws -> KeyPackageResult {
     return try FfiConverterTypeKeyPackageResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeKeyPackageResult_lower(_ value: KeyPackageResult) -> RustBuffer {
     return FfiConverterTypeKeyPackageResult.lower(value)
 }
+
 
 public struct MemberCredential {
     public var credential: CredentialData
@@ -2709,8 +2954,10 @@ public struct MemberCredential {
     }
 }
 
+
+
 extension MemberCredential: Equatable, Hashable {
-    public static func == (lhs: MemberCredential, rhs: MemberCredential) -> Bool {
+    public static func ==(lhs: MemberCredential, rhs: MemberCredential) -> Bool {
         if lhs.credential != rhs.credential {
             return false
         }
@@ -2726,16 +2973,17 @@ extension MemberCredential: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeMemberCredential: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MemberCredential {
         return
             try MemberCredential(
-                credential: FfiConverterTypeCredentialData.read(from: &buf),
+                credential: FfiConverterTypeCredentialData.read(from: &buf), 
                 signatureKey: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: MemberCredential, into buf: inout [UInt8]) {
@@ -2744,19 +2992,169 @@ public struct FfiConverterTypeMemberCredential: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeMemberCredential_lift(_ buf: RustBuffer) throws -> MemberCredential {
     return try FfiConverterTypeMemberCredential.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeMemberCredential_lower(_ value: MemberCredential) -> RustBuffer {
     return FfiConverterTypeMemberCredential.lower(value)
 }
+
+
+public struct PendingProposalDetail {
+    /**
+     * Unique reference for this proposal
+     */
+    public var proposalRef: Data
+    /**
+     * Type: "add", "remove", "update", "psk", "reinit", "external_init", "group_context_extensions"
+     */
+    public var proposalType: String
+    /**
+     * For Add: the identity being added
+     */
+    public var addIdentity: Data?
+    /**
+     * For Remove: the leaf index being removed
+     */
+    public var removeLeafIndex: UInt32?
+    /**
+     * For Update: the identity updating their key
+     */
+    public var updateIdentity: Data?
+    /**
+     * Sender of the proposal
+     */
+    public var senderIdentity: Data?
+    /**
+     * Sender leaf index
+     */
+    public var senderLeafIndex: UInt32?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Unique reference for this proposal
+         */proposalRef: Data, 
+        /**
+         * Type: "add", "remove", "update", "psk", "reinit", "external_init", "group_context_extensions"
+         */proposalType: String, 
+        /**
+         * For Add: the identity being added
+         */addIdentity: Data?, 
+        /**
+         * For Remove: the leaf index being removed
+         */removeLeafIndex: UInt32?, 
+        /**
+         * For Update: the identity updating their key
+         */updateIdentity: Data?, 
+        /**
+         * Sender of the proposal
+         */senderIdentity: Data?, 
+        /**
+         * Sender leaf index
+         */senderLeafIndex: UInt32?) {
+        self.proposalRef = proposalRef
+        self.proposalType = proposalType
+        self.addIdentity = addIdentity
+        self.removeLeafIndex = removeLeafIndex
+        self.updateIdentity = updateIdentity
+        self.senderIdentity = senderIdentity
+        self.senderLeafIndex = senderLeafIndex
+    }
+}
+
+
+
+extension PendingProposalDetail: Equatable, Hashable {
+    public static func ==(lhs: PendingProposalDetail, rhs: PendingProposalDetail) -> Bool {
+        if lhs.proposalRef != rhs.proposalRef {
+            return false
+        }
+        if lhs.proposalType != rhs.proposalType {
+            return false
+        }
+        if lhs.addIdentity != rhs.addIdentity {
+            return false
+        }
+        if lhs.removeLeafIndex != rhs.removeLeafIndex {
+            return false
+        }
+        if lhs.updateIdentity != rhs.updateIdentity {
+            return false
+        }
+        if lhs.senderIdentity != rhs.senderIdentity {
+            return false
+        }
+        if lhs.senderLeafIndex != rhs.senderLeafIndex {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(proposalRef)
+        hasher.combine(proposalType)
+        hasher.combine(addIdentity)
+        hasher.combine(removeLeafIndex)
+        hasher.combine(updateIdentity)
+        hasher.combine(senderIdentity)
+        hasher.combine(senderLeafIndex)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingProposalDetail: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingProposalDetail {
+        return
+            try PendingProposalDetail(
+                proposalRef: FfiConverterData.read(from: &buf), 
+                proposalType: FfiConverterString.read(from: &buf), 
+                addIdentity: FfiConverterOptionData.read(from: &buf), 
+                removeLeafIndex: FfiConverterOptionUInt32.read(from: &buf), 
+                updateIdentity: FfiConverterOptionData.read(from: &buf), 
+                senderIdentity: FfiConverterOptionData.read(from: &buf), 
+                senderLeafIndex: FfiConverterOptionUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PendingProposalDetail, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.proposalRef, into: &buf)
+        FfiConverterString.write(value.proposalType, into: &buf)
+        FfiConverterOptionData.write(value.addIdentity, into: &buf)
+        FfiConverterOptionUInt32.write(value.removeLeafIndex, into: &buf)
+        FfiConverterOptionData.write(value.updateIdentity, into: &buf)
+        FfiConverterOptionData.write(value.senderIdentity, into: &buf)
+        FfiConverterOptionUInt32.write(value.senderLeafIndex, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingProposalDetail_lift(_ buf: RustBuffer) throws -> PendingProposalDetail {
+    return try FfiConverterTypePendingProposalDetail.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingProposalDetail_lower(_ value: PendingProposalDetail) -> RustBuffer {
+    return FfiConverterTypePendingProposalDetail.lower(value)
+}
+
 
 public struct ProcessCommitResult {
     public var newEpoch: UInt64
@@ -2774,8 +3172,10 @@ public struct ProcessCommitResult {
     }
 }
 
+
+
 extension ProcessCommitResult: Equatable, Hashable {
-    public static func == (lhs: ProcessCommitResult, rhs: ProcessCommitResult) -> Bool {
+    public static func ==(lhs: ProcessCommitResult, rhs: ProcessCommitResult) -> Bool {
         if lhs.newEpoch != rhs.newEpoch {
             return false
         }
@@ -2799,18 +3199,19 @@ extension ProcessCommitResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeProcessCommitResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProcessCommitResult {
         return
             try ProcessCommitResult(
-                newEpoch: FfiConverterUInt64.read(from: &buf),
-                updateProposals: FfiConverterSequenceTypeUpdateProposalInfo.read(from: &buf),
-                addProposals: FfiConverterSequenceTypeAddProposalInfo.read(from: &buf),
+                newEpoch: FfiConverterUInt64.read(from: &buf), 
+                updateProposals: FfiConverterSequenceTypeUpdateProposalInfo.read(from: &buf), 
+                addProposals: FfiConverterSequenceTypeAddProposalInfo.read(from: &buf), 
                 removeProposals: FfiConverterSequenceTypeRemoveProposalInfo.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ProcessCommitResult, into buf: inout [UInt8]) {
@@ -2821,19 +3222,21 @@ public struct FfiConverterTypeProcessCommitResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProcessCommitResult_lift(_ buf: RustBuffer) throws -> ProcessCommitResult {
     return try FfiConverterTypeProcessCommitResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProcessCommitResult_lower(_ value: ProcessCommitResult) -> RustBuffer {
     return FfiConverterTypeProcessCommitResult.lower(value)
 }
+
 
 public struct ProposalRef {
     public var data: Data
@@ -2845,8 +3248,10 @@ public struct ProposalRef {
     }
 }
 
+
+
 extension ProposalRef: Equatable, Hashable {
-    public static func == (lhs: ProposalRef, rhs: ProposalRef) -> Bool {
+    public static func ==(lhs: ProposalRef, rhs: ProposalRef) -> Bool {
         if lhs.data != rhs.data {
             return false
         }
@@ -2858,15 +3263,16 @@ extension ProposalRef: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeProposalRef: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProposalRef {
         return
             try ProposalRef(
                 data: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ProposalRef, into buf: inout [UInt8]) {
@@ -2874,19 +3280,21 @@ public struct FfiConverterTypeProposalRef: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProposalRef_lift(_ buf: RustBuffer) throws -> ProposalRef {
     return try FfiConverterTypeProposalRef.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProposalRef_lower(_ value: ProposalRef) -> RustBuffer {
     return FfiConverterTypeProposalRef.lower(value)
 }
+
 
 /**
  * Result type for proposal creation operations
@@ -2907,18 +3315,19 @@ public struct ProposeResult {
     public init(
         /**
          * MlsMessageOut to send to server (serialized proposal)
-         */ proposalMessage: Data,
+         */proposalMessage: Data, 
         /**
-            * ProposalRef for local tracking (serialized reference)
-            */ proposalRef: Data
-    ) {
+         * ProposalRef for local tracking (serialized reference)
+         */proposalRef: Data) {
         self.proposalMessage = proposalMessage
         self.proposalRef = proposalRef
     }
 }
 
+
+
 extension ProposeResult: Equatable, Hashable {
-    public static func == (lhs: ProposeResult, rhs: ProposeResult) -> Bool {
+    public static func ==(lhs: ProposeResult, rhs: ProposeResult) -> Bool {
         if lhs.proposalMessage != rhs.proposalMessage {
             return false
         }
@@ -2934,16 +3343,17 @@ extension ProposeResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeProposeResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProposeResult {
         return
             try ProposeResult(
-                proposalMessage: FfiConverterData.read(from: &buf),
+                proposalMessage: FfiConverterData.read(from: &buf), 
                 proposalRef: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ProposeResult, into buf: inout [UInt8]) {
@@ -2952,19 +3362,21 @@ public struct FfiConverterTypeProposeResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProposeResult_lift(_ buf: RustBuffer) throws -> ProposeResult {
     return try FfiConverterTypeProposeResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProposeResult_lower(_ value: ProposeResult) -> RustBuffer {
     return FfiConverterTypeProposeResult.lower(value)
 }
+
 
 public struct RemoveProposalInfo {
     public var removedIndex: UInt32
@@ -2976,8 +3388,10 @@ public struct RemoveProposalInfo {
     }
 }
 
+
+
 extension RemoveProposalInfo: Equatable, Hashable {
-    public static func == (lhs: RemoveProposalInfo, rhs: RemoveProposalInfo) -> Bool {
+    public static func ==(lhs: RemoveProposalInfo, rhs: RemoveProposalInfo) -> Bool {
         if lhs.removedIndex != rhs.removedIndex {
             return false
         }
@@ -2989,15 +3403,16 @@ extension RemoveProposalInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeRemoveProposalInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RemoveProposalInfo {
         return
             try RemoveProposalInfo(
                 removedIndex: FfiConverterUInt32.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: RemoveProposalInfo, into buf: inout [UInt8]) {
@@ -3005,19 +3420,21 @@ public struct FfiConverterTypeRemoveProposalInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeRemoveProposalInfo_lift(_ buf: RustBuffer) throws -> RemoveProposalInfo {
     return try FfiConverterTypeRemoveProposalInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeRemoveProposalInfo_lower(_ value: RemoveProposalInfo) -> RustBuffer {
     return FfiConverterTypeRemoveProposalInfo.lower(value)
 }
+
 
 public struct StagedCommitInfo {
     public var groupId: Data
@@ -3037,8 +3454,10 @@ public struct StagedCommitInfo {
     }
 }
 
+
+
 extension StagedCommitInfo: Equatable, Hashable {
-    public static func == (lhs: StagedCommitInfo, rhs: StagedCommitInfo) -> Bool {
+    public static func ==(lhs: StagedCommitInfo, rhs: StagedCommitInfo) -> Bool {
         if lhs.groupId != rhs.groupId {
             return false
         }
@@ -3066,19 +3485,20 @@ extension StagedCommitInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeStagedCommitInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StagedCommitInfo {
         return
             try StagedCommitInfo(
-                groupId: FfiConverterData.read(from: &buf),
-                senderCredential: FfiConverterTypeCredentialData.read(from: &buf),
-                addedMembers: FfiConverterSequenceTypeMemberCredential.read(from: &buf),
-                removedMembers: FfiConverterSequenceTypeMemberCredential.read(from: &buf),
+                groupId: FfiConverterData.read(from: &buf), 
+                senderCredential: FfiConverterTypeCredentialData.read(from: &buf), 
+                addedMembers: FfiConverterSequenceTypeMemberCredential.read(from: &buf), 
+                removedMembers: FfiConverterSequenceTypeMemberCredential.read(from: &buf), 
                 stagedCommitId: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: StagedCommitInfo, into buf: inout [UInt8]) {
@@ -3090,19 +3510,21 @@ public struct FfiConverterTypeStagedCommitInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeStagedCommitInfo_lift(_ buf: RustBuffer) throws -> StagedCommitInfo {
     return try FfiConverterTypeStagedCommitInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeStagedCommitInfo_lower(_ value: StagedCommitInfo) -> RustBuffer {
     return FfiConverterTypeStagedCommitInfo.lower(value)
 }
+
 
 public struct StagedWelcomeInfo {
     public var groupId: Data
@@ -3120,8 +3542,10 @@ public struct StagedWelcomeInfo {
     }
 }
 
+
+
 extension StagedWelcomeInfo: Equatable, Hashable {
-    public static func == (lhs: StagedWelcomeInfo, rhs: StagedWelcomeInfo) -> Bool {
+    public static func ==(lhs: StagedWelcomeInfo, rhs: StagedWelcomeInfo) -> Bool {
         if lhs.groupId != rhs.groupId {
             return false
         }
@@ -3145,18 +3569,19 @@ extension StagedWelcomeInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeStagedWelcomeInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StagedWelcomeInfo {
         return
             try StagedWelcomeInfo(
-                groupId: FfiConverterData.read(from: &buf),
-                senderCredential: FfiConverterTypeCredentialData.read(from: &buf),
-                memberCredentials: FfiConverterSequenceTypeMemberCredential.read(from: &buf),
+                groupId: FfiConverterData.read(from: &buf), 
+                senderCredential: FfiConverterTypeCredentialData.read(from: &buf), 
+                memberCredentials: FfiConverterSequenceTypeMemberCredential.read(from: &buf), 
                 stagedWelcomeId: FfiConverterString.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: StagedWelcomeInfo, into buf: inout [UInt8]) {
@@ -3167,19 +3592,21 @@ public struct FfiConverterTypeStagedWelcomeInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeStagedWelcomeInfo_lift(_ buf: RustBuffer) throws -> StagedWelcomeInfo {
     return try FfiConverterTypeStagedWelcomeInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeStagedWelcomeInfo_lower(_ value: StagedWelcomeInfo) -> RustBuffer {
     return FfiConverterTypeStagedWelcomeInfo.lower(value)
 }
+
 
 /**
  * Tree hash data for epoch state verification
@@ -3196,8 +3623,10 @@ public struct TreeHashData {
     }
 }
 
+
+
 extension TreeHashData: Equatable, Hashable {
-    public static func == (lhs: TreeHashData, rhs: TreeHashData) -> Bool {
+    public static func ==(lhs: TreeHashData, rhs: TreeHashData) -> Bool {
         if lhs.epoch != rhs.epoch {
             return false
         }
@@ -3213,16 +3642,17 @@ extension TreeHashData: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeTreeHashData: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TreeHashData {
         return
             try TreeHashData(
-                epoch: FfiConverterUInt64.read(from: &buf),
+                epoch: FfiConverterUInt64.read(from: &buf), 
                 treeHash: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: TreeHashData, into buf: inout [UInt8]) {
@@ -3231,19 +3661,21 @@ public struct FfiConverterTypeTreeHashData: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTreeHashData_lift(_ buf: RustBuffer) throws -> TreeHashData {
     return try FfiConverterTypeTreeHashData.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeTreeHashData_lower(_ value: TreeHashData) -> RustBuffer {
     return FfiConverterTypeTreeHashData.lower(value)
 }
+
 
 public struct UpdateProposalInfo {
     public var leafIndex: UInt32
@@ -3259,8 +3691,10 @@ public struct UpdateProposalInfo {
     }
 }
 
+
+
 extension UpdateProposalInfo: Equatable, Hashable {
-    public static func == (lhs: UpdateProposalInfo, rhs: UpdateProposalInfo) -> Bool {
+    public static func ==(lhs: UpdateProposalInfo, rhs: UpdateProposalInfo) -> Bool {
         if lhs.leafIndex != rhs.leafIndex {
             return false
         }
@@ -3280,17 +3714,18 @@ extension UpdateProposalInfo: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeUpdateProposalInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UpdateProposalInfo {
         return
             try UpdateProposalInfo(
-                leafIndex: FfiConverterUInt32.read(from: &buf),
-                oldCredential: FfiConverterTypeCredentialData.read(from: &buf),
+                leafIndex: FfiConverterUInt32.read(from: &buf), 
+                oldCredential: FfiConverterTypeCredentialData.read(from: &buf), 
                 newCredential: FfiConverterTypeCredentialData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: UpdateProposalInfo, into buf: inout [UInt8]) {
@@ -3300,19 +3735,21 @@ public struct FfiConverterTypeUpdateProposalInfo: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeUpdateProposalInfo_lift(_ buf: RustBuffer) throws -> UpdateProposalInfo {
     return try FfiConverterTypeUpdateProposalInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeUpdateProposalInfo_lower(_ value: UpdateProposalInfo) -> RustBuffer {
     return FfiConverterTypeUpdateProposalInfo.lower(value)
 }
+
 
 /**
  * Validation context passed to CredentialValidator
@@ -3331,8 +3768,10 @@ public struct ValidationContext {
     }
 }
 
+
+
 extension ValidationContext: Equatable, Hashable {
-    public static func == (lhs: ValidationContext, rhs: ValidationContext) -> Bool {
+    public static func ==(lhs: ValidationContext, rhs: ValidationContext) -> Bool {
         if lhs.conversationId != rhs.conversationId {
             return false
         }
@@ -3352,17 +3791,18 @@ extension ValidationContext: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeValidationContext: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ValidationContext {
         return
             try ValidationContext(
-                conversationId: FfiConverterString.read(from: &buf),
-                operationType: FfiConverterTypeOperationType.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf), 
+                operationType: FfiConverterTypeOperationType.read(from: &buf), 
                 currentEpoch: FfiConverterUInt64.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: ValidationContext, into buf: inout [UInt8]) {
@@ -3372,19 +3812,21 @@ public struct FfiConverterTypeValidationContext: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeValidationContext_lift(_ buf: RustBuffer) throws -> ValidationContext {
     return try FfiConverterTypeValidationContext.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeValidationContext_lower(_ value: ValidationContext) -> RustBuffer {
     return FfiConverterTypeValidationContext.lower(value)
 }
+
 
 public struct WelcomeResult {
     public var groupId: Data
@@ -3396,8 +3838,10 @@ public struct WelcomeResult {
     }
 }
 
+
+
 extension WelcomeResult: Equatable, Hashable {
-    public static func == (lhs: WelcomeResult, rhs: WelcomeResult) -> Bool {
+    public static func ==(lhs: WelcomeResult, rhs: WelcomeResult) -> Bool {
         if lhs.groupId != rhs.groupId {
             return false
         }
@@ -3409,15 +3853,16 @@ extension WelcomeResult: Equatable, Hashable {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeWelcomeResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WelcomeResult {
         return
             try WelcomeResult(
                 groupId: FfiConverterData.read(from: &buf)
-            )
+        )
     }
 
     public static func write(_ value: WelcomeResult, into buf: inout [UInt8]) {
@@ -3425,124 +3870,133 @@ public struct FfiConverterTypeWelcomeResult: FfiConverterRustBuffer {
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeWelcomeResult_lift(_ buf: RustBuffer) throws -> WelcomeResult {
     return try FfiConverterTypeWelcomeResult.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeWelcomeResult_lower(_ value: WelcomeResult) -> RustBuffer {
     return FfiConverterTypeWelcomeResult.lower(value)
 }
 
+
 /**
  * P2: Comprehensive error enum with detailed variants for better debugging
  */
 public enum MlsError {
+
+    
+    
     case InvalidInput(message: String)
-
+    
     case GroupNotFound(message: String)
-
+    
     case InvalidKeyPackage(message: String)
-
+    
     case AddMembersFailed(message: String)
-
+    
     case EncryptionFailed(message: String)
-
+    
     case DecryptionFailed(message: String)
-
+    
     case SerializationError(message: String)
-
+    
     case OpenMlsError(message: String)
-
+    
     case InvalidGroupId(message: String)
-
+    
     case SecretExportFailed(message: String)
-
+    
     case CommitProcessingFailed(message: String)
-
+    
     case InvalidCommit(message: String)
-
+    
     case InvalidData(message: String)
-
+    
     case ContextNotInitialized(message: String)
-
+    
+    case ContextClosed(message: String)
+    
     case WireFormatPolicyViolation(message: String)
-
+    
     case MergeFailed(message: String)
-
+    
     case NoMatchingKeyPackage(message: String)
-
+    
     case KeyPackageDesyncDetected(message: String)
-
+    
     case WelcomeConsumed(message: String)
-
+    
     case StorageError(message: String)
-
+    
     case StorageFailed(message: String)
-
+    
     case MemberNotFound(message: String)
-
+    
     case CannotRemoveLastAdmin(message: String)
-
+    
     case InsufficientPermissions(message: String)
-
+    
     case InvalidProposalRef(message: String)
-
+    
     case LockPoisoned(message: String)
-
+    
     /**
      * Null pointer passed where non-null was expected
      */
     case NullPointer(message: String)
-
+    
     /**
      * Invalid context handle
      */
     case InvalidContext(message: String)
-
+    
     /**
      * TLS codec error with details
      */
     case TlsCodec(message: String)
-
+    
     /**
      * OpenMLS error with details
      */
     case OpenMls(message: String)
-
+    
     /**
      * Internal error for unexpected states
      */
     case Internal(message: String)
-
+    
     /**
      * Invalid UTF-8 string
      */
     case InvalidUtf8(message: String)
-
+    
     /**
      * JSON serialization error
      */
     case Serialization(message: String)
-
+    
     /**
      * Thread safety error (lock contention, etc.)
      */
     case ThreadSafety(message: String)
-
+    
     /**
      * Panic occurred (caught at FFI boundary)
      */
     case Panic(message: String)
+    
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
     typealias SwiftType = MlsError
@@ -3550,145 +4004,154 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsError {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return try .InvalidInput(
-                message: FfiConverterString.read(from: &buf)
-            )
 
-        case 2: return try .GroupNotFound(
-                message: FfiConverterString.read(from: &buf)
-            )
+        
 
-        case 3: return try .InvalidKeyPackage(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 4: return try .AddMembersFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 5: return try .EncryptionFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 6: return try .DecryptionFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 7: return try .SerializationError(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 8: return try .OpenMlsError(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 9: return try .InvalidGroupId(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 10: return try .SecretExportFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 11: return try .CommitProcessingFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 12: return try .InvalidCommit(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 13: return try .InvalidData(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 14: return try .ContextNotInitialized(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 15: return try .WireFormatPolicyViolation(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 16: return try .MergeFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 17: return try .NoMatchingKeyPackage(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 18: return try .KeyPackageDesyncDetected(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 19: return try .WelcomeConsumed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 20: return try .StorageError(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 21: return try .StorageFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 22: return try .MemberNotFound(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 23: return try .CannotRemoveLastAdmin(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 24: return try .InsufficientPermissions(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 25: return try .InvalidProposalRef(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 26: return try .LockPoisoned(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 27: return try .NullPointer(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 28: return try .InvalidContext(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 29: return try .TlsCodec(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 30: return try .OpenMls(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 31: return try .Internal(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 32: return try .InvalidUtf8(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 33: return try .Serialization(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 34: return try .ThreadSafety(
-                message: FfiConverterString.read(from: &buf)
-            )
-
-        case 35: return try .Panic(
-                message: FfiConverterString.read(from: &buf)
-            )
+        
+        case 1: return .InvalidInput(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .GroupNotFound(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .InvalidKeyPackage(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .AddMembersFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 5: return .EncryptionFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 6: return .DecryptionFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 7: return .SerializationError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 8: return .OpenMlsError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 9: return .InvalidGroupId(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 10: return .SecretExportFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 11: return .CommitProcessingFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 12: return .InvalidCommit(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 13: return .InvalidData(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 14: return .ContextNotInitialized(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 15: return .ContextClosed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 16: return .WireFormatPolicyViolation(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 17: return .MergeFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 18: return .NoMatchingKeyPackage(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 19: return .KeyPackageDesyncDetected(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 20: return .WelcomeConsumed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 21: return .StorageError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 22: return .StorageFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 23: return .MemberNotFound(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 24: return .CannotRemoveLastAdmin(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 25: return .InsufficientPermissions(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 26: return .InvalidProposalRef(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 27: return .LockPoisoned(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 28: return .NullPointer(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 29: return .InvalidContext(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 30: return .TlsCodec(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 31: return .OpenMls(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 32: return .Internal(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 33: return .InvalidUtf8(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 34: return .Serialization(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 35: return .ThreadSafety(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 36: return .Panic(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3696,79 +4159,88 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
 
     public static func write(_ value: MlsError, into buf: inout [UInt8]) {
         switch value {
-        case .InvalidInput(_ /* message is ignored*/ ):
+
+        
+
+        
+        case .InvalidInput(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
-        case .GroupNotFound(_ /* message is ignored*/ ):
+        case .GroupNotFound(_ /* message is ignored*/):
             writeInt(&buf, Int32(2))
-        case .InvalidKeyPackage(_ /* message is ignored*/ ):
+        case .InvalidKeyPackage(_ /* message is ignored*/):
             writeInt(&buf, Int32(3))
-        case .AddMembersFailed(_ /* message is ignored*/ ):
+        case .AddMembersFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(4))
-        case .EncryptionFailed(_ /* message is ignored*/ ):
+        case .EncryptionFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .DecryptionFailed(_ /* message is ignored*/ ):
+        case .DecryptionFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
-        case .SerializationError(_ /* message is ignored*/ ):
+        case .SerializationError(_ /* message is ignored*/):
             writeInt(&buf, Int32(7))
-        case .OpenMlsError(_ /* message is ignored*/ ):
+        case .OpenMlsError(_ /* message is ignored*/):
             writeInt(&buf, Int32(8))
-        case .InvalidGroupId(_ /* message is ignored*/ ):
+        case .InvalidGroupId(_ /* message is ignored*/):
             writeInt(&buf, Int32(9))
-        case .SecretExportFailed(_ /* message is ignored*/ ):
+        case .SecretExportFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(10))
-        case .CommitProcessingFailed(_ /* message is ignored*/ ):
+        case .CommitProcessingFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(11))
-        case .InvalidCommit(_ /* message is ignored*/ ):
+        case .InvalidCommit(_ /* message is ignored*/):
             writeInt(&buf, Int32(12))
-        case .InvalidData(_ /* message is ignored*/ ):
+        case .InvalidData(_ /* message is ignored*/):
             writeInt(&buf, Int32(13))
-        case .ContextNotInitialized(_ /* message is ignored*/ ):
+        case .ContextNotInitialized(_ /* message is ignored*/):
             writeInt(&buf, Int32(14))
-        case .WireFormatPolicyViolation(_ /* message is ignored*/ ):
+        case .ContextClosed(_ /* message is ignored*/):
             writeInt(&buf, Int32(15))
-        case .MergeFailed(_ /* message is ignored*/ ):
+        case .WireFormatPolicyViolation(_ /* message is ignored*/):
             writeInt(&buf, Int32(16))
-        case .NoMatchingKeyPackage(_ /* message is ignored*/ ):
+        case .MergeFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(17))
-        case .KeyPackageDesyncDetected(_ /* message is ignored*/ ):
+        case .NoMatchingKeyPackage(_ /* message is ignored*/):
             writeInt(&buf, Int32(18))
-        case .WelcomeConsumed(_ /* message is ignored*/ ):
+        case .KeyPackageDesyncDetected(_ /* message is ignored*/):
             writeInt(&buf, Int32(19))
-        case .StorageError(_ /* message is ignored*/ ):
+        case .WelcomeConsumed(_ /* message is ignored*/):
             writeInt(&buf, Int32(20))
-        case .StorageFailed(_ /* message is ignored*/ ):
+        case .StorageError(_ /* message is ignored*/):
             writeInt(&buf, Int32(21))
-        case .MemberNotFound(_ /* message is ignored*/ ):
+        case .StorageFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(22))
-        case .CannotRemoveLastAdmin(_ /* message is ignored*/ ):
+        case .MemberNotFound(_ /* message is ignored*/):
             writeInt(&buf, Int32(23))
-        case .InsufficientPermissions(_ /* message is ignored*/ ):
+        case .CannotRemoveLastAdmin(_ /* message is ignored*/):
             writeInt(&buf, Int32(24))
-        case .InvalidProposalRef(_ /* message is ignored*/ ):
+        case .InsufficientPermissions(_ /* message is ignored*/):
             writeInt(&buf, Int32(25))
-        case .LockPoisoned(_ /* message is ignored*/ ):
+        case .InvalidProposalRef(_ /* message is ignored*/):
             writeInt(&buf, Int32(26))
-        case .NullPointer(_ /* message is ignored*/ ):
+        case .LockPoisoned(_ /* message is ignored*/):
             writeInt(&buf, Int32(27))
-        case .InvalidContext(_ /* message is ignored*/ ):
+        case .NullPointer(_ /* message is ignored*/):
             writeInt(&buf, Int32(28))
-        case .TlsCodec(_ /* message is ignored*/ ):
+        case .InvalidContext(_ /* message is ignored*/):
             writeInt(&buf, Int32(29))
-        case .OpenMls(_ /* message is ignored*/ ):
+        case .TlsCodec(_ /* message is ignored*/):
             writeInt(&buf, Int32(30))
-        case .Internal(_ /* message is ignored*/ ):
+        case .OpenMls(_ /* message is ignored*/):
             writeInt(&buf, Int32(31))
-        case .InvalidUtf8(_ /* message is ignored*/ ):
+        case .Internal(_ /* message is ignored*/):
             writeInt(&buf, Int32(32))
-        case .Serialization(_ /* message is ignored*/ ):
+        case .InvalidUtf8(_ /* message is ignored*/):
             writeInt(&buf, Int32(33))
-        case .ThreadSafety(_ /* message is ignored*/ ):
+        case .Serialization(_ /* message is ignored*/):
             writeInt(&buf, Int32(34))
-        case .Panic(_ /* message is ignored*/ ):
+        case .ThreadSafety(_ /* message is ignored*/):
             writeInt(&buf, Int32(35))
+        case .Panic(_ /* message is ignored*/):
+            writeInt(&buf, Int32(36))
+
+        
         }
     }
 }
+
 
 extension MlsError: Equatable, Hashable {}
 
@@ -3785,6 +4257,7 @@ extension MlsError: Foundation.LocalizedError {
  */
 
 public enum OperationType {
+    
     case join
     case add
     case update
@@ -3792,8 +4265,9 @@ public enum OperationType {
     case decrypt
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeOperationType: FfiConverterRustBuffer {
     typealias SwiftType = OperationType
@@ -3801,68 +4275,85 @@ public struct FfiConverterTypeOperationType: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OperationType {
         let variant: Int32 = try readInt(&buf)
         switch variant {
+        
         case 1: return .join
-
+        
         case 2: return .add
-
+        
         case 3: return .update
-
+        
         case 4: return .remove
-
+        
         case 5: return .decrypt
-
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: OperationType, into buf: inout [UInt8]) {
         switch value {
+        
+        
         case .join:
             writeInt(&buf, Int32(1))
-
+        
+        
         case .add:
             writeInt(&buf, Int32(2))
-
+        
+        
         case .update:
             writeInt(&buf, Int32(3))
-
+        
+        
         case .remove:
             writeInt(&buf, Int32(4))
-
+        
+        
         case .decrypt:
             writeInt(&buf, Int32(5))
+        
         }
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeOperationType_lift(_ buf: RustBuffer) throws -> OperationType {
     return try FfiConverterTypeOperationType.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeOperationType_lower(_ value: OperationType) -> RustBuffer {
     return FfiConverterTypeOperationType.lower(value)
 }
 
+
+
 extension OperationType: Equatable, Hashable {}
+
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum ProcessedContent {
-    case applicationMessage(plaintext: Data, sender: CredentialData)
-    case proposal(proposal: ProposalInfo, proposalRef: ProposalRef)
+    
+    case applicationMessage(plaintext: Data, sender: CredentialData
+    )
+    case proposal(proposal: ProposalInfo, proposalRef: ProposalRef
+    )
     case stagedCommit(newEpoch: UInt64
     )
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeProcessedContent: FfiConverterRustBuffer {
     typealias SwiftType = ProcessedContent
@@ -3870,56 +4361,70 @@ public struct FfiConverterTypeProcessedContent: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProcessedContent {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return try .applicationMessage(plaintext: FfiConverterData.read(from: &buf), sender: FfiConverterTypeCredentialData.read(from: &buf))
-
-        case 2: return try .proposal(proposal: FfiConverterTypeProposalInfo.read(from: &buf), proposalRef: FfiConverterTypeProposalRef.read(from: &buf))
-
-        case 3: return try .stagedCommit(newEpoch: FfiConverterUInt64.read(from: &buf)
-            )
-
+        
+        case 1: return .applicationMessage(plaintext: try FfiConverterData.read(from: &buf), sender: try FfiConverterTypeCredentialData.read(from: &buf)
+        )
+        
+        case 2: return .proposal(proposal: try FfiConverterTypeProposalInfo.read(from: &buf), proposalRef: try FfiConverterTypeProposalRef.read(from: &buf)
+        )
+        
+        case 3: return .stagedCommit(newEpoch: try FfiConverterUInt64.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: ProcessedContent, into buf: inout [UInt8]) {
         switch value {
-        case let .applicationMessage(plaintext, sender):
+        
+        
+        case let .applicationMessage(plaintext,sender):
             writeInt(&buf, Int32(1))
             FfiConverterData.write(plaintext, into: &buf)
             FfiConverterTypeCredentialData.write(sender, into: &buf)
-
-        case let .proposal(proposal, proposalRef):
+            
+        
+        case let .proposal(proposal,proposalRef):
             writeInt(&buf, Int32(2))
             FfiConverterTypeProposalInfo.write(proposal, into: &buf)
             FfiConverterTypeProposalRef.write(proposalRef, into: &buf)
-
+            
+        
         case let .stagedCommit(newEpoch):
             writeInt(&buf, Int32(3))
             FfiConverterUInt64.write(newEpoch, into: &buf)
+            
         }
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProcessedContent_lift(_ buf: RustBuffer) throws -> ProcessedContent {
     return try FfiConverterTypeProcessedContent.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProcessedContent_lower(_ value: ProcessedContent) -> RustBuffer {
     return FfiConverterTypeProcessedContent.lower(value)
 }
 
+
+
 extension ProcessedContent: Equatable, Hashable {}
+
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum ProposalInfo {
+    
     case add(info: AddProposalInfo
     )
     case remove(info: RemoveProposalInfo
@@ -3928,8 +4433,9 @@ public enum ProposalInfo {
     )
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeProposalInfo: FfiConverterRustBuffer {
     typealias SwiftType = ProposalInfo
@@ -3937,63 +4443,79 @@ public struct FfiConverterTypeProposalInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProposalInfo {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return try .add(info: FfiConverterTypeAddProposalInfo.read(from: &buf)
-            )
-
-        case 2: return try .remove(info: FfiConverterTypeRemoveProposalInfo.read(from: &buf)
-            )
-
-        case 3: return try .update(info: FfiConverterTypeUpdateProposalInfo.read(from: &buf)
-            )
-
+        
+        case 1: return .add(info: try FfiConverterTypeAddProposalInfo.read(from: &buf)
+        )
+        
+        case 2: return .remove(info: try FfiConverterTypeRemoveProposalInfo.read(from: &buf)
+        )
+        
+        case 3: return .update(info: try FfiConverterTypeUpdateProposalInfo.read(from: &buf)
+        )
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: ProposalInfo, into buf: inout [UInt8]) {
         switch value {
+        
+        
         case let .add(info):
             writeInt(&buf, Int32(1))
             FfiConverterTypeAddProposalInfo.write(info, into: &buf)
-
+            
+        
         case let .remove(info):
             writeInt(&buf, Int32(2))
             FfiConverterTypeRemoveProposalInfo.write(info, into: &buf)
-
+            
+        
         case let .update(info):
             writeInt(&buf, Int32(3))
             FfiConverterTypeUpdateProposalInfo.write(info, into: &buf)
+            
         }
     }
 }
 
+
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProposalInfo_lift(_ buf: RustBuffer) throws -> ProposalInfo {
     return try FfiConverterTypeProposalInfo.lift(buf)
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
 public func FfiConverterTypeProposalInfo_lower(_ value: ProposalInfo) -> RustBuffer {
     return FfiConverterTypeProposalInfo.lower(value)
 }
 
+
+
 extension ProposalInfo: Equatable, Hashable {}
+
+
+
+
+
 
 /**
  * Credential validator callback trait for Swift-side policy enforcement
  * Allows the client to validate credentials before accepting group state changes
  */
-public protocol CredentialValidator: AnyObject {
+public protocol CredentialValidator : AnyObject {
+    
     /**
      * Validate a credential in the context of a specific operation
      * Returns true if the credential is valid and the operation should proceed
      * Returns false to reject the credential and abort the operation
      */
-    func validateCredential(credential: CredentialData, context: ValidationContext) async -> Bool
+    func validateCredential(credential: CredentialData, context: ValidationContext) async  -> Bool
+    
 }
 
 // Magic number for the Rust proxy to call using the same mechanism as every other method,
@@ -4005,10 +4527,11 @@ private let UNIFFI_CALLBACK_ERROR: Int32 = 1
 private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceCredentialValidator {
+fileprivate struct UniffiCallbackInterfaceCredentialValidator {
+
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceCredentialValidator = .init(
+    static var vtable: UniffiVTableCallbackInterfaceCredentialValidator = UniffiVTableCallbackInterfaceCredentialValidator(
         validateCredential: { (
             uniffiHandle: UInt64,
             credential: RustBuffer,
@@ -4022,9 +4545,9 @@ private enum UniffiCallbackInterfaceCredentialValidator {
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceCredentialValidator.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try await uniffiObj.validateCredential(
-                    credential: FfiConverterTypeCredentialData.lift(credential),
-                    context: FfiConverterTypeValidationContext.lift(context)
+                return await uniffiObj.validateCredential(
+                     credential: try FfiConverterTypeCredentialData.lift(credential),
+                     context: try FfiConverterTypeValidationContext.lift(context)
                 )
             }
 
@@ -4037,7 +4560,7 @@ private enum UniffiCallbackInterfaceCredentialValidator {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructI8(
@@ -4053,7 +4576,7 @@ private enum UniffiCallbackInterfaceCredentialValidator {
             )
             uniffiOutReturn.pointee = uniffiForeignFuture
         },
-        uniffiFree: { (uniffiHandle: UInt64) in
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
             let result = try? FfiConverterCallbackInterfaceCredentialValidator.handleMap.remove(handle: uniffiHandle)
             if result == nil {
                 print("Uniffi callback interface CredentialValidator: handle missing in uniffiFree")
@@ -4068,50 +4591,54 @@ private func uniffiCallbackInitCredentialValidator() {
 
 // FfiConverter protocol for callback interfaces
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private enum FfiConverterCallbackInterfaceCredentialValidator {
+fileprivate struct FfiConverterCallbackInterfaceCredentialValidator {
     fileprivate static var handleMap = UniffiHandleMap<CredentialValidator>()
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-extension FfiConverterCallbackInterfaceCredentialValidator: FfiConverter {
+extension FfiConverterCallbackInterfaceCredentialValidator : FfiConverter {
     typealias SwiftType = CredentialValidator
     typealias FfiType = UInt64
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ handle: UInt64) throws -> SwiftType {
         try handleMap.get(handle: handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ v: SwiftType) -> UInt64 {
         return handleMap.insert(obj: v)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
     }
 }
 
-public protocol EpochSecretStorage: AnyObject {
+
+
+
+public protocol EpochSecretStorage : AnyObject {
+    
     /**
      * Store epoch secret for a conversation
      * - conversation_id: Hex-encoded conversation/group ID
@@ -4119,30 +4646,42 @@ public protocol EpochSecretStorage: AnyObject {
      * - secret_data: Serialized epoch secret material
      * Returns true if stored successfully
      */
-    func storeEpochSecret(conversationId: String, epoch: UInt64, secretData: Data) async -> Bool
-
+    func storeEpochSecret(conversationId: String, epoch: UInt64, secretData: Data) async  -> Bool
+    
     /**
      * Retrieve epoch secret for a conversation
      * - conversation_id: Hex-encoded conversation/group ID
      * - epoch: Epoch number
      * Returns serialized epoch secret material if found
      */
-    func getEpochSecret(conversationId: String, epoch: UInt64) async -> Data?
-
+    func getEpochSecret(conversationId: String, epoch: UInt64) async  -> Data?
+    
     /**
      * Delete epoch secret (called during retention cleanup)
      * - conversation_id: Hex-encoded conversation/group ID
      * - epoch: Epoch number
      * Returns true if deleted successfully
      */
-    func deleteEpochSecret(conversationId: String, epoch: UInt64) async -> Bool
+    func deleteEpochSecret(conversationId: String, epoch: UInt64) async  -> Bool
+    
+    /**
+     * Delete epoch secrets older than a cutoff epoch
+     * - conversation_id: Hex-encoded conversation/group ID
+     * - cutoff_epoch: Epoch number (exclusive) - delete all epochs < cutoff_epoch
+     * Returns number of deleted secrets
+     */
+    func deleteEpochsBefore(conversationId: String, cutoffEpoch: UInt64) async  -> UInt32
+    
 }
 
+
+
 // Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceEpochSecretStorage {
+fileprivate struct UniffiCallbackInterfaceEpochSecretStorage {
+
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceEpochSecretStorage = .init(
+    static var vtable: UniffiVTableCallbackInterfaceEpochSecretStorage = UniffiVTableCallbackInterfaceEpochSecretStorage(
         storeEpochSecret: { (
             uniffiHandle: UInt64,
             conversationId: RustBuffer,
@@ -4157,10 +4696,10 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try await uniffiObj.storeEpochSecret(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    epoch: FfiConverterUInt64.lift(epoch),
-                    secretData: FfiConverterData.lift(secretData)
+                return await uniffiObj.storeEpochSecret(
+                     conversationId: try FfiConverterString.lift(conversationId),
+                     epoch: try FfiConverterUInt64.lift(epoch),
+                     secretData: try FfiConverterData.lift(secretData)
                 )
             }
 
@@ -4173,7 +4712,7 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructI8(
@@ -4202,9 +4741,9 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try await uniffiObj.getEpochSecret(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    epoch: FfiConverterUInt64.lift(epoch)
+                return await uniffiObj.getEpochSecret(
+                     conversationId: try FfiConverterString.lift(conversationId),
+                     epoch: try FfiConverterUInt64.lift(epoch)
                 )
             }
 
@@ -4217,7 +4756,7 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructRustBuffer(
@@ -4246,9 +4785,9 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try await uniffiObj.deleteEpochSecret(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    epoch: FfiConverterUInt64.lift(epoch)
+                return await uniffiObj.deleteEpochSecret(
+                     conversationId: try FfiConverterString.lift(conversationId),
+                     epoch: try FfiConverterUInt64.lift(epoch)
                 )
             }
 
@@ -4261,7 +4800,7 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructI8(
@@ -4277,7 +4816,51 @@ private enum UniffiCallbackInterfaceEpochSecretStorage {
             )
             uniffiOutReturn.pointee = uniffiForeignFuture
         },
-        uniffiFree: { (uniffiHandle: UInt64) in
+        deleteEpochsBefore: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            cutoffEpoch: UInt64,
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteU32,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
+        ) in
+            let makeCall = {
+                () async throws -> UInt32 in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return await uniffiObj.deleteEpochsBefore(
+                     conversationId: try FfiConverterString.lift(conversationId),
+                     cutoffEpoch: try FfiConverterUInt64.lift(cutoffEpoch)
+                )
+            }
+
+            let uniffiHandleSuccess = { (returnValue: UInt32) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructU32(
+                        returnValue: FfiConverterUInt32.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { (statusCode, errorBuf) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructU32(
+                        returnValue: 0,
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsync(
+                makeCall: makeCall,
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError
+            )
+            uniffiOutReturn.pointee = uniffiForeignFuture
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
             let result = try? FfiConverterCallbackInterfaceEpochSecretStorage.handleMap.remove(handle: uniffiHandle)
             if result == nil {
                 print("Uniffi callback interface EpochSecretStorage: handle missing in uniffiFree")
@@ -4292,62 +4875,190 @@ private func uniffiCallbackInitEpochSecretStorage() {
 
 // FfiConverter protocol for callback interfaces
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private enum FfiConverterCallbackInterfaceEpochSecretStorage {
+fileprivate struct FfiConverterCallbackInterfaceEpochSecretStorage {
     fileprivate static var handleMap = UniffiHandleMap<EpochSecretStorage>()
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-extension FfiConverterCallbackInterfaceEpochSecretStorage: FfiConverter {
+extension FfiConverterCallbackInterfaceEpochSecretStorage : FfiConverter {
     typealias SwiftType = EpochSecretStorage
     typealias FfiType = UInt64
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ handle: UInt64) throws -> SwiftType {
         try handleMap.get(handle: handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ v: SwiftType) -> UInt64 {
         return handleMap.insert(obj: v)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
     }
 }
 
-public protocol KeychainAccess: AnyObject {
-    func read(key: String) async throws -> Data?
 
-    func write(key: String, value: Data) async throws
 
-    func delete(key: String) async throws
+
+/**
+ * Callback for authorizing external join proposals
+ *
+ * Implement this to define your application's authorization policy
+ * for external commits (outsiders requesting to join a group).
+ */
+public protocol ExternalJoinAuthorizer : AnyObject {
+    
+    /**
+     * Authorize an external join request.
+     *
+     * # Arguments
+     * * `group_id` - Group being joined
+     * * `requester_credential` - Credential of the requester
+     * * `requester_signature_key` - Public signature key of requester
+     *
+     * # Returns
+     * true to allow the join, false to reject
+     */
+    func authorizeExternalJoin(groupId: Data, requesterCredential: CredentialData, requesterSignatureKey: Data)  -> Bool
+    
 }
 
+
+
 // Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceKeychainAccess {
+fileprivate struct UniffiCallbackInterfaceExternalJoinAuthorizer {
+
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceKeychainAccess = .init(
+    static var vtable: UniffiVTableCallbackInterfaceExternalJoinAuthorizer = UniffiVTableCallbackInterfaceExternalJoinAuthorizer(
+        authorizeExternalJoin: { (
+            uniffiHandle: UInt64,
+            groupId: RustBuffer,
+            requesterCredential: RustBuffer,
+            requesterSignatureKey: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceExternalJoinAuthorizer.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.authorizeExternalJoin(
+                     groupId: try FfiConverterData.lift(groupId),
+                     requesterCredential: try FfiConverterTypeCredentialData.lift(requesterCredential),
+                     requesterSignatureKey: try FfiConverterData.lift(requesterSignatureKey)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterCallbackInterfaceExternalJoinAuthorizer.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface ExternalJoinAuthorizer: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitExternalJoinAuthorizer() {
+    uniffi_mls_ffi_fn_init_callback_vtable_externaljoinauthorizer(&UniffiCallbackInterfaceExternalJoinAuthorizer.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceExternalJoinAuthorizer {
+    fileprivate static var handleMap = UniffiHandleMap<ExternalJoinAuthorizer>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceExternalJoinAuthorizer : FfiConverter {
+    typealias SwiftType = ExternalJoinAuthorizer
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+
+
+public protocol KeychainAccess : AnyObject {
+    
+    func read(key: String) async throws  -> Data?
+    
+    func write(key: String, value: Data) async throws 
+    
+    func delete(key: String) async throws 
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceKeychainAccess {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceKeychainAccess = UniffiVTableCallbackInterfaceKeychainAccess(
         read: { (
             uniffiHandle: UInt64,
             key: RustBuffer,
@@ -4361,7 +5072,7 @@ private enum UniffiCallbackInterfaceKeychainAccess {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try await uniffiObj.read(
-                    key: FfiConverterString.lift(key)
+                     key: try FfiConverterString.lift(key)
                 )
             }
 
@@ -4374,7 +5085,7 @@ private enum UniffiCallbackInterfaceKeychainAccess {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructRustBuffer(
@@ -4400,17 +5111,17 @@ private enum UniffiCallbackInterfaceKeychainAccess {
             uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () async throws in
+                () async throws -> () in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try await uniffiObj.write(
-                    key: FfiConverterString.lift(key),
-                    value: FfiConverterData.lift(value)
+                     key: try FfiConverterString.lift(key),
+                     value: try FfiConverterData.lift(value)
                 )
             }
 
-            let uniffiHandleSuccess = { (_: ()) in
+            let uniffiHandleSuccess = { (returnValue: ()) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructVoid(
@@ -4418,7 +5129,7 @@ private enum UniffiCallbackInterfaceKeychainAccess {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructVoid(
@@ -4442,16 +5153,16 @@ private enum UniffiCallbackInterfaceKeychainAccess {
             uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () async throws in
+                () async throws -> () in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try await uniffiObj.delete(
-                    key: FfiConverterString.lift(key)
+                     key: try FfiConverterString.lift(key)
                 )
             }
 
-            let uniffiHandleSuccess = { (_: ()) in
+            let uniffiHandleSuccess = { (returnValue: ()) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructVoid(
@@ -4459,7 +5170,7 @@ private enum UniffiCallbackInterfaceKeychainAccess {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructVoid(
@@ -4475,7 +5186,7 @@ private enum UniffiCallbackInterfaceKeychainAccess {
             )
             uniffiOutReturn.pointee = uniffiForeignFuture
         },
-        uniffiFree: { (uniffiHandle: UInt64) in
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
             let result = try? FfiConverterCallbackInterfaceKeychainAccess.handleMap.remove(handle: uniffiHandle)
             if result == nil {
                 print("Uniffi callback interface KeychainAccess: handle missing in uniffiFree")
@@ -4490,63 +5201,71 @@ private func uniffiCallbackInitKeychainAccess() {
 
 // FfiConverter protocol for callback interfaces
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private enum FfiConverterCallbackInterfaceKeychainAccess {
+fileprivate struct FfiConverterCallbackInterfaceKeychainAccess {
     fileprivate static var handleMap = UniffiHandleMap<KeychainAccess>()
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-extension FfiConverterCallbackInterfaceKeychainAccess: FfiConverter {
+extension FfiConverterCallbackInterfaceKeychainAccess : FfiConverter {
     typealias SwiftType = KeychainAccess
     typealias FfiType = UInt64
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ handle: UInt64) throws -> SwiftType {
         try handleMap.get(handle: handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ v: SwiftType) -> UInt64 {
         return handleMap.insert(obj: v)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
     }
 }
 
-public protocol MlsLogger: AnyObject {
+
+
+
+public protocol MlsLogger : AnyObject {
+    
     /**
      * Log a message from Rust to Swift's OSLog
      * - level: "debug", "info", "warning", "error"
      * - message: The log message
      */
-    func log(level: String, message: String) async
+    func log(level: String, message: String) async 
+    
 }
 
+
+
 // Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceMLSLogger {
+fileprivate struct UniffiCallbackInterfaceMLSLogger {
+
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceMlsLogger = .init(
+    static var vtable: UniffiVTableCallbackInterfaceMlsLogger = UniffiVTableCallbackInterfaceMlsLogger(
         log: { (
             uniffiHandle: UInt64,
             level: RustBuffer,
@@ -4556,17 +5275,17 @@ private enum UniffiCallbackInterfaceMLSLogger {
             uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
         ) in
             let makeCall = {
-                () async throws in
+                () async throws -> () in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceMlsLogger.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try await uniffiObj.log(
-                    level: FfiConverterString.lift(level),
-                    message: FfiConverterString.lift(message)
+                return await uniffiObj.log(
+                     level: try FfiConverterString.lift(level),
+                     message: try FfiConverterString.lift(message)
                 )
             }
 
-            let uniffiHandleSuccess = { (_: ()) in
+            let uniffiHandleSuccess = { (returnValue: ()) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructVoid(
@@ -4574,7 +5293,7 @@ private enum UniffiCallbackInterfaceMLSLogger {
                     )
                 )
             }
-            let uniffiHandleError = { statusCode, errorBuf in
+            let uniffiHandleError = { (statusCode, errorBuf) in
                 uniffiFutureCallback(
                     uniffiCallbackData,
                     UniffiForeignFutureStructVoid(
@@ -4589,7 +5308,7 @@ private enum UniffiCallbackInterfaceMLSLogger {
             )
             uniffiOutReturn.pointee = uniffiForeignFuture
         },
-        uniffiFree: { (uniffiHandle: UInt64) in
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
             let result = try? FfiConverterCallbackInterfaceMlsLogger.handleMap.remove(handle: uniffiHandle)
             if result == nil {
                 print("Uniffi callback interface MLSLogger: handle missing in uniffiFree")
@@ -4604,53 +5323,77 @@ private func uniffiCallbackInitMLSLogger() {
 
 // FfiConverter protocol for callback interfaces
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private enum FfiConverterCallbackInterfaceMlsLogger {
+fileprivate struct FfiConverterCallbackInterfaceMlsLogger {
     fileprivate static var handleMap = UniffiHandleMap<MlsLogger>()
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-extension FfiConverterCallbackInterfaceMlsLogger: FfiConverter {
+extension FfiConverterCallbackInterfaceMlsLogger : FfiConverter {
     typealias SwiftType = MlsLogger
     typealias FfiType = UInt64
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lift(_ handle: UInt64) throws -> SwiftType {
         try handleMap.get(handle: handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func lower(_ v: SwiftType) -> UInt64 {
         return handleMap.insert(obj: v)
     }
 
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
         writeInt(&buf, lower(v))
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionData: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
     typealias SwiftType = Data?
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
@@ -4672,9 +5415,9 @@ private struct FfiConverterOptionData: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
+fileprivate struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
     typealias SwiftType = GroupConfig?
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
@@ -4696,9 +5439,9 @@ private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceString: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
     public static func write(_ value: [String], into buf: inout [UInt8]) {
@@ -4714,16 +5457,16 @@ private struct FfiConverterSequenceString: FfiConverterRustBuffer {
         var seq = [String]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterString.read(from: &buf))
+            seq.append(try FfiConverterString.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceData: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
     typealias SwiftType = [Data]
 
     public static func write(_ value: [Data], into buf: inout [UInt8]) {
@@ -4739,16 +5482,16 @@ private struct FfiConverterSequenceData: FfiConverterRustBuffer {
         var seq = [Data]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterData.read(from: &buf))
+            seq.append(try FfiConverterData.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeAddProposalInfo: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeAddProposalInfo: FfiConverterRustBuffer {
     typealias SwiftType = [AddProposalInfo]
 
     public static func write(_ value: [AddProposalInfo], into buf: inout [UInt8]) {
@@ -4764,16 +5507,16 @@ private struct FfiConverterSequenceTypeAddProposalInfo: FfiConverterRustBuffer {
         var seq = [AddProposalInfo]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeAddProposalInfo.read(from: &buf))
+            seq.append(try FfiConverterTypeAddProposalInfo.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuffer {
     typealias SwiftType = [GroupMemberDebugInfo]
 
     public static func write(_ value: [GroupMemberDebugInfo], into buf: inout [UInt8]) {
@@ -4789,16 +5532,16 @@ private struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuf
         var seq = [GroupMemberDebugInfo]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeGroupMemberDebugInfo.read(from: &buf))
+            seq.append(try FfiConverterTypeGroupMemberDebugInfo.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeKeyPackageData: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeKeyPackageData: FfiConverterRustBuffer {
     typealias SwiftType = [KeyPackageData]
 
     public static func write(_ value: [KeyPackageData], into buf: inout [UInt8]) {
@@ -4814,16 +5557,16 @@ private struct FfiConverterSequenceTypeKeyPackageData: FfiConverterRustBuffer {
         var seq = [KeyPackageData]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeKeyPackageData.read(from: &buf))
+            seq.append(try FfiConverterTypeKeyPackageData.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer {
     typealias SwiftType = [MemberCredential]
 
     public static func write(_ value: [MemberCredential], into buf: inout [UInt8]) {
@@ -4839,16 +5582,41 @@ private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer 
         var seq = [MemberCredential]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeMemberCredential.read(from: &buf))
+            seq.append(try FfiConverterTypeMemberCredential.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeProposalRef: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypePendingProposalDetail: FfiConverterRustBuffer {
+    typealias SwiftType = [PendingProposalDetail]
+
+    public static func write(_ value: [PendingProposalDetail], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePendingProposalDetail.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PendingProposalDetail] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PendingProposalDetail]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePendingProposalDetail.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeProposalRef: FfiConverterRustBuffer {
     typealias SwiftType = [ProposalRef]
 
     public static func write(_ value: [ProposalRef], into buf: inout [UInt8]) {
@@ -4864,16 +5632,16 @@ private struct FfiConverterSequenceTypeProposalRef: FfiConverterRustBuffer {
         var seq = [ProposalRef]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeProposalRef.read(from: &buf))
+            seq.append(try FfiConverterTypeProposalRef.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeRemoveProposalInfo: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeRemoveProposalInfo: FfiConverterRustBuffer {
     typealias SwiftType = [RemoveProposalInfo]
 
     public static func write(_ value: [RemoveProposalInfo], into buf: inout [UInt8]) {
@@ -4889,16 +5657,16 @@ private struct FfiConverterSequenceTypeRemoveProposalInfo: FfiConverterRustBuffe
         var seq = [RemoveProposalInfo]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeRemoveProposalInfo.read(from: &buf))
+            seq.append(try FfiConverterTypeRemoveProposalInfo.read(from: &buf))
         }
         return seq
     }
 }
 
 #if swift(>=5.8)
-    @_documentation(visibility: private)
+@_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeUpdateProposalInfo: FfiConverterRustBuffer {
+fileprivate struct FfiConverterSequenceTypeUpdateProposalInfo: FfiConverterRustBuffer {
     typealias SwiftType = [UpdateProposalInfo]
 
     public static func write(_ value: [UpdateProposalInfo], into buf: inout [UInt8]) {
@@ -4914,22 +5682,21 @@ private struct FfiConverterSequenceTypeUpdateProposalInfo: FfiConverterRustBuffe
         var seq = [UpdateProposalInfo]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeUpdateProposalInfo.read(from: &buf))
+            seq.append(try FfiConverterTypeUpdateProposalInfo.read(from: &buf))
         }
         return seq
     }
 }
-
 private let UNIFFI_RUST_FUTURE_POLL_READY: Int8 = 0
 private let UNIFFI_RUST_FUTURE_POLL_MAYBE_READY: Int8 = 1
 
-private let uniffiContinuationHandleMap = UniffiHandleMap<UnsafeContinuation<Int8, Never>>()
+fileprivate let uniffiContinuationHandleMap = UniffiHandleMap<UnsafeContinuation<Int8, Never>>()
 
-private func uniffiRustCallAsync<F, T>(
+fileprivate func uniffiRustCallAsync<F, T>(
     rustFutureFunc: () -> UInt64,
-    pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> Void,
+    pollFunc: (UInt64, @escaping UniffiRustFutureContinuationCallback, UInt64) -> (),
     completeFunc: (UInt64, UnsafeMutablePointer<RustCallStatus>) -> F,
-    freeFunc: (UInt64) -> Void,
+    freeFunc: (UInt64) -> (),
     liftFunc: (F) throws -> T,
     errorHandler: ((RustBuffer) throws -> Swift.Error)?
 ) async throws -> T {
@@ -4940,7 +5707,7 @@ private func uniffiRustCallAsync<F, T>(
     defer {
         freeFunc(rustFuture)
     }
-    var pollResult: Int8
+    var pollResult: Int8;
     repeat {
         pollResult = await withUnsafeContinuation {
             pollFunc(
@@ -4959,39 +5726,39 @@ private func uniffiRustCallAsync<F, T>(
 
 // Callback handlers for an async calls.  These are invoked by Rust when the future is ready.  They
 // lift the return value or error and resume the suspended function.
-private func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) {
+fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: Int8) {
     if let continuation = try? uniffiContinuationHandleMap.remove(handle: handle) {
         continuation.resume(returning: pollResult)
     } else {
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
-
 private func uniffiTraitInterfaceCallAsync<T>(
     makeCall: @escaping () async throws -> T,
-    handleSuccess: @escaping (T) -> Void,
-    handleError: @escaping (Int8, RustBuffer) -> Void
+    handleSuccess: @escaping (T) -> (),
+    handleError: @escaping (Int8, RustBuffer) -> ()
 ) -> UniffiForeignFuture {
     let task = Task {
         do {
-            try handleSuccess(await makeCall())
+            handleSuccess(try await makeCall())
         } catch {
             handleError(CALL_UNEXPECTED_ERROR, FfiConverterString.lower(String(describing: error)))
         }
     }
     let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
     return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+
 }
 
 private func uniffiTraitInterfaceCallAsyncWithError<T, E>(
     makeCall: @escaping () async throws -> T,
-    handleSuccess: @escaping (T) -> Void,
-    handleError: @escaping (Int8, RustBuffer) -> Void,
+    handleSuccess: @escaping (T) -> (),
+    handleError: @escaping (Int8, RustBuffer) -> (),
     lowerError: @escaping (E) -> RustBuffer
 ) -> UniffiForeignFuture {
     let task = Task {
         do {
-            try handleSuccess(await makeCall())
+            handleSuccess(try await makeCall())
         } catch let error as E {
             handleError(CALL_ERROR, lowerError(error))
         } catch {
@@ -5004,7 +5771,7 @@ private func uniffiTraitInterfaceCallAsyncWithError<T, E>(
 
 // Borrow the callback handle map implementation to store foreign future handles
 // TODO: consolidate the handle-map code (https://github.com/mozilla/uniffi-rs/pull/1823)
-private var UNIFFI_FOREIGN_FUTURE_HANDLE_MAP = UniffiHandleMap<UniffiForeignFutureTask>()
+fileprivate var UNIFFI_FOREIGN_FUTURE_HANDLE_MAP = UniffiHandleMap<UniffiForeignFutureTask>()
 
 // Protocol for tasks that handle foreign futures.
 //
@@ -5032,50 +5799,88 @@ private func uniffiForeignFutureFree(handle: UInt64) {
 public func uniffiForeignFutureHandleCountMlsFfi() -> Int {
     UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.count
 }
-
+/**
+ * Returns the build identifier for this FFI version.
+ *
+ * Call this at app startup in both main app and NSE to verify both processes
+ * are using the same FFI binary. Log mismatches as errors.
+ *
+ * Format: "mls-ffi-{version}-{build_timestamp}"
+ */
+public func getFfiBuildId() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_mls_ffi_fn_func_get_ffi_build_id($0
+    )
+})
+}
+/**
+ * Returns detailed build information for diagnostics.
+ *
+ * Includes:
+ * - Version from Cargo.toml
+ * - Build timestamp (if set during build)
+ * - SQLCipher pragma settings (for verification)
+ */
+public func getFfiBuildInfo() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_mls_ffi_fn_func_get_ffi_build_info($0
+    )
+})
+}
 /**
  * Compute the hash reference for a serialized KeyPackage
  * Accepts either an MlsMessage-wrapped KeyPackage or raw KeyPackage bytes
  * This is useful when you need to compute a hash from KeyPackage bytes received from the server
  */
-public func mlsComputeKeyPackageHash(keyPackageBytes: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_func_mls_compute_key_package_hash(
-            FfiConverterData.lower(keyPackageBytes), $0
-        )
-    })
+public func mlsComputeKeyPackageHash(keyPackageBytes: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_func_mls_compute_key_package_hash(
+        FfiConverterData.lower(keyPackageBytes),$0
+    )
+})
 }
-
+/**
+ * Extract the credential identity from a serialized KeyPackage
+ * This returns the identity string (e.g., "did:plc:xxx" or "did:plc:xxx#deviceUUID")
+ * embedded in the key package's leaf node credential.
+ *
+ * This is useful for deduplicating key packages by device on the client side.
+ */
+public func mlsExtractKeyPackageIdentity(keyPackageBytes: Data)throws  -> String {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_func_mls_extract_key_package_identity(
+        FfiConverterData.lower(keyPackageBytes),$0
+    )
+})
+}
 /**
  * Generate a random Pre-Shared Key (PSK) for external commit authentication
  * Returns 32 random bytes (256 bits) suitable for use as a PSK
  */
-public func mlsGeneratePsk() throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_mls_ffi_fn_func_mls_generate_psk($0
-        )
-    })
+public func mlsGeneratePsk()throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_mls_ffi_fn_func_mls_generate_psk($0
+    )
+})
 }
-
 /**
  * Hash a Pre-Shared Key (PSK) using SHA256
  * Returns a hex-encoded string (64 characters) that can be used as a PSK identifier
  */
 public func mlsHashPsk(psk: Data) -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_mls_ffi_fn_func_mls_hash_psk(
-            FfiConverterData.lower(psk), $0
-        )
-    })
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_mls_ffi_fn_func_mls_hash_psk(
+        FfiConverterData.lower(psk),$0
+    )
+})
 }
-
 /**
  * Set the global MLS logger to receive Rust logs in Swift
  * This allows forwarding internal MLS logs to OSLog or other Swift logging systems
  */
-public func mlsSetLogger(logger: MlsLogger) { try! rustCall {
+public func mlsSetLogger(logger: MlsLogger) {try! rustCall() {
     uniffi_mls_ffi_fn_func_mls_set_logger(
-        FfiConverterCallbackInterfaceMlsLogger.lower(logger), $0
+        FfiConverterCallbackInterfaceMlsLogger.lower(logger),$0
     )
 }
 }
@@ -5085,7 +5890,6 @@ private enum InitializationResult {
     case contractVersionMismatch
     case apiChecksumMismatch
 }
-
 // Use a global variable to perform the versioning checks. Swift ensures that
 // the code inside is only computed once.
 private var initializationResult: InitializationResult = {
@@ -5096,207 +5900,238 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if uniffi_mls_ffi_checksum_func_mls_compute_key_package_hash() != 37874 {
+    if (uniffi_mls_ffi_checksum_func_get_ffi_build_id() != 44452) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_func_mls_generate_psk() != 34785 {
+    if (uniffi_mls_ffi_checksum_func_get_ffi_build_info() != 55464) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_func_mls_hash_psk() != 21951 {
+    if (uniffi_mls_ffi_checksum_func_mls_compute_key_package_hash() != 37874) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_func_mls_set_logger() != 30330 {
+    if (uniffi_mls_ffi_checksum_func_mls_extract_key_package_identity() != 36637) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_add_members() != 7911 {
+    if (uniffi_mls_ffi_checksum_func_mls_generate_psk() != 34785) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_add_members_async() != 30297 {
+    if (uniffi_mls_ffi_checksum_func_mls_hash_psk() != 21951) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_clear_pending_commit() != 41903 {
+    if (uniffi_mls_ffi_checksum_func_mls_set_logger() != 30330) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_commit_pending_proposals() != 14894 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_add_members() != 7911) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_compute_key_package_hash() != 63639 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_add_members_async() != 30297) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_create_external_commit() != 56676 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_clear_pending_commit() != 41903) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_create_external_commit_with_psk() != 46742 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_commit_pending_proposals() != 14894) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_create_group() != 24270 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_compute_key_package_hash() != 63639) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_create_group_async() != 31343 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_create_external_commit() != 56676) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_create_key_package() != 46265 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_create_external_commit_with_psk() != 46742) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_debug_check_key_package_hash() != 56561 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_create_group() != 24270) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_debug_group_members() != 31412 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_create_group_async() != 31343) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_debug_list_key_package_hashes() != 59032 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_create_key_package() != 46265) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message() != 31578 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_debug_check_key_package_hash() != 56561) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message_async() != 5191 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_debug_group_members() != 31412) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_delete_group() != 145 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_debug_list_key_package_hashes() != 59032) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_delete_key_package_bundles() != 40126 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message() != 31578) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_encrypt_message() != 31493 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_decrypt_message_async() != 5191) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_encrypt_message_async() != 2609 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_delete_group() != 145) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_export_epoch_secret() != 4955 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_delete_key_package_bundles() != 40126) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_export_group_info() != 39113 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_discard_pending_external_join() != 11711) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_export_group_state() != 3686 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_encrypt_message() != 31493) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_export_identity_key() != 25142 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_encrypt_message_async() != 2609) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_export_secret() != 25912 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_export_epoch_secret() != 4955) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_flush_and_prepare_close() != 22318 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_export_group_info() != 39113) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_flush_storage() != 36619 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_export_group_state() != 3686) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_get_epoch() != 52081 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_export_identity_key() != 25142) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_get_group_debug_state() != 37623 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_export_secret() != 25912) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_get_group_member_count() != 57867 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_flush_and_prepare_close() != 37168) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_get_key_package_bundle_count() != 20966 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_flush_storage() != 36619) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_get_tree_hash() != 18516 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_get_epoch() != 52081) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_group_exists() != 30707 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_get_group_debug_state() != 37623) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_import_group_state() != 26468 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_get_group_member_count() != 57867) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_import_identity_key() != 35224 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_get_key_package_bundle_count() != 20966) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_list_pending_proposals() != 55658 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_get_pending_proposal_details() != 59267) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_merge_pending_commit() != 45783 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_get_tree_hash() != 18516) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_merge_staged_commit() != 14736 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_group_exists() != 30707) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_process_commit() != 4332 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_import_group_state() != 26468) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_process_message() != 3909 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_import_identity_key() != 35224) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_process_message_async() != 28819 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_is_closed() != 44765) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_process_welcome() != 3091 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_launch_checkpoint() != 19095) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_propose_add_member() != 37433 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_list_pending_proposals() != 55658) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_propose_remove_member() != 56664 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_merge_pending_commit() != 45783) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_propose_self_update() != 42903 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_merge_staged_commit() != 14736) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_remove_members() != 46844 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_process_commit() != 4332) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_remove_proposal() != 4954 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_process_message() != 3909) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_self_update() != 49396 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_process_message_async() != 28819) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_set_credential_validator() != 37116 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_process_welcome() != 3091) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_set_epoch_secret_storage() != 44820 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_propose_add_member() != 37433) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_set_logger() != 20649 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_propose_remove_member() != 56664) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_store_proposal() != 52869 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_propose_self_update() != 42903) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_sync_database() != 34401 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_remove_members() != 46844) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlscontext_validate_group_info_format() != 48990 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_remove_proposal() != 4954) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_constructor_mlscontext_new() != 23112 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_self_update() != 49396) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_credentialvalidator_validate_credential() != 39416 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_set_credential_validator() != 37116) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_epochsecretstorage_store_epoch_secret() != 33043 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_set_epoch_secret_storage() != 44820) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_epochsecretstorage_get_epoch_secret() != 42117 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_set_external_join_authorizer() != 17654) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_epochsecretstorage_delete_epoch_secret() != 15099 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_set_logger() != 20649) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_keychainaccess_read() != 3271 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_store_proposal() != 52869) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_keychainaccess_write() != 5316 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_sync_database() != 34401) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_keychainaccess_delete() != 2937 {
+    if (uniffi_mls_ffi_checksum_method_mlscontext_validate_group_info_format() != 48990) {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_mls_ffi_checksum_method_mlslogger_log() != 45548 {
+    if (uniffi_mls_ffi_checksum_constructor_mlscontext_new() != 23112) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_credentialvalidator_validate_credential() != 39416) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_epochsecretstorage_store_epoch_secret() != 33043) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_epochsecretstorage_get_epoch_secret() != 42117) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_epochsecretstorage_delete_epoch_secret() != 15099) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_epochsecretstorage_delete_epochs_before() != 24751) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_externaljoinauthorizer_authorize_external_join() != 31338) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_keychainaccess_read() != 3271) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_keychainaccess_write() != 5316) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_keychainaccess_delete() != 2937) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mls_ffi_checksum_method_mlslogger_log() != 45548) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitCredentialValidator()
     uniffiCallbackInitEpochSecretStorage()
+    uniffiCallbackInitExternalJoinAuthorizer()
     uniffiCallbackInitKeychainAccess()
     uniffiCallbackInitMLSLogger()
     return InitializationResult.ok

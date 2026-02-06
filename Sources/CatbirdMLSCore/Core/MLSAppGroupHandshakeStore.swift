@@ -53,36 +53,23 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   public func issueWillCloseRequest(for userDID: String) -> MLSNSEWillCloseRequest {
     let now = Date().timeIntervalSince1970
 
-    var token: UInt64
-    do {
-      token = try ProcessCoordinator.shared.performExclusive {
-        let counterKey = counterKey(for: userDID)
-        let current: UInt64
-        if let number = defaults.object(forKey: counterKey) as? NSNumber {
-          current = number.uint64Value
-        } else {
-          current = UInt64(defaults.integer(forKey: counterKey))
-        }
-        let next = current &+ 1
-        defaults.set(next, forKey: counterKey)
-        defaults.synchronize()
-        return next
-      }
-    } catch {
-      logger.error("🚫 [Handshake] Failed to acquire token counter lock: \(error.localizedDescription)")
-      // Best-effort fallback: still attempt to advance the counter even without the lock.
-      // This preserves monotonicity and avoids generating a token that might appear "already acked".
-      let counterKey = counterKey(for: userDID)
-      let current: UInt64
-      if let number = defaults.object(forKey: counterKey) as? NSNumber {
-        current = number.uint64Value
-      } else {
-        current = UInt64(defaults.integer(forKey: counterKey))
-      }
-      token = current &+ 1
-      defaults.set(token, forKey: counterKey)
-      defaults.synchronize()
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADVISORY LOCKS REMOVED (2026-02): Signal-style 0xdead10cc prevention
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Advisory locks cause 0xdead10cc crashes. Token increment is now best-effort
+    // with UserDefaults atomic operations. Monotonicity is preserved by using
+    // incrementing counters - even if we read a stale value, we'll increment it.
+    // ═══════════════════════════════════════════════════════════════════════════
+    let counterKey = counterKey(for: userDID)
+    let current: UInt64
+    if let number = defaults.object(forKey: counterKey) as? NSNumber {
+      current = number.uint64Value
+    } else {
+      current = UInt64(defaults.integer(forKey: counterKey))
     }
+    let token = current &+ 1
+    defaults.set(token, forKey: counterKey)
+    defaults.synchronize()
 
     let request = MLSNSEWillCloseRequest(userDID: userDID, token: token, createdAt: now)
     set(request, forKey: requestKey(for: userDID))

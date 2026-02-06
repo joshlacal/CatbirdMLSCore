@@ -20,34 +20,39 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
     private let storage = MLSStorage.shared
     private let logger = Logger(subsystem: "blue.catbird.mls", category: "EpochSecretStorage")
     private let userDID: String
+    private let databaseManager: MLSGRDBManager
 
-    /// Initialize with explicit userDID parameter
-    /// - Parameter userDID: User's decentralized identifier
-    public init(userDID: String) {
+    /// Initialize with explicit userDID and database manager
+    /// - Parameters:
+    ///   - userDID: User's decentralized identifier
+    ///   - databaseManager: Database manager instance (owned by session)
+    public init(userDID: String, databaseManager: MLSGRDBManager) {
         self.userDID = userDID
+        self.databaseManager = databaseManager
     }
 
     public func storeEpochSecret(conversationId: String, epoch: UInt64, secretData: Data) async -> Bool {
         logger.debug("[EPOCH-STORAGE] storeEpochSecret called: conversation=\(conversationId), epoch=\(epoch), \(secretData.count) bytes")
 
         do {
-            let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
+            // Use write(for:) to safely route to Pool or lightweight Queue
+            try await databaseManager.write(for: userDID) { [storage, userDID] db in
+                // Ensure conversation exists BEFORE storing epoch secret
+                try storage.ensureConversationExistsSync(
+                    userDID: userDID,
+                    conversationID: conversationId,
+                    groupID: conversationId,
+                    db: db
+                )
 
-            // Ensure conversation exists BEFORE storing epoch secret
-            try await storage.ensureConversationExists(
-                userDID: userDID,
-                conversationID: conversationId,
-                groupID: conversationId,
-                database: database
-            )
-
-            try await storage.saveEpochSecret(
-                userDID: userDID,
-                conversationID: conversationId,
-                epoch: epoch,
-                secretData: secretData,
-                database: database
-            )
+                try storage.saveEpochSecretSync(
+                    userDID: userDID,
+                    conversationID: conversationId,
+                    epoch: epoch,
+                    secretData: secretData,
+                    db: db
+                )
+            }
             logger.info("[EPOCH-STORAGE] Stored epoch secret successfully")
             return true
         } catch {
@@ -60,13 +65,15 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
         logger.debug("[EPOCH-STORAGE] getEpochSecret called: conversation=\(conversationId), epoch=\(epoch)")
 
         do {
-            let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
-            let data = try await storage.getEpochSecret(
-                userDID: userDID,
-                conversationID: conversationId,
-                epoch: epoch,
-                database: database
-            )
+            // Use read(for:) to safely route to Pool or lightweight Queue
+            let data = try await databaseManager.read(for: userDID) { [storage, userDID] db in
+                try storage.getEpochSecretSync(
+                    userDID: userDID,
+                    conversationID: conversationId,
+                    epoch: epoch,
+                    db: db
+                )
+            }
 
             if let data = data {
                 logger.info("[EPOCH-STORAGE] Retrieved epoch secret: \(data.count) bytes")
@@ -84,18 +91,41 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
         logger.debug("[EPOCH-STORAGE] deleteEpochSecret called: conversation=\(conversationId), epoch=\(epoch)")
 
         do {
-            let database = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
-            try await storage.deleteEpochSecret(
-                userDID: userDID,
-                conversationID: conversationId,
-                epoch: epoch,
-                database: database
-            )
+            // Use write(for:) to safely route to Pool or lightweight Queue
+            try await databaseManager.write(for: userDID) { [storage, userDID] db in
+                try storage.deleteEpochSecretSync(
+                    userDID: userDID,
+                    conversationID: conversationId,
+                    epoch: epoch,
+                    db: db
+                )
+            }
             logger.info("[EPOCH-STORAGE] Deleted epoch secret successfully")
             return true
         } catch {
             logger.error("[EPOCH-STORAGE] Failed to delete epoch secret: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    public func deleteEpochsBefore(conversationId: String, cutoffEpoch: UInt64) async -> UInt32 {
+        logger.debug("[EPOCH-STORAGE] deleteEpochsBefore called: conversation=\(conversationId), cutoff=\(cutoffEpoch)")
+
+        do {
+            // Use write(for:) to safely route to Pool or lightweight Queue
+            let deletedCount = try await databaseManager.write(for: userDID) { [storage, userDID] db in
+                try storage.deleteEpochsBeforeSync(
+                    userDID: userDID,
+                    conversationID: conversationId,
+                    cutoffEpoch: cutoffEpoch,
+                    db: db
+                )
+            }
+            logger.info("[EPOCH-STORAGE] Deleted \(deletedCount) old epoch secrets")
+            return UInt32(deletedCount)
+        } catch {
+            logger.error("[EPOCH-STORAGE] Failed to delete old epoch secrets: \(error.localizedDescription)")
+            return 0
         }
     }
 }

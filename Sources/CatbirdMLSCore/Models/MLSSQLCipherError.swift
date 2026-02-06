@@ -24,8 +24,15 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
   /// This typically occurs during account switching race conditions when the wrong key is used
   case encryptionKeyMismatch(message: String)
 
+  /// Database account mismatch - operation requested for wrong user
+  /// This prevents cross-account access during account switching race conditions
+  case accountMismatch(requested: String, active: String)
+
   /// Database is locked by another process
   case databaseLocked
+
+  /// Database has been closed and can no longer be accessed
+  case databaseClosed
 
   /// Database schema version mismatch
   case schemaVersionMismatch(expected: Int, found: Int)
@@ -132,8 +139,12 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Invalid encryption key"
     case .encryptionKeyMismatch:
       return "Encryption key mismatch"
+    case .accountMismatch:
+      return "Database account mismatch"
     case .databaseLocked:
       return "Database is locked"
+    case .databaseClosed:
+      return "Database has been closed"
     case .schemaVersionMismatch:
       return "Schema version mismatch"
     case .storageUnavailable(let reason):
@@ -195,8 +206,12 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Check that the encryption key is properly stored in Keychain."
     case .encryptionKeyMismatch:
       return "Wait for account switching to complete and retry. If the issue persists, restart the app."
+    case .accountMismatch:
+      return "Wait for account switching to complete and retry. This prevents cross-account data access."
     case .databaseLocked:
       return "Close other connections to the database and retry."
+    case .databaseClosed:
+      return "The database connection has been closed. Restart the app to re-establish connection."
     case .schemaVersionMismatch:
       return "Database schema needs migration. Contact support."
     case .storageUnavailable:
@@ -250,8 +265,12 @@ public enum MLSSQLCipherError: Error, LocalizedError, CustomStringConvertible {
       return "Invalid encryption key: \(reason)"
     case .encryptionKeyMismatch(let message):
       return "Encryption key mismatch (HMAC failure): \(message)"
+    case .accountMismatch(let requested, let active):
+      return "Database account mismatch: requested \(requested.prefix(20))..., but active is \(active.prefix(20))..."
     case .databaseLocked:
       return "Database is locked by another process"
+    case .databaseClosed:
+      return "Database connection has been closed"
     case .schemaVersionMismatch(let expected, let found):
       return "Schema version mismatch: expected \(expected), found \(found)"
     case .storageUnavailable(let reason):

@@ -2,6 +2,15 @@
 
 This guide summarizes how to work inside CatbirdMLSCore. Keep changes small, well-described, and consistent with the existing Swift package layout.
 
+## Build & Test Workflow
+
+Agents SHOULD build and test autonomously:
+- Swift package builds are fast
+- Use `swift build` and `swift test` freely
+- Verify changes work before reporting completion
+
+See `~/Developer/.claude/AGENTS.md` for global agent guidelines.
+
 ## Project Structure & Modules
 - `Sources/CatbirdMLSCore/Core` — MLS context, managers, primary logic.
 - `Sources/CatbirdMLSCore/Storage` — SQLCipher + GRDB persistence.

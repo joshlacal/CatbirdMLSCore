@@ -2,47 +2,61 @@
 //  MLSMessageModel.swift
 //  Catbird
 //
-//  MLS message data model with plaintext caching
+//  MLS message data model with payload caching
 //
 
 import Foundation
 import GRDB
 
-/// MLS message model (critical for plaintext caching)
+/// MLS message model with full payload storage
 public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
-  public   let messageID: String
-  public   let currentUserDID: String
-  public   let conversationID: String
-  public   let senderID: String
-  public   let plaintext: String?
-  public   let embedDataJSON: Data?  // Stores MLSEmbedData as JSON
-  public   let wireFormat: Data?
-  public   let contentType: String
-  public   let timestamp: Date
-  public   let epoch: Int64
-  public   let sequenceNumber: Int64
-  public   let authenticatedData: Data?
-  public   let signature: Data?
-  public   let isDelivered: Bool
-  public   let isRead: Bool
-  public   let isSent: Bool
-  public   let sendAttempts: Int
-  public   let error: String?
-  public   let processingState: String
-  public   let gapBefore: Bool
-  public   let plaintextExpired: Bool
-  public   let processingError: String?  // Specific error from decryption/processing
-  public   let processingAttempts: Int  // Number of times processing was attempted
-  public   let validationFailureReason: String?  // Why pre-processing validation failed
+  public let messageID: String
+  public let currentUserDID: String
+  public let conversationID: String
+  public let senderID: String
+  public let payloadJSON: Data?  // Full MLSMessagePayload as JSON
+  public let wireFormat: Data?
+  public let contentType: String
+  public let timestamp: Date
+  public let epoch: Int64
+  public let sequenceNumber: Int64
+  public let authenticatedData: Data?
+  public let signature: Data?
+  public let isDelivered: Bool
+  public let isRead: Bool
+  public let isSent: Bool
+  public let sendAttempts: Int
+  public let error: String?
+  public let processingState: String
+  public let gapBefore: Bool
+  public let payloadExpired: Bool
+  public let processingError: String?
+  public let processingAttempts: Int
+  public let validationFailureReason: String?
 
   public var id: String { messageID }
 
   // MARK: - Computed Properties
 
-  /// Parse embedData from JSON
-  public   var parsedEmbed: MLSEmbedData? {
-    guard let json = embedDataJSON else { return nil }
-    return try? MLSEmbedData.fromJSONData(json)
+  /// Parse full payload from JSON
+  public var parsedPayload: MLSMessagePayload? {
+    guard let json = payloadJSON else { return nil }
+    return try? MLSMessagePayload.decodeFromJSON(json)
+  }
+
+  /// Get plaintext from payload (convenience)
+  public var plaintext: String? {
+    parsedPayload?.text
+  }
+
+  /// Get embed from payload (convenience)
+  public var parsedEmbed: MLSEmbedData? {
+    parsedPayload?.embed
+  }
+
+  /// Message type from payload
+  public var messageType: MLSMessageType? {
+    parsedPayload?.messageType
   }
 
   // MARK: - Initialization
@@ -52,10 +66,9 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     currentUserDID: String,
     conversationID: String,
     senderID: String,
-    plaintext: String? = nil,
-    embedDataJSON: Data? = nil,
+    payloadJSON: Data? = nil,
     wireFormat: Data? = nil,
-    contentType: String = "text",
+    contentType: String = "application/json",
     timestamp: Date = Date(),
     epoch: Int64,
     sequenceNumber: Int64,
@@ -68,7 +81,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     error: String? = nil,
     processingState: String = "delivered",
     gapBefore: Bool = false,
-    plaintextExpired: Bool = false,
+    payloadExpired: Bool = false,
     processingError: String? = nil,
     processingAttempts: Int = 0,
     validationFailureReason: String? = nil
@@ -77,8 +90,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.currentUserDID = currentUserDID
     self.conversationID = conversationID
     self.senderID = senderID
-    self.plaintext = plaintext
-    self.embedDataJSON = embedDataJSON
+    self.payloadJSON = payloadJSON
     self.wireFormat = wireFormat
     self.contentType = contentType
     self.timestamp = timestamp
@@ -93,7 +105,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.error = error
     self.processingState = processingState
     self.gapBefore = gapBefore
-    self.plaintextExpired = plaintextExpired
+    self.payloadExpired = payloadExpired
     self.processingError = processingError
     self.processingAttempts = processingAttempts
     self.validationFailureReason = validationFailureReason
@@ -101,16 +113,15 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
 
   // MARK: - Update Methods
 
-  /// Create copy with plaintext cached
-  func withPlaintext(_ text: String, embedData: MLSEmbedData? = nil) -> MLSMessageModel {
-    let embedJSON = embedData.flatMap { try? $0.toJSONData() }
+  /// Create copy with payload cached
+  public func withPayload(_ payload: MLSMessagePayload) -> MLSMessageModel {
+    let payloadData = try? payload.encodeToJSON()
     return MLSMessageModel(
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
       senderID: senderID,
-      plaintext: text,
-      embedDataJSON: embedJSON,
+      payloadJSON: payloadData,
       wireFormat: wireFormat,
       contentType: contentType,
       timestamp: timestamp,
@@ -125,7 +136,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       error: error,
       processingState: processingState,
       gapBefore: gapBefore,
-      plaintextExpired: plaintextExpired,
+      payloadExpired: false,
       processingError: processingError,
       processingAttempts: processingAttempts,
       validationFailureReason: validationFailureReason
@@ -133,14 +144,13 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   }
 
   /// Create copy marked as sent
-  func withSentStatus() -> MLSMessageModel {
+  public func withSentStatus() -> MLSMessageModel {
     MLSMessageModel(
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
       senderID: senderID,
-      plaintext: plaintext,
-      embedDataJSON: embedDataJSON,
+      payloadJSON: payloadJSON,
       wireFormat: wireFormat,
       contentType: contentType,
       timestamp: timestamp,
@@ -155,7 +165,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       error: nil,
       processingState: processingState,
       gapBefore: gapBefore,
-      plaintextExpired: plaintextExpired,
+      payloadExpired: payloadExpired,
       processingError: processingError,
       processingAttempts: processingAttempts,
       validationFailureReason: validationFailureReason
@@ -163,14 +173,13 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   }
 
   /// Create copy marked as read
-  func withReadStatus() -> MLSMessageModel {
+  public func withReadStatus() -> MLSMessageModel {
     MLSMessageModel(
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
       senderID: senderID,
-      plaintext: plaintext,
-      embedDataJSON: embedDataJSON,
+      payloadJSON: payloadJSON,
       wireFormat: wireFormat,
       contentType: contentType,
       timestamp: timestamp,
@@ -185,7 +194,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       error: error,
       processingState: processingState,
       gapBefore: gapBefore,
-      plaintextExpired: plaintextExpired,
+      payloadExpired: payloadExpired,
       processingError: processingError,
       processingAttempts: processingAttempts,
       validationFailureReason: validationFailureReason
@@ -193,14 +202,13 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   }
 
   /// Create copy with send error
-  func withError(_ errorMessage: String) -> MLSMessageModel {
+  public func withError(_ errorMessage: String) -> MLSMessageModel {
     MLSMessageModel(
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
       senderID: senderID,
-      plaintext: plaintext,
-      embedDataJSON: embedDataJSON,
+      payloadJSON: payloadJSON,
       wireFormat: wireFormat,
       contentType: contentType,
       timestamp: timestamp,
@@ -215,7 +223,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       error: errorMessage,
       processingState: "failed",
       gapBefore: gapBefore,
-      plaintextExpired: plaintextExpired,
+      payloadExpired: payloadExpired,
       processingError: processingError,
       processingAttempts: processingAttempts,
       validationFailureReason: validationFailureReason
@@ -223,14 +231,13 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   }
 
   /// Create copy marked as expired (forward secrecy)
-  func withExpiredPlaintext() -> MLSMessageModel {
+  public func withExpiredPayload() -> MLSMessageModel {
     MLSMessageModel(
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
       senderID: senderID,
-      plaintext: nil, // Clear plaintext
-      embedDataJSON: nil, // Clear embed
+      payloadJSON: nil,  // Clear payload
       wireFormat: wireFormat,
       contentType: contentType,
       timestamp: timestamp,
@@ -245,7 +252,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       error: error,
       processingState: processingState,
       gapBefore: gapBefore,
-      plaintextExpired: true,
+      payloadExpired: true,
       processingError: processingError,
       processingAttempts: processingAttempts,
       validationFailureReason: validationFailureReason
@@ -253,14 +260,15 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   }
 
   /// Create copy with processing error
-  func withProcessingError(_ errorMessage: String, validationReason: String? = nil) -> MLSMessageModel {
+  public func withProcessingError(_ errorMessage: String, validationReason: String? = nil)
+    -> MLSMessageModel
+  {
     MLSMessageModel(
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
       senderID: senderID,
-      plaintext: plaintext,
-      embedDataJSON: embedDataJSON,
+      payloadJSON: payloadJSON,
       wireFormat: wireFormat,
       contentType: contentType,
       timestamp: timestamp,
@@ -275,7 +283,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       error: error,
       processingState: processingState,
       gapBefore: gapBefore,
-      plaintextExpired: plaintextExpired,
+      payloadExpired: payloadExpired,
       processingError: errorMessage,
       processingAttempts: processingAttempts + 1,
       validationFailureReason: validationReason
@@ -292,8 +300,7 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     public static let currentUserDID = Column("currentUserDID")
     public static let conversationID = Column("conversationID")
     public static let senderID = Column("senderID")
-    public static let plaintext = Column("plaintext")
-    public static let embedDataJSON = Column("embedData")
+    public static let payloadJSON = Column("payloadJSON")
     public static let wireFormat = Column("wireFormat")
     public static let contentType = Column("contentType")
     public static let timestamp = Column("timestamp")
@@ -308,56 +315,110 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     public static let error = Column("error")
     public static let processingState = Column("processingState")
     public static let gapBefore = Column("gapBefore")
-    public static let plaintextExpired = Column("plaintextExpired")
+    public static let payloadExpired = Column("payloadExpired")
     public static let processingError = Column("processingError")
     public static let processingAttempts = Column("processingAttempts")
     public static let validationFailureReason = Column("validationFailureReason")
   }
 
-  enum CodingKeys: String, CodingKey {
-    case messageID
-    case currentUserDID
-    case conversationID
-    case senderID
-    case plaintext
-    case embedDataJSON = "embedData"
-    case wireFormat
-    case contentType
-    case timestamp
-    case epoch
-    case sequenceNumber
-    case authenticatedData
-    case signature
-    case isDelivered
-    case isRead
-    case isSent
-    case sendAttempts
-    case error
-    case processingState
-    case gapBefore
-    case plaintextExpired
-    case processingError
-    case processingAttempts
-    case validationFailureReason
+  /// Custom init to handle both old (plaintext/embedData) and new (payloadJSON) column names
+  public init(row: Row) throws {
+    messageID = row["messageID"] ?? ""
+    currentUserDID = row["currentUserDID"] ?? ""
+    conversationID = row["conversationID"] ?? ""
+    senderID = row["senderID"] ?? ""
+    
+    // Handle payloadJSON with fallback from old plaintext + embedData columns
+    if let payload: Data = row["payloadJSON"] {
+      payloadJSON = payload
+    } else if let plaintext: String = row["plaintext"] {
+      // Migrate from old format: create payloadJSON from plaintext + embedData
+      let embedData: Data? = row["embedData"]
+      if let embedData = embedData,
+         let embed = try? MLSEmbedData.fromJSONData(embedData) {
+        let payload = MLSMessagePayload.text(plaintext, embed: embed)
+        payloadJSON = try? payload.encodeToJSON()
+      } else {
+        let payload = MLSMessagePayload.text(plaintext, embed: nil)
+        payloadJSON = try? payload.encodeToJSON()
+      }
+    } else {
+      payloadJSON = nil
+    }
+    
+    wireFormat = row["wireFormat"]
+    contentType = row["contentType"] ?? "application/json"
+    timestamp = row["timestamp"] ?? Date()
+    epoch = row["epoch"] ?? 0
+    sequenceNumber = row["sequenceNumber"] ?? 0
+    authenticatedData = row["authenticatedData"]
+    signature = row["signature"]
+    isDelivered = row["isDelivered"] ?? false
+    isRead = row["isRead"] ?? false
+    isSent = row["isSent"] ?? false
+    sendAttempts = row["sendAttempts"] ?? 0
+    error = row["error"]
+    processingState = row["processingState"] ?? "unknown"
+    gapBefore = row["gapBefore"] ?? false
+    
+    // Handle payloadExpired with fallback from old plaintextExpired column
+    if let expired: Bool = row["payloadExpired"] {
+      payloadExpired = expired
+    } else if let expired: Bool = row["plaintextExpired"] {
+      payloadExpired = expired
+    } else {
+      payloadExpired = false
+    }
+    
+    processingError = row["processingError"]
+    processingAttempts = row["processingAttempts"] ?? 0
+    validationFailureReason = row["validationFailureReason"]
+  }
+
+  /// Encode for persistence (only uses new column names)
+  public func encode(to container: inout PersistenceContainer) throws {
+    container["messageID"] = messageID
+    container["currentUserDID"] = currentUserDID
+    container["conversationID"] = conversationID
+    container["senderID"] = senderID
+    container["payloadJSON"] = payloadJSON
+    container["wireFormat"] = wireFormat
+    container["contentType"] = contentType
+    container["timestamp"] = timestamp
+    container["epoch"] = epoch
+    container["sequenceNumber"] = sequenceNumber
+    container["authenticatedData"] = authenticatedData
+    container["signature"] = signature
+    container["isDelivered"] = isDelivered
+    container["isRead"] = isRead
+    container["isSent"] = isSent
+    container["sendAttempts"] = sendAttempts
+    container["error"] = error
+    container["processingState"] = processingState
+    container["gapBefore"] = gapBefore
+    container["payloadExpired"] = payloadExpired
+    container["processingError"] = processingError
+    container["processingAttempts"] = processingAttempts
+    container["validationFailureReason"] = validationFailureReason
   }
 }
 
 // MARK: - Helpers
 
 extension MLSMessageModel {
-  /// Check if message has plaintext available
-  public   var hasPlaintext: Bool {
-    plaintext != nil && !plaintextExpired
+  /// Check if message has payload available
+  public var hasPayload: Bool {
+    payloadJSON != nil && !payloadExpired
   }
 
   /// Check if message can be retried
-  public   var canRetry: Bool {
+  public var canRetry: Bool {
     !isSent && sendAttempts < 3
   }
 
   /// Display text (handles expired messages)
-  public   var displayText: String {
-    if plaintextExpired {
+  public var displayText: String {
+    if payloadExpired {
       return "🔒 Message expired (forward secrecy)"
     } else if let text = plaintext {
       return text

@@ -147,7 +147,8 @@ public struct MLSConfiguration: Sendable {
     return GroupConfig(
       maxPastEpochs: UInt32(maxPastEpochs),
       outOfOrderTolerance: UInt32(outOfOrderTolerance),
-      maximumForwardDistance: UInt32(maximumForwardDistance)
+      maximumForwardDistance: UInt32(maximumForwardDistance),
+      maxLeafLifetimeSeconds: 86400 * 90 // Default 90 days
     )
   }
 

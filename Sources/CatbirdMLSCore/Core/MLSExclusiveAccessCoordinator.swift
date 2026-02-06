@@ -19,6 +19,8 @@ public enum MLSExclusivePurpose: String, Sendable {
 public enum MLSExclusiveAccessError: Error, LocalizedError, Sendable {
   public enum Phase: String, Sendable {
     case permit
+    /// Deprecated: Advisory locks removed. Only permit phase is used now.
+    @available(*, deprecated, message: "Advisory locks removed. SQLite WAL handles concurrent access.")
     case advisoryLock
   }
 
@@ -54,11 +56,13 @@ public func assertMLSExclusiveAccessHeld(
 
 /// The only supported way to perform MLS operations that can mutate on-disk state.
 ///
-/// Lock order is enforced:
-/// 1) process-local per-user permit
-/// 2) cross-process POSIX advisory lock
-/// 3) caller opens/uses/closes database handles
-/// 4) caller checkpoints (when needed)
+/// Coordination:
+/// 1) process-local per-user permit (prevents intra-process races)
+/// 2) caller opens/uses/closes database handles (SQLite WAL handles concurrent access)
+/// 3) caller checkpoints (when needed)
+///
+/// Cross-process coordination uses Darwin notifications (MLSCrossProcess) instead of file locks.
+/// This avoids 0xdead10cc crashes when iOS suspends the app with held file locks.
 public func withMLSExclusiveAccess<T>(
   userDID: String,
   purpose: MLSExclusivePurpose,
@@ -105,82 +109,61 @@ public func withMLSExclusiveAccess<T>(
 
   defer { Task { await MLSUserOperationCoordinator.shared.release(permit) } }
 
-  do {
-    let lockStart = clock.now
-    try await acquireAdvisoryLock(
-      userDID: userDID,
-      purpose: purpose,
-      deadline: deadline,
-      clock: clock,
-      logger: logger
-    )
-    let waited = lockStart.duration(to: clock.now)
-    if waited > .zero {
-      logger.debug(
-        "🔐 [Exclusive] Advisory lock acquired for \(userDID.prefix(20), privacy: .private) in \(String(describing: waited)) (\(purpose.rawValue, privacy: .public))"
-      )
-    }
-  } catch is CancellationError {
-    throw CancellationError()
-  } catch let error as MLSExclusiveAccessError {
-    throw error
-  } catch {
-    logger.error(
-      "🚫 [Exclusive] Advisory lock acquisition failed for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription, privacy: .public)"
-    )
-    throw error
-  }
-
-  defer { MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDID) }
+  // No advisory lock needed - SQLite WAL handles concurrent access
+  // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
 
   return try await MLSExclusiveAccessContext.$heldUserDIDs.withValue(held.union([userDID])) {
     try await operation()
   }
 }
 
-private func acquireAdvisoryLock(
-  userDID: String,
-  purpose: MLSExclusivePurpose,
-  deadline: ContinuousClock.Instant,
-  clock: ContinuousClock,
-  logger: Logger
-) async throws {
-  var delay = Duration.milliseconds(10)
-  let maxDelay = Duration.milliseconds(250)
-
-  while clock.now < deadline {
-    try Task.checkCancellation()
-
-    if MLSAdvisoryLockCoordinator.shared.tryAcquireExclusiveLock(for: userDID) {
-      return
-    }
-
-    // Backoff with jitter, bounded by remaining time.
-    let jittered = delay + .milliseconds(Int.random(in: 0...20))
-    let remaining = clock.now.duration(to: deadline)
-    if remaining <= .zero {
-      break
-    }
-
-    try await Task.sleep(for: min(jittered, remaining))
-    delay = min(delay + delay, maxDelay)
-  }
-
-  logger.warning(
-    "⏱️ [Exclusive] Advisory lock timeout for \(userDID.prefix(20), privacy: .private) (\(purpose.rawValue, privacy: .public))"
-  )
-  throw MLSExclusiveAccessError.timedOut(userDID: userDID, purpose: purpose, phase: .advisoryLock)
+/// Probe cross-process storage exclusivity.
+///
+/// This function previously used advisory file locks to coordinate between processes.
+/// Now it always returns true since SQLite WAL mode handles concurrent access and
+/// cross-process coordination uses Darwin notifications (MLSCrossProcess) instead.
+///
+/// Kept for API compatibility with existing callers.
+@available(*, deprecated, message: "Advisory locks removed. SQLite WAL handles concurrent access.")
+public func tryAcquireMLSCrossProcessStorageGate(userDID: String) -> Bool {
+  // Always return true - SQLite WAL handles concurrent access
+  // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+  return true
 }
 
-/// Probe cross-process storage exclusivity without holding the lock.
+// MARK: - Database Operation Wrapper
+
+/// Execute a database operation with automatic operation ticket management.
 ///
-/// This is intended as a "gate" (e.g., for the NSE) to decide whether to proceed with
-/// MLS/SQLCipher work when the main app may be active. It acquires the underlying advisory
-/// lock non-blocking and immediately releases it.
-public func tryAcquireMLSCrossProcessStorageGate(userDID: String) -> Bool {
-  if MLSAdvisoryLockCoordinator.shared.tryAcquireExclusiveLock(for: userDID) {
-    MLSAdvisoryLockCoordinator.shared.releaseExclusiveLock(for: userDID)
-    return true
+/// This is the recommended way to perform MLS database operations. It:
+/// 1. Acquires an operation ticket (atomically rejected during shutdown)
+/// 2. Executes the operation with exclusive access coordination
+/// 3. Releases the ticket when complete
+///
+/// - Parameters:
+///   - userDID: User's decentralized identifier
+///   - purpose: The purpose of this operation (for logging/debugging)
+///   - operation: The async operation to perform
+/// - Returns: The result of the operation
+/// - Throws: `MLSGateError` if the gate is closing/closed,
+///           or any error from the operation or exclusives access coordination
+public func withMLSDatabaseOperation<T: Sendable>(
+  for userDID: String,
+  purpose: MLSExclusivePurpose = .other,
+  _ operation: @Sendable () async throws -> T
+) async throws -> T {
+  // 1. Acquire connection token (atomic rejection during gate closing/closed)
+  let token = try await MLSDatabaseGate.shared.acquireConnection(for: userDID)
+
+  // Ensure token is released even on error/cancellation
+  defer {
+    Task {
+      await MLSDatabaseGate.shared.releaseConnection(token)
+    }
   }
-  return false
+
+  // 2. Use existing exclusive access coordination
+  return try await withMLSExclusiveAccess(userDID: userDID, purpose: purpose) {
+    try await operation()
+  }
 }

@@ -16,6 +16,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
   public static let shared = MLSKeychainManager()
 
+  private static let probeLogger = Logger(subsystem: "blue.catbird.mls", category: "KeychainProbe")
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSKeychainManager")
 
   // MARK: - Configuration
@@ -25,16 +26,43 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Format: "TeamID.com.example.group"
   public var accessGroup: String?
 
+  /// The Keychain service name. Defaults to "blue.catbird.mls".
+  /// Set to a different value for standalone daemons to avoid conflicts with the main app.
+  public var serviceName: String = "blue.catbird.mls"
+
+  /// Resolve the fully-qualified keychain access group from entitlements.
+  ///
+  /// On macOS/Catalyst: Uses SecTask APIs to read entitlements directly.
+  /// On iOS: Probes the keychain to discover the Team ID prefix, then constructs
+  /// the full access group as `{TeamID}.{suffix}`.
+  ///
+  /// - Parameter suffix: The suffix of the access group (e.g., "blue.catbird.shared")
+  /// - Returns: The fully-qualified access group, or nil if resolution fails
   public static func resolvedAccessGroup(suffix: String) -> String? {
     #if os(macOS) || targetEnvironment(macCatalyst)
-    guard let task = SecTaskCreateFromSelf(nil) else { return nil }
+    probeLogger.debug("🔑 [Probe] Using SecTask API for macOS/Catalyst")
+    guard let task = SecTaskCreateFromSelf(nil) else {
+      probeLogger.error("🔑 [Probe] SecTaskCreateFromSelf failed")
+      return nil
+    }
     guard
       let value = SecTaskCopyValueForEntitlement(task, "keychain-access-groups" as CFString, nil),
       let groups = value as? [String]
-    else { return nil }
-    return groups.first(where: { $0.hasSuffix(suffix) })
+    else {
+      probeLogger.error("🔑 [Probe] Failed to read keychain-access-groups entitlement")
+      return nil
+    }
+    let result = groups.first(where: { $0.hasSuffix(suffix) })
+    if let result {
+      probeLogger.info("🔑 [Probe] Resolved access group: \(result)")
+    } else {
+      probeLogger.error("🔑 [Probe] No access group found with suffix '\(suffix)' in groups: \(groups)")
+    }
+    return result
     #else
     // iOS/tvOS/watchOS: SecTask* APIs are unavailable; infer the TeamID prefix by probing the default access group.
+    probeLogger.debug("🔑 [Probe] Using keychain probe for iOS")
+    
     let probeService = "blue.catbird.mls.accessGroupProbe"
     let probeAccount = UUID().uuidString
     let probeData = Data([0])
@@ -46,7 +74,14 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecValueData: probeData,
       kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
     ]
-    _ = SecItemAdd(addQuery as CFDictionary, nil)
+    
+    let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+    if addStatus != errSecSuccess && addStatus != errSecDuplicateItem {
+      probeLogger.error("🔑 [Probe] SecItemAdd failed with status: \(addStatus)")
+      // Continue anyway - the item might already exist from a previous probe
+    } else {
+      probeLogger.debug("🔑 [Probe] SecItemAdd succeeded (status: \(addStatus))")
+    }
 
     let matchQuery: [CFString: Any] = [
       kSecClass: kSecClassGenericPassword,
@@ -62,18 +97,44 @@ public final class MLSKeychainManager: @unchecked Sendable {
         kSecAttrService: probeService,
         kSecAttrAccount: probeAccount,
       ]
-      _ = SecItemDelete(delQuery as CFDictionary)
+      let delStatus = SecItemDelete(delQuery as CFDictionary)
+      if delStatus != errSecSuccess && delStatus != errSecItemNotFound {
+        probeLogger.warning("🔑 [Probe] SecItemDelete failed with status: \(delStatus)")
+      }
     }
 
     var item: CFTypeRef?
-    guard SecItemCopyMatching(matchQuery as CFDictionary, &item) == errSecSuccess,
-      let attrs = item as? [CFString: Any],
-      let accessGroup = attrs[kSecAttrAccessGroup] as? String,
-      let dot = accessGroup.firstIndex(of: ".")
-    else { return nil }
+    let matchStatus = SecItemCopyMatching(matchQuery as CFDictionary, &item)
+    
+    guard matchStatus == errSecSuccess else {
+      probeLogger.error("🔑 [Probe] SecItemCopyMatching failed with status: \(matchStatus)")
+      return nil
+    }
+    
+    guard let attrs = item as? [CFString: Any] else {
+      probeLogger.error("🔑 [Probe] Failed to cast item to attributes dictionary")
+      return nil
+    }
+    
+    guard let defaultAccessGroup = attrs[kSecAttrAccessGroup] as? String else {
+      probeLogger.error("🔑 [Probe] No kSecAttrAccessGroup in returned attributes")
+      probeLogger.debug("🔑 [Probe] Available attributes: \(attrs.keys.map { $0 as String })")
+      return nil
+    }
+    
+    guard let dot = defaultAccessGroup.firstIndex(of: ".") else {
+      probeLogger.error("🔑 [Probe] Access group '\(defaultAccessGroup)' has no dot separator")
+      return nil
+    }
 
-    let prefix = String(accessGroup[..<accessGroup.index(after: dot)])
-    return prefix + suffix
+    let prefix = String(defaultAccessGroup[..<defaultAccessGroup.index(after: dot)])
+    let result = prefix + suffix
+    
+    probeLogger.info("🔑 [Probe] Default access group: \(defaultAccessGroup)")
+    probeLogger.info("🔑 [Probe] Team ID prefix: \(prefix)")
+    probeLogger.info("🔑 [Probe] Resolved shared access group: \(result)")
+    
+    return result
     #endif
   }
 
@@ -531,7 +592,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: "blue.catbird.mls",
+      kSecAttrService as String: serviceName,
       kSecValueData as String: data,
       kSecAttrAccessible as String: accessible,
       kSecAttrSynchronizable as String: false,
@@ -553,7 +614,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: "blue.catbird.mls",
+      kSecAttrService as String: serviceName,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
     ]
@@ -581,7 +642,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: "blue.catbird.mls",
+      kSecAttrService as String: serviceName,
     ]
 
     if let accessGroup = accessGroup {

@@ -23,7 +23,7 @@ public actor MLSConsumptionTracker {
   /// GRDB manager for database access
   private let dbManager: MLSGRDBManager
 
-  public init(userDID: String, dbManager: MLSGRDBManager = .shared, retentionDays: Int = 30) {
+  public init(userDID: String, dbManager: MLSGRDBManager, retentionDays: Int = 30) {
     self.userDID = userDID
     self.dbManager = dbManager
     self.retentionDays = retentionDays

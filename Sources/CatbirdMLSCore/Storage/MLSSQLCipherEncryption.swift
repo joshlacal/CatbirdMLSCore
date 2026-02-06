@@ -27,19 +27,42 @@ public actor MLSSQLCipherEncryption {
   /// Logger for debugging keychain operations
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "SQLCipherEncryption")
 
+  /// Cached keychain access group (probing is expensive)
+  private var _cachedAccessGroup: String??
+  
   /// Shared keychain access group for App/Extension sharing
   /// Uses the same pattern as MLSKeychainManager
   private var keychainAccessGroup: String? {
     #if targetEnvironment(simulator)
+    logger.debug("[SQLCipher] Running on simulator - using default keychain (no sharing)")
     return nil
     #else
-    return MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
+    // Use cached value if available
+    if let cached = _cachedAccessGroup {
+      return cached
+    }
+    
+    let resolved = MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
+    _cachedAccessGroup = .some(resolved)
+    
+    if let resolved {
+      logger.info("[SQLCipher] ✅ Keychain access group resolved: \(resolved)")
+    } else {
+      logger.error("[SQLCipher] ⚠️ Failed to resolve keychain access group - using default (may cause sharing issues)")
+    }
+    
+    return resolved
     #endif
   }
 
   // MARK: - Initialization
 
-  private init() {}
+  private init() {
+    // Pre-resolve access group on init to cache it early
+    #if !targetEnvironment(simulator)
+    _ = keychainAccessGroup
+    #endif
+  }
 
   // MARK: - Public API
 
@@ -131,6 +154,173 @@ public actor MLSSQLCipherEncryption {
   func keyToHexString(_ key: Data) -> String {
     let hexString = key.map { String(format: "%02x", $0) }.joined()
     return "x'\(hexString)'"
+  }
+
+  // MARK: - Salt Management (for cipher_plaintext_header_size)
+
+  /// Salt size for SQLCipher (16 bytes)
+  private let saltSize: Int = 16
+
+  /// Generate or retrieve salt for a specific user
+  ///
+  /// When using `cipher_plaintext_header_size = 32`, the salt must be provided explicitly
+  /// via `PRAGMA cipher_salt` because it's no longer stored in the encrypted header.
+  ///
+  /// - Parameter userDID: User's decentralized identifier
+  /// - Returns: 16-byte salt as Data
+  /// - Throws: MLSSQLCipherError if salt generation or retrieval fails
+  func getOrCreateSalt(for userDID: String) throws -> Data {
+    let keychainKey = makeSaltKeychainKey(for: userDID)
+
+    logger.debug("[SQLCipher] getOrCreateSalt for user: \(userDID.prefix(24))...")
+
+    // Try to retrieve existing salt from Keychain
+    if let existingSalt = try? retrieveSalt(keychainKey: keychainKey) {
+      guard existingSalt.count == saltSize else {
+        logger.error("[SQLCipher] Salt size mismatch: expected \(self.saltSize) bytes, got \(existingSalt.count)")
+        throw MLSSQLCipherError.invalidEncryptionKey(reason: "Salt size mismatch: expected \(saltSize) bytes, got \(existingSalt.count)")
+      }
+      logger.debug("[SQLCipher] Retrieved existing salt for user")
+      return existingSalt
+    }
+
+    // Generate new salt if none exists
+    logger.info("[SQLCipher] No existing salt found, generating new salt for user: \(userDID.prefix(24))...")
+    let newSalt = try generateSalt()
+    try storeSalt(newSalt, keychainKey: keychainKey)
+    return newSalt
+  }
+
+  /// Retrieve existing salt for a user
+  /// - Parameter userDID: User's decentralized identifier
+  /// - Returns: 16-byte salt as Data, or nil if not found
+  func getSalt(for userDID: String) throws -> Data? {
+    let keychainKey = makeSaltKeychainKey(for: userDID)
+    return try? retrieveSalt(keychainKey: keychainKey)
+  }
+
+  /// Delete salt for a user (when deleting account)
+  /// - Parameter userDID: User's decentralized identifier
+  /// - Throws: MLSSQLCipherError if deletion fails
+  func deleteSalt(for userDID: String) throws {
+    let keychainKey = makeSaltKeychainKey(for: userDID)
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: keychainService,
+      kSecAttrAccount as String: keychainKey
+    ]
+
+    if let accessGroup = keychainAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+    }
+
+    let status = SecItemDelete(query as CFDictionary)
+
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      logger.error("[SQLCipher] Salt delete failed with status: \(status)")
+      throw MLSSQLCipherError.keychainAccessFailed(operation: "delete salt", status: status)
+    }
+
+    logger.debug("[SQLCipher] Salt deleted for user: \(userDID.prefix(24))...")
+  }
+
+  /// Generate cryptographically secure random salt
+  private func generateSalt() throws -> Data {
+    var saltData = Data(count: saltSize)
+
+    let result = saltData.withUnsafeMutableBytes { bufferPointer in
+      SecRandomCopyBytes(kSecRandomDefault, saltSize, bufferPointer.baseAddress!)
+    }
+
+    guard result == errSecSuccess else {
+      throw MLSSQLCipherError.keyGenerationFailed
+    }
+
+    return saltData
+  }
+
+  /// Store salt in Keychain
+  private func storeSalt(_ salt: Data, keychainKey: String) throws {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: keychainService,
+      kSecAttrAccount as String: keychainKey,
+      kSecValueData as String: salt,
+      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+      kSecAttrSynchronizable as String: false
+    ]
+
+    if let accessGroup = keychainAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+    }
+
+    // Try to add, handle duplicate
+    let status = SecItemAdd(query as CFDictionary, nil)
+
+    if status == errSecDuplicateItem {
+      // Update existing
+      var updateQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: keychainService,
+        kSecAttrAccount as String: keychainKey
+      ]
+      if let accessGroup = keychainAccessGroup {
+        updateQuery[kSecAttrAccessGroup as String] = accessGroup
+      }
+
+      let updateStatus = SecItemUpdate(
+        updateQuery as CFDictionary,
+        [kSecValueData as String: salt] as CFDictionary
+      )
+
+      guard updateStatus == errSecSuccess else {
+        logger.error("[SQLCipher] Salt update failed with status: \(updateStatus)")
+        throw MLSSQLCipherError.keychainAccessFailed(operation: "store salt", status: updateStatus)
+      }
+      logger.debug("[SQLCipher] Salt updated successfully")
+      return
+    }
+
+    guard status == errSecSuccess else {
+      logger.error("[SQLCipher] Salt store failed with status: \(status)")
+      throw MLSSQLCipherError.keychainAccessFailed(operation: "store salt", status: status)
+    }
+
+    logger.debug("[SQLCipher] Salt stored successfully")
+  }
+
+  /// Retrieve salt from Keychain
+  private func retrieveSalt(keychainKey: String) throws -> Data {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: keychainService,
+      kSecAttrAccount as String: keychainKey,
+      kSecReturnData as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne
+    ]
+
+    if let accessGroup = keychainAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+    }
+
+    var result: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+    guard status == errSecSuccess else {
+      throw MLSSQLCipherError.keychainAccessFailed(operation: "retrieve salt", status: status)
+    }
+
+    guard let saltData = result as? Data else {
+      throw MLSSQLCipherError.invalidEncryptionKey(reason: "Retrieved salt is not in expected format")
+    }
+
+    return saltData
+  }
+
+  /// Generate Keychain account identifier for user's salt
+  private func makeSaltKeychainKey(for userDID: String) -> String {
+    "mls.sqlcipher.db.salt.\(userDID)"
   }
 
   // MARK: - Private Methods

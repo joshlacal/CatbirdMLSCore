@@ -7,7 +7,7 @@ let package = Package(
     name: "CatbirdMLSCore",
     platforms: [
         .iOS(.v18),
-        .macOS(.v13)
+        .macOS(.v15)
     ],
     products: [
         .library(
@@ -44,9 +44,13 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
-         .binaryTarget(
-             name: "MLSFFICore",
-             path: "Sources/MLSFFICore.xcframework"
-         )
+        .binaryTarget(
+            name: "MLSFFICore",
+            path: "Sources/MLSFFICore.xcframework"
+        ),
+        .testTarget(
+            name: "CatbirdMLSCoreTests",
+            dependencies: ["CatbirdMLSCore"]
+        )
     ]
 )

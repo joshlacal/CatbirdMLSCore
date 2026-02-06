@@ -22,7 +22,7 @@
 //  Architecture:
 //  1. NSE: After any MLS state change → increment version
 //  2. App: Before MLS operation → check version → reload if stale
-//  3. Both: Use ProcessCoordinator lock when incrementing
+//  3. Both: Best-effort atomic increment (no file locks to avoid 0xdead10cc)
 //
 //  Version storage:
 //  - Per-user: "mls_state_version.<userDID_hash>" in shared UserDefaults suite
@@ -177,7 +177,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   /// - Welcome processing (group join)
   /// - Member add/remove
   ///
-  /// This operation is atomic and uses ProcessCoordinator for cross-process safety.
+  /// This operation uses best-effort atomic increment (no file locks for 0xdead10cc prevention).
   ///
   /// - Parameter userDID: User's decentralized identifier
   /// - Returns: The new version number
@@ -185,28 +185,23 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   public func incrementVersion(for userDID: String) -> Int {
     let key = versionKey(for: userDID)
 
-    // Use ProcessCoordinator to ensure atomic increment across processes
-    let newVersion: Int
-    do {
-      newVersion = try ProcessCoordinator.shared.performExclusive {
-        let current = sharedDefaults.integer(forKey: key)
-        let next = current + 1
-        sharedDefaults.set(next, forKey: key)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADVISORY LOCKS REMOVED (2026-02): Signal-style 0xdead10cc prevention
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Advisory locks cause 0xdead10cc crashes. Version increment is now best-effort.
+    // Even if we read a slightly stale value, the version will still increase,
+    // which is sufficient to trigger context reload on the other process.
+    // ═══════════════════════════════════════════════════════════════════════════
+    let current = sharedDefaults.integer(forKey: key)
+    let newVersion = current + 1
+    sharedDefaults.set(newVersion, forKey: key)
 
-        // Also increment global version
-        let globalCurrent = sharedDefaults.integer(forKey: Self.globalVersionKey)
-        sharedDefaults.set(globalCurrent + 1, forKey: Self.globalVersionKey)
+    // Also increment global version
+    let globalCurrent = sharedDefaults.integer(forKey: Self.globalVersionKey)
+    sharedDefaults.set(globalCurrent + 1, forKey: Self.globalVersionKey)
 
-        // Force synchronize to ensure cross-process visibility
-        sharedDefaults.synchronize()
-
-        return next
-      }
-    } catch {
-      logger.error("🚫 [StateVersion] Failed to acquire lock for increment: \(error.localizedDescription)")
-      // Fail-closed: return current disk value without incrementing
-      return sharedDefaults.integer(forKey: key)
-    }
+    // Force synchronize to ensure cross-process visibility
+    sharedDefaults.synchronize()
 
     // Update our local cache
     cacheLock.lock()
@@ -259,13 +254,18 @@ public final class MLSStateVersionManager: @unchecked Sendable {
 
   // MARK: - Public API: Lock Status
 
-  /// Try to acquire lock without blocking (to detect if NSE is working).
+  /// Check if MLS operations are likely busy.
   ///
-  /// Use this to show a spinner in the UI when NSE holds the lock.
+  /// ADVISORY LOCKS REMOVED (2026-02): Signal-style 0xdead10cc prevention.
+  /// This method now always returns true since we no longer use file locks.
+  /// The UI can instead observe Darwin notifications or state version changes
+  /// to detect NSE activity.
   ///
-  /// - Returns: true if lock is available (no one else holds it), false if busy
+  /// - Returns: Always true (locks removed)
   public func isLockAvailable() -> Bool {
-    return ProcessCoordinator.shared.tryExclusiveNonBlocking()
+    // Advisory locks removed - always return true
+    // UI should use Darwin notification observation instead
+    return true
   }
 
   // MARK: - Public API: Cleanup

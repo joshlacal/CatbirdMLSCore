@@ -62,6 +62,9 @@ public let kMLSNSEWillCloseNotification = "blue.catbird.mls.nseWillClose" as CFS
 /// Posted by main app after it releases database readers
 public let kMLSAppAcknowledgedNotification = "blue.catbird.mls.appAcknowledged" as CFString
 
+/// Notification name for main app requesting NSE to stop and release DB handles.
+public let kMLSNSEStopNotification = "blue.catbird.nse.stop" as CFString
+
 /// Manager for cross-process MLS state change notifications using Darwin Notifications.
 ///
 /// Usage from NSE (after decrypting a message):
@@ -161,6 +164,24 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
     
     logger.info("📢 [MLS State] Posted Darwin notification: stateChanged")
     logger.debug("   Main app should reload MLS state from disk")
+  }
+
+  /// Post a Darwin Notification requesting the NSE to release database handles.
+  ///
+  /// Call this from the main app before destructive operations (account switch, reset).
+  public static func postNSEStop() {
+    let logger = Logger(subsystem: "blue.catbird.mls", category: "StateChangeNotifier")
+    let center = CFNotificationCenterGetDarwinNotifyCenter()
+
+    CFNotificationCenterPostNotification(
+      center,
+      CFNotificationName(kMLSNSEStopNotification),
+      nil,
+      nil,
+      true
+    )
+
+    logger.info("📢 [MLS Stop] Posted Darwin notification: nseStop")
   }
   
   // MARK: - Phase 5: Handshake Notifications

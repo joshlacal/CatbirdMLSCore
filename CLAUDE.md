@@ -158,7 +158,8 @@ XCFramework is missing. Download it:
 
 - Keys are stored in iOS Keychain per user DID
 - Check `MLSSQLCipherEncryption` for key management
-- Keychain access group: `group.blue.catbird.shared` (device only, not simulator)
+- Keychain access group: `$(AppIdentifierPrefix)blue.catbird.shared` (device only, not simulator)
+- App Group (for file container): `group.blue.catbird.shared`
 - Database files: `Application Support/MLS/<userDID>.db`
 
 ## Integration with Catbird App

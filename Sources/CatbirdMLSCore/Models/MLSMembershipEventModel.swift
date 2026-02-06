@@ -27,6 +27,7 @@ public struct MLSMembershipEventModel: Codable, Sendable, Hashable, Identifiable
         case kicked
         case roleChanged
         case deviceAdded
+        case deviceRemoved
     }
 
     public init(

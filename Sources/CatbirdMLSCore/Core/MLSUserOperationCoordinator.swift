@@ -16,9 +16,9 @@ enum MLSUserOperationCoordinatorError: Error, Sendable {
 /// Serializes MLS operations that mutate per-user state (Rust MLS SQLite + Swift SQLCipher).
 ///
 /// This is intentionally process-local; cross-process safety is provided separately by
-/// `MLSDatabaseCoordinator` (NSFileCoordinator) using per-user lock files.
-actor MLSUserOperationCoordinator {
-  static let shared = MLSUserOperationCoordinator()
+/// Darwin notifications (`MLSCrossProcess`) and SQLite WAL-mode busy timeouts.
+public actor MLSUserOperationCoordinator {
+  public static let shared = MLSUserOperationCoordinator()
 
   private var owners: [String: UUID] = [:]
 
@@ -129,13 +129,40 @@ actor MLSUserOperationCoordinator {
       waiters[permit.userDID] = nil
     }
   }
+
+  /// Force-release all permits for a user during shutdown.
+  ///
+  /// This clears any stuck permits held by cancelled tasks that never released them.
+  /// All waiters are resumed with CancellationError so they can exit gracefully.
+  ///
+  /// **Call this as the FIRST step of account switch/shutdown**, before any other
+  /// operations that might need permits.
+  public func forceReleaseAll(for userDID: String) {
+    // Clear the owner - this frees the "lock"
+    owners[userDID] = nil
+
+    // Resume all waiters with cancellation so they don't hang forever
+    if let queue = waiters.removeValue(forKey: userDID) {
+      for waiter in queue {
+        switch waiter.continuation {
+        case .nonThrowing(let continuation):
+          // Non-throwing continuations can't throw, so we give them a dummy permit
+          // that will be invalid (owner is nil), but at least they won't hang
+          let dummyPermit = MLSUserOperationPermit(userDID: userDID, id: UUID())
+          continuation.resume(returning: dummyPermit)
+        case .throwing(let continuation):
+          continuation.resume(throwing: CancellationError())
+        }
+      }
+    }
+  }
 }
 
 /// Acquire a per-user permit without breaking actor isolation in the caller.
 ///
 /// This function does *not* require a @Sendable closure, so it can be used inside actors
 /// (e.g. MLSCoreContext / MLSGRDBManager / MLSClient) without triggering isolation errors.
-func withMLSUserPermit<T>(
+public func withMLSUserPermit<T>(
   for userDID: String,
   operation: () async throws -> T
 ) async rethrows -> T {

@@ -15,6 +15,15 @@ public enum MLSJoinMethod: String, Codable, Sendable {
   case unknown
 }
 
+/// Request state for inbound conversations (tracked locally, not on server)
+/// This enables the "chat requests" UX where non-followers appear in a separate inbox
+public enum MLSRequestState: String, Codable, Sendable {
+  /// Normal conversation - either user-created or explicitly accepted
+  case none
+  /// Inbound conversation from non-trusted sender, pending user acceptance
+  case pendingInbound
+}
+
 /// MLS group conversation model
 public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let conversationID: String
@@ -36,8 +45,12 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let lastRecoveryAttempt: Date?  // When we last attempted automatic recovery
   public let consecutiveFailures: Int  // Count of consecutive decryption failures
   public let isPlaceholder: Bool  // True if created by NSE as a placeholder (needs metadata sync)
+  public let requestState: MLSRequestState  // Local-only: pending inbound request or accepted
 
   public var id: String { conversationID }
+  
+  /// Whether this conversation is pending user acceptance (inbound chat request)
+  public var isPendingRequest: Bool { requestState == .pendingInbound }
 
   // MARK: - Initialization
 
@@ -60,7 +73,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     rejoinRequestedAt: Date? = nil,
     lastRecoveryAttempt: Date? = nil,
     consecutiveFailures: Int = 0,
-    isPlaceholder: Bool = false
+    isPlaceholder: Bool = false,
+    requestState: MLSRequestState = .none
   ) {
     self.conversationID = conversationID
     self.currentUserDID = currentUserDID
@@ -81,6 +95,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.lastRecoveryAttempt = lastRecoveryAttempt
     self.consecutiveFailures = consecutiveFailures
     self.isPlaceholder = isPlaceholder
+    self.requestState = requestState
   }
 
   // MARK: - Update Methods
@@ -106,7 +121,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -130,7 +146,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -155,7 +172,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -180,7 +198,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -206,7 +225,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: false  // Clear placeholder flag when metadata is set
+      isPlaceholder: false,  // Clear placeholder flag when metadata is set
+      requestState: requestState
     )
   }
 
@@ -231,7 +251,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -258,7 +279,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -283,7 +305,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: 0,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -308,7 +331,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
     )
   }
 
@@ -333,7 +357,34 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
-      isPlaceholder: isPlaceholder
+      isPlaceholder: isPlaceholder,
+      requestState: requestState
+    )
+  }
+
+  /// Create updated copy with new request state
+  public func withRequestState(_ state: MLSRequestState) -> MLSConversationModel {
+    MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      groupID: groupID,
+      epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
+      title: title,
+      avatarURL: avatarURL,
+      createdAt: createdAt,
+      updatedAt: Date(),
+      lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
+      isActive: isActive,
+      needsRejoin: needsRejoin,
+      rejoinRequestedAt: rejoinRequestedAt,
+      lastRecoveryAttempt: lastRecoveryAttempt,
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder,
+      requestState: state
     )
   }
 }
@@ -362,6 +413,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let lastRecoveryAttempt = Column("lastRecoveryAttempt")
     public static let consecutiveFailures = Column("consecutiveFailures")
     public static let isPlaceholder = Column("isPlaceholder")
+    public static let requestState = Column("requestState")
   }
 
   enum CodingKeys: String, CodingKey {
@@ -384,5 +436,6 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case lastRecoveryAttempt
     case consecutiveFailures
     case isPlaceholder
+    case requestState
   }
 }

@@ -4,6 +4,26 @@ set -euo pipefail
 echo "🔨 Rebuilding MLS FFI for CatbirdMLSCore"
 echo "=========================================="
 
+ensure_ios_sdk() {
+    if xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+        return
+    fi
+
+    if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+        echo "ℹ️  iphoneos SDK not found with current developer directory; using /Applications/Xcode.app"
+        export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+    fi
+
+    if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+        echo "❌ iOS SDK (iphoneos) cannot be located."
+        echo "   Fix by installing Xcode and selecting it:"
+        echo "   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+        exit 1
+    fi
+}
+
+ensure_ios_sdk
+
 # Navigate to MLSFFI build directory
 cd "$(dirname "$0")/../../MLSFFI/mls-ffi"
 
