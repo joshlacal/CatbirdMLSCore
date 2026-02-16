@@ -24,8 +24,8 @@ ensure_ios_sdk() {
 
 ensure_ios_sdk
 
-# Navigate to MLSFFI build directory
-cd "$(dirname "$0")/../../MLSFFI/mls-ffi"
+# Navigate to catbird-mls build directory
+cd "$(dirname "$0")/../../catbird-mls"
 
 # Run the XCFramework build script
 echo "📦 Step 1: Building XCFramework..."
@@ -33,16 +33,19 @@ echo "📦 Step 1: Building XCFramework..."
 
 echo ""
 echo "📋 Step 2: Copying XCFramework to CatbirdMLSCore..."
-rm -rf ../../CatbirdMLSCore/Sources/MLSFFICore.xcframework
-cp -R MLSFFICore.xcframework ../../CatbirdMLSCore/Sources/
+rm -rf ../CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework
+cp -R CatbirdMLSFFI.xcframework ../CatbirdMLSCore/Sources/
+echo "✅ XCFramework copied"
 
 echo ""
 echo "📄 Step 3: Updating Swift bindings..."
-if [ -f "build/bindings/MLSFFI.swift" ]; then
-    cp build/bindings/MLSFFI.swift ../../CatbirdMLSCore/Sources/MLSFFI/
+if [ -f "build/bindings/CatbirdMLS.swift" ]; then
+    # Remove any stale bindings (e.g. old MLSFFI.swift from pre-consolidation)
+    rm -f ../CatbirdMLSCore/Sources/CatbirdMLS/MLSFFI.swift
+    cp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/
     echo "✅ Swift bindings updated"
 else
-    echo "⚠️  Warning: build/bindings/MLSFFI.swift not found"
+    echo "⚠️  Warning: build/bindings/CatbirdMLS.swift not found"
     echo "   The XCFramework was built but Swift bindings weren't generated"
     exit 1
 fi

@@ -12,7 +12,7 @@ final class MLSReactionTests: XCTestCase {
         try await super.setUp()
         dbQueue = try DatabaseQueue()
         
-        try dbQueue.write { db in
+        try await dbQueue.write { db in
             // Enable Foreign Keys
             try db.execute(sql: "PRAGMA foreign_keys = ON")
             
@@ -65,7 +65,7 @@ final class MLSReactionTests: XCTestCase {
     /// Verify that saving a reaction for a missing message saves it as an orphan
     /// instead of throwing a Foreign Key error.
     func testSaveReactionForMissingMessage() async throws {
-        let storage = MLSStorage() // Uses shared logger?
+        let storage = MLSStorage.shared
         // Note: MLSStorage doesn't store the DB, but methods take it as arg.
         
         let reaction = MLSReactionModel(
@@ -99,7 +99,7 @@ final class MLSReactionTests: XCTestCase {
     
     /// Verify normal save works when parent exists
     func testSaveReactionForExistingMessage() async throws {
-        let storage = MLSStorage()
+        let storage = MLSStorage.shared
         
         // Create parent message
         try await dbQueue.write { db in

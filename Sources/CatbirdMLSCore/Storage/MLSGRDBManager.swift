@@ -97,6 +97,7 @@ public actor MLSGRDBManager {
   /// `sqlite3_busy_handler()` set by GRDB's `busyMode = .callback`.
   /// This was the root cause of persistent 0xdead10cc crashes.
   private nonisolated static let checkpointTimeoutKey = "MLSGRDBManager.checkpointBusyRetries"
+  private nonisolated static let staticLogger = Logger(subsystem: "Catbird", category: "MLSGRDBManager")
 
   /// Emergency synchronous close of all GRDB database pools for 0xdead10cc prevention.
   /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
@@ -105,7 +106,7 @@ public actor MLSGRDBManager {
     emergencyDatabasesLock.lock()
     defer { emergencyDatabasesLock.unlock() }
 
-    print("🚨 [0xdead10cc-FIX] Emergency closing \(emergencyDatabases.count) GRDB database pools")
+    staticLogger.warning("🚨 [0xdead10cc-FIX] Emergency closing \(emergencyDatabases.count) GRDB database pools")
 
     for (userDID, pool) in emergencyDatabases {
       // Best-effort checkpoint before close (short timeout - we're suspending)
@@ -115,17 +116,17 @@ public actor MLSGRDBManager {
           defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
           try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
         }
-        print("✅ [0xdead10cc-FIX] GRDB checkpoint for \(userDID.prefix(20))...")
+        staticLogger.debug("✅ [0xdead10cc-FIX] GRDB checkpoint for \(userDID.prefix(20), privacy: .private)...")
       } catch {
-        print("⚠️ [0xdead10cc-FIX] GRDB checkpoint failed for \(userDID.prefix(20))...: \(error)")
+        staticLogger.warning("⚠️ [0xdead10cc-FIX] GRDB checkpoint failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
       }
 
       // Close the pool
       do {
         try pool.close()
-        print("✅ [0xdead10cc-FIX] GRDB pool closed for \(userDID.prefix(20))...")
+        staticLogger.debug("✅ [0xdead10cc-FIX] GRDB pool closed for \(userDID.prefix(20), privacy: .private)...")
       } catch {
-        print("⚠️ [0xdead10cc-FIX] GRDB pool close failed for \(userDID.prefix(20))...: \(error)")
+        staticLogger.warning("⚠️ [0xdead10cc-FIX] GRDB pool close failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
       }
     }
     emergencyDatabases.removeAll()
@@ -133,7 +134,7 @@ public actor MLSGRDBManager {
     // Mark actor cache as stale - must be cleared on next access
     emergencyCacheInvalidated = true
 
-    print("✅ [0xdead10cc-FIX] All GRDB database pools emergency closed")
+    staticLogger.debug("✅ [0xdead10cc-FIX] All GRDB database pools emergency closed")
   }
 
   /// Synchronous TRUNCATE checkpoint at app launch to clear any leftover WAL from previous session.
@@ -156,11 +157,11 @@ public actor MLSGRDBManager {
     emergencyDatabasesLock.unlock()
 
     guard !pools.isEmpty else {
-      print("[0xdead10cc-FIX] Launch checkpoint: no GRDB pools registered yet")
+      staticLogger.debug("[0xdead10cc-FIX] Launch checkpoint: no GRDB pools registered yet")
       return
     }
 
-    print("[0xdead10cc-FIX] Launch checkpoint: checkpointing \(pools.count) GRDB pool(s)")
+    staticLogger.debug("[0xdead10cc-FIX] Launch checkpoint: checkpointing \(pools.count) GRDB pool(s)")
 
     for (userDID, pool) in pools {
       do {
@@ -170,10 +171,10 @@ public actor MLSGRDBManager {
           defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
           try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
         }
-        print("  ✅ Launch TRUNCATE checkpoint succeeded for \(userDID.prefix(20))...")
+        staticLogger.debug("  ✅ Launch TRUNCATE checkpoint succeeded for \(userDID.prefix(20), privacy: .private)...")
       } catch {
         // SQLITE_BUSY is expected if NSE is active; log and continue
-        print("  ⚠️ Launch TRUNCATE checkpoint skipped for \(userDID.prefix(20))...: \(error.localizedDescription)")
+        staticLogger.warning("  ⚠️ Launch TRUNCATE checkpoint skipped for \(userDID.prefix(20), privacy: .private)...: \(error.localizedDescription)")
       }
     }
   }
@@ -500,10 +501,10 @@ public actor MLSGRDBManager {
     for (userDID, db) in databases {
       do {
         try db.close()
-        logger.info("🧹 [deinit] Closed database for user: \(userDID.prefix(20))")
+        logger.info("🧹 [deinit] Closed database for user: \(userDID.prefix(20), privacy: .private)")
       } catch {
         logger.warning(
-          "⚠️ [deinit] Failed to close database for \(userDID.prefix(20)): \(error.localizedDescription)"
+          "⚠️ [deinit] Failed to close database for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
         )
       }
     }
@@ -700,9 +701,7 @@ public actor MLSGRDBManager {
         Use read(for:)/write(for:) instead - they auto-route to lightweight access.
         """)
       #if DEBUG
-        // In debug builds, crash to catch developers early
-        assertionFailure(
-          "getDatabasePool called for inactive user. Use read(for:)/write(for:) instead.")
+        logger.critical("getDatabasePool called for inactive user. Use read(for:)/write(for:) instead.")
       #endif
       throw MLSSQLCipherError.storageUnavailable(
         reason:
@@ -725,7 +724,7 @@ public actor MLSGRDBManager {
     case .closed:
       // Auto-open the gate for a new login
       await MLSDatabaseGate.shared.openGate(for: userDID)
-      logger.info("🚪 [Gate] Auto-opened gate for new user: \(userDID.prefix(16))...")
+      logger.info("🚪 [Gate] Auto-opened gate for new user: \(userDID.prefix(16), privacy: .private)...")
     case .open:
       break  // Already open, proceed
     }
@@ -758,7 +757,7 @@ public actor MLSGRDBManager {
     // So we check the flag here and clear the cache if needed.
     if Self.emergencyCacheInvalidated {
       Self.emergencyCacheInvalidated = false
-      print("🔄 [0xdead10cc-FIX] Clearing stale database cache after emergency close")
+      logger.debug("🔄 [0xdead10cc-FIX] Clearing stale database cache after emergency close")
       databases.removeAll()
       uncachedEphemeralPools.removeAll()
     }
@@ -957,8 +956,7 @@ public actor MLSGRDBManager {
         Use read(for:)/write(for:) instead - they auto-route to lightweight access.
         """)
       #if DEBUG
-        assertionFailure(
-          "withDatabase called for inactive user. Use read(for:)/write(for:) instead.")
+        logger.critical("withDatabase called for inactive user. Use read(for:)/write(for:) instead.")
       #endif
       throw MLSSQLCipherError.storageUnavailable(
         reason: "Cannot use withDatabase for inactive user. Use read(for:)/write(for:) instead."
@@ -1058,7 +1056,7 @@ public actor MLSGRDBManager {
     case .closed:
       // Auto-open for NSE access to inactive user's database
       await MLSDatabaseGate.shared.openGate(for: userDID)
-      logger.info("🚪 [Gate] Auto-opened gate for ephemeral access: \(userDID.prefix(16))...")
+      logger.info("🚪 [Gate] Auto-opened gate for ephemeral access: \(userDID.prefix(16), privacy: .private)...")
     case .open:
       break
     }
@@ -4064,6 +4062,41 @@ public actor MLSGRDBManager {
           """)
     }
 
+    // v16: Declaration verification cache (scoped by local account + target DID)
+    migrator.registerMigration("v16_declaration_cache") { db in
+      try db.create(table: "MLSDeclarationCache", ifNotExists: true) { t in
+        t.column("localAccountDID", .text).notNull()
+        t.column("targetDID", .text).notNull()
+        t.column("chainState", .text).notNull()
+        t.column("verifiedAt", .double).notNull()
+        t.column("headEpoch", .integer)
+        t.column("headSeq", .integer)
+        t.column("headCID", .text)
+        t.column("headURI", .text)
+        t.column("onlineRootPublicKey", .blob)
+        t.column("onlineRootAlg", .text)
+        t.column("recoveryRootPublicKey", .blob)
+        t.column("recoveryRootAlg", .text)
+        t.column("authorizedDeviceKeysJSON", .text).notNull().defaults(to: "[]")
+        t.column("hadRecovery", .boolean).notNull().defaults(to: false)
+        t.column("lastError", .text)
+        t.primaryKey(["localAccountDID", "targetDID"])
+      }
+
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_declaration_cache_local_verified
+            ON MLSDeclarationCache(localAccountDID, verifiedAt DESC);
+          """)
+    }
+
+    // v17: Declaration chat policy
+    migrator.registerMigration("v17_declaration_policy") { db in
+      try db.alter(table: "MLSDeclarationCache") { t in
+        t.add(column: "chatPolicyJSON", .text)
+      }
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }
@@ -4196,7 +4229,7 @@ public actor MLSGRDBManager {
       message = "WAL size normal (\(walSize / 1024)KB)"
     }
     
-    logger.debug("🔍 WAL Health Check for \(userDID.prefix(20)): status=\(status.rawValue), walSize=\(walSize), dbSize=\(dbSize)")
+    logger.debug("🔍 WAL Health Check for \(userDID.prefix(20), privacy: .private): status=\(status.rawValue), walSize=\(walSize), dbSize=\(dbSize)")
     
     return WALHealthStatus(
       userDID: userDID,
@@ -4311,14 +4344,14 @@ public actor MLSGRDBManager {
             try db.execute(sql: "PRAGMA wal_checkpoint(\(checkpointMode));")
           }
           checkpointedCount += 1
-          logger.debug("✅ Checkpointed database for \(userDID.prefix(20))")
+          logger.debug("✅ Checkpointed database for \(userDID.prefix(20), privacy: .private)")
         } catch {
           failedCount += 1
           let errorDesc = error.localizedDescription.lowercased()
           if errorDesc.contains("locked") || errorDesc.contains("busy") {
-            logger.debug("⏳ Checkpoint deferred (database busy) for \(userDID.prefix(20))")
+            logger.debug("⏳ Checkpoint deferred (database busy) for \(userDID.prefix(20), privacy: .private)")
           } else {
-            logger.warning("⚠️ Checkpoint failed for \(userDID.prefix(20)): \(error.localizedDescription)")
+            logger.warning("⚠️ Checkpoint failed for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
           }
         }
       }
@@ -4352,7 +4385,7 @@ public actor MLSGRDBManager {
       let success = await closeDatabaseAndDrain(for: userDID, timeout: 3.0)
       if success {
         closedCount += 1
-        logger.debug("🗑️ Closed inactive database for \(userDID.prefix(20))")
+        logger.debug("🗑️ Closed inactive database for \(userDID.prefix(20), privacy: .private)")
       }
     }
     

@@ -39,4 +39,10 @@ build/
 *.swo
 
 # FFI Binary Framework (built by CI/CD, download from releases)
-Sources/MLSFFICore.xcframework/
+Sources/CatbirdMLSFFI.xcframework/
+.build-codex/
+
+.claude/
+.letta/
+
+StressTest/.build/

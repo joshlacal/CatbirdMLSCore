@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import MLSFFI
+import CatbirdMLS
 import OSLog
 
 /// Epoch secret storage implementation for MLS FFI callback

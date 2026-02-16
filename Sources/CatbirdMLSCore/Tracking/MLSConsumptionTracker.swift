@@ -48,10 +48,9 @@ public actor MLSConsumptionTracker {
       context: context
     )
 
-    // Store in database
-    let db = try await dbManager.getDatabasePool(for: userDID)
-
-    try await db.write { database in
+    // Store in database (use write(for:) to auto-route for inactive users)
+    let userDID = self.userDID
+    try await dbManager.write(for: userDID) { database in
       let model = MLSConsumptionRecordModel(from: record, userDID: userDID)
       try model.insert(database)
     }
@@ -64,9 +63,9 @@ public actor MLSConsumptionTracker {
 
   /// Get consumption statistics for the tracked period
   public func getStatistics(currentInventory: Int? = nil) async throws -> ConsumptionStatistics {
-    let db = try await dbManager.getDatabasePool(for: userDID)
-
-    return try await db.read { database in
+    let userDID = self.userDID
+    let retentionDays = self.retentionDays
+    return try await dbManager.read(for: userDID) { database in
       // Get all recent records
       let records = try MLSConsumptionRecordModel
         .withinDays(retentionDays, userDID: userDID)
@@ -123,9 +122,8 @@ public actor MLSConsumptionTracker {
 
   /// Get consumption rate (packages per day) over the specified window
   public func getConsumptionRate(days: Int = 7) async throws -> Double {
-    let db = try await dbManager.getDatabasePool(for: userDID)
-
-    return try await db.read { database in
+    let userDID = self.userDID
+    return try await dbManager.read(for: userDID) { database in
       let total = try MLSConsumptionRecordModel.totalConsumption(
         withinDays: days,
         userDID: userDID,
@@ -159,9 +157,8 @@ public actor MLSConsumptionTracker {
 
   /// Get all consumption records (for debugging/analysis)
   public func getAllRecords() async throws -> [ConsumptionRecord] {
-    let db = try await dbManager.getDatabasePool(for: userDID)
-
-    return try await db.read { database in
+    let userDID = self.userDID
+    return try await dbManager.read(for: userDID) { database in
       try MLSConsumptionRecordModel
         .orderedByTimestamp(userDID: userDID)
         .fetchAll(database)
@@ -171,9 +168,8 @@ public actor MLSConsumptionTracker {
 
   /// Clear all consumption history
   public func clearHistory() async throws {
-    let db = try await dbManager.getDatabasePool(for: userDID)
-
-    _ = try await db.write { database in
+    let userDID = self.userDID
+    _ = try await dbManager.write(for: userDID) { database in
       try MLSConsumptionRecordModel
         .forUser(userDID)
         .deleteAll(database)
@@ -187,18 +183,17 @@ public actor MLSConsumptionTracker {
   /// Remove records older than retention period
   private func cleanupOldRecords() async {
     do {
-      let db = try await dbManager.getDatabasePool(for: userDID)
-      let cutoffDate = Date().addingTimeInterval(-TimeInterval(retentionDays * 24 * 60 * 60))
-
-      try await db.write { database in
+      let deletedCount = try await dbManager.write(for: userDID) { [retentionDays = self.retentionDays, userDID = self.userDID] database in
+        let cutoffDate = Date().addingTimeInterval(-TimeInterval(retentionDays * 24 * 60 * 60))
         let deletedCount = try MLSConsumptionRecordModel
           .forUser(userDID)
           .filter(Column("timestamp") < cutoffDate)
           .deleteAll(database)
+        return deletedCount
+      }
 
-        if deletedCount > 0 {
-          logger.info("🗑️ Cleaned up \(deletedCount) old consumption records")
-        }
+      if deletedCount > 0 {
+        logger.info("🗑️ Cleaned up \(deletedCount) old consumption records")
       }
     } catch {
       logger.error("❌ Failed to cleanup old records: \(error.localizedDescription)")
@@ -211,9 +206,8 @@ public actor MLSConsumptionTracker {
 public extension MLSConsumptionTracker {
   /// Get consumption breakdown by operation type
   func getConsumptionByOperation(days: Int = 30) async throws -> [ConsumptionOperation: Int] {
-    let db = try await dbManager.getDatabasePool(for: userDID)
-
-    return try await db.read { database in
+    let userDID = self.userDID
+    return try await dbManager.read(for: userDID) { database in
       let records = try MLSConsumptionRecordModel
         .withinDays(days, userDID: userDID)
         .fetchAll(database)

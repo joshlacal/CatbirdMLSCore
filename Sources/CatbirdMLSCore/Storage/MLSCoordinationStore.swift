@@ -69,7 +69,7 @@ public final class MLSCoordinationStore {
       state.activeUserDID = userDID
       state.updatedAt = Date()
       save(state)
-      logger.info("🔢 [COORD] Generation incremented to \(state.coordinationGeneration) for user: \(userDID?.prefix(16) ?? "nil")")
+      logger.info("🔢 [COORD] Generation incremented to \(state.coordinationGeneration) for user: \(userDID?.prefix(16) ?? "nil", privacy: .private)")
     }
   }
   

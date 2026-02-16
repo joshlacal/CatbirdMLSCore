@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import MLSFFI
+import CatbirdMLS
 
 /// Bridges iOS Keychain access for Rust FFI
 final class MLSKeychainAccessBridge: KeychainAccess {

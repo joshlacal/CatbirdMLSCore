@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import MLSFFI
+import CatbirdMLS
 import OSLog
 
 
@@ -68,6 +68,10 @@ public struct MLSConfiguration: Sendable {
   /// Default: 86400 (24 hours)
   public let keyPackageRefreshInterval: TimeInterval
 
+  /// Rollout policy for declaration-chain verification enforcement.
+  /// Default: shadow (log + allow) during initial rollout.
+  public let declarationRolloutMode: MLSDeclarationRolloutMode
+
   // MARK: - Initialization
 
   /// Initialize MLS configuration with custom values
@@ -79,8 +83,9 @@ public struct MLSConfiguration: Sendable {
     messageKeyRetentionDays: Int = 30,
     enableAutomaticCleanup: Bool = true,
     cleanupInterval: TimeInterval = 3600,
-    defaultCipherSuite: String = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
-    keyPackageRefreshInterval: TimeInterval = 86400
+    defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+    keyPackageRefreshInterval: TimeInterval = 86400,
+    declarationRolloutMode: MLSDeclarationRolloutMode = .shadow
   ) {
     self.maxPastEpochs = max(0, maxPastEpochs)
     self.outOfOrderTolerance = max(1, outOfOrderTolerance)
@@ -91,6 +96,7 @@ public struct MLSConfiguration: Sendable {
     self.cleanupInterval = max(300, cleanupInterval)
     self.defaultCipherSuite = defaultCipherSuite
     self.keyPackageRefreshInterval = max(3600, keyPackageRefreshInterval)
+    self.declarationRolloutMode = declarationRolloutMode
   }
 
   /// Default configuration with balanced security and usability
@@ -171,6 +177,10 @@ public struct MLSConfiguration: Sendable {
 
     if !enableAutomaticCleanup {
       logger.warning("Automatic cleanup is disabled - key material may accumulate")
+    }
+
+    if declarationRolloutMode == .full {
+      logger.warning("Declaration rollout mode is full enforcement")
     }
 
     logger.info("MLS Configuration validated: maxPastEpochs=\(self.maxPastEpochs), messageKeyRetention=\(self.messageKeyRetentionDays)d")

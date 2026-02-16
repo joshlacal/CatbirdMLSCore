@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import MLSFFI
+import CatbirdMLS
 import OSLog
 
 /// Bridge implementation for external join authorization

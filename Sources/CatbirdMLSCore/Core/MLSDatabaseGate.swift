@@ -171,7 +171,7 @@ public actor MLSDatabaseGate {
     }
     
     let gen = generations[userDID] ?? 1
-    logger.info("🚪 [Gate] OPENED for user: \(userDID.prefix(16))... (gen=\(gen))")
+    logger.info("🚪 [Gate] OPENED for user: \(userDID.prefix(16), privacy: .private)... (gen=\(gen))")
   }
   
   /// Close the gate and wait for all active connections to drain.
@@ -190,13 +190,13 @@ public actor MLSDatabaseGate {
     
     // Already closed? Nothing to do
     if currentState == .closed {
-      logger.debug("🚪 [Gate] Already closed for: \(userDID.prefix(16))...")
+      logger.debug("🚪 [Gate] Already closed for: \(userDID.prefix(16), privacy: .private)...")
       return
     }
     
     // Already closing? Wait for existing drain
     if currentState == .closing {
-      logger.debug("🚪 [Gate] Already closing, waiting for drain: \(userDID.prefix(16))...")
+      logger.debug("🚪 [Gate] Already closing, waiting for drain: \(userDID.prefix(16), privacy: .private)...")
       try await waitForDrain(for: userDID, timeout: timeout)
       return
     }
@@ -204,14 +204,14 @@ public actor MLSDatabaseGate {
     // Begin closing
     gateStates[userDID] = .closing
     let activeCount = activeConnections[userDID] ?? 0
-    logger.info("🚪 [Gate] CLOSING for user: \(userDID.prefix(16))... (\(activeCount) active connections)")
+    logger.info("🚪 [Gate] CLOSING for user: \(userDID.prefix(16), privacy: .private)... (\(activeCount) active connections)")
     
     // Wait for drain
     try await waitForDrain(for: userDID, timeout: timeout)
     
     // Mark as closed
     gateStates[userDID] = .closed
-    logger.info("🚪 [Gate] CLOSED for user: \(userDID.prefix(16))...")
+    logger.info("🚪 [Gate] CLOSED for user: \(userDID.prefix(16), privacy: .private)...")
   }
   
   /// Force close the gate without waiting for drain.
@@ -233,7 +233,7 @@ public actor MLSDatabaseGate {
       }
     }
     
-    logger.warning("🚪 [Gate] FORCE CLOSED for: \(userDID.prefix(16))... (abandoned \(activeCount) connections)")
+    logger.warning("🚪 [Gate] FORCE CLOSED for: \(userDID.prefix(16), privacy: .private)... (abandoned \(activeCount) connections)")
   }
   
   // MARK: - Connection Lifecycle
@@ -263,7 +263,7 @@ public actor MLSDatabaseGate {
     let token = MLSConnectionToken(userDID: userDID, generation: gen)
     
     let count = activeConnections[userDID] ?? 0
-    logger.debug("📈 [Gate] Connection acquired (count=\(count)) for: \(userDID.prefix(16))...")
+    logger.debug("📈 [Gate] Connection acquired (count=\(count)) for: \(userDID.prefix(16), privacy: .private)...")
     
     return token
   }
@@ -273,7 +273,7 @@ public actor MLSDatabaseGate {
   /// - Parameter token: The token from `acquireConnection()`
   public func releaseConnection(_ token: MLSConnectionToken) {
     guard var count = activeConnections[token.userDID], count > 0 else {
-      logger.warning("⚠️ [Gate] Release with no active connections: \(token.userDID.prefix(16))...")
+      logger.warning("⚠️ [Gate] Release with no active connections: \(token.userDID.prefix(16), privacy: .private)...")
       return
     }
     
@@ -285,7 +285,7 @@ public actor MLSDatabaseGate {
       // Signal drain if gate is closing
       if gateStates[token.userDID] == .closing {
         if let continuations = drainContinuations.removeValue(forKey: token.userDID) {
-          logger.info("✅ [Gate] All connections drained for: \(token.userDID.prefix(16))...")
+          logger.info("✅ [Gate] All connections drained for: \(token.userDID.prefix(16), privacy: .private)...")
           for continuation in continuations {
             continuation.resume()
           }
@@ -295,7 +295,7 @@ public actor MLSDatabaseGate {
       activeConnections[token.userDID] = count
     }
     
-    logger.debug("📉 [Gate] Connection released (remaining=\(count)) for: \(token.userDID.prefix(16))...")
+    logger.debug("📉 [Gate] Connection released (remaining=\(count)) for: \(token.userDID.prefix(16), privacy: .private)...")
   }
   
   // MARK: - Queries
@@ -332,11 +332,11 @@ public actor MLSDatabaseGate {
   private func waitForDrain(for userDID: String, timeout: Duration) async throws {
     // Fast path: already drained
     guard let count = activeConnections[userDID], count > 0 else {
-      logger.debug("⚡ [Gate] No connections to drain for: \(userDID.prefix(16))...")
+      logger.debug("⚡ [Gate] No connections to drain for: \(userDID.prefix(16), privacy: .private)...")
       return
     }
     
-    logger.info("⏳ [Gate] Waiting for \(count) connections to drain: \(userDID.prefix(16))...")
+    logger.info("⏳ [Gate] Waiting for \(count) connections to drain: \(userDID.prefix(16), privacy: .private)...")
     
     // Create drain task
     let drainTask = Task {
@@ -363,6 +363,18 @@ public actor MLSDatabaseGate {
       }
       
       let first = await group.next() ?? false
+      
+      // If timeout wins, ensure the drain waiter can complete; otherwise the task group will hang
+      // waiting for the cancelled drain wait task.
+      if !first {
+        drainTask.cancel()
+        if let orphanedContinuations = drainContinuations.removeValue(forKey: userDID) {
+          logger.debug("🧹 [Gate] Resuming \(orphanedContinuations.count) orphaned drain continuations")
+          for continuation in orphanedContinuations {
+            continuation.resume()
+          }
+        }
+      }
       group.cancelAll()
       return first
     }
@@ -370,18 +382,8 @@ public actor MLSDatabaseGate {
     if !result {
       drainTask.cancel()
 
-      // FIX: Resume orphaned continuations to prevent leak
-      // When timeout fires, continuations stored in drainContinuations are never resumed,
-      // violating Swift's continuation contract (must resume exactly once)
-      if let orphanedContinuations = drainContinuations.removeValue(forKey: userDID) {
-        logger.debug("🧹 [Gate] Resuming \(orphanedContinuations.count) orphaned drain continuations")
-        for continuation in orphanedContinuations {
-          continuation.resume()
-        }
-      }
-
       let remaining = activeConnections[userDID] ?? 0
-      logger.warning("⏱️ [Gate] Drain timeout, \(remaining) connections remaining: \(userDID.prefix(16))...")
+      logger.warning("⏱️ [Gate] Drain timeout, \(remaining) connections remaining: \(userDID.prefix(16), privacy: .private)...")
       throw MLSGateError.drainTimeout(userDID: userDID, activeConnections: remaining)
     }
   }

@@ -39,7 +39,7 @@
 
 import Foundation
 import GRDB
-@_exported import MLSFFI
+@_exported import CatbirdMLS
 import OSLog
 import Synchronization
 
@@ -63,6 +63,7 @@ public actor MLSCoreContext {
   }
 
   private static let emergencyState = Mutex(EmergencyState())
+  private nonisolated static let staticLogger = Logger(subsystem: "blue.catbird.mls", category: "MLSCoreContext")
 
   /// Check if suspension is in progress (thread-safe read)
   public nonisolated static var isSuspensionInProgress: Bool {
@@ -72,19 +73,20 @@ public actor MLSCoreContext {
   /// Set suspension flag - call this BEFORE emergency close
   public nonisolated static func markSuspensionInProgress() {
     emergencyState.withLock { $0.suspensionInProgress = true }
-    print("🚨 [0xdead10cc-FIX] Suspension flag SET - blocking all MLS operations")
+    staticLogger.warning("🚨 [0xdead10cc-FIX] Suspension flag SET - blocking all MLS operations")
   }
 
   /// Clear suspension flag - call this when returning to foreground
   public nonisolated static func clearSuspensionFlag() {
     emergencyState.withLock { $0.suspensionInProgress = false }
-    print("✅ [0xdead10cc-FIX] Suspension flag CLEARED - MLS operations allowed")
+    staticLogger.debug("✅ [0xdead10cc-FIX] Suspension flag CLEARED - MLS operations allowed")
   }
 
   /// Emergency synchronous close of all Rust MLS contexts for 0xdead10cc prevention.
   /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
   /// This is safe to call from any thread and does not require actor isolation.
   public nonisolated static func emergencyCloseAllContexts() {
+    let process = Bundle.main.bundlePath.hasSuffix(".appex") ? "nse" : "app"
     // Extract contexts and set flags atomically, then close outside the lock
     // to avoid holding the lock during potentially slow FFI calls.
     let contextsToClose: [String: MlsContext] = emergencyState.withLock { state in
@@ -95,18 +97,33 @@ public actor MLSCoreContext {
       return snapshot
     }
 
-    print("🚨 [0xdead10cc-FIX] Suspension flag SET, emergency closing \(contextsToClose.count) Rust MLS contexts")
+    staticLogger.warning("🚨 [0xdead10cc-FIX] Suspension flag SET, emergency closing \(contextsToClose.count) Rust MLS contexts")
+    MLSSuspensionFlightRecorder.shared.record(
+      .flushStarted,
+      details: "MLSCoreContext emergencyCloseAllContexts: closing \(contextsToClose.count)",
+      process: process
+    )
 
     for (userDID, context) in contextsToClose {
       do {
         try context.flushAndPrepareClose()
-        print("✅ [0xdead10cc-FIX] Rust context closed for \(userDID.prefix(20))...")
+        staticLogger.debug("✅ [0xdead10cc-FIX] Rust context closed for \(userDID.prefix(20), privacy: .private)...")
       } catch {
-        print("⚠️ [0xdead10cc-FIX] Rust context close failed for \(userDID.prefix(20))...: \(error)")
+        staticLogger.warning("⚠️ [0xdead10cc-FIX] Rust context close failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
+        MLSSuspensionFlightRecorder.shared.record(
+          .flushFailed,
+          details: "MLSCoreContext close failed for \(userDID.prefix(20)): \(error.localizedDescription)",
+          process: process
+        )
       }
     }
 
-    print("✅ [0xdead10cc-FIX] All Rust MLS contexts emergency closed")
+    staticLogger.debug("✅ [0xdead10cc-FIX] All Rust MLS contexts emergency closed")
+    MLSSuspensionFlightRecorder.shared.record(
+      .flushCompleted,
+      details: "MLSCoreContext emergencyCloseAllContexts: closed \(contextsToClose.count)",
+      process: process
+    )
   }
 
   /// Register a context for emergency close.
@@ -384,7 +401,7 @@ public actor MLSCoreContext {
     // CRITICAL: Check suspension flag FIRST - abort immediately if app is going to background
     // This prevents the race condition where we start creating a context right before suspension
     if Self.isSuspensionInProgress {
-      print("🚫 [0xdead10cc-FIX] getContext BLOCKED - suspension in progress")
+      logger.warning("🚫 [0xdead10cc-FIX] getContext BLOCKED - suspension in progress")
       throw MLSError.contextCreationBlocked(reason: "App is transitioning to background - MLS operations suspended")
     }
 
@@ -399,7 +416,7 @@ public actor MLSCoreContext {
       return false
     }
     if needsCacheClear {
-      print("🔄 [0xdead10cc-FIX] Clearing stale Rust context cache after emergency close")
+      logger.debug("🔄 [0xdead10cc-FIX] Clearing stale Rust context cache after emergency close")
       contexts.removeAll()
       contextVersions.removeAll()
     }
@@ -920,15 +937,8 @@ public actor MLSCoreContext {
       // Get context (must be done in actor context)
       let context = try await getContext(for: userDid)
 
-      // CRITICAL FIX: Strip padding envelope before MLS deserialization
-      // Messages may be padded to bucket sizes (512, 1024, etc.) for traffic analysis resistance.
-      // Format: [4-byte BE length][actual MLS ciphertext][zero padding...]
-      let actualCiphertext = MLSPaddingUtility.stripPaddingIfPresent(ciphertext)
-
-      if actualCiphertext.count != ciphertext.count {
-        logger.info(
-          "[DECRYPT] Stripped padding: \(ciphertext.count) -> \(actualCiphertext.count) bytes")
-      }
+      // Padding is stripped by catbird-mls decrypt_message internally.
+      let actualCiphertext = ciphertext
 
       logger.debug("[DECRYPT] Performing MLS decrypt for message: \(messageID)")
 

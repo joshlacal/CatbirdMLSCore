@@ -73,7 +73,7 @@ public actor MLSSQLCipherEncryption {
   func getOrCreateKey(for userDID: String) throws -> Data {
     let keychainKey = makeKeychainKey(for: userDID)
     
-    logger.debug("[SQLCipher] getOrCreateKey for user: \(userDID.prefix(24))..., accessGroup=\(self.keychainAccessGroup ?? "default")")
+    logger.debug("[SQLCipher] getOrCreateKey for user: \(userDID.prefix(24), privacy: .private)..., accessGroup=\(self.keychainAccessGroup ?? "default")")
 
     // Try to retrieve existing key from Keychain
     if let existingKey = try? retrieveKey(keychainKey: keychainKey) {
@@ -86,7 +86,7 @@ public actor MLSSQLCipherEncryption {
     }
 
     // Generate new key if none exists
-    logger.info("[SQLCipher] No existing key found, generating new key for user: \(userDID.prefix(24))...")
+    logger.info("[SQLCipher] No existing key found, generating new key for user: \(userDID.prefix(24), privacy: .private)...")
     let newKey = try generateKey()
     try storeKey(newKey, keychainKey: keychainKey)
     return newKey
@@ -125,7 +125,7 @@ public actor MLSSQLCipherEncryption {
       throw MLSSQLCipherError.keychainAccessFailed(operation: "delete", status: status)
     }
     
-    logger.debug("[SQLCipher] Key deleted for user: \(userDID.prefix(24))...")
+    logger.debug("[SQLCipher] Key deleted for user: \(userDID.prefix(24), privacy: .private)...")
   }
 
   /// Rotate encryption key for a user (generates new key, returns both old and new)
@@ -172,7 +172,7 @@ public actor MLSSQLCipherEncryption {
   func getOrCreateSalt(for userDID: String) throws -> Data {
     let keychainKey = makeSaltKeychainKey(for: userDID)
 
-    logger.debug("[SQLCipher] getOrCreateSalt for user: \(userDID.prefix(24))...")
+    logger.debug("[SQLCipher] getOrCreateSalt for user: \(userDID.prefix(24), privacy: .private)...")
 
     // Try to retrieve existing salt from Keychain
     if let existingSalt = try? retrieveSalt(keychainKey: keychainKey) {
@@ -185,7 +185,7 @@ public actor MLSSQLCipherEncryption {
     }
 
     // Generate new salt if none exists
-    logger.info("[SQLCipher] No existing salt found, generating new salt for user: \(userDID.prefix(24))...")
+    logger.info("[SQLCipher] No existing salt found, generating new salt for user: \(userDID.prefix(24), privacy: .private)...")
     let newSalt = try generateSalt()
     try storeSalt(newSalt, keychainKey: keychainKey)
     return newSalt
@@ -222,7 +222,7 @@ public actor MLSSQLCipherEncryption {
       throw MLSSQLCipherError.keychainAccessFailed(operation: "delete salt", status: status)
     }
 
-    logger.debug("[SQLCipher] Salt deleted for user: \(userDID.prefix(24))...")
+    logger.debug("[SQLCipher] Salt deleted for user: \(userDID.prefix(24), privacy: .private)...")
   }
 
   /// Generate cryptographically secure random salt

@@ -1,5 +1,5 @@
 import Foundation
-import MLSFFI
+import CatbirdMLS
 import OSLog
 
 /// Swift implementation of MLSLogger that bridges Rust FFI logs to OSLog
@@ -13,7 +13,7 @@ import OSLog
 public class MLSLoggerImplementation: MlsLogger {
   private let logger = Logger(
     subsystem: "blue.catbird.mls",
-    category: "MLSFFI"
+    category: "CatbirdMLS"
   )
 
   public init() {}

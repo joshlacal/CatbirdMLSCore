@@ -192,14 +192,14 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     // Try to retrieve existing key
     if let existingKey = try retrieve(forKey: key) {
-      logger.debug("Retrieved existing encryption key for user: \(userDID)")
+      logger.debug("Retrieved existing encryption key for user: \(userDID, privacy: .private)")
       return existingKey
     }
 
     // Generate new 256-bit AES key
     let newKey = try generateSecureRandomKey(length: 32)
     try store(newKey, forKey: key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-    logger.info("🔑 Generated new encryption key for user: \(userDID)")
+    logger.info("🔑 Generated new encryption key for user: \(userDID, privacy: .private)")
 
     return newKey
   }
@@ -210,7 +210,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
   public func deleteEncryptionKey(forUserDID userDID: String) throws {
     let key = "mls.encryption.key.\(userDID)"
     try delete(forKey: key)
-    logger.info("Deleted encryption key for user: \(userDID)")
+    logger.info("Deleted encryption key for user: \(userDID, privacy: .private)")
   }
 
   // MARK: - Group State Management
@@ -351,7 +351,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
   public func storeRejoinPSK(_ psk: Data, for conversationID: String, userDID: String) throws {
     let key = "mls.rejoin.psk.\(conversationID).\(userDID)"
     try store(psk, forKey: key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-    logger.info("Stored rejoin PSK for conversation: \(conversationID), user: \(userDID)")
+    logger.info("Stored rejoin PSK for conversation: \(conversationID, privacy: .private), user: \(userDID, privacy: .private)")
   }
 
   /// Retrieve pre-shared key for rejoining a conversation
@@ -372,7 +372,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
   public func deleteRejoinPSK(for conversationID: String, userDID: String) throws {
     let key = "mls.rejoin.psk.\(conversationID).\(userDID)"
     try delete(forKey: key)
-    logger.info("Deleted rejoin PSK for conversation: \(conversationID), user: \(userDID)")
+    logger.info("Deleted rejoin PSK for conversation: \(conversationID, privacy: .private), user: \(userDID, privacy: .private)")
   }
 
   // MARK: - General Key Storage (for FFI Bridge)
@@ -584,10 +584,11 @@ public final class MLSKeychainManager: @unchecked Sendable {
   public func store(
     _ data: Data,
     forKey key: String,
-    accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+    synchronizable: Bool = false
   ) throws {
-    // Delete existing item first
-    try? delete(forKey: key)
+    // Delete existing item first (must match synchronizable flag)
+    try? delete(forKey: key, synchronizable: synchronizable)
 
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
@@ -595,7 +596,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrService as String: serviceName,
       kSecValueData as String: data,
       kSecAttrAccessible as String: accessible,
-      kSecAttrSynchronizable as String: false,
+      kSecAttrSynchronizable as String: synchronizable,
     ]
 
     if let accessGroup = accessGroup {
@@ -610,13 +611,14 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
   }
 
-  public func retrieve(forKey key: String) throws -> Data? {
+  public func retrieve(forKey key: String, synchronizable: Bool = false) throws -> Data? {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
       kSecAttrService as String: serviceName,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
+      kSecAttrSynchronizable as String: synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny,
     ]
 
     if let accessGroup = accessGroup {
@@ -638,12 +640,16 @@ public final class MLSKeychainManager: @unchecked Sendable {
     return result as? Data
   }
 
-  public func delete(forKey key: String) throws {
+  public func delete(forKey key: String, synchronizable: Bool = false) throws {
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
       kSecAttrService as String: serviceName,
     ]
+
+    if synchronizable {
+      query[kSecAttrSynchronizable as String] = true
+    }
 
     if let accessGroup = accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup

@@ -16,15 +16,17 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0")
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
+        .package(path: "../Petrel")
     ],
     targets: [
         .target(
             name: "CatbirdMLSCore",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
-                "MLSFFI",
-                "MLSFFICore"
+                "CatbirdMLS",
+                "CatbirdMLSFFI",
+                "Petrel"
             ],
             swiftSettings: [
                 // Keep Swift 5 mode for UniFFI bindings compatibility
@@ -36,8 +38,9 @@ let package = Package(
             ]
         ),
         .target(
-            name: "MLSFFI",
-            dependencies: ["MLSFFICore"],
+            name: "CatbirdMLS",
+            dependencies: ["CatbirdMLSFFI"],
+            path: "Sources/CatbirdMLS",
             swiftSettings: [
                 // Keep Swift 5 mode for auto-generated UniFFI bindings
                 // UniFFI generates mutable global state that isn't Swift 6 compatible
@@ -45,8 +48,8 @@ let package = Package(
             ]
         ),
         .binaryTarget(
-            name: "MLSFFICore",
-            path: "Sources/MLSFFICore.xcframework"
+            name: "CatbirdMLSFFI",
+            path: "Sources/CatbirdMLSFFI.xcframework"
         ),
         .testTarget(
             name: "CatbirdMLSCoreTests",

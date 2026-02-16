@@ -138,7 +138,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     let diskVersion = getDiskVersion(for: userDID)
     let isStale = diskVersion > memoryVersion
     if isStale {
-      logger.info("🔄 [StateVersion] Context stale for \(userDID.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
+      logger.info("🔄 [StateVersion] Context stale for \(userDID.prefix(20), privacy: .private)...: disk=\(diskVersion), memory=\(memoryVersion)")
     }
     return isStale
   }
@@ -162,7 +162,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     cacheLock.unlock()
 
     if changed {
-      logger.info("🔄 [StateVersion] Version changed for \(userDID.prefix(20))...: \(lastKnown ?? 0) → \(diskVersion)")
+      logger.info("🔄 [StateVersion] Version changed for \(userDID.prefix(20), privacy: .private)...: \(lastKnown ?? 0) → \(diskVersion)")
     }
     return changed
   }
@@ -208,7 +208,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     lastKnownVersions[userDID] = newVersion
     cacheLock.unlock()
 
-    logger.info("📈 [StateVersion] Incremented version for \(userDID.prefix(20))...: → \(newVersion)")
+    logger.info("📈 [StateVersion] Incremented version for \(userDID.prefix(20), privacy: .private)...: → \(newVersion)")
 
     // Post local notification for immediate in-process handling
     NotificationCenter.default.post(
@@ -234,7 +234,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     lastKnownVersions[userDID] = version
     cacheLock.unlock()
 
-    logger.debug("📝 [StateVersion] Set version for \(userDID.prefix(20))...: \(version)")
+    logger.debug("📝 [StateVersion] Set version for \(userDID.prefix(20), privacy: .private)...: \(version)")
   }
 
   /// Update the last known version without incrementing disk version.
@@ -249,7 +249,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     lastKnownVersions[userDID] = diskVersion
     cacheLock.unlock()
 
-    logger.debug("🔄 [StateVersion] Synced last known version for \(userDID.prefix(20))...: \(diskVersion)")
+    logger.debug("🔄 [StateVersion] Synced last known version for \(userDID.prefix(20), privacy: .private)...: \(diskVersion)")
   }
 
   // MARK: - Public API: Lock Status
@@ -282,7 +282,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     lastKnownVersions.removeValue(forKey: userDID)
     cacheLock.unlock()
 
-    logger.info("🗑️ [StateVersion] Cleared version for \(userDID.prefix(20))...")
+    logger.info("🗑️ [StateVersion] Cleared version for \(userDID.prefix(20), privacy: .private)...")
   }
 
   /// Clear all version data (e.g., on app reset).

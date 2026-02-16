@@ -126,7 +126,7 @@ Managed via Swift Package Manager:
 ## Coding Style
 
 - Swift 5 language mode, iOS 18+ / macOS 13+ targets
-- 4-space indentation
+- 2-space indentation
 - Use `private`/`fileprivate` and `final` appropriately
 - Types: PascalCase, methods/properties: camelCase, enum cases: lowerCamel
 - Keep module boundaries clear (storage in Storage/, logging in Logging/, etc.)
