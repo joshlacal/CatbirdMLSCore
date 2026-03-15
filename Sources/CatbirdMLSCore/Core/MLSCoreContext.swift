@@ -1291,18 +1291,15 @@ public actor MLSCoreContext {
       }
 
       // ═══════════════════════════════════════════════════════════════════════════════
-      // MONOTONIC VERSION INCREMENT: Only in non-ephemeral mode
+      // MONOTONIC VERSION INCREMENT: Always on successful mutation
       // ═══════════════════════════════════════════════════════════════════════════════
-      // Version increment is still skipped in ephemeral mode since the main app
-      // handles version management through its normal sync path.
+      // Ephemeral and non-ephemeral notification paths both mutate on-disk MLS state.
+      // Always increment version so other processes can deterministically detect staleness.
       // ═══════════════════════════════════════════════════════════════════════════════
-      if !useEphemeralAccess {
-        let newVersion = MLSStateVersionManager.shared.incrementVersion(for: userDid)
-        contextVersions[userDid] = newVersion
-        logger.debug("[DECRYPT] State version incremented to \(newVersion)")
-      } else {
-        logger.debug("🛡️ [EPHEMERAL] Skipping version increment (main app will handle)")
-      }
+      let newVersion = MLSStateVersionManager.shared.incrementVersion(for: userDid)
+      contextVersions[userDid] = newVersion
+      logger.debug(
+        "[DECRYPT] State version incremented to \(newVersion) (ephemeral=\(useEphemeralAccess))")
 
       // ═══════════════════════════════════════════════════════════════════════════════
       // CRITICAL CHECK: Detect if account switch happened during our operation
@@ -1661,41 +1658,102 @@ public actor MLSCoreContext {
     var resolvedConversationID = conversationID
 
     do {
-      // CRITICAL: For notifications, ALWAYS use ephemeral access since notifications can
-      // arrive for any user (active or inactive). getDatabasePool() will crash for inactive users.
-      let database = try await databaseManager.getEphemeralDatabasePool(for: userDid)
+      // ═══════════════════════════════════════════════════════════════
+      // SCOPED DB ACCESS: Three sequential nseWrite/nseRead calls.
+      // Each opens a lightweight DatabaseQueue, executes, and closes
+      // immediately. No long-lived pools leak into MLSCoreContext's
+      // private databaseManager (unlike getEphemeralDatabasePool).
+      //
+      // We use separate calls (not one big closure) because the
+      // existing MLSStorage async methods use database.read/write
+      // internally — calling them inside an nseWrite closure would
+      // deadlock on reentrant GRDB access.
+      // ═══════════════════════════════════════════════════════════════
 
-      // Resolve the real Conversation ID before proceeding.
-      // If this throws, we fail back to catch block but keep original ID.
-      resolvedConversationID = try await storage.ensureConversationExistsOrPlaceholder(
-        userDID: userDid,
-        conversationID: conversationID,
-        groupID: groupId.hexEncodedString(),
-        senderDID: nil,  // Unknown at this stage
-        database: database
-      )
+      // Normalize DID for database queries (matches MLSStorage behavior)
+      let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+      let groupIDData = groupId  // Already Data from parameter
 
-      if let cachedPayload = try await storage.fetchPayloadForMessage(
-        messageID,
-        currentUserDID: userDid,
-        database: database
-      ) {
-        // Also fetch the cached sender for rich notification display
-        let cachedSender = try await storage.fetchSenderForMessage(
-          messageID,
-          currentUserDID: userDid,
-          database: database
+      // Step 1: Resolve conversation ID (may insert placeholder -> write)
+      // Replicates ensureConversationExistsOrPlaceholder logic:
+      // - Direct match on conversationID + currentUserDID
+      // - Smart lookup by groupID + currentUserDID (prevents hex/UUID duplicates)
+      // - Create placeholder if neither exists
+      resolvedConversationID = try await databaseManager.nseWrite(for: userDid) { db in
+        // Direct check
+        if let existing = try MLSConversationModel
+          .filter(
+            MLSConversationModel.Columns.conversationID == conversationID
+              && MLSConversationModel.Columns.currentUserDID == normalizedDID
+          )
+          .fetchOne(db)
+        {
+          return existing.conversationID
+        }
+        // Smart lookup by groupID (binary Data comparison)
+        if let byGroup = try MLSConversationModel
+          .filter(
+            MLSConversationModel.Columns.groupID == groupIDData
+              && MLSConversationModel.Columns.currentUserDID == normalizedDID
+          )
+          .fetchOne(db)
+        {
+          return byGroup.conversationID
+        }
+        // Create placeholder — main app will heal with real metadata during listConvos sync
+        let placeholder = MLSConversationModel(
+          conversationID: conversationID,
+          currentUserDID: normalizedDID,
+          groupID: groupIDData,
+          epoch: 0,
+          joinMethod: .unknown,
+          joinEpoch: 0,
+          title: "New Conversation",
+          avatarURL: nil,
+          createdAt: Date(),
+          updatedAt: Date(),
+          lastMessageAt: Date(),
+          lastMembershipChangeAt: nil,
+          unacknowledgedMemberChanges: 0,
+          isActive: true,
+          needsRejoin: false,
+          rejoinRequestedAt: nil,
+          lastRecoveryAttempt: nil,
+          consecutiveFailures: 0,
+          isPlaceholder: true
         )
+        try placeholder.insert(db)
+        return conversationID
+      }
+
+      // Step 2: Check for cached payload (read-only)
+      let cachedMessage: (payload: MLSMessagePayload, senderID: String)? =
+        try await databaseManager.nseRead(for: userDid) { db in
+          guard let msg = try MLSMessageModel
+            .filter(
+              MLSMessageModel.Columns.messageID == messageID
+                && MLSMessageModel.Columns.currentUserDID == normalizedDID
+            )
+            .fetchOne(db),
+            let payload = msg.parsedPayload
+          else {
+            return nil
+          }
+          return (payload: payload, senderID: msg.senderID)
+        }
+
+      if let cached = cachedMessage {
         logger.info(
-          "✅ [DECRYPT-NOTIF] IDEMPOTENCY HIT: Message \(messageID.prefix(16))... already decrypted conversationID=\(resolvedConversationID)")
+          "✅ [DECRYPT-NOTIF] IDEMPOTENCY HIT: Message \(messageID.prefix(16))... already decrypted conversationID=\(resolvedConversationID)"
+        )
         logger.info("   Returning cached plaintext, skipping MLS decryption")
 
-        let displayText = notificationDisplayText(from: cachedPayload)
+        let displayText = notificationDisplayText(from: cached.payload)
         return NotificationDecryptResult(
           plaintext: displayText,
-          senderDID: cachedSender,
-          messageType: cachedPayload.messageType,
-          reaction: cachedPayload.reaction,
+          senderDID: cached.senderID,
+          messageType: cached.payload.messageType,
+          reaction: cached.payload.reaction,
           epoch: nil  // Cached result - no epoch available
         )
       }
