@@ -99,6 +99,27 @@ public actor MLSGRDBManager {
   private nonisolated static let checkpointTimeoutKey = "MLSGRDBManager.checkpointBusyRetries"
   private nonisolated static let staticLogger = Logger(subsystem: "Catbird", category: "MLSGRDBManager")
 
+  /// Create a Signal-style busy callback with configurable max retries.
+  ///
+  /// - Parameter maxRetries: Maximum number of retries before giving up (each retry sleeps 25ms)
+  /// - Returns: GRDB BusyMode.callback configured with checkpoint abort support
+  private static func nseBusyMode(maxRetries: Int) -> Database.BusyMode {
+    .callback { numberOfTries in
+      // Checkpoint abort: same thread-local pattern as the main pool
+      if let checkpointMax = Thread.current.threadDictionary[MLSGRDBManager.checkpointTimeoutKey] as? Int {
+        if numberOfTries >= checkpointMax {
+          return false
+        }
+      }
+      // Hard cap for NSE: never block longer than maxRetries * 25ms
+      if numberOfTries >= maxRetries {
+        return false
+      }
+      Thread.sleep(forTimeInterval: 0.025)
+      return true
+    }
+  }
+
   /// Emergency synchronous close of all GRDB database pools for 0xdead10cc prevention.
   /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
   /// This is safe to call from any thread and does not require actor isolation.
@@ -513,7 +534,7 @@ public actor MLSGRDBManager {
 
   // MARK: - Lock Helpers
   // NOTE: Advisory file locks have been removed (2026-02) to prevent 0xdead10cc crashes.
-  // SQLite WAL mode handles concurrent access. Darwin notifications (MLSCrossProcess)
+  // SQLite WAL mode handles concurrent access. `MLSStateChangeNotifier`/`MLSNotificationCoordinator`
   // coordinate cache invalidation across processes instead.
 
   private func updateConnectionState(_ state: ConnectionState, for userDID: String) {
@@ -880,7 +901,7 @@ public actor MLSGRDBManager {
     let isNewDatabase = !FileManager.default.fileExists(atPath: dbPath.path)
 
     // NOTE: Advisory lock removed (2026-02) - SQLite WAL handles concurrent access.
-    // Darwin notifications (MLSCrossProcess) coordinate cache invalidation.
+    // `MLSStateChangeNotifier`/`MLSNotificationCoordinator` coordinate cache invalidation.
 
     // Create/open database (runs off main thread via actor isolation)
     do {
@@ -1272,7 +1293,7 @@ public actor MLSGRDBManager {
     // Configure ultra-lightweight connection for NSE
     var config = Configuration()
     config.readonly = true  // Read-only for safety
-    config.busyMode = .timeout(5.0)  // Shorter timeout for lightweight access
+    config.busyMode = Self.nseBusyMode(maxRetries: 20)  // 20 * 25ms = 500ms max
     config.observesSuspensionNotifications = true
 
     config.prepareDatabase { db in
@@ -1352,7 +1373,7 @@ public actor MLSGRDBManager {
     }
 
     // No advisory lock needed - SQLite WAL handles concurrent access
-    // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+    // Cross-process coordination uses `MLSStateChangeNotifier`/`MLSNotificationCoordinator`
 
     // If we have a running pool for this user AND we're not in NSE, use it
     if !isRunningInExtension, let existingPool = databases[userDID] {
@@ -1381,7 +1402,7 @@ public actor MLSGRDBManager {
     config.allowsUnsafeTransactions = true  // Allow checkpoint-without-transaction
     config.maximumReaderCount = 4  // Signal uses 4 for extensions
     config.readonly = false
-    config.busyMode = .timeout(10.0)  // NSE has ~30s limit; keep fixed timeout here
+    config.busyMode = Self.nseBusyMode(maxRetries: 80)  // 80 * 25ms = 2s max
     config.observesSuspensionNotifications = true
 
     config.prepareDatabase { db in
@@ -2852,7 +2873,7 @@ public actor MLSGRDBManager {
 
     // 2. No advisory lock needed - SQLite WAL handles concurrent access
     // NSE stop signal above gives grace period for extension to close handles
-    // Darwin notification (MLSCrossProcess) will notify after reset completes
+    // `MLSStateChangeNotifier` publishes state changes after reset completes
 
     // 3. Close any open connections
     let released = await releaseConnectionWithoutCheckpoint(for: userDID)
@@ -4094,6 +4115,42 @@ public actor MLSGRDBManager {
     migrator.registerMigration("v17_declaration_policy") { db in
       try db.alter(table: "MLSDeclarationCache") { t in
         t.add(column: "chatPolicyJSON", .text)
+      }
+    }
+
+    // v18: Per-conversation read frontier for monotonic local read state
+    migrator.registerMigration("v18_read_frontier") { db in
+      try MLSReadFrontierModel.createTable(in: db)
+    }
+
+    // v19: Control/protocol payloads should not remain unread.
+    migrator.registerMigration("v19_control_messages_read") { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSMessageModel
+          SET isRead = 1
+          WHERE isRead = 0
+            AND json_valid(CAST(payloadJSON AS TEXT)) = 1
+            AND COALESCE(
+              json_extract(CAST(payloadJSON AS TEXT), '$.messageType'),
+              json_extract(CAST(payloadJSON AS TEXT), '$.type')
+            ) IS NOT NULL
+            AND COALESCE(
+              json_extract(CAST(payloadJSON AS TEXT), '$.messageType'),
+              json_extract(CAST(payloadJSON AS TEXT), '$.type')
+            ) != 'text';
+          """
+      )
+    }
+
+    // v20: Store decrypted group avatar image data locally
+    migrator.registerMigration("v20_group_avatar_image_data") { db in
+      let hasAvatarImageData = try db.columns(in: "MLSConversationModel")
+        .contains { $0.name == "avatarImageData" }
+      if !hasAvatarImageData {
+        try db.alter(table: "MLSConversationModel") { t in
+          t.add(column: "avatarImageData", .blob)
+        }
       }
     }
 
