@@ -10,32 +10,6 @@ public enum MLSDeclarationRolloutMode: String, Codable, Sendable {
   case full
 }
 
-public enum MLSWhoCanMessageMe: String, Codable, Sendable {
-  case everyone
-  case mutuals
-  case following
-  case nobody
-}
-
-public struct MLSChatPolicy: Sendable, Codable, Equatable {
-  public var allowFollowersBypass: Bool?
-  public var allowFollowingBypass: Bool?
-  public var whoCanMessageMe: MLSWhoCanMessageMe?
-  public var autoExpireDays: Int?
-
-  public init(
-    allowFollowersBypass: Bool? = nil,
-    allowFollowingBypass: Bool? = nil,
-    whoCanMessageMe: MLSWhoCanMessageMe? = nil,
-    autoExpireDays: Int? = nil
-  ) {
-    self.allowFollowersBypass = allowFollowersBypass
-    self.allowFollowingBypass = allowFollowingBypass
-    self.whoCanMessageMe = whoCanMessageMe
-    self.autoExpireDays = autoExpireDays
-  }
-}
-
 public struct MLSDeclarationAuthorizationDecision: Sendable {
   public let allowed: Bool
   public let requiresUserFriction: Bool
@@ -459,9 +433,12 @@ internal actor MLSDeclarationService {
         if cached.authorizedDeviceKeys.contains(signatureKeyB64) {
           return MLSDeclarationAuthorizationDecision(allowed: true)
         }
+        // Shadow mode: log but allow unrecognized keys (e.g. daemon devices
+        // that haven't been added to the declaration chain yet).
         return MLSDeclarationAuthorizationDecision(
-          allowed: false,
-          failureReason: "Key package signature key is not authorized by declaration chain"
+          allowed: rolloutMode == .shadow,
+          warning: rolloutMode == .shadow ? "Key not in verified declaration chain (shadow mode - allowing)" : nil,
+          failureReason: rolloutMode == .shadow ? nil : "Key package signature key is not authorized by declaration chain"
         )
       }
 
@@ -478,9 +455,12 @@ internal actor MLSDeclarationService {
       if snapshot.authorizedDeviceKeys.contains(signatureKeyB64) {
         return MLSDeclarationAuthorizationDecision(allowed: true)
       }
+      // Shadow mode: log but allow unrecognized keys (e.g. daemon devices
+      // that haven't been added to the declaration chain yet).
       return MLSDeclarationAuthorizationDecision(
-        allowed: false,
-        failureReason: "Key package signature key is not authorized by declaration chain"
+        allowed: rolloutMode == .shadow,
+        warning: rolloutMode == .shadow ? "Key not in verified declaration chain (shadow mode - allowing)" : nil,
+        failureReason: rolloutMode == .shadow ? nil : "Key package signature key is not authorized by declaration chain"
       )
     case .missingChain, .invalid, .rollback, .unavailable:
       let decision = decisionForNonVerifiedState(snapshot.state, securitySensitive: securitySensitive)
