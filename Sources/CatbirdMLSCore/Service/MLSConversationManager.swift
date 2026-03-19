@@ -68,7 +68,8 @@ public final class MLSConversationManager {
   // Pending operations queue (MLSOperation type not defined - removed)
 
   /// Observers for state changes
-  public var observers: [MLSStateObserver] = []
+  /// Protected by Mutex for thread-safe access from any isolation context
+  public let observers = Mutex<[MLSStateObserver]>([])
 
   /// Current user's DID
   public var userDid: String?
@@ -184,9 +185,10 @@ public final class MLSConversationManager {
   /// Track initialization state for conversations to prevent race conditions
   public var conversationStates: [String: ConversationInitState] = [:]
 
-  /// Track group IDs currently being created to prevent reconciliation from deleting them
-  /// Uses Mutex for thread-safe access from both creation and sync paths
-  public let groupsBeingCreated = Mutex<Set<String>>(Set())
+  /// Track group IDs currently being created to prevent reconciliation from deleting them.
+  /// Maps group ID → creation timestamp. Entries are kept for `recentCreationWindow` seconds
+  /// after creation completes, protecting against stale sync responses deleting new conversations.
+  public let groupsBeingCreated = Mutex<[String: Date]>([:])
 
   /// Flag indicating the manager is preparing for shutdown/storage reset
   public var isShuttingDown = false
@@ -213,14 +215,8 @@ public final class MLSConversationManager {
   /// Manager for key packages (Phase 3 architecture)
   internal let keyPackageManager: MLSKeyPackageManager
 
-  /// Declaration-chain publisher/verifier for MLS device-key authorization.
-  internal let declarationService: MLSDeclarationService
-
-  /// Set when self-chain checks detect rollback or unauthorized current device key.
-  public private(set) var declarationSecurityFrozen = false
-  public private(set) var declarationSecurityFreezeReason: String?
-  @ObservationIgnored private var declarationFrictionApprovals: Set<String> = []
-  @ObservationIgnored private let declarationFrictionLock = NSLock()
+  /// Device record service for per-device key verification.
+  internal let deviceRecordService: MLSDeviceRecordService
 
   /// Coordinates message ordering across processes (prevents out-of-order processing)
   public let messageOrderingCoordinator = MLSMessageOrderingCoordinator()
@@ -327,11 +323,9 @@ public final class MLSConversationManager {
     )
 
 
-    self.declarationService = MLSDeclarationService(
+    self.deviceRecordService = MLSDeviceRecordService(
       atProtoClient: atProtoClient,
-      mlsClient: MLSClient.shared,
-      database: database,
-      rolloutMode: configuration.declarationRolloutMode
+      mlsClient: MLSClient.shared
     )
 
     self.configuration = configuration
@@ -397,190 +391,50 @@ public final class MLSConversationManager {
     // but we flag here that we are no longer accepting data.
   }
 
-  // MARK: - Declaration Security
+  // MARK: - Device Record Management
 
-  internal func updateDeclarationSecurityState(_ result: MLSDeclarationSelfCheckResult) {
-    declarationSecurityFrozen = result.securityFrozen
-    declarationSecurityFreezeReason = result.reason
-    if result.securityFrozen {
-      logger.critical(
-        "🚨 [Declaration] Security frozen: \(result.reason ?? "unknown reason", privacy: .public)")
-    } else {
-      logger.info("✅ [Declaration] Self-chain verification healthy")
-    }
-  }
-
-  internal func requireDeclarationSecurityReady(operation: String) throws {
-    guard !declarationSecurityFrozen else {
-      throw MLSConversationError.operationFailed(
-        "Declaration security freeze active (\(operation)): \(declarationSecurityFreezeReason ?? "no reason provided")"
-      )
-    }
-  }
-
-  private func declarationFrictionKey(operation: String, targetDid: String) -> String {
-    "\(operation.lowercased())::\(targetDid.lowercased())"
-  }
-
-  private func consumeDeclarationFrictionApproval(operation: String, targetDid: String) -> Bool {
-    let key = declarationFrictionKey(operation: operation, targetDid: targetDid)
-    return declarationFrictionLock.withLock {
-      declarationFrictionApprovals.remove(key) != nil
-    }
-  }
-
-  /// Approve one declaration soft-mode friction gate and retry the originating action.
-  public func approveDeclarationUserFriction(targetDid: String, operation: String) {
-    let key = declarationFrictionKey(operation: operation, targetDid: targetDid)
-    declarationFrictionLock.withLock {
-      declarationFrictionApprovals.insert(key)
-    }
-  }
-
-  internal func enforceDeclarationFrictionOrThrow(
-    operation: String,
-    targetDid: String,
-    warning: String?
-  ) throws {
-    if consumeDeclarationFrictionApproval(operation: operation, targetDid: targetDid) {
-      logger.info(
-        "✅ [Declaration] Friction approval consumed for \(operation, privacy: .public) target \(targetDid, privacy: .private)"
-      )
-      return
-    }
-    throw MLSConversationError.declarationUserConfirmationRequired(
-      targetDid: targetDid,
-      operation: operation,
-      warning: warning
-    )
-  }
-
-  internal func enforceDeclarationDecision(
-    _ decision: MLSDeclarationAuthorizationDecision,
-    operation: String,
-    targetDid: String
-  ) throws {
-    if let warning = decision.warning {
-      logger.warning(
-        "⚠️ [Declaration] \(operation) warning for \(targetDid, privacy: .private): \(warning, privacy: .public)"
-      )
-    }
-
-    if decision.requiresUserFriction {
-      try enforceDeclarationFrictionOrThrow(
-        operation: operation,
-        targetDid: targetDid,
-        warning: decision.warning
-      )
-    }
-
-    guard decision.allowed else {
-      throw MLSConversationError.operationFailed(
-        decision.failureReason ?? "Declaration verification denied key package for \(targetDid)")
-    }
-  }
-
-  /// Update declaration rollout mode for a live manager without reinitializing MLS state.
-  public func setDeclarationRolloutMode(_ mode: MLSDeclarationRolloutMode) async {
-    await declarationService.setRolloutMode(mode)
-  }
-
-  /// Publish declaration revocation for a removed/opted-out device.
-  @discardableResult
-  public func publishDeclarationDeviceRevoke(
-    deviceId: String?,
-    reason: String?
-  ) async throws -> Bool {
-    try throwIfShuttingDown("publishDeclarationDeviceRevoke")
-    guard let activeDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-    var resolvedDeviceId = deviceId
-    if resolvedDeviceId == nil {
-      resolvedDeviceId = await mlsClient.getDeviceInfo(for: activeDid)?.deviceId
-    }
-    guard resolvedDeviceId != nil else {
-      throw MLSConversationError.operationFailed(
-        "Cannot publish declaration deviceRevoke without device identifier"
-      )
-    }
-    _ = try await declarationService.publishDeviceRevoke(
-      localAccountDid: activeDid,
-      deviceMlsSignaturePublicKey: nil,
-      deviceId: resolvedDeviceId,
-      reason: reason
-    )
-    return true
-  }
-
-  /// Publish a signed declaration update for chat-request policy settings.
-  @discardableResult
-  public func getDeclarationChatPolicy() async -> MLSChatPolicy? {
-    guard let did = currentUserDID else { return nil }
-    return await declarationService.getSelfDeclarationPolicy(localAccountDID: did)
-  }
-
-  public func publishDeclarationChatPolicyUpdate(
-    allowFollowersBypass: Bool,
-    allowFollowingBypass: Bool,
+  public func publishChatPolicy(
     whoCanMessageMe: MLSWhoCanMessageMe?,
-    autoExpireDays: Int
-  ) async throws -> Bool {
-    try throwIfShuttingDown("publishDeclarationChatPolicyUpdate")
+    allowFollowersBypass: Bool?,
+    allowFollowingBypass: Bool?,
+    autoExpireDays: Int?
+  ) async throws {
+    try throwIfShuttingDown("publishChatPolicy")
     guard let activeDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-    _ = try await declarationService.publishChatPolicyUpdate(
-      localAccountDid: activeDid,
+    try await deviceRecordService.publishChatPolicy(
+      userDid: activeDid,
+      whoCanMessageMe: whoCanMessageMe,
       allowFollowersBypass: allowFollowersBypass,
       allowFollowingBypass: allowFollowingBypass,
-      whoCanMessageMe: whoCanMessageMe,
       autoExpireDays: autoExpireDays
     )
-    return true
   }
 
-  /// Force a normal online-root rotation.
-  @discardableResult
-  public func rotateDeclarationOnlineRoot() async throws -> Bool {
-    try throwIfShuttingDown("rotateDeclarationOnlineRoot")
+  public func getChatPolicy() async -> MLSChatPolicy? {
+    guard let did = currentUserDID else { return nil }
+    return try? await deviceRecordService.fetchChatPolicy(for: did)
+  }
+
+  public func removeDeviceRecord(deviceId: String) async throws {
+    try throwIfShuttingDown("removeDeviceRecord")
     guard let activeDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-    _ = try await declarationService.publishRootRotate(
-      localAccountDid: activeDid,
-      rotationMode: "normal"
-    )
-    return true
+    try await deviceRecordService.removeDeviceRecord(userDid: activeDid, deviceId: deviceId)
   }
 
-  /// Force a recovery-root authorized replacement of the online root.
-  @discardableResult
-  public func recoverDeclarationOnlineRoot(reason: String?) async throws -> Bool {
-    try throwIfShuttingDown("recoverDeclarationOnlineRoot")
+  public func ensureDeviceRecordPublished() async throws {
+    try throwIfShuttingDown("ensureDeviceRecordPublished")
     guard let activeDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-    _ = try await declarationService.publishRecoveryRotateOnlineRoot(
-      localAccountDid: activeDid,
-      recoveryReason: reason
-    )
-    return true
-  }
-
-  /// Force declaration bootstrap/verification for the current account after opt-in changes.
-  @MainActor
-  public func ensureDeclarationChainReady() async throws {
-    try throwIfShuttingDown("ensureDeclarationChainReady")
-
-    guard let activeDid = userDid else {
-      throw MLSConversationError.noAuthentication
+    guard !configuration.skipDeviceRecordPublishing else {
+      logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
+      return
     }
-
-    try await declarationService.ensureSelfChainInitialized(localAccountDid: activeDid)
-    let selfCheck = await declarationService.verifySelfChainOnLaunch(localAccountDid: activeDid)
-    updateDeclarationSecurityState(selfCheck)
-    try requireDeclarationSecurityReady(operation: "ensureDeclarationChainReady")
+    try await deviceRecordService.ensureDeviceRecordPublished(userDid: activeDid)
   }
 
   // MARK: - Task Tracking & Generation Validation
@@ -729,8 +583,6 @@ public final class MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
-    try requireDeclarationSecurityReady(operation: "addDeviceWithKeyPackage")
-
     // Extract user DID from device credential DID (format: did:plc:user#device-uuid)
     let userDidFromDevice: String
     if let hashIndex = deviceCredentialDid.firstIndex(of: "#") {
@@ -739,17 +591,15 @@ public final class MLSConversationManager {
       userDidFromDevice = deviceCredentialDid
     }
 
-    let declarationDecision = try await declarationService.authorizeKeyPackage(
+    let decision = try await deviceRecordService.verifyKeyPackageAuthorization(
       localAccountDid: userDid,
       targetDid: userDidFromDevice,
-      keyPackageData: keyPackageData,
-      securitySensitive: true
+      keyPackageData: keyPackageData
     )
-    try enforceDeclarationDecision(
-      declarationDecision,
-      operation: "addDeviceWithKeyPackage",
-      targetDid: userDidFromDevice
-    )
+    guard decision.allowed else {
+      throw MLSConversationError.operationFailed(
+        decision.failureReason ?? "Device record verification denied key package")
+    }
 
     // Use GroupOperationCoordinator to serialize operations on this group
     return try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in

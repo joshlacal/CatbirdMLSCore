@@ -2,6 +2,7 @@ import Foundation
 import GRDB
 import OSLog
 import Petrel
+import Synchronization
 
 extension MLSConversationManager {
 
@@ -9,12 +10,13 @@ extension MLSConversationManager {
 
   /// Flag indicating MLS operations are suspended for app backgrounding
   /// This is different from `isShuttingDown` - suspension is temporary and reversible
-  private static var _isSuspending = false
+  /// Protected by Mutex for thread-safe access from any isolation context
+  private static let _isSuspending = Mutex<Bool>(false)
 
   /// Check if MLS operations are suspended for app backgrounding
   public var isSuspending: Bool {
-    get { Self._isSuspending }
-    set { Self._isSuspending = newValue }
+    get { Self._isSuspending.withLock { $0 } }
+    set { Self._isSuspending.withLock { $0 = newValue } }
   }
 
   /// Suspend all MLS operations when app enters background
@@ -38,6 +40,8 @@ extension MLSConversationManager {
     // Set flag to reject new operations
     isSuspending = true
     isSyncPaused = true
+    MLSCoreContext.markSuspensionInProgress()
+    MLSClient.markSuspensionInProgress(reason: "MLSConversationManager.suspendMLSOperations")
     // Reset circuit breaker during lifecycle suspension so transient suspended errors
     // cannot strand foreground sync for the full backoff window.
     consecutiveSyncFailures = 0
@@ -107,6 +111,8 @@ extension MLSConversationManager {
     // Clear suspension flags
     isSuspending = false
     isSyncPaused = false
+    MLSCoreContext.clearSuspensionFlag()
+    MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
 
     // Restart background tasks (only if we're initialized)
     guard isInitialized else {
@@ -131,21 +137,13 @@ extension MLSConversationManager {
       startGroupInfoRefreshTask()
     }
 
-    if let activeDid = userDid {
+    if let activeDid = userDid, !configuration.skipDeviceRecordPublishing {
       Task { [weak self] in
         guard let self else { return }
         do {
-          try await self.declarationService.ensureSelfChainInitialized(localAccountDid: activeDid)
+          try await self.deviceRecordService.ensureDeviceRecordPublished(userDid: activeDid)
         } catch {
-          self.logger.error(
-            "❌ [Declaration] Failed to refresh self-chain on resume: \(error.localizedDescription)"
-          )
-        }
-        let selfCheck = await self.declarationService.verifySelfChainOnLaunch(
-          localAccountDid: activeDid
-        )
-        await MainActor.run {
-          self.updateDeclarationSecurityState(selfCheck)
+          self.logger.error("Failed to publish device record on resume: \(error.localizedDescription)")
         }
       }
     }
@@ -199,7 +197,6 @@ extension MLSConversationManager {
     if let resetUserDid = resetUserDid {
       logger.info("🔓 [MLSConversationManager] Force-releasing all permits for shutdown")
       await MLSUserOperationCoordinator.shared.forceReleaseAll(for: resetUserDid)
-      await declarationService.purgeCache(localAccountDid: resetUserDid)
     }
 
     // Cancel all background tasks
@@ -239,7 +236,7 @@ extension MLSConversationManager {
     ownCommits.removeAll()
     conversationStates.removeAll()
     await keyPackageManager.clearAllExhaustedKeyPackages()
-    observers.removeAll()
+    observers.withLock { $0.removeAll() }
     isInitialized = false
     isSyncing = false
 
@@ -444,7 +441,7 @@ extension MLSConversationManager {
     ownCommits.removeAll()
     conversationStates.removeAll()
     await keyPackageManager.clearAllExhaustedKeyPackages()
-    observers.removeAll()
+    observers.withLock { $0.removeAll() }
 
     // Clear consumption tracking
     keyPackageMonitor = nil
@@ -468,8 +465,6 @@ extension MLSConversationManager {
     // ═══════════════════════════════════════════════════════════════════════════
 
     if let shutdownUserDid = shutdownUserDid {
-      await declarationService.purgeCache(localAccountDid: shutdownUserDid)
-
       // Step 1: Close the app-layer MLSClient context (separate from core package)
       let closedAppContext = await MLSClient.shared.closeContext(for: shutdownUserDid)
       if closedAppContext {
@@ -637,22 +632,18 @@ extension MLSConversationManager {
 
   /// Initialize the MLS crypto context
   public func initialize() async throws {
-    print("[MLSConversationManager.initialize] START")
     guard !isInitialized else {
       logger.debug("MLS context already initialized")
       return
     }
 
     if let userDid = userDid {
-      print("[MLSConversationManager.initialize] Calling MLSClient.shared.configure...")
       await MLSClient.shared.configure(
         for: userDid, apiClient: apiClient, atProtoClient: atProtoClient)
-      print("[MLSConversationManager.initialize] MLSClient.shared.configure DONE")
 
       // CRITICAL FIX: Ensure device is registered with MLS server before proceeding
       // This prevents "Missing key packages" errors if device registration was skipped/removed
       do {
-        print("[MLSConversationManager.initialize] Ensuring device is registered...")
         try await MLSClient.shared.ensureDeviceRegistered(userDid: userDid)
         logger.info("✅ Device registered with MLS server")
       } catch {
@@ -660,30 +651,24 @@ extension MLSConversationManager {
         // Continue initialization but warn - functionality may be limited
       }
 
-      do {
-        try await declarationService.ensureSelfChainInitialized(localAccountDid: userDid)
-      } catch {
-        logger.error(
-          "❌ [MLS Init] Failed to initialize declaration self-chain: \(error.localizedDescription)"
-        )
-        if configuration.declarationRolloutMode == .full {
-          throw MLSConversationError.operationFailed(
-            "Declaration self-chain initialization failed in full enforcement mode")
+      if !configuration.skipDeviceRecordPublishing {
+        do {
+          try await deviceRecordService.ensureDeviceRecordPublished(userDid: userDid)
+        } catch {
+          logger.error(
+            "❌ [MLS Init] Failed to publish device record: \(error.localizedDescription)"
+          )
         }
+      } else {
+        logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
       }
-
-      let selfCheck = await declarationService.verifySelfChainOnLaunch(localAccountDid: userDid)
-      updateDeclarationSecurityState(selfCheck)
 
       logger.info("Loading persisted MLS storage for user: \(userDid)")
       do {
         logger.info("✅ MLS storage loaded successfully")
-        print("[MLSConversationManager.initialize] MLS storage loaded")
 
         do {
-          print("[MLSConversationManager.initialize] Getting key package bundle count...")
           let localBundleCount = try await MLSClient.shared.getKeyPackageBundleCount(for: userDid)
-          print("[MLSConversationManager.initialize] Bundle count: \(localBundleCount)")
           logger.info("📊 [MLS Init] Local bundle count: \(localBundleCount)")
 
           if localBundleCount == 0 {
@@ -741,28 +726,22 @@ extension MLSConversationManager {
       logger.warning("No user DID provided - MLS storage will not be persisted")
     }
 
-    print("[MLSConversationManager.initialize] Setting isInitialized = true")
     logger.info("MLS context initialized successfully")
     isInitialized = true
 
     if let userDid = userDid {
-      print("[MLSConversationManager.initialize] Creating consumption tracker...")
       consumptionTracker = MLSConsumptionTracker(userDID: userDid, dbManager: databaseManager)
       keyPackageMonitor = MLSKeyPackageMonitor(
         userDID: userDid,
         consumptionTracker: consumptionTracker,
         dbManager: databaseManager
       )
-      print("[MLSConversationManager.initialize] Key package monitor created")
       logger.info("✅ Initialized smart key package monitoring")
 
       if let deviceSyncManager = deviceSyncManager {
-        print("[MLSConversationManager.initialize] Getting device info...")
         let deviceInfo = await mlsClient.getDeviceInfo(for: userDid)
-        print("[MLSConversationManager.initialize] Device info: \(String(describing: deviceInfo))")
         let deviceUUID = deviceInfo?.deviceUUID
 
-        print("[MLSConversationManager.initialize] Configuring device sync manager...")
         await deviceSyncManager.configure(
           userDid: userDid,
           deviceUUID: deviceUUID,
@@ -775,17 +754,13 @@ extension MLSConversationManager {
             )
           }
         )
-        print(
-          "[MLSConversationManager.initialize] Device sync manager configured, starting polling...")
         await deviceSyncManager.startPolling(interval: 60)
-        print("[MLSConversationManager.initialize] Polling started")
         logger.info(
           "✅ Configured device sync manager for multi-device support (deviceUUID: \(deviceUUID ?? "not registered"))"
         )
       }
     }
 
-    print("[MLSConversationManager.initialize] Spawning key package refresh task...")
     keyPackageRefreshTask = Task(priority: .utility) { [weak self] in
       guard let self else { return }
       do {
@@ -800,23 +775,18 @@ extension MLSConversationManager {
       }
     }
 
-    print("[MLSConversationManager.initialize] Validating group states...")
     await validateGroupStates()
-    print("[MLSConversationManager.initialize] Group states validated")
 
     // Run detectAndRejoinMissingConversations in background to avoid blocking startup
     // CRITICAL FIX: Store task reference so it can be properly cancelled during shutdown
     // Previously this was a fire-and-forget Task.detached which caused 40+ second hangs
     // during account switching as External Commit operations continued running
-    print("[MLSConversationManager.initialize] Spawning missing conversation detection task...")
     missingConversationsTask = Task(priority: .utility) { [weak self] in
       guard let self else { return }
       do {
         // Check for cancellation before starting potentially long operation
         try Task.checkCancellation()
-        print("[MLSConversationManager.initialize] Detecting missing conversations (background)...")
         try await self.detectAndRejoinMissingConversations()
-        print("[MLSConversationManager.initialize] Missing conversations checked (background)")
       } catch is CancellationError {
         self.logger.info("📭 Missing conversation detection cancelled (expected during shutdown)")
       } catch {
@@ -824,8 +794,6 @@ extension MLSConversationManager {
           "Failed to auto-rejoin missing conversations: \(error.localizedDescription)")
       }
     }
-    print("[MLSConversationManager.initialize] DONE")
-
     if configuration.enableAutomaticCleanup {
       startBackgroundCleanup()
     }

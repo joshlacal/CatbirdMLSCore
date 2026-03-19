@@ -32,7 +32,6 @@ public enum MLSConversationError: Error, LocalizedError {
   case keyPackageDesyncRecoveryInitiated
   case duplicateMessage
   case welcomeFetchFailed
-  case declarationUserConfirmationRequired(targetDid: String, operation: String, warning: String?)
 
   public var errorDescription: String? {
     switch self {
@@ -95,13 +94,6 @@ public enum MLSConversationError: Error, LocalizedError {
       return "Duplicate message detected"
     case .welcomeFetchFailed:
       return "Failed to fetch Welcome message for group join"
-    case .declarationUserConfirmationRequired(let targetDid, let operation, let warning):
-      if let warning {
-        return
-          "Declaration verification for \(targetDid) requires explicit confirmation (\(operation)): \(warning)"
-      }
-      return
-        "Declaration verification for \(targetDid) requires explicit confirmation (\(operation))"
     }
   }
 }
@@ -178,7 +170,7 @@ public struct MessageReorderState {
   /// Timestamp when the buffer started waiting (for timeout)
   public var bufferStartTime: Date?
   
-  public init(lastProcessedSeq: Int64 = -1) {
+  public init(lastProcessedSeq: Int64 = 0) {
     self.lastProcessedSeq = lastProcessedSeq
     self.bufferedMessages = []
     self.bufferStartTime = nil

@@ -68,9 +68,12 @@ public struct MLSConfiguration: Sendable {
   /// Default: 86400 (24 hours)
   public let keyPackageRefreshInterval: TimeInterval
 
-  /// Rollout policy for declaration-chain verification enforcement.
-  /// Default: shadow (log + allow) during initial rollout.
-  public let declarationRolloutMode: MLSDeclarationRolloutMode
+  /// When true, skip all device record publishing/initialization.
+  /// Useful for daemon/CLI tools that share an account with the main app
+  /// but shouldn't modify device records (different keychain service
+  /// would cause conflicts).
+  /// Default: false
+  public let skipDeviceRecordPublishing: Bool
 
   // MARK: - Initialization
 
@@ -85,7 +88,7 @@ public struct MLSConfiguration: Sendable {
     cleanupInterval: TimeInterval = 3600,
     defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
     keyPackageRefreshInterval: TimeInterval = 86400,
-    declarationRolloutMode: MLSDeclarationRolloutMode = .shadow
+    skipDeviceRecordPublishing: Bool = false
   ) {
     self.maxPastEpochs = max(0, maxPastEpochs)
     self.outOfOrderTolerance = max(1, outOfOrderTolerance)
@@ -96,7 +99,7 @@ public struct MLSConfiguration: Sendable {
     self.cleanupInterval = max(300, cleanupInterval)
     self.defaultCipherSuite = defaultCipherSuite
     self.keyPackageRefreshInterval = max(3600, keyPackageRefreshInterval)
-    self.declarationRolloutMode = declarationRolloutMode
+    self.skipDeviceRecordPublishing = skipDeviceRecordPublishing
   }
 
   /// Default configuration with balanced security and usability
@@ -149,12 +152,17 @@ public struct MLSConfiguration: Sendable {
   }
 
   /// Convert to GroupConfig for FFI operations
-  public func toFFI() -> GroupConfig {
+  /// - Parameters:
+  ///   - groupName: Optional group name to encrypt in MLS group context extension
+  ///   - groupDescription: Optional group description to encrypt in MLS group context extension
+  public func toFFI(groupName: String? = nil, groupDescription: String? = nil) -> GroupConfig {
     return GroupConfig(
       maxPastEpochs: UInt32(maxPastEpochs),
       outOfOrderTolerance: UInt32(outOfOrderTolerance),
       maximumForwardDistance: UInt32(maximumForwardDistance),
-      maxLeafLifetimeSeconds: 86400 * 90 // Default 90 days
+      maxLeafLifetimeSeconds: 86400 * 90, // Default 90 days
+      groupName: groupName,
+      groupDescription: groupDescription
     )
   }
 
@@ -179,10 +187,6 @@ public struct MLSConfiguration: Sendable {
       logger.warning("Automatic cleanup is disabled - key material may accumulate")
     }
 
-    if declarationRolloutMode == .full {
-      logger.warning("Declaration rollout mode is full enforcement")
-    }
-
     logger.info("MLS Configuration validated: maxPastEpochs=\(self.maxPastEpochs), messageKeyRetention=\(self.messageKeyRetentionDays)d")
   }
 }
@@ -193,5 +197,24 @@ extension GroupConfig {
   /// Default group configuration from MLSConfiguration.default
   public static var `default`: GroupConfig {
     MLSConfiguration.default.toFFI()
+  }
+}
+
+// MARK: - Group Metadata Payload
+
+/// JSON payload for encrypted group metadata stored in MLS group context extensions.
+/// Format: `{"v":1,"name":"...","description":"..."}`
+public struct GroupMetadataPayload: Codable, Sendable {
+  /// Schema version
+  public let v: Int
+  /// Group name
+  public let name: String?
+  /// Group description
+  public let description: String?
+
+  public init(v: Int = 1, name: String? = nil, description: String? = nil) {
+    self.v = v
+    self.name = name
+    self.description = description
   }
 }

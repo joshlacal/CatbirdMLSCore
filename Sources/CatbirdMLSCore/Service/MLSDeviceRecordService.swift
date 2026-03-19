@@ -1,6 +1,9 @@
 import Foundation
 import OSLog
 import Petrel
+#if canImport(UIKit)
+import UIKit
+#endif
 
 internal actor MLSDeviceRecordService {
   private let logger = Logger(subsystem: "blue.catbird", category: "MLSDeviceRecordService")

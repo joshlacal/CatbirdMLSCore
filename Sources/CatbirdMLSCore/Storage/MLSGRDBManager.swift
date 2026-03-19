@@ -4143,8 +4143,13 @@ public actor MLSGRDBManager {
       )
     }
 
-    // v20: Store decrypted group avatar image data locally
-    migrator.registerMigration("v20_group_avatar_image_data") { db in
+    // v20: Drop legacy declaration cache (replaced by device record service)
+    migrator.registerMigration("v20_drop_declaration_cache") { db in
+      try db.drop(table: "MLSDeclarationCache")
+    }
+
+    // v21: Store decrypted group avatar image data locally
+    migrator.registerMigration("v21_group_avatar_image_data") { db in
       let hasAvatarImageData = try db.columns(in: "MLSConversationModel")
         .contains { $0.name == "avatarImageData" }
       if !hasAvatarImageData {
