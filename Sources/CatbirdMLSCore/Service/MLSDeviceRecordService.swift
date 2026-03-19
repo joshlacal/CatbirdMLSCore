@@ -43,15 +43,22 @@ internal actor MLSDeviceRecordService {
 
     if alreadyPublished {
       logger.debug("Device record already published for \(deviceId)")
-      return
+    } else {
+      try await publishDeviceRecord(
+        did: did,
+        deviceId: deviceId,
+        signaturePublicKey: sigMaterial.publicKey,
+        algorithm: sigMaterial.algorithm
+      )
     }
 
-    try await publishDeviceRecord(
-      did: did,
-      deviceId: deviceId,
-      signaturePublicKey: sigMaterial.publicKey,
-      algorithm: sigMaterial.algorithm
-    )
+    // One-time cleanup of legacy declaration chain records
+    let cleanupKey = "mls.device.legacy.cleanup.\(normalized)"
+    if !UserDefaults.standard.bool(forKey: cleanupKey) {
+      await cleanupLegacyDeclarationRecords(userDid: normalized)
+      cleanupLegacyKeychainKeys(userDid: normalized)
+      UserDefaults.standard.set(true, forKey: cleanupKey)
+    }
   }
 
   func removeDeviceRecord(userDid: String, deviceId: String) async throws {
@@ -180,6 +187,61 @@ internal actor MLSDeviceRecordService {
       whoCanMessageMe: policy.whoCanMessageMe.flatMap { MLSWhoCanMessageMe(rawValue: $0) },
       autoExpireDays: policy.autoExpireDays
     )
+  }
+
+  // MARK: - Legacy Cleanup
+
+  /// Clean up legacy declaration chain records from the repo.
+  /// Called once after migration to device records.
+  private func cleanupLegacyDeclarationRecords(userDid: String) async {
+    let normalized = userDid.lowercased()
+    guard let did = try? DID(didString: normalized) else { return }
+    let legacyCollection = "blue.catbird.mlsChat.declaration"
+    guard let collection = try? NSID(nsidString: legacyCollection) else { return }
+
+    do {
+      let input = ComAtprotoRepoListRecords.Parameters(
+        repo: .did(did),
+        collection: collection,
+        limit: 100,
+        cursor: nil,
+        reverse: false
+      )
+      let (code, data) = try await atProtoClient.com.atproto.repo.listRecords(input: input)
+      guard (200...299).contains(code), let data else { return }
+
+      for record in data.records {
+        guard let rkey = record.uri.recordKey else { continue }
+        let deleteInput = ComAtprotoRepoDeleteRecord.Input(
+          repo: .did(did),
+          collection: collection,
+          rkey: try RecordKey(keyString: rkey)
+        )
+        let (deleteCode, _) = try await atProtoClient.com.atproto.repo.deleteRecord(
+          input: deleteInput
+        )
+        if (200...299).contains(deleteCode) {
+          logger.debug("Cleaned up legacy declaration record: \(rkey)")
+        }
+      }
+      logger.info("Legacy declaration record cleanup complete")
+    } catch {
+      logger.warning("Legacy declaration cleanup failed (non-fatal): \(error.localizedDescription)")
+    }
+  }
+
+  /// Clean up legacy declaration Keychain keys.
+  private nonisolated func cleanupLegacyKeychainKeys(userDid: String) {
+    let normalized = userDid.lowercased()
+    let legacyKeys: [(key: String, synchronizable: Bool)] = [
+      ("mls.declaration.root.online.\(normalized)", true),
+      ("mls.declaration.root.recovery.\(normalized)", false),
+      ("mls.declaration.device.sigpub.\(normalized)", false),
+      ("mls.declaration.device.sigalg.\(normalized)", false),
+    ]
+    for entry in legacyKeys {
+      try? MLSKeychainManager.shared.delete(forKey: entry.key, synchronizable: entry.synchronizable)
+    }
   }
 
   // MARK: - Internal Helpers
