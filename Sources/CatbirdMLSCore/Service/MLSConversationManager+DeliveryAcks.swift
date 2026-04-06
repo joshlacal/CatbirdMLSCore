@@ -10,6 +10,10 @@ import GRDB
 import OSLog
 import Petrel
 
+/// Conversations with more than this many members skip delivery acks
+/// to avoid SSE amplification storms.
+private let defaultDeliveryAckGroupSizeCap = 20
+
 extension MLSConversationManager {
 
   // MARK: - Fetch
@@ -60,6 +64,11 @@ extension MLSConversationManager {
 
     Task { [weak self] in
       guard let self else { return }
+
+      // Skip acks for large groups to prevent SSE amplification.
+      if let count = await self.memberCount(for: conversationId), count > defaultDeliveryAckGroupSizeCap {
+        return
+      }
 
       // Deduplication: skip if we already acked this message from this device.
       let alreadyAcked: Bool = (try? await self.database.read { db in
