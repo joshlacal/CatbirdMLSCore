@@ -1239,7 +1239,7 @@ public actor MLSCoreContext {
           embedData = nil
 
         case .deliveryAck, .recoveryRequest:
-          plaintext = "Delivery ack"
+          plaintext = ""
           embedData = nil
         }
       } else {
@@ -2132,7 +2132,7 @@ public actor MLSCoreContext {
     case .system:
       return payload.text ?? "System message"
     case .deliveryAck, .recoveryRequest:
-      return "Delivery ack"
+      return ""
     }
   }
 
@@ -2157,7 +2157,7 @@ public actor MLSCoreContext {
     case .system:
       return payload.text ?? "System message"
     case .deliveryAck, .recoveryRequest:
-      return "Delivery ack"
+      return nil
     }
   }
 

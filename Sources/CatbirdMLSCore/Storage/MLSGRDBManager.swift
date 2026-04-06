@@ -34,6 +34,16 @@ import GRDB
 import os
 import OSLog
 
+/// Checkpoint mode for emergency close — controls how aggressively WAL is flushed.
+public enum EmergencyCheckpointMode: String, Sendable {
+  /// TRUNCATE: Exclusive WAL access, resets WAL to zero. Use ONLY from the main app
+  /// during suspension. NEVER from NSE — TRUNCATE from two processes corrupts the WAL.
+  case truncate
+  /// PASSIVE: Non-blocking, checkpoints as many frames as possible without waiting.
+  /// Safe for cross-process use. Use from NSE and any non-owning process.
+  case passive
+}
+
 /// Result of a safe checkpoint operation for app suspension.
 public enum CheckpointResult: Sendable {
   /// Checkpoint completed successfully, all WAL pages written to database
@@ -123,31 +133,86 @@ public actor MLSGRDBManager {
   /// Emergency synchronous close of all GRDB database pools for 0xdead10cc prevention.
   /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
   /// This is safe to call from any thread and does not require actor isolation.
-  public nonisolated static func emergencyCloseAllDatabases() {
+  ///
+  /// - Parameter mode: Checkpoint mode. Main app uses `.truncate` for 0xdead10cc prevention.
+  ///   NSE MUST use `.passive` — TRUNCATE from a non-owning process causes WAL corruption.
+  public nonisolated static func emergencyCloseAllDatabases(
+    mode: EmergencyCheckpointMode = .truncate
+  ) {
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let processTag = Bundle.main.bundlePath.hasSuffix(".appex") ? "NSE" : "APP"
+
+    // Wait for any in-progress budget checkpoint to finish before we close pools.
+    // This prevents the race where a background PASSIVE checkpoint holds a connection
+    // while we TRUNCATE + close underneath it.
+    var spinCount = 0
+    while checkpointBudgetLock.withLock({ $0.checkpointInProgress }) && spinCount < 20 {
+      Thread.sleep(forTimeInterval: 0.005)  // 5ms per spin, 100ms max
+      spinCount += 1
+    }
+    if spinCount > 0 {
+      staticLogger.debug("[0xdead10cc-FIX] Waited \(spinCount * 5)ms for in-progress checkpoint to finish")
+    }
+
     emergencyDatabasesLock.lock()
     defer { emergencyDatabasesLock.unlock() }
 
-    staticLogger.warning("🚨 [0xdead10cc-FIX] Emergency closing \(emergencyDatabases.count) GRDB database pools")
+    staticLogger.warning(
+      "🚨 [0xdead10cc-FIX] [\(processTag)/\(pid)] Emergency closing \(emergencyDatabases.count) GRDB pools (mode=\(mode.rawValue))"
+    )
 
     for (userDID, pool) in emergencyDatabases {
-      // Best-effort checkpoint before close (short timeout - we're suspending)
+      let checkpointSQL: String
+      switch mode {
+      case .truncate:
+        checkpointSQL = "PRAGMA wal_checkpoint(TRUNCATE);"
+      case .passive:
+        checkpointSQL = "PRAGMA wal_checkpoint(PASSIVE);"
+      }
+
+      // Log WAL state BEFORE checkpoint for corruption diagnostics
+      do {
+        try pool.read { db in
+          let walInfo = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(PASSIVE);")
+          let busy = walInfo?["busy"] as? Int ?? -1
+          let log = walInfo?["log"] as? Int ?? -1
+          let checkpointed = walInfo?["checkpointed"] as? Int ?? -1
+          staticLogger.warning(
+            "📊 [\(processTag)/\(pid)] PRE-checkpoint WAL state for \(userDID.prefix(20), privacy: .private): busy=\(busy) log=\(log) checkpointed=\(checkpointed)"
+          )
+        }
+      } catch {
+        staticLogger.warning(
+          "📊 [\(processTag)/\(pid)] PRE-checkpoint WAL probe failed for \(userDID.prefix(20), privacy: .private): \(error)"
+        )
+      }
+
+      // Best-effort checkpoint before close
       do {
         try pool.writeWithoutTransaction { db in
           Thread.current.threadDictionary[checkpointTimeoutKey] = 2  // ~50ms max
           defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
-          try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+          try db.execute(sql: checkpointSQL)
         }
-        staticLogger.debug("✅ [0xdead10cc-FIX] GRDB checkpoint for \(userDID.prefix(20), privacy: .private)...")
+        staticLogger.debug(
+          "✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB \(mode.rawValue) checkpoint for \(userDID.prefix(20), privacy: .private)"
+        )
       } catch {
-        staticLogger.warning("⚠️ [0xdead10cc-FIX] GRDB checkpoint failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
+        staticLogger.warning(
+          "⚠️ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB \(mode.rawValue) checkpoint failed for \(userDID.prefix(20), privacy: .private): \(error)"
+        )
       }
 
       // Close the pool
       do {
         try pool.close()
-        staticLogger.debug("✅ [0xdead10cc-FIX] GRDB pool closed for \(userDID.prefix(20), privacy: .private)...")
+        staticLogger.debug(
+          "✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB pool closed for \(userDID.prefix(20), privacy: .private)"
+        )
       } catch {
-        staticLogger.warning("⚠️ [0xdead10cc-FIX] GRDB pool close failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
+        staticLogger.warning(
+          "⚠️ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB pool close failed for \(userDID.prefix(20), privacy: .private): \(error)"
+        )
       }
     }
     emergencyDatabases.removeAll()
@@ -155,7 +220,37 @@ public actor MLSGRDBManager {
     // Mark actor cache as stale - must be cleared on next access
     emergencyCacheInvalidated = true
 
-    staticLogger.debug("✅ [0xdead10cc-FIX] All GRDB database pools emergency closed")
+    staticLogger.debug("✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] All GRDB database pools emergency closed")
+  }
+
+  /// Best-effort PASSIVE checkpoint on all registered pools WITHOUT closing them.
+  /// Safe to call before GRDB suspension — shrinks the WAL so the NSE has less
+  /// data to contend with, without disrupting GRDB's pool lifecycle.
+  /// Unlike emergencyCloseAllDatabases, this preserves pool state for resume.
+  public nonisolated static func flushWALOnAllDatabases() {
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let processTag = Bundle.main.bundlePath.hasSuffix(".appex") ? "NSE" : "APP"
+
+    emergencyDatabasesLock.lock()
+    let pools = emergencyDatabases
+    emergencyDatabasesLock.unlock()
+
+    for (userDID, pool) in pools {
+      do {
+        try pool.writeWithoutTransaction { db in
+          Thread.current.threadDictionary[checkpointTimeoutKey] = 2
+          defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
+          try db.execute(sql: "PRAGMA wal_checkpoint(PASSIVE);")
+        }
+        staticLogger.debug(
+          "✅ [\(processTag)/\(pid)] Pre-suspension PASSIVE checkpoint for \(userDID.prefix(20), privacy: .private)"
+        )
+      } catch {
+        staticLogger.debug(
+          "⚠️ [\(processTag)/\(pid)] Pre-suspension PASSIVE checkpoint skipped for \(userDID.prefix(20), privacy: .private): \(error)"
+        )
+      }
+    }
   }
 
   /// Synchronous TRUNCATE checkpoint at app launch to clear any leftover WAL from previous session.
@@ -261,6 +356,11 @@ public actor MLSGRDBManager {
   /// Active database pools per user DID (upgraded from DatabaseQueue for better concurrency)
   private var databases: [String: DatabasePool] = [:]
 
+  /// Cached lightweight queues to prevent rapid open/close cycles that corrupt SHM.
+  /// Each entry is evicted after 5 seconds of inactivity.
+  private var cachedLightweightQueues: [String: (queue: DatabaseQueue, lastUsed: Date)] = [:]
+  private let lightweightQueueTTL: TimeInterval = 5.0
+
   /// Encryption manager
   private let encryption = MLSSQLCipherEncryption.shared
 
@@ -282,6 +382,54 @@ public actor MLSGRDBManager {
   /// Tracks uncached ephemeral database pools for cleanup during account switch
   /// Key: userDID, Value: DatabasePool (not in main cache)
   private var uncachedEphemeralPools: [String: DatabasePool] = [:]
+
+  private struct DatabaseAccessSuspension: Sendable {
+    let until: Date
+    let reason: String
+    let operation: String
+  }
+
+  private struct ForegroundResumePreparation: Sendable {
+    let startedAt: Date
+  }
+
+  public enum ForegroundResumePreparationResult: Sendable {
+    case ready
+    case repaired
+    case reset
+  }
+
+  private enum QuickIntegrityCheckClassification {
+    case ok
+    case transient(String)
+    case corruption(String)
+    case unexpected(String)
+  }
+
+  /// Temporary fail-fast guard for a user whose database is returning corruption or
+  /// resource-exhaustion errors. This prevents notification decrypt, polling, and UI
+  /// refresh loops from repeatedly reopening and probing the same broken store.
+  private var databaseAccessSuspensions: [String: DatabaseAccessSuspension] = [:]
+
+  private let resourceExhaustionSuspensionDuration: TimeInterval = 8
+  private let corruptionSuspensionDuration: TimeInterval = 30
+
+  /// Tracks WAL/SHM repair state per user.
+  /// `repairsDone`: how many WAL repairs have been performed since last successful DB open.
+  /// `lastRepairTime`: when the last repair was done, to debounce rapid-fire errors.
+  /// When WAL repair "succeeds" but corruption persists (main .db is corrupt),
+  /// we escalate to automatic quarantine + salvage after maxWALRepairsBeforeSalvage repairs.
+  private var walRepairState: [String: (repairsDone: Int, lastRepairTime: Date)] = [:]
+  private let maxWALRepairsBeforeSalvage = 3
+  /// Minimum interval between counting separate WAL repair attempts (seconds).
+  /// Rapid-fire errors from ephemeral lightweight queues hitting the same corrupt file
+  /// should count as ONE repair attempt, not multiple.
+  private let walRepairDebounceInterval: TimeInterval = 5.0
+  private var foregroundResumePreparations: [String: ForegroundResumePreparation] = [:]
+  private let foregroundResumeWaitTimeout: TimeInterval = 2.0
+  private let foregroundResumeWaitPollIntervalNanos: UInt64 = 50_000_000
+  private let foregroundResumeTransientRetryCount = 6
+  private let foregroundResumeBaseRetryDelayNanos: UInt64 = 100_000_000
 
   private enum ConnectionState: String {
     case closed
@@ -325,6 +473,300 @@ public actor MLSGRDBManager {
       "🔢 [GEN] Incremented coordination generation to \(current + 1) for \(userDID.prefix(16))...")
   }
 
+  private func currentDatabaseAccessSuspension(for userDID: String) -> DatabaseAccessSuspension? {
+    guard let suspension = databaseAccessSuspensions[userDID] else {
+      return nil
+    }
+
+    if suspension.until <= Date() {
+      databaseAccessSuspensions.removeValue(forKey: userDID)
+      return nil
+    }
+
+    return suspension
+  }
+
+  private func requireDatabaseAccess(for userDID: String, operation: String) throws {
+    guard let suspension = currentDatabaseAccessSuspension(for: userDID) else {
+      return
+    }
+
+    let remaining = max(1, Int(suspension.until.timeIntervalSinceNow.rounded(.up)))
+    logger.warning(
+      "⏸️ [DB-GUARD] Rejecting \(operation) for \(userDID.prefix(20), privacy: .private) - \(remaining)s remaining (\(suspension.reason, privacy: .public))"
+    )
+    throw MLSSQLCipherError.storageUnavailable(
+      reason: "MLS storage temporarily unavailable for \(remaining)s: \(suspension.reason)"
+    )
+  }
+
+  private func clearDatabaseAccessSuspensionIfNeeded(for userDID: String, operation: String) {
+    guard databaseAccessSuspensions.removeValue(forKey: userDID) != nil else {
+      return
+    }
+
+    logger.info(
+      "✅ [DB-GUARD] Cleared storage suspension for \(userDID.prefix(20), privacy: .private) via \(operation, privacy: .public)"
+    )
+  }
+
+  private func recordDatabaseAccessFailure(for userDID: String, error: Error, operation: String) {
+    let isResourceExhaustion = isSQLiteError7(error)
+    let isCorruption = isRecoverableCodecError(error)
+    guard isResourceExhaustion || isCorruption else {
+      return
+    }
+
+    let duration = isCorruption ? corruptionSuspensionDuration : resourceExhaustionSuspensionDuration
+    let now = Date()
+    let previousUntil = databaseAccessSuspensions[userDID]?.until ?? now
+    let baseTime = max(previousUntil.timeIntervalSince1970, now.timeIntervalSince1970)
+    let until = Date(timeIntervalSince1970: baseTime + duration)
+    let reason = error.localizedDescription
+
+    databaseAccessSuspensions[userDID] = DatabaseAccessSuspension(
+      until: until,
+      reason: reason,
+      operation: operation
+    )
+
+    let remaining = max(1, Int(until.timeIntervalSinceNow.rounded(.up)))
+    logger.error(
+      "🚨 [DB-GUARD] Suspending \(operation, privacy: .public) for \(userDID.prefix(20), privacy: .private) for \(remaining)s after database failure: \(reason, privacy: .public)"
+    )
+
+    if let ephemeralPool = uncachedEphemeralPools.removeValue(forKey: userDID) {
+      do {
+        try ephemeralPool.close()
+        logger.info(
+          "🧹 [DB-GUARD] Closed uncached ephemeral pool for \(userDID.prefix(20), privacy: .private)"
+        )
+      } catch {
+        logger.warning(
+          "⚠️ [DB-GUARD] Failed to close uncached ephemeral pool for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
+        )
+      }
+    }
+
+    closeDatabase(for: userDID)
+
+    // CRITICAL FIX: When corruption is detected (error 11), delete WAL/SHM files
+    // immediately so the next connection attempt opens cleanly.
+    // If recovery succeeds, clear the suspension — the database is ready to use.
+    //
+    // DEBOUNCE: Multiple rapid-fire lightweight reads hitting the same corrupt file
+    // should count as ONE repair attempt, not N. We only increment the repair count
+    // if enough time has passed since the last repair (walRepairDebounceInterval).
+    if isCorruption {
+      let now = Date()
+      let state = walRepairState[userDID] ?? (repairsDone: 0, lastRepairTime: .distantPast)
+      let timeSinceLastRepair = now.timeIntervalSince(state.lastRepairTime)
+
+      if timeSinceLastRepair < walRepairDebounceInterval {
+        // Within debounce window — this is likely the same corruption event.
+        // Don't increment counter, don't repair again (already done), just suspend.
+        logger.debug(
+          "🔧 [DB-GUARD] Corruption re-hit within debounce window (\(Int(timeSinceLastRepair))s) for \(userDID.prefix(20), privacy: .private) - skipping duplicate repair"
+        )
+        return
+      }
+
+      let newRepairCount = state.repairsDone + 1
+      walRepairState[userDID] = (repairsDone: newRepairCount, lastRepairTime: now)
+
+      if newRepairCount >= maxWALRepairsBeforeSalvage && !isRunningInExtension {
+        // WAL repair has been attempted multiple times but corruption persists.
+        // The main .db file is corrupt. Escalate to the coordinated Swift/Rust reset path.
+        logger.error(
+          "🚨 [DB-GUARD] WAL repair attempted \(newRepairCount)x for \(userDID.prefix(20), privacy: .private) - escalating to coordinated reset"
+        )
+        walRepairState.removeValue(forKey: userDID)
+
+        Task { [self] in
+          await triggerCoordinatedResetIfNeeded(
+            for: userDID,
+            operation: operation,
+            trigger: "persistent corruption after \(newRepairCount) WAL repairs"
+          )
+        }
+      } else {
+        logger.warning(
+          "🔧 [DB-GUARD] Corruption detected (\(newRepairCount)/\(self.maxWALRepairsBeforeSalvage)) - attempting WAL/SHM repair for \(userDID.prefix(20), privacy: .private)"
+        )
+        Task { [self] in
+          let recovered = await attemptSoftRecovery(for: userDID)
+          if recovered {
+            logger.info(
+              "🧪 [DB-GUARD] WAL/SHM cleanup finished for \(userDID.prefix(20), privacy: .private) - verifying readability before shortening suspension"
+            )
+            await verifySoftRecoveryOutcome(for: userDID, operation: operation)
+          }
+        }
+      }
+    }
+  }
+
+  private func verifySoftRecoveryOutcome(for userDID: String, operation: String) async {
+    let verification = await runQuickIntegrityCheckWithRetry(for: userDID)
+
+    switch verification {
+    case .ok:
+      let shortSuspension = Date().addingTimeInterval(2.0)
+      databaseAccessSuspensions[userDID] = DatabaseAccessSuspension(
+        until: shortSuspension,
+        reason: "WAL repair verified, retrying shortly",
+        operation: operation
+      )
+      logger.info(
+        "✅ [DB-GUARD] WAL/SHM repair verified for \(userDID.prefix(20), privacy: .private) - short suspension (2s) before retry"
+      )
+
+    case .transient(let description):
+      logger.warning(
+        "⏳ [DB-GUARD] Soft-recovery verification still transient for \(userDID.prefix(20), privacy: .private): \(description, privacy: .public)"
+      )
+
+    case .unexpected(let description):
+      logger.error(
+        "❌ [DB-GUARD] Soft-recovery verification failed unexpectedly for \(userDID.prefix(20), privacy: .private): \(description, privacy: .public)"
+      )
+
+    case .corruption(let description):
+      // WAL repair "succeeded" (files deleted) but the .db file itself is corrupt.
+      // Do NOT trigger immediate reset — this would wipe the database on the first
+      // corruption event. Instead, keep the 30s suspension and let the walRepairState
+      // debounce counter accumulate naturally. After 3 repair attempts all fail
+      // verification, the counter in recordDatabaseAccessFailure will escalate to
+      // auto-salvage with proper quarantine and data recovery.
+      logger.error(
+        "🚨 [DB-GUARD] WAL/SHM cleanup did not restore readability for \(userDID.prefix(20), privacy: .private): \(description, privacy: .public)"
+      )
+      logger.warning(
+        "⏳ [DB-GUARD] Keeping suspension active for \(userDID.prefix(20), privacy: .private) - walRepairState counter will escalate if corruption persists"
+      )
+    }
+  }
+
+  private func triggerCoordinatedResetIfNeeded(
+    for userDID: String,
+    operation: String,
+    trigger: String
+  ) async {
+    guard !isRunningInExtension else {
+      return
+    }
+
+    guard coordinatedResetsInProgress.insert(userDID).inserted else {
+      logger.debug(
+        "🧰 [DB-GUARD] Coordinated reset already running for \(userDID.prefix(20), privacy: .private)"
+      )
+      return
+    }
+
+    databaseAccessSuspensions[userDID] = DatabaseAccessSuspension(
+      until: Date().addingTimeInterval(5.0),
+      reason: "MLS storage reset in progress",
+      operation: operation
+    )
+
+    logger.error(
+      "🧰 [DB-GUARD] Triggering coordinated Swift/Rust MLS reset for \(userDID.prefix(20), privacy: .private) (\(trigger, privacy: .public))"
+    )
+
+    defer {
+      coordinatedResetsInProgress.remove(userDID)
+    }
+
+    do {
+      try await MLSClient.shared.clearStorage(for: userDID)
+      clearRepairState(for: userDID)
+      clearHardResetFlag(for: userDID)
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "coordinated-reset")
+      logger.info(
+        "✅ [DB-GUARD] Coordinated MLS storage reset completed for \(userDID.prefix(20), privacy: .private)"
+      )
+    } catch {
+      logger.error(
+        "❌ [DB-GUARD] Coordinated MLS storage reset failed for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
+      )
+    }
+  }
+
+  private func waitForForegroundResumePreparationIfNeeded(for userDID: String, operation: String)
+    async throws
+  {
+    guard let state = foregroundResumePreparations[userDID] else {
+      return
+    }
+
+    logger.info(
+      "⏳ [RESUME-GUARD] Waiting for foreground resume preparation before \(operation, privacy: .public) for \(userDID.prefix(20), privacy: .private)"
+    )
+
+    let deadline = Date().addingTimeInterval(foregroundResumeWaitTimeout)
+
+    while let currentState = foregroundResumePreparations[userDID] {
+      if Date() >= deadline {
+        let elapsedMs = Int(Date().timeIntervalSince(currentState.startedAt) * 1000)
+        logger.error(
+          "🚫 [RESUME-GUARD] Timed out after \(elapsedMs)ms waiting for foreground resume preparation before \(operation, privacy: .public) for \(userDID.prefix(20), privacy: .private)"
+        )
+        throw MLSSQLCipherError.storageUnavailable(
+          reason: "MLS foreground resume still in progress"
+        )
+      }
+
+      // If the state changed while we were waiting, reset the deadline to give the
+      // active preparation a full window to finish cleanly.
+      if currentState.startedAt != state.startedAt {
+        return try await waitForForegroundResumePreparationIfNeeded(
+          for: userDID,
+          operation: operation
+        )
+      }
+
+      try await Task.sleep(nanoseconds: foregroundResumeWaitPollIntervalNanos)
+    }
+  }
+
+  public func isDatabaseAccessSuspended(for userDID: String) -> Bool {
+    currentDatabaseAccessSuspension(for: userDID) != nil
+  }
+
+  public func databaseAccessSuspensionDescription(for userDID: String) -> String? {
+    guard let suspension = currentDatabaseAccessSuspension(for: userDID) else {
+      return nil
+    }
+
+    let remaining = max(1, Int(suspension.until.timeIntervalSinceNow.rounded(.up)))
+    return "\(remaining)s remaining after \(suspension.operation): \(suspension.reason)"
+  }
+
+  public func suspendDatabaseAccessForTesting(
+    for userDID: String,
+    duration: TimeInterval = 60,
+    reason: String = "test",
+    operation: String = "test"
+  ) {
+    databaseAccessSuspensions[userDID] = DatabaseAccessSuspension(
+      until: Date().addingTimeInterval(duration),
+      reason: reason,
+      operation: operation
+    )
+  }
+
+  public func clearDatabaseAccessSuspensionForTesting(for userDID: String) {
+    databaseAccessSuspensions.removeValue(forKey: userDID)
+  }
+
+  public func beginForegroundResumePreparationForTesting(for userDID: String) {
+    foregroundResumePreparations[userDID] = ForegroundResumePreparation(startedAt: Date())
+  }
+
+  public func endForegroundResumePreparationForTesting(for userDID: String) {
+    foregroundResumePreparations.removeValue(forKey: userDID)
+  }
+
   // MARK: - Periodic Checkpointing (fast switches)
 
   private var periodicCheckpointTask: Task<Void, Never>?
@@ -336,7 +778,7 @@ public actor MLSGRDBManager {
   // This prevents WAL growth and reduces lock contention at suspension time.
   // Reference: Signal's GRDBDatabaseStorageAdapter
 
-  /// Thread-safe checkpoint budget state for budget-based TRUNCATE checkpoints.
+  /// Thread-safe checkpoint budget state for budget-based checkpoints.
   /// Uses nonisolated(unsafe) with OSAllocatedUnfairLock for synchronous access from any thread.
   private struct CheckpointBudgetState: Sendable {
     /// Number of writes remaining before triggering a checkpoint.
@@ -348,6 +790,10 @@ public actor MLSGRDBManager {
 
     /// Retry budget when checkpoint fails (try sooner)
     static let retryBudget: Int = 8
+
+    /// Whether a checkpoint is currently in progress.
+    /// Prevents queued checkpoint Tasks from racing each other or with emergency close.
+    var checkpointInProgress: Bool = false
   }
 
   /// Nonisolated checkpoint budget tracker using unfair lock for thread safety.
@@ -357,39 +803,53 @@ public actor MLSGRDBManager {
   )
 
   /// Called after every successful write operation to decrement the checkpoint budget
-  /// and trigger a TRUNCATE checkpoint when the budget reaches zero.
+  /// and trigger a PASSIVE checkpoint when the budget reaches zero.
   ///
   /// This implements Signal's pattern of frequent, small checkpoints to keep the WAL file
-  /// perpetually small, rather than waiting for app suspension to checkpoint.
+  /// small, rather than waiting for app suspension to checkpoint.
+  ///
+  /// Uses PASSIVE mode during normal operation (non-blocking, doesn't interfere with writers).
+  /// TRUNCATE mode is reserved for suspension (emergencyCloseAllDatabases) where we MUST
+  /// release WAL file handles to avoid 0xdead10cc termination.
   private nonisolated func didCompleteWrite(for userDID: String) {
     let shouldCheckpoint = Self.checkpointBudgetLock.withLock { state -> Bool in
       state.budget -= 1
-      return state.budget <= 0
+      if state.budget <= 0 && !state.checkpointInProgress {
+        state.checkpointInProgress = true
+        return true
+      }
+      return false
     }
 
     if shouldCheckpoint {
       // Perform checkpoint on background queue to avoid blocking the write caller
       DispatchQueue.global(qos: .utility).async { [weak self] in
-        guard let self else { return }
+        guard let self else {
+          Self.checkpointBudgetLock.withLock { $0.checkpointInProgress = false }
+          return
+        }
         Task {
-          await self.performTruncatingCheckpoint(for: userDID)
+          await self.performPassiveCheckpoint(for: userDID)
         }
       }
     }
   }
 
-  /// Performs a TRUNCATE checkpoint with a short timeout.
+  /// Performs a PASSIVE checkpoint (non-blocking).
   ///
-  /// TRUNCATE mode:
-  /// - Copies all WAL pages back to the main database
-  /// - Truncates the WAL file to zero bytes
-  /// - Releases all WAL file handles
+  /// PASSIVE mode:
+  /// - Copies WAL pages back to the main database without blocking readers or writers
+  /// - Does NOT require exclusive access — safe under concurrent write pressure
+  /// - WAL file is not truncated (that's reserved for suspension via emergencyCloseAllDatabases)
   ///
-  /// This is more aggressive than PASSIVE but keeps WAL perpetually small.
-  /// Uses a 50ms busy timeout - if we can't checkpoint in that time, abort and retry sooner.
-  private func performTruncatingCheckpoint(for userDID: String) async {
+  /// This prevents the corruption vector where TRUNCATE checkpoints race with concurrent writes
+  /// or emergency close during high-throughput message processing.
+  private func performPassiveCheckpoint(for userDID: String) async {
+    defer {
+      Self.checkpointBudgetLock.withLock { $0.checkpointInProgress = false }
+    }
+
     guard let pool = databases[userDID] else {
-      // No active pool for this user, nothing to checkpoint
       Self.checkpointBudgetLock.withLock { state in
         state.budget = CheckpointBudgetState.normalBudget
       }
@@ -398,29 +858,20 @@ public actor MLSGRDBManager {
 
     do {
       try await pool.writeWithoutTransaction { db in
-        // Signal-style: set thread-local retry limit for checkpoint busy handler.
-        // 50ms timeout / 25ms per retry = 2 retries max.
-        // The busy callback checks this and aborts early instead of retrying forever.
-        // We MUST NOT use `PRAGMA busy_timeout` - it clears the callback handler.
-        Thread.current.threadDictionary[Self.checkpointTimeoutKey] = 2
-        defer { Thread.current.threadDictionary.removeObject(forKey: Self.checkpointTimeoutKey) }
-
-        // TRUNCATE checkpoint: copy WAL to main DB and truncate WAL to zero
-        try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+        // PASSIVE checkpoint: non-blocking, copies what it can without waiting for locks
+        try db.execute(sql: "PRAGMA wal_checkpoint(PASSIVE);")
       }
 
-      // Success - reset to full budget
       Self.checkpointBudgetLock.withLock { state in
         state.budget = CheckpointBudgetState.normalBudget
       }
-      logger.debug("✅ [Checkpoint] TRUNCATE checkpoint succeeded for \(userDID.prefix(20), privacy: .private)")
+      logger.debug("✅ [Checkpoint] PASSIVE checkpoint succeeded for \(userDID.prefix(20), privacy: .private)")
 
     } catch {
-      // Checkpoint failed (probably busy) - retry sooner
       Self.checkpointBudgetLock.withLock { state in
         state.budget = CheckpointBudgetState.retryBudget
       }
-      logger.debug("⚠️ [Checkpoint] TRUNCATE checkpoint deferred for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
+      logger.debug("⚠️ [Checkpoint] PASSIVE checkpoint deferred for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
     }
   }
   
@@ -472,6 +923,10 @@ public actor MLSGRDBManager {
   /// When soft recovery (WAL/SHM deletion) fails, this flag is set to indicate
   /// the main .db file is corrupted and must be reset from Diagnostics.
   private var usersNeedingHardReset: Set<String> = []
+
+  /// Tracks coordinated resets already running for a DID so corruption storms do not
+  /// trigger duplicate Swift/Rust storage resets.
+  private var coordinatedResetsInProgress: Set<String> = []
 
   /// Check if a user's database needs hard reset
   /// - Parameter userDID: User's decentralized identifier
@@ -572,33 +1027,68 @@ public actor MLSGRDBManager {
     for userDID: String,
     _ work: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
+    try await waitForForegroundResumePreparationIfNeeded(for: userDID, operation: "read")
+    try requireDatabaseAccess(for: userDID, operation: "read")
+
     // ═══════════════════════════════════════════════════════════════════════════
-    // SMART ROUTING: Prevent OOM by using lightweight access for inactive users
+    // SMART ROUTING: Signal-style single-pool-per-database
     // ═══════════════════════════════════════════════════════════════════════════
-    // The "Error 7 → Error 11" cascade happens when:
-    // 1. User B is active with a DatabasePool (3+ connections, ~6MB)
-    // 2. Code tries to open a DatabasePool for inactive User A
-    // 3. Memory spikes, causing OOM (Error 7) mid-transaction
-    // 4. WAL file is left in corrupted state (Error 11)
+    // CRITICAL: In the main app, NEVER create ephemeral DatabaseQueues for a
+    // database that is (or was) managed by a DatabasePool. Mixing connection
+    // types on the same file causes rapid SHM open/close cycles that corrupt
+    // the WAL coordination state, turning transient lock contention into
+    // permanent Error 11 (database disk image is malformed).
     //
-    // Solution: Inactive users MUST use lightweight DatabaseQueue access.
+    // Main app: Always use DatabasePool (lazy-opened via getDatabasePool).
+    // NSE only: Use lightweight DatabaseQueue (separate process, memory limited).
     // ═══════════════════════════════════════════════════════════════════════════
 
-    let isActive = (activeUserDID == userDID)
     let inExtension = isRunningInExtension
+    let pooledDatabase = reusablePooledDatabaseForSmartRoute(for: userDID)
 
-    if inExtension || !isActive {
-      // Inactive user OR running in NSE: Use lightweight queue
-      if !inExtension && !isActive {
-        logger.info(
-          "📀 [SmartRoute] Using lightweight read for inactive user: \(userDID.prefix(20), privacy: .private)"
-        )
-      }
-      return try await performLightweightRead(for: userDID, work)
+    // Determine if this user is inactive (not the app's foreground account).
+    // We check activeUserDID first, but also handle the transient nil case:
+    // during NSE handshake, activeUserDID is temporarily cleared. If another
+    // user has an open pool, this user is inactive even when activeUserDID is nil.
+    let isInactive: Bool
+    if let activeDID = activeUserDID {
+      isInactive = activeDID != userDID
+    } else if pooledDatabase == nil {
+      // activeUserDID is nil (transient handshake window) and this user has no pool.
+      // Check if ANY other user has an open pool — if so, this user is inactive.
+      let otherPoolExists = databases.contains { $0.key != userDID && $0.value != nil }
+      isInactive = otherPoolExists
     } else {
-      // Active user in main app: Use full DatabasePool for performance
-      let pool = try await getDatabasePool(for: userDID)
-      return try await pool.read(work)
+      isInactive = false
+    }
+
+    do {
+      let result: T
+      if let pooledDatabase {
+        // Existing pool available — always prefer it
+        result = try await pooledDatabase.read(work)
+      } else if inExtension {
+        // NSE: Must use lightweight DatabaseQueue (separate process, 24MB memory limit)
+        result = try await performLightweightRead(for: userDID, work)
+      } else if isInactive {
+        // Main app, inactive user: use ephemeral DatabasePool (not DatabaseQueue).
+        // getEphemeralDatabasePool returns a DatabasePool — same connection type as the
+        // active user — so no SHM corruption from mixing connection types in one process.
+        let pool = try await getEphemeralDatabasePool(for: userDID)
+        result = try await pool.read(work)
+      } else {
+        // Main app, active user, no pool cached: open a full DatabasePool.
+        // Rapid ephemeral DatabaseQueue open/close cycles corrupt the SHM coordination state,
+        // turning transient lock contention into permanent database corruption (Error 11).
+        let pool = try await getDatabasePool(for: userDID)
+        result = try await pool.read(work)
+      }
+
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "read")
+      return result
+    } catch {
+      recordDatabaseAccessFailure(for: userDID, error: error, operation: "read")
+      throw error
     }
   }
 
@@ -617,28 +1107,49 @@ public actor MLSGRDBManager {
     for userDID: String,
     _ work: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
-    let isActive = (activeUserDID == userDID)
-    let inExtension = isRunningInExtension
+    try await waitForForegroundResumePreparationIfNeeded(for: userDID, operation: "write")
+    try requireDatabaseAccess(for: userDID, operation: "write")
 
-    let result: T
-    if inExtension || !isActive {
-      // Inactive user OR running in NSE: Use lightweight queue
-      if !inExtension && !isActive {
-        logger.info(
-          "📀 [SmartRoute] Using lightweight write for inactive user: \(userDID.prefix(20), privacy: .private)"
-        )
-      }
-      result = try await performLightweightWrite(for: userDID, work)
+    let inExtension = isRunningInExtension
+    let pooledDatabase = reusablePooledDatabaseForSmartRoute(for: userDID)
+
+    // Same transient-nil-safe inactive check as read(for:) — see comment there.
+    let isInactive: Bool
+    if let activeDID = activeUserDID {
+      isInactive = activeDID != userDID
+    } else if pooledDatabase == nil {
+      let otherPoolExists = databases.contains { $0.key != userDID && $0.value != nil }
+      isInactive = otherPoolExists
     } else {
-      // Active user in main app: Use full DatabasePool for performance
-      let pool = try await getDatabasePool(for: userDID)
-      result = try await pool.write(work)
+      isInactive = false
     }
 
-    // Signal-style budget checkpoint: decrement budget and trigger TRUNCATE checkpoint when needed
-    didCompleteWrite(for: userDID)
+    do {
+      let result: T
+      if let pooledDatabase {
+        result = try await pooledDatabase.write(work)
+      } else if inExtension {
+        // NSE: Must use lightweight DatabaseQueue (separate process, 24MB memory limit)
+        result = try await performLightweightWrite(for: userDID, work)
+      } else if isInactive {
+        // Main app, inactive user: use ephemeral DatabasePool (same connection type, no SHM corruption)
+        let pool = try await getEphemeralDatabasePool(for: userDID)
+        result = try await pool.write(work)
+      } else {
+        // Main app, active user: open the primary DatabasePool
+        let pool = try await getDatabasePool(for: userDID)
+        result = try await pool.write(work)
+      }
 
-    return result
+      // Signal-style budget checkpoint: decrement budget and trigger TRUNCATE checkpoint when needed
+      didCompleteWrite(for: userDID)
+
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "write")
+      return result
+    } catch {
+      recordDatabaseAccessFailure(for: userDID, error: error, operation: "write")
+      throw error
+    }
   }
 
   // MARK: - NSE-Optimized Database Access
@@ -658,7 +1169,16 @@ public actor MLSGRDBManager {
     for userDID: String,
     _ work: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
-    return try await performLightweightRead(for: userDID, work)
+    try requireDatabaseAccess(for: userDID, operation: "nseRead")
+
+    do {
+      let result = try await performLightweightRead(for: userDID, work)
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "nseRead")
+      return result
+    } catch {
+      recordDatabaseAccessFailure(for: userDID, error: error, operation: "nseRead")
+      throw error
+    }
   }
 
   /// Perform a database write operation optimized for Notification Service Extension.
@@ -676,13 +1196,21 @@ public actor MLSGRDBManager {
     for userDID: String,
     _ work: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
-    let result = try await performLightweightWrite(for: userDID, work)
+    try requireDatabaseAccess(for: userDID, operation: "nseWrite")
 
-    // Signal-style budget checkpoint: decrement budget and trigger TRUNCATE checkpoint when needed
-    // Note: In NSE we still track the budget, but the checkpoint may be deferred if no active pool exists
-    didCompleteWrite(for: userDID)
+    do {
+      let result = try await performLightweightWrite(for: userDID, work)
 
-    return result
+      // Signal-style budget checkpoint: decrement budget and trigger TRUNCATE checkpoint when needed
+      // Note: In NSE we still track the budget, but the checkpoint may be deferred if no active pool exists
+      didCompleteWrite(for: userDID)
+
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "nseWrite")
+      return result
+    } catch {
+      recordDatabaseAccessFailure(for: userDID, error: error, operation: "nseWrite")
+      throw error
+    }
   }
 
   /// Get or create encrypted DatabasePool for a user (actor isolation)
@@ -693,6 +1221,13 @@ public actor MLSGRDBManager {
   /// - Warning: DO NOT use this in NSE! Use nseRead/nseWrite instead.
   /// - Warning: This method now BLOCKS access for inactive users to prevent OOM → corruption.
   public func getDatabasePool(for userDID: String) async throws -> DatabasePool {
+    try await waitForForegroundResumePreparationIfNeeded(
+      for: userDID,
+      operation: "getDatabasePool"
+    )
+    try requireDatabaseAccess(for: userDID, operation: "getDatabasePool")
+
+    do {
     // ═══════════════════════════════════════════════════════════════════════════
     // CRITICAL: BLOCK DatabasePool for inactive users
     // ═══════════════════════════════════════════════════════════════════════════
@@ -829,8 +1364,14 @@ public actor MLSGRDBManager {
           logger.critical("💥 HMAC check failed during cached pool validation")
           logger.critical("   User: \(userDID.prefix(20), privacy: .private)")
 
-          // Remove from cache
-          databases.removeValue(forKey: userDID)
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "HMAC failure during cached pool validation"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling a broken pooled connection"
+            )
+          }
 
           // Use safe recovery ladder instead of auto-reset
           return try await handleHMACFailure(
@@ -848,9 +1389,14 @@ public actor MLSGRDBManager {
             "⚠️ [Error7] Cached connection returned SQLITE_NOMEM - closing and reopening")
           logger.warning("   This usually means file descriptor or mlock() quota exhaustion")
 
-          // Remove from cache and close properly
-          databases.removeValue(forKey: userDID)
-          closeDatabase(for: userDID)
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "cached pool returned SQLITE_NOMEM"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling an exhausted pooled connection"
+            )
+          }
           
           // Brief pause to let resources free up
           try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
@@ -861,10 +1407,17 @@ public actor MLSGRDBManager {
           // Avoid destructive recovery for transient errors (locks, timeouts, etc.).
           logger.warning(
             "⚠️ Cached database connection unhealthy, reconnecting: \(error.localizedDescription)")
-          databases.removeValue(forKey: userDID)
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "cached pool failed validation with recoverable codec error"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling an unhealthy pooled connection"
+            )
+          }
 
           // Repair WAL/SHM files
-          try? repairDatabase(for: userDID)
+          try? await repairDatabase(for: userDID)
         } else {
           logger.debug(
             "Database validation query failed (non-recoverable), reusing existing connection: \(error.localizedDescription)"
@@ -913,6 +1466,9 @@ public actor MLSGRDBManager {
       updateConnectionState(.open, for: userDID)
       startPeriodicCheckpointingIfNeeded()
 
+      // Successfully opened - clear any corruption counters
+      walRepairState.removeValue(forKey: userDID)
+
       if isNewDatabase {
         logger.info("✨ Created new database pool for user: \(userDID, privacy: .private)")
       } else {
@@ -948,6 +1504,10 @@ public actor MLSGRDBManager {
       }
 
       // Re-throw if not a recoverable error
+      throw error
+    }
+    } catch {
+      recordDatabaseAccessFailure(for: userDID, error: error, operation: "getDatabasePool")
       throw error
     }
   }
@@ -1039,6 +1599,13 @@ public actor MLSGRDBManager {
   /// - Warning: This method now BLOCKS access for inactive users to prevent OOM → corruption.
   ///   Use `read(for:)`/`write(for:)` instead which auto-route to lightweight access.
   public func getEphemeralDatabasePool(for userDID: String) async throws -> DatabasePool {
+    try await waitForForegroundResumePreparationIfNeeded(
+      for: userDID,
+      operation: "getEphemeralDatabasePool"
+    )
+    try requireDatabaseAccess(for: userDID, operation: "getEphemeralDatabasePool")
+
+    do {
     // ═══════════════════════════════════════════════════════════════════════════
     // EPHEMERAL ACCESS: Lightweight access for inactive users
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1113,6 +1680,10 @@ public actor MLSGRDBManager {
         code: -6,
         userInfo: [NSLocalizedDescriptionKey: "Max retries exceeded"]
       ))
+    } catch {
+      recordDatabaseAccessFailure(for: userDID, error: error, operation: "getEphemeralDatabasePool")
+      throw error
+    }
   }
   
   /// Internal implementation of getEphemeralDatabasePool
@@ -1123,7 +1694,15 @@ public actor MLSGRDBManager {
     logger.debug("   Active user: \(self.activeUserDID?.prefix(20) ?? "none", privacy: .private)")
     logger.debug("   Strategy: NO checkpoint, NO active user switch")
 
-
+    // CRITICAL: Clear stale cache after emergency suspension close
+    // Emergency close happens synchronously from a nonisolated context and can't clear the actor's cache directly.
+    // Without this check, closed pools remain in `databases` and get returned to callers.
+    if Self.emergencyCacheInvalidated {
+      Self.emergencyCacheInvalidated = false
+      logger.debug("🔄 [0xdead10cc-FIX] Clearing stale database cache after emergency close (ephemeral path)")
+      databases.removeAll()
+      uncachedEphemeralPools.removeAll()
+    }
 
     // NOTE: We intentionally DO NOT checkpoint or switch the active user here
     // This allows concurrent access to multiple user databases
@@ -1145,7 +1724,14 @@ public actor MLSGRDBManager {
         // Connection unhealthy - remove and recreate
         if isHMACFailure(error) {
           logger.critical("🔐 [Ephemeral] HMAC check failed")
-          databases.removeValue(forKey: userDID)
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "ephemeral cached validation hit HMAC failure"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling a broken pooled connection"
+            )
+          }
 
           return try await handleHMACFailure(
             for: userDID,
@@ -1156,17 +1742,39 @@ public actor MLSGRDBManager {
         } else if isSQLiteError7(error) {
           // SQLite error 7 - close and reopen WITHOUT deleting files
           logger.warning("⚠️ [Ephemeral] SQLITE_NOMEM - closing and reopening")
-          databases.removeValue(forKey: userDID)
-          closeDatabase(for: userDID)
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "ephemeral cached pool returned SQLITE_NOMEM"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling an exhausted pooled connection"
+            )
+          }
           try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
           // Fall through to create fresh connection
         } else if isRecoverableCodecError(error) {
           logger.warning("⚠️ [Ephemeral] Cached connection unhealthy, reconnecting")
-          databases.removeValue(forKey: userDID)
-          try? repairDatabase(for: userDID)
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "ephemeral cached pool failed validation with recoverable codec error"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling an unhealthy pooled connection"
+            )
+          }
+          try? await repairDatabase(for: userDID)
         } else {
-          // Non-fatal error, reuse existing connection
-          return existingDatabase
+          // Connection is broken (e.g. SQLITE_MISUSE after emergency close) - discard and recreate
+          logger.warning("⚠️ [Ephemeral] Cached connection failed validation (code=\((error as NSError).code)): \(error.localizedDescription) - discarding")
+          guard discardCachedDatabaseForRecovery(
+            for: userDID,
+            reason: "ephemeral cached pool failed validation unexpectedly"
+          ) else {
+            throw MLSSQLCipherError.storageUnavailable(
+              reason: "MLS storage is busy while recycling an invalid pooled connection"
+            )
+          }
+          // Fall through to create fresh connection
         }
       }
     }
@@ -1223,6 +1831,34 @@ public actor MLSGRDBManager {
   public func isActiveUser(_ userDID: String) -> Bool {
     return activeUserDID == userDID
   }
+
+  private func reusablePooledDatabaseForSmartRoute(for userDID: String) -> DatabasePool? {
+    guard !isRunningInExtension, let existingPool = databases[userDID] else {
+      return nil
+    }
+
+    if activeUserDID == nil {
+      logger.warning(
+        "🔧 [Active] Restoring active user tracking from pooled database for: \(userDID.prefix(20), privacy: .private)"
+      )
+      activeUserDID = userDID
+    } else if
+      let activeDID = activeUserDID,
+      activeDID != userDID,
+      databases[activeDID] == nil
+    {
+      logger.warning(
+        """
+        🔧 [Active] Repairing stale active user tracking from pooled database
+        Previous active: \(activeDID.prefix(20), privacy: .private)
+        Repaired active: \(userDID.prefix(20), privacy: .private)
+        """
+      )
+      activeUserDID = userDID
+    }
+
+    return existingPool
+  }
   
   /// Set a user as the active user for database access.
   ///
@@ -1235,6 +1871,38 @@ public actor MLSGRDBManager {
     let newUser = userDID?.prefix(20) ?? "nil"
     logger.info("🔄 [Active] Switching active user: \(oldUser) → \(newUser)")
     activeUserDID = userDID
+  }
+
+  @discardableResult
+  private func discardCachedDatabaseForRecovery(
+    for userDID: String,
+    reason: String
+  ) -> Bool {
+    guard databases[userDID] != nil else {
+      return true
+    }
+
+    logger.warning(
+      """
+      🧹 [Recovery] Discarding cached database before recovery
+      User: \(userDID.prefix(20), privacy: .private)
+      Reason: \(reason, privacy: .public)
+      """
+    )
+    closeDatabase(for: userDID)
+
+    guard databases[userDID] == nil else {
+      logger.warning(
+        """
+        🚫 [Recovery] Cached database remained open after close attempt
+        User: \(userDID.prefix(20), privacy: .private)
+        Reason: \(reason, privacy: .public)
+        """
+      )
+      return false
+    }
+
+    return true
   }
 
   // MARK: - Lightweight Ephemeral Access (Notifications)
@@ -1333,18 +2001,37 @@ public actor MLSGRDBManager {
       try db.execute(sql: "PRAGMA mmap_size = 0;")
     }
     
-    // Open, read, close immediately - no caching
-    let queue = try DatabaseQueue(path: dbPath.path, configuration: config)
-    defer {
-      do {
-        try queue.close()
-        logger.debug("✅ [Lightweight] Closed ephemeral queue for: \(userDID.prefix(20), privacy: .private)")
-      } catch {
-        logger.warning("⚠️ [Lightweight] Failed to close queue: \(error.localizedDescription)")
+    // Reuse a cached lightweight queue if available (prevents rapid open/close SHM corruption).
+    let queue: DatabaseQueue
+    if let cached = cachedLightweightQueues[userDID],
+       Date().timeIntervalSince(cached.lastUsed) < lightweightQueueTTL {
+      queue = cached.queue
+      logger.debug("   Reusing cached lightweight queue")
+    } else {
+      // Close any expired cached queue before creating a new one
+      if let old = cachedLightweightQueues.removeValue(forKey: userDID) {
+        try? old.queue.close()
+      }
+      queue = try DatabaseQueue(path: dbPath.path, configuration: config)
+      logger.debug("   Created new lightweight queue (will cache for reuse)")
+    }
+
+    // Update last-used timestamp
+    cachedLightweightQueues[userDID] = (queue: queue, lastUsed: Date())
+
+    // Schedule eviction after TTL (only if no other read refreshes the timestamp)
+    let ttl = self.lightweightQueueTTL
+    Task { [self] in
+      try? await Task.sleep(nanoseconds: UInt64(ttl * 1_500_000_000))  // 1.5x TTL
+      if let cached = cachedLightweightQueues[userDID],
+         Date().timeIntervalSince(cached.lastUsed) >= ttl {
+        cachedLightweightQueues.removeValue(forKey: userDID)
+        try? cached.queue.close()
+        logger.debug("✅ [Lightweight] Evicted cached queue for: \(userDID.prefix(20), privacy: .private)")
       }
     }
-    
-      return try await queue.read(work)
+
+    return try await queue.read(work)
   }
 
   // MARK: - NSE Lightweight Write Access
@@ -1435,6 +2122,10 @@ public actor MLSGRDBManager {
       try db.execute(sql: "PRAGMA journal_mode = WAL;")
       try db.execute(sql: "PRAGMA wal_autocheckpoint = 0;")
       try db.execute(sql: "PRAGMA synchronous = NORMAL;")
+      // Ensure NSE checkpoint pages are fully fsynced to disk before transfer.
+      // Without this, a PASSIVE checkpoint from the NSE can leave partially-written
+      // WAL pages that corrupt the database if iOS kills the extension mid-checkpoint.
+      try db.execute(sql: "PRAGMA checkpoint_fullfsync = ON;")
     }
 
     // Open, write, close immediately
@@ -1485,15 +2176,18 @@ public actor MLSGRDBManager {
   /// Close database for a user
   /// - Parameter userDID: User's decentralized identifier
   public func closeDatabase(for userDID: String) {
+    let wasActiveUser = (activeUserDID == userDID)
 
-
-    // Clear active user if this was the active database
-    if activeUserDID == userDID {
-      activeUserDID = nil
+    // Also close any cached lightweight queue to prevent stale SHM references
+    if let cached = cachedLightweightQueues.removeValue(forKey: userDID) {
+      try? cached.queue.close()
     }
 
     guard let db = databases[userDID] else {
       logger.debug("No database to close for user: \(userDID, privacy: .private)")
+      if wasActiveUser {
+        activeUserDID = nil
+      }
       updateConnectionState(.closed, for: userDID)
       return
     }
@@ -1518,10 +2212,16 @@ public actor MLSGRDBManager {
       try db.close()
       databases.removeValue(forKey: userDID)
       Self.unregisterFromEmergencyClose(for: userDID)
+      if wasActiveUser {
+        activeUserDID = nil
+      }
       updateConnectionState(.closed, for: userDID)
       logger.info("✅ Database pool closed for user: \(userDID, privacy: .private)")
     } catch {
       updateConnectionState(.open, for: userDID)
+      if wasActiveUser {
+        activeUserDID = userDID
+      }
       logger.warning("⚠️ Database pool close deferred (busy): \(error.localizedDescription)")
     }
   }
@@ -1553,12 +2253,8 @@ public actor MLSGRDBManager {
 
         // Prevent new opens while we're trying to close.
         updateConnectionState(.closing, for: userDID)
+        let wasActiveUser = (activeUserDID == userDID)
 
-        // Clear active user if this was the active database
-        if activeUserDID == userDID {
-          activeUserDID = nil
-        }
-        
         // CRITICAL FIX: Close any uncached ephemeral pools for this user
         // These are created during notification handling for non-active users
         if let ephemeralPool = uncachedEphemeralPools.removeValue(forKey: userDID) {
@@ -1603,6 +2299,9 @@ public actor MLSGRDBManager {
 
         guard let db = databases[userDID] else {
           logger.debug("   No database to close for user: \(userDID, privacy: .private)")
+          if wasActiveUser {
+            activeUserDID = nil
+          }
           updateConnectionState(.closed, for: userDID)
           return true
         }
@@ -1647,12 +2346,18 @@ public actor MLSGRDBManager {
           // Fail-closed: do not interrupt in-flight queries; if close cannot complete, report busy.
           try db.close()
           databases.removeValue(forKey: userDID)
+          if wasActiveUser {
+            activeUserDID = nil
+          }
           updateConnectionState(.closed, for: userDID)
           logger.info("✅ Database closed and drained for user: \(userDID, privacy: .private)")
           return true
 
         } catch {
           updateConnectionState(.open, for: userDID)
+          if wasActiveUser {
+            activeUserDID = userDID
+          }
           logger.warning("🚨 Database drain/checkpoint did not complete for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
           return false
         }
@@ -1682,14 +2387,13 @@ public actor MLSGRDBManager {
         timeout: .seconds(2)
       ) { [self] in
         logger.info("🔓 [Release] Releasing connection WITHOUT checkpoint for: \(userDID.prefix(20), privacy: .private)")
-
-        // Clear active user if this was the active database
-        if activeUserDID == userDID {
-          activeUserDID = nil
-        }
+        let wasActiveUser = (activeUserDID == userDID)
 
         guard let db = databases[userDID] else {
           logger.debug("   No database connection to release for user: \(userDID.prefix(20), privacy: .private)")
+          if wasActiveUser {
+            activeUserDID = nil
+          }
           updateConnectionState(.closed, for: userDID)
           return true
         }
@@ -1701,11 +2405,17 @@ public actor MLSGRDBManager {
         do {
           try db.close()
           databases.removeValue(forKey: userDID)
+          if wasActiveUser {
+            activeUserDID = nil
+          }
           updateConnectionState(.closed, for: userDID)
           logger.info("🔓 [Release] Connection released for: \(userDID.prefix(20), privacy: .private)")
           return true
         } catch {
           updateConnectionState(.open, for: userDID)
+          if wasActiveUser {
+            activeUserDID = userDID
+          }
           logger.warning("⚠️ [Release] Could not close connection (busy): \(error.localizedDescription)")
           return false
         }
@@ -2043,7 +2753,7 @@ public actor MLSGRDBManager {
   /// Repair corrupted database by removing WAL and SHM files
   /// Call this if you get SQLITE_NOMEM or other corruption errors
   /// - Parameter userDID: User's decentralized identifier
-  public func repairDatabase(for userDID: String) throws {
+  public func repairDatabase(for userDID: String) async throws {
     if isRunningInExtension {
       logger.warning(
         "🛑 [MLS] repairDatabase blocked in extension for \(userDID.prefix(20), privacy: .private)")
@@ -2054,85 +2764,174 @@ public actor MLSGRDBManager {
 
     logger.warning("⚠️ Attempting to repair database for user: \(userDID, privacy: .private)")
 
-    // Close database first
+    // Close the cached pool first so we get a fresh connection.
     closeDatabase(for: userDID)
 
     let dbPath = databasePath(for: userDID)
     let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
     let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
 
-    // Delete WAL and SHM files (will be recreated)
-    for path in [walPath, shmPath] {
-      if FileManager.default.fileExists(atPath: path.path) {
-        do {
-          try FileManager.default.removeItem(at: path)
-          logger.info("Deleted corrupted file: \(path.lastPathComponent)")
-        } catch {
-          logger.error("Failed to delete \(path.lastPathComponent): \(error.localizedDescription)")
-        }
+    // Check WAL size before deciding what to do.
+    let walSize = (try? FileManager.default.attributesOfItem(atPath: walPath.path)[.size] as? Int64) ?? 0
+
+    // CHECKPOINT-FIRST STRATEGY: Never blindly delete WAL files containing data.
+    // A WAL file with uncommitted pages is the ONLY copy of recent transactions.
+    // Deleting it permanently corrupts the main .db file.
+    if walSize > 0 {
+      logger.info("🔧 [Repair] WAL file has \(walSize) bytes — attempting checkpoint before cleanup")
+
+      // Try to checkpoint via a temporary connection to merge WAL into main DB.
+      let checkpointed = await checkpointWALSafely(dbPath: dbPath, userDID: userDID)
+
+      if checkpointed {
+        // Checkpoint succeeded — WAL data is now in the main .db file.
+        // Safe to delete WAL/SHM.
+        logger.info("✅ [Repair] Checkpoint succeeded — WAL merged into main DB, cleaning up files")
+        deleteWALAndSHM(walPath: walPath, shmPath: shmPath)
+      } else {
+        // Checkpoint failed — the DB or WAL may have real corruption.
+        // Do NOT delete the WAL. Leave files intact for the escalation path
+        // (walRepairState counter → quarantine + salvage) to handle properly.
+        logger.warning(
+          "⚠️ [Repair] Checkpoint failed — leaving WAL intact to preserve data. Escalation path will handle if corruption persists."
+        )
       }
+    } else {
+      // WAL is empty or missing — safe to clean up SHM for a fresh start.
+      logger.info("🔧 [Repair] WAL is empty/missing — cleaning up SHM only")
+      deleteWALAndSHM(walPath: walPath, shmPath: shmPath)
     }
 
     logger.info("✅ Database repair completed for user: \(userDID, privacy: .private)")
   }
+
+  /// Attempt a PASSIVE checkpoint on the WAL file via a temporary SQLite connection.
+  /// Returns true if the checkpoint succeeded (WAL data merged into main DB).
+  private func checkpointWALSafely(dbPath: URL, userDID: String) async -> Bool {
+    do {
+      let key = try await encryption.getOrCreateKey(for: userDID)
+      guard let salt = try await encryption.getSalt(for: userDID) else {
+        logger.error("❌ [Checkpoint] No salt found for \(userDID.prefix(20), privacy: .private)")
+        return false
+      }
+      let hexKey = key.map { String(format: "%02x", $0) }.joined()
+      let hexSalt = salt.map { String(format: "%02x", $0) }.joined()
+
+      var config = Configuration()
+      config.prepareDatabase { db in
+        try db.execute(sql: "PRAGMA cipher_memory_security = OFF;")
+        try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
+        try db.execute(sql: "PRAGMA cipher_plaintext_header_size = 32;")
+        try db.execute(sql: "PRAGMA cipher_salt = \"x'\(hexSalt)'\";")
+        try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
+        try db.execute(sql: "PRAGMA kdf_iter = 256000;")
+        try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
+        try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+      }
+      // Use a temporary DatabaseQueue (not pool) for the checkpoint.
+      let tempQueue = try DatabaseQueue(path: dbPath.path, configuration: config)
+      defer { try? tempQueue.close() }
+
+      var logPages: Int32 = -1
+      var checkpointedPages: Int32 = -1
+      var busyPages: Int32 = -1
+      try await tempQueue.write { db in
+        // PASSIVE checkpoint: merges what it can without blocking other writers.
+        // This is the safest checkpoint mode — it won't wait for locks.
+        let result = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(PASSIVE)")
+        busyPages = result?["busy"] as? Int32 ?? -1
+        checkpointedPages = result?["checkpointed"] as? Int32 ?? -1
+        logPages = result?["log"] as? Int32 ?? -1
+      }
+      logger.info(
+        "🔧 [Checkpoint] PASSIVE result for \(userDID.prefix(20), privacy: .private): log=\(logPages), checkpointed=\(checkpointedPages), busy=\(busyPages)"
+      )
+
+      return true
+    } catch {
+      logger.error(
+        "❌ [Checkpoint] Failed for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
+      )
+      return false
+    }
+  }
+
+  /// Delete WAL and SHM files. Only call this when WAL is empty or after a successful checkpoint.
+  private func deleteWALAndSHM(walPath: URL, shmPath: URL) {
+    for path in [walPath, shmPath] {
+      if FileManager.default.fileExists(atPath: path.path) {
+        do {
+          try FileManager.default.removeItem(at: path)
+          logger.info("   ✅ Deleted: \(path.lastPathComponent)")
+        } catch {
+          logger.error("   ❌ Failed to delete \(path.lastPathComponent): \(error.localizedDescription)")
+        }
+      }
+    }
+  }
   
   /// Attempt soft recovery for WAL/SHM desync issues (non-HMAC).
-  /// This ONLY deletes WAL and SHM files, preserving the main .db file.
+  /// Uses a CHECKPOINT-FIRST strategy: merges WAL data into the main .db before cleanup.
+  /// Never blindly deletes WAL files that may contain the only copy of recent transactions.
   /// - Parameter userDID: User's decentralized identifier
-  /// - Returns: true if soft recovery was performed, false if files couldn't be deleted
-  private func attemptSoftRecovery(for userDID: String) -> Bool {
+  /// - Returns: true if soft recovery was performed, false if it failed or was skipped
+  private func attemptSoftRecovery(for userDID: String) async -> Bool {
     if isRunningInExtension {
       logger.warning(
         "🛑 [SoftRecovery] Skipped in extension for \(userDID.prefix(20), privacy: .private)")
       return false
     }
 
-    logger.warning("🔧 [SoftRecovery] Attempting WAL/SHM cleanup for user: \(userDID.prefix(20), privacy: .private)")
-    
-    // Close any cached connection first
+    logger.warning("🔧 [SoftRecovery] Attempting checkpoint-first recovery for user: \(userDID.prefix(20), privacy: .private)")
+
+    // Close any cached connection first to release file locks.
     closeDatabase(for: userDID)
-    
+
     let dbPath = databasePath(for: userDID)
     let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
     let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
-    
-    var deletedFiles: [String] = []
-    var failedFiles: [String] = []
-    
-    // Only delete WAL and SHM files - NEVER the main .db file
-    for path in [walPath, shmPath] {
-      if FileManager.default.fileExists(atPath: path.path) {
-        do {
-          // Get file size for logging
-          let attrs = try? FileManager.default.attributesOfItem(atPath: path.path)
-          let fileSize = (attrs?[.size] as? Int64) ?? 0
-          
-          try FileManager.default.removeItem(at: path)
-          deletedFiles.append("\(path.lastPathComponent) (\(fileSize) bytes)")
-          logger.info("   ✅ Deleted: \(path.lastPathComponent) (\(fileSize) bytes)")
-        } catch {
-          failedFiles.append(path.lastPathComponent)
-          logger.error("   ❌ Failed to delete \(path.lastPathComponent): \(error.localizedDescription)")
-        }
+
+    // Check WAL file size to understand what we're dealing with.
+    let walExists = FileManager.default.fileExists(atPath: walPath.path)
+    let walSize: Int64
+    if walExists {
+      walSize = (try? FileManager.default.attributesOfItem(atPath: walPath.path)[.size] as? Int64) ?? 0
+    } else {
+      walSize = 0
+    }
+
+    logger.info("🔧 [SoftRecovery] WAL exists=\(walExists), size=\(walSize) bytes")
+
+    if walSize > 0 {
+      // WAL has data — try to checkpoint it safely before any file operations.
+      let checkpointed = await checkpointWALSafely(dbPath: dbPath, userDID: userDID)
+
+      if checkpointed {
+        // WAL data merged into main DB — now safe to clean up.
+        logger.info("✅ [SoftRecovery] Checkpoint succeeded — safe to clean WAL/SHM")
+        deleteWALAndSHM(walPath: walPath, shmPath: shmPath)
+      } else {
+        // Checkpoint failed — real corruption may exist. Do NOT delete WAL.
+        // The WAL might be the only copy of recent data. Leave it for the
+        // escalation path (quarantine + salvage) which can recover rows from both files.
+        logger.warning(
+          "⚠️ [SoftRecovery] Checkpoint failed for \(userDID.prefix(20), privacy: .private) — preserving WAL (\(walSize) bytes) to avoid permanent data loss"
+        )
+        // Still return true so the caller proceeds with verification.
+        // The verification will detect if corruption persists.
       }
+    } else {
+      // WAL is empty or missing — just clean up SHM for a fresh lock state.
+      deleteWALAndSHM(walPath: walPath, shmPath: shmPath)
     }
-    
-    if !deletedFiles.isEmpty {
-      logger.info("🔧 [SoftRecovery] Cleaned up: \(deletedFiles.joined(separator: ", "))")
-    }
-    
-    if !failedFiles.isEmpty {
-      logger.warning("🔧 [SoftRecovery] Failed to clean: \(failedFiles.joined(separator: ", "))")
-      return false
-    }
-    
-    // Verify the main .db file still exists
+
+    // Verify the main .db file still exists.
     if FileManager.default.fileExists(atPath: dbPath.path) {
       logger.info("🔧 [SoftRecovery] ✅ Main database file preserved: \(dbPath.lastPathComponent)")
       return true
     } else {
       logger.warning("🔧 [SoftRecovery] ⚠️ Main database file missing - will create new one")
-      return true  // Still return true since cleanup was successful
+      return true
     }
   }
 
@@ -2332,9 +3131,162 @@ public actor MLSGRDBManager {
     case likelyCorruptionOrRace
   }
 
-  /// Manually reset MLS storage by quarantining existing files and recreating a fresh database.
+  // MARK: - Data Salvage from Corrupt Database
+
+  /// Result of a salvage attempt from a corrupt database.
+  public struct SalvageResult: Sendable {
+    public let conversationsRecovered: Int
+    public let messagesRecovered: Int
+    public let membersRecovered: Int
+    public let errors: [String]
+  }
+
+  /// Attempts to extract readable data from a corrupt database into a fresh one.
   ///
-  /// IMPORTANT: This MUST NEVER run automatically.
+  /// Opens the corrupt DB read-only and copies each table row-by-row into the target pool.
+  /// Rows on corrupted pages will fail individually but won't prevent other rows from being saved.
+  ///
+  /// - Parameters:
+  ///   - corruptPath: Path to the corrupt database file
+  ///   - targetPool: Fresh database pool to copy data into
+  ///   - userDID: User's DID (for encryption key lookup)
+  /// - Returns: SalvageResult describing what was recovered
+  private func salvageDataFromCorruptDatabase(
+    corruptPath: URL,
+    targetPool: DatabasePool,
+    userDID: String
+  ) async -> SalvageResult {
+    var conversationsRecovered = 0
+    var messagesRecovered = 0
+    var membersRecovered = 0
+    var errors: [String] = []
+
+    guard FileManager.default.fileExists(atPath: corruptPath.path) else {
+      return SalvageResult(conversationsRecovered: 0, messagesRecovered: 0, membersRecovered: 0, errors: ["Database file not found"])
+    }
+
+    do {
+      // Open the corrupt database read-only with the same encryption settings
+      let encryptionKey: Data
+      let salt: Data
+      do {
+        encryptionKey = try await encryption.getOrCreateKey(for: userDID)
+        guard let s = try await encryption.getSalt(for: userDID) else {
+          return SalvageResult(conversationsRecovered: 0, messagesRecovered: 0, membersRecovered: 0, errors: ["No salt found for user"])
+        }
+        salt = s
+      } catch {
+        return SalvageResult(conversationsRecovered: 0, messagesRecovered: 0, membersRecovered: 0, errors: ["Cannot retrieve encryption key/salt: \(error.localizedDescription)"])
+      }
+
+      let hexKey = encryptionKey.map { String(format: "%02x", $0) }.joined()
+      let hexSalt = salt.map { String(format: "%02x", $0) }.joined()
+
+      var config = Configuration()
+      config.readonly = true
+      config.prepareDatabase { db in
+        try db.execute(sql: "PRAGMA cipher_memory_security = OFF;")
+        try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
+        try db.execute(sql: "PRAGMA cipher_plaintext_header_size = 32;")
+        try db.execute(sql: "PRAGMA cipher_salt = \"x'\(hexSalt)'\";")
+        try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
+        try db.execute(sql: "PRAGMA kdf_iter = 256000;")
+        try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
+        try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+      }
+
+      let corruptQueue = try DatabaseQueue(path: corruptPath.path, configuration: config)
+      defer { try? corruptQueue.close() }
+
+      // Use GRDB's ATTACH DATABASE to copy data directly via SQL.
+      // This avoids Row/Sendable issues and is more efficient than row-by-row copying.
+      // We read from the corrupt DB and insert into the target using raw SQL.
+
+      // Run integrity check to understand what's damaged
+      do {
+        let integrityResults = try await corruptQueue.read { db in
+          try String.fetchAll(db, sql: "PRAGMA integrity_check(20);")
+        }
+        for line in integrityResults where line != "ok" {
+          errors.append("integrity: \(line)")
+        }
+      } catch {
+        errors.append("integrity_check failed: \(error.localizedDescription)")
+      }
+
+      // Salvage each table: read from corrupt DB, then write to fresh DB.
+      // Using model types with synchronous GRDB access (we're already actor-isolated).
+
+      let tablesToSalvage: [(name: String, label: String)] = [
+        ("MLSConversationModel", "conversations"),
+        ("MLSMessageModel", "messages"),
+        ("MLSMemberModel", "members"),
+        ("MLSConversationSequenceState", "sequence_state"),
+        ("MLSEpochKeyModel", "epoch_keys"),
+        ("MLSReactionModel", "reactions"),
+      ]
+
+      for (tableName, label) in tablesToSalvage {
+        do {
+          // Phase 1: Read all rows as raw dictionaries from corrupt DB
+          let rowDicts: [[String: DatabaseValue]] = try await corruptQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM \(tableName)")
+            return rows.map { row in
+              var dict: [String: DatabaseValue] = [:]
+              for column in row.columnNames {
+                dict[column] = row[column]
+              }
+              return dict
+            }
+          }
+
+          guard !rowDicts.isEmpty else { continue }
+
+          // Phase 2: Insert into fresh target DB
+          try await targetPool.write { targetDb in
+            for dict in rowDicts {
+              do {
+                let columns = dict.keys.joined(separator: ", ")
+                let placeholders = dict.keys.map { _ in "?" }.joined(separator: ", ")
+                let values = Array(dict.values) as [DatabaseValueConvertible?]
+                try targetDb.execute(
+                  sql: "INSERT OR IGNORE INTO \(tableName) (\(columns)) VALUES (\(placeholders))",
+                  arguments: StatementArguments(values)
+                )
+                switch label {
+                case "conversations": conversationsRecovered += 1
+                case "messages": messagesRecovered += 1
+                case "members": membersRecovered += 1
+                default: break
+                }
+              } catch {
+                errors.append("\(label): \(error.localizedDescription)")
+              }
+            }
+          }
+        } catch {
+          errors.append("\(label) table: \(error.localizedDescription)")
+        }
+      }
+
+    } catch {
+      errors.append("Failed to open corrupt database: \(error.localizedDescription)")
+    }
+
+    logger.info("📦 [Salvage] Recovered \(conversationsRecovered) conversations, \(messagesRecovered) messages, \(membersRecovered) members (\(errors.count) errors)")
+    return SalvageResult(
+      conversationsRecovered: conversationsRecovered,
+      messagesRecovered: messagesRecovered,
+      membersRecovered: membersRecovered,
+      errors: errors
+    )
+  }
+
+  /// Reset MLS storage by quarantining existing files and recreating a fresh database.
+  /// Attempts to salvage readable data from the corrupt database before quarantining.
+  ///
+  /// Called automatically after repeated WAL repair failures indicate main .db corruption,
+  /// or manually from Settings > Diagnostics > Reset MLS Storage.
   public func quarantineAndResetDatabase(for userDID: String) async throws {
     if isRunningInExtension {
       logger.error(
@@ -2394,8 +3346,14 @@ public actor MLSGRDBManager {
         }
       }
 
-      // Clear repair state now that the old files are quarantined.
+      // Clear repair state and access suspension now that the old files are quarantined.
+      // The suspension was set against the OLD corrupt database — the fresh database is healthy,
+      // so continuing to block access would deadlock re-initialization.
       repairAttempts.removeValue(forKey: userDID)
+      walRepairState.removeValue(forKey: userDID)
+      usersNeedingHardReset.remove(userDID)
+      consecutiveHMACFailures.removeValue(forKey: userDID)
+      databaseAccessSuspensions.removeValue(forKey: userDID)
       updateConnectionState(.closed, for: userDID)
 
       // Recreate a fresh database.
@@ -2406,6 +3364,27 @@ public actor MLSGRDBManager {
       updateConnectionState(.open, for: userDID)
       activeUserDID = userDID
       startPeriodicCheckpointingIfNeeded()
+
+      // Attempt to salvage readable data from the quarantined (corrupt) database.
+      // This runs after the fresh database is created, so failures here are non-fatal.
+      let quarantinedDbPath = quarantineDir.appendingPathComponent(dbPath.lastPathComponent)
+      if FileManager.default.fileExists(atPath: quarantinedDbPath.path) {
+        logger.info("🔧 [Salvage] Attempting to recover data from quarantined database...")
+        let result = await salvageDataFromCorruptDatabase(
+          corruptPath: quarantinedDbPath,
+          targetPool: database,
+          userDID: userDID
+        )
+        if result.messagesRecovered > 0 || result.conversationsRecovered > 0 {
+          logger.info("✅ [Salvage] Recovered \(result.conversationsRecovered) conversations, \(result.messagesRecovered) messages from corrupt database")
+        }
+        if !result.errors.isEmpty {
+          logger.warning("⚠️ [Salvage] \(result.errors.count) errors during recovery (some data may be unrecoverable)")
+          for error in result.errors.prefix(5) {
+            logger.debug("   [Salvage] \(error)")
+          }
+        }
+      }
 
       logger.info("✅ [Diagnostics] MLS storage reset complete (old files quarantined)")
     }
@@ -2499,7 +3478,7 @@ public actor MLSGRDBManager {
         logger.critical("   Treating as suspected SQLCipher header corruption; attempting auto-heal")
 
         // Step 1: Non-destructive cleanup (WAL/SHM only)
-        _ = attemptSoftRecovery(for: userDID)
+        _ = await attemptSoftRecovery(for: userDID)
 
         do {
           let db = try await createDatabase(for: userDID)
@@ -2564,13 +3543,13 @@ public actor MLSGRDBManager {
     )
 
     // Strategy based on attempt number:
-    // Attempt 1-2: Try WAL/SHM repair
-    // Attempt 3+: Full database reset (ONLY for true corruption, not transient errors)
+    // Attempt 1: Try WAL/SHM repair
+    // Attempt 2+: Coordinated Swift/Rust reset (ONLY for true corruption, not transient errors)
 
-    if attemptNumber <= 2 {
+    if attemptNumber == 1 {
       // Try standard WAL/SHM repair
       logger.info("📝 Strategy: WAL/SHM file repair (attempt \(attemptNumber))")
-      try? repairDatabase(for: userDID)
+      try? await repairDatabase(for: userDID)
 
       // Try to open the database
       do {
@@ -2585,6 +3564,7 @@ public actor MLSGRDBManager {
 
         // Success! Reset the counter
         repairAttempts.removeValue(forKey: userDID)
+        walRepairState.removeValue(forKey: userDID)
         logger.info("✅ Database recovered via WAL/SHM repair")
         return db
       } catch {
@@ -2610,13 +3590,31 @@ public actor MLSGRDBManager {
           ))
       }
 
-      // Fail-closed: never perform destructive reset automatically.
+      guard !isRunningInExtension else {
+        logger.critical(
+          "🚨 [progressiveRepair] Persistent corruption detected in extension for \(userDID.prefix(20), privacy: .private)"
+        )
+        throw MLSSQLCipherError.needsUserAction(
+          reason: "MLS storage requires main-app reset. Reopen the app to continue recovery."
+        )
+      }
+
       logger.critical(
-        "🚨 [progressiveRepair] Max repair attempts exceeded for \(userDID.prefix(20), privacy: .private)"
+        "🚨 [progressiveRepair] Persistent corruption after WAL/SHM repair for \(userDID.prefix(20), privacy: .private) - triggering coordinated reset"
       )
-      throw MLSSQLCipherError.needsUserAction(
-        reason: "MLS storage requires manual reset. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
-      )
+
+      try await MLSClient.shared.clearStorage(for: userDID)
+      clearRepairState(for: userDID)
+      clearHardResetFlag(for: userDID)
+
+      if let reopenedDatabase = databases[userDID] {
+        logger.info("✅ [progressiveRepair] Coordinated reset restored database access")
+        return reopenedDatabase
+      }
+
+      let reopenedDatabase = try await MLSGRDBManager.shared.getDatabasePool(for: userDID)
+      logger.info("✅ [progressiveRepair] Reopened database after coordinated reset")
+      return reopenedDatabase
     }
   }
 
@@ -2634,6 +3632,7 @@ public actor MLSGRDBManager {
     if repairAttempts.removeValue(forKey: userDID) != nil {
       logger.info("🧹 Cleared repair state for user: \(userDID, privacy: .private)")
     }
+    walRepairState.removeValue(forKey: userDID)
   }
   
   private enum DatabaseOpenMode {
@@ -2946,6 +3945,7 @@ public actor MLSGRDBManager {
 
     // 7. Clear all state for this user
     repairAttempts.removeValue(forKey: userDID)
+    walRepairState.removeValue(forKey: userDID)
     usersNeedingHardReset.remove(userDID)
     connectionStates.removeValue(forKey: userDID)
     coordinationGeneration.removeValue(forKey: userDID)
@@ -3119,12 +4119,39 @@ public actor MLSGRDBManager {
 
   // MARK: - Private Methods
 
-  /// Execute database write operation.
-  /// Previously used ProcessCoordinator (BSD flock) + NSFileCoordinator, but both can trigger
-  /// 0xdead10cc crashes when iOS suspends the app while locks are held.
-  /// Now relies on SQLite's internal WAL-mode locking which iOS exempts from RunningBoard monitoring.
+  /// Execute database write operation with cross-process coordination.
+  ///
+  /// Uses NSFileCoordinator(.forMerging) around pool creation — the same approach Signal uses.
+  /// The coordinator is only held for the duration of the block (milliseconds for DatabasePool init),
+  /// NOT across ongoing transactions, so it cannot trigger 0xdead10cc (which requires holding a
+  /// file lock while the process is suspended by RunningBoard).
+  ///
+  /// Previously this was gutted to a no-op passthrough, which removed the only cross-process
+  /// handshake between the main app and NSE when both open the same SQLCipher WAL file.
+  /// Without it, concurrent pool creation could corrupt the WAL/SHM mapping.
   private func coordinatedWrite<T>(to url: URL, _ block: () throws -> T) throws -> T {
-    return try block()
+    let coordinator = NSFileCoordinator(filePresenter: nil)
+    var coordinatorError: NSError?
+    var result: T?
+    var blockError: Error?
+    coordinator.coordinate(
+      writingItemAt: url,
+      options: .forMerging,
+      error: &coordinatorError,
+      byAccessor: { _ in
+        do {
+          result = try block()
+        } catch {
+          blockError = error
+        }
+      }
+    )
+    if let error = blockError ?? coordinatorError {
+      throw error
+    }
+    // The coordinator always invokes the accessor synchronously, so result is always set
+    // if neither blockError nor coordinatorError was thrown.
+    return result!
   }
 
   /// Create new encrypted database with GRDB DatabasePool (runs off main thread via actor isolation)
@@ -3257,6 +4284,13 @@ public actor MLSGRDBManager {
       // This prevents data loss if the device loses power during/after a checkpoint.
       // Critical for our budget-based TRUNCATE checkpoint strategy.
       try db.execute(sql: "PRAGMA checkpoint_fullfsync = ON;")
+
+      // F_FULLFSYNC for all fsync operations (not just checkpoints).
+      // Signal uses F_BARRIERFSYNC via a patched SQLCipher; stock SQLCipher maps
+      // PRAGMA fullfsync to the stronger F_FULLFSYNC. Either way, this ensures WAL
+      // frames are fully flushed to stable storage before the write returns,
+      // preventing cross-process WAL corruption when the NSE and main app alternate.
+      try db.execute(sql: "PRAGMA fullfsync = ON;")
 
       // OOM FIX: Increase SQLite's page cache for SQLCipher overhead
       // SQLCipher requires additional memory per page for encryption/decryption buffers
@@ -3494,20 +4528,6 @@ public actor MLSGRDBManager {
         t.column("updatedAt", .datetime).notNull()
       }
 
-      try db.create(table: "MLSReportModel") { t in
-        t.primaryKey("id", .text).notNull()
-        t.column("convo_id", .text).notNull().references("MLSConversationModel", onDelete: .cascade)
-        t.column("reporter_did", .text).notNull()
-        t.column("reported_did", .text).notNull()
-        t.column("reason", .text).notNull()
-        t.column("details", .text)
-        t.column("status", .text).notNull().defaults(to: "pending")
-        t.column("action", .text)
-        t.column("resolution_notes", .text)
-        t.column("created_at", .datetime).notNull()
-        t.column("resolved_at", .datetime)
-      }
-
       try db.create(table: "MLSAdminRosterModel") { t in
         t.primaryKey("convo_id", .text).notNull().references(
           "MLSConversationModel", onDelete: .cascade)
@@ -3590,25 +4610,6 @@ public actor MLSGRDBManager {
         sql: """
             CREATE INDEX IF NOT EXISTS idx_blob_user_type
             ON MLSStorageBlobModel(currentUserDID, blobType);
-          """)
-
-      // MLSReportModel indexes - frequently queried by conversation and status
-      try db.execute(
-        sql: """
-            CREATE INDEX IF NOT EXISTS idx_reports_convo
-            ON MLSReportModel(convo_id);
-          """)
-
-      try db.execute(
-        sql: """
-            CREATE INDEX IF NOT EXISTS idx_reports_status
-            ON MLSReportModel(status);
-          """)
-
-      try db.execute(
-        sql: """
-            CREATE INDEX IF NOT EXISTS idx_reports_convo_status
-            ON MLSReportModel(convo_id, status, created_at DESC);
           """)
 
       // MLSAdminRosterModel - primary key index already covers convo_id lookups
@@ -4159,6 +5160,47 @@ public actor MLSGRDBManager {
       }
     }
 
+    // v22: Per-conversation timed mute
+    migrator.registerMigration("v22_conversation_muted_until") { db in
+      let hasMutedUntil = try db.columns(in: "MLSConversationModel")
+        .contains { $0.name == "mutedUntil" }
+      if !hasMutedUntil {
+        try db.alter(table: "MLSConversationModel") { t in
+          t.add(column: "mutedUntil", .datetime)
+        }
+      }
+    }
+
+    migrator.registerMigration("v23_member_avatar_url") { db in
+      let hasAvatarURL = try db.columns(in: "MLSMemberModel")
+        .contains { $0.name == "avatarURL" }
+      if !hasAvatarURL {
+        try db.alter(table: "MLSMemberModel") { t in
+          t.add(column: "avatarURL", .text)
+        }
+      }
+    }
+
+    migrator.registerMigration("v24_remote_read_cursors") { db in
+      try MLSRemoteReadCursorModel.createTable(in: db)
+    }
+
+    // MARK: v25 - Delivery acks
+    migrator.registerMigration("v25_delivery_acks") { db in
+      try db.create(table: "MLSDeliveryAck", ifNotExists: true) { t in
+        t.column("messageId", .text).notNull()
+        t.column("conversationId", .text).notNull()
+        t.column("senderDID", .text).notNull()
+        t.column("ackedAt", .datetime).notNull()
+        t.column("currentUserDID", .text).notNull()
+        t.primaryKey(["messageId", "senderDID", "currentUserDID"])
+      }
+      try db.execute(sql: """
+        CREATE INDEX IF NOT EXISTS idx_delivery_ack_conversation
+        ON MLSDeliveryAck(conversationId, currentUserDID)
+      """)
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }
@@ -4203,6 +5245,294 @@ public actor MLSGRDBManager {
       try url.setResourceValues(resourceValues)
     } catch {
       throw MLSSQLCipherError.backupExclusionFailed(underlying: error)
+    }
+  }
+
+  // MARK: - WAL Corruption Diagnostics
+
+  /// Probe WAL health for a user's database. Logs file sizes, lock state, and integrity.
+  ///
+  /// Call this before and after NSE operations to detect corruption windows.
+  /// Safe to call from any context — uses its own lightweight connection.
+  public nonisolated static func probeWALHealth(
+    for userDID: String,
+    label: String,
+    file: String = #fileID,
+    line: Int = #line
+  ) {
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let processTag = Bundle.main.bundlePath.hasSuffix(".appex") ? "NSE" : "APP"
+    let didPrefix = String(userDID.prefix(20))
+
+    guard let appGroup = FileManager.default.containerURL(
+      forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared"
+    ) else {
+      staticLogger.warning("📊 [WAL-DIAG] [\(processTag)/\(pid)] Cannot access app group container")
+      return
+    }
+
+    // Probe both GRDB and Rust databases
+    let grdbDir = appGroup.appendingPathComponent("Application Support/MLS", isDirectory: true)
+    let rustDir = appGroup.appendingPathComponent("Application Support/mls-state", isDirectory: true)
+
+    probeWALFiles(in: grdbDir, dbType: "GRDB", userDID: didPrefix, label: label, processTag: processTag, pid: pid)
+    probeWALFiles(in: rustDir, dbType: "Rust", userDID: didPrefix, label: label, processTag: processTag, pid: pid)
+  }
+
+  private nonisolated static func probeWALFiles(
+    in directory: URL,
+    dbType: String,
+    userDID: String,
+    label: String,
+    processTag: String,
+    pid: Int32
+  ) {
+    let fm = FileManager.default
+    guard let files = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
+
+    let dbFiles = files.filter { $0.hasSuffix(".db") }
+    for dbFile in dbFiles {
+      let dbPath = directory.appendingPathComponent(dbFile)
+      let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
+      let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
+
+      let dbSize = (try? fm.attributesOfItem(atPath: dbPath.path)[.size] as? Int64) ?? 0
+      let walSize = (try? fm.attributesOfItem(atPath: walPath.path)[.size] as? Int64) ?? 0
+      let shmSize = (try? fm.attributesOfItem(atPath: shmPath.path)[.size] as? Int64) ?? 0
+      let walExists = fm.fileExists(atPath: walPath.path)
+
+      // Check POSIX file lock state on the main DB file
+      let lockState = probePOSIXLock(at: dbPath)
+
+      staticLogger.warning(
+        """
+        📊 [WAL-DIAG] [\(processTag)/\(pid)] \(label) | \(dbType)/\(dbFile) \
+        db=\(dbSize)B wal=\(walExists ? "\(walSize)B" : "NONE") shm=\(shmSize)B \
+        lock=\(lockState)
+        """
+      )
+    }
+  }
+
+  /// Probe POSIX advisory lock state on a file.
+  /// Returns a human-readable string describing the lock holder (if any).
+  private nonisolated static func probePOSIXLock(at url: URL) -> String {
+    guard let fd = fopen(url.path, "r") else {
+      return "cannot_open"
+    }
+    defer { fclose(fd) }
+
+    let fileno = fileno(fd)
+    var flock = Darwin.flock()
+    flock.l_type = Int16(F_WRLCK)
+    flock.l_whence = Int16(SEEK_SET)
+    flock.l_start = 0
+    flock.l_len = 0  // Entire file
+
+    // F_GETLK checks if a lock WOULD block, and fills in the conflicting lock info
+    if fcntl(fileno, F_GETLK, &flock) == -1 {
+      return "probe_failed(errno=\(errno))"
+    }
+
+    if flock.l_type == Int16(F_UNLCK) {
+      return "unlocked"
+    }
+
+    let lockType = flock.l_type == Int16(F_RDLCK) ? "READ" : "WRITE"
+    return "\(lockType)_by_pid=\(flock.l_pid)"
+  }
+
+  /// Run a quick integrity check on a database file using a fresh ephemeral connection.
+  /// Returns "ok" on success, or the error description on failure.
+  ///
+  /// IMPORTANT: This opens its own connection — do not call during emergency close.
+  public func quickIntegrityCheck(for userDID: String) async -> String {
+    do {
+      let result = try await performLightweightRead(for: userDID) { db -> String in
+        // quick_check is faster than full integrity_check — stops at first error
+        if let check = try String.fetchOne(db, sql: "PRAGMA quick_check;") {
+          return check
+        }
+        return "no_result"
+      }
+      return result
+    } catch {
+      return "error: \(error.localizedDescription)"
+    }
+  }
+
+  private func classifyQuickIntegrityCheckResult(_ result: String) -> QuickIntegrityCheckClassification {
+    let normalized = result.trimmingCharacters(in: .whitespacesAndNewlines)
+    if normalized.lowercased() == "ok" {
+      return .ok
+    }
+
+    let error = NSError(
+      domain: "MLSGRDBManager.ForegroundResume",
+      code: -1,
+      userInfo: [NSLocalizedDescriptionKey: normalized]
+    )
+
+    if isTransientError(error) {
+      return .transient(normalized)
+    }
+
+    if isRecoverableCodecError(error) {
+      return .corruption(normalized)
+    }
+
+    return .unexpected(normalized)
+  }
+
+  private func runQuickIntegrityCheckWithRetry(for userDID: String) async -> QuickIntegrityCheckClassification {
+    let maxAttempts = self.foregroundResumeTransientRetryCount
+    let baseDelayNanos = self.foregroundResumeBaseRetryDelayNanos
+
+    for attempt in 1...maxAttempts {
+      let result = await quickIntegrityCheck(for: userDID)
+      let classification = classifyQuickIntegrityCheckResult(result)
+
+      switch classification {
+      case .ok, .corruption, .unexpected:
+        return classification
+      case .transient(let description):
+        if attempt == maxAttempts {
+          return .transient(description)
+        }
+
+        let delayNanos = baseDelayNanos * UInt64(attempt)
+        let delayMs = delayNanos / 1_000_000
+        logger.warning(
+          "⏳ [RESUME] Transient integrity-check result (\(attempt)/\(maxAttempts)) for \(userDID.prefix(20), privacy: .private): \(description, privacy: .public). Retrying in \(delayMs)ms"
+        )
+        try? await Task.sleep(nanoseconds: delayNanos)
+      }
+    }
+
+    return .unexpected("unknown integrity check state")
+  }
+
+  public func prepareForForegroundResume(
+    for userDID: String,
+    allowCoordinatedReset: Bool = true
+  ) async throws -> ForegroundResumePreparationResult {
+    if foregroundResumePreparations[userDID] != nil {
+      try await waitForForegroundResumePreparationIfNeeded(
+        for: userDID,
+        operation: "prepareForForegroundResume"
+      )
+      return .ready
+    }
+
+    foregroundResumePreparations[userDID] = ForegroundResumePreparation(startedAt: Date())
+    logger.info(
+      "🚦 [RESUME-GUARD] Starting foreground resume preparation for \(userDID.prefix(20), privacy: .private)"
+    )
+
+    defer {
+      foregroundResumePreparations.removeValue(forKey: userDID)
+      logger.info(
+        "✅ [RESUME-GUARD] Finished foreground resume preparation for \(userDID.prefix(20), privacy: .private)"
+      )
+    }
+
+    let initialCheck = await runQuickIntegrityCheckWithRetry(for: userDID)
+
+    switch initialCheck {
+    case .ok:
+      clearRepairState(for: userDID)
+      clearHardResetFlag(for: userDID)
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "prepareForForegroundResume")
+      return .ready
+
+    case .transient(let description):
+      // Transient errors (SQLITE_NOMEM, locked) after retries usually mean the pool's
+      // internal reader connections are stale from suspension. Close and reopen the pool
+      // to get fresh connections, then retry one more time.
+      logger.warning(
+        "🔄 [RESUME] Transient errors persisted after retries - closing and reopening pool for \(userDID.prefix(20), privacy: .private)"
+      )
+      closeDatabase(for: userDID)
+      // Clear any suspension state that might block the reopen
+      databaseAccessSuspensions.removeValue(forKey: userDID)
+
+      let retryCheck = await runQuickIntegrityCheckWithRetry(for: userDID)
+      switch retryCheck {
+      case .ok:
+        clearRepairState(for: userDID)
+        clearHardResetFlag(for: userDID)
+        logger.info("✅ [RESUME] Pool reopen resolved transient errors")
+        return .repaired
+      case .corruption(let corruptionDesc):
+        logger.error("🚨 [RESUME] Pool reopen revealed corruption: \(corruptionDesc)")
+        // Fall through to repair path below
+        try await repairDatabase(for: userDID)
+        let postRepairCheck = await runQuickIntegrityCheckWithRetry(for: userDID)
+        if case .ok = postRepairCheck {
+          clearRepairState(for: userDID)
+          clearHardResetFlag(for: userDID)
+          clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "prepareForForegroundResume")
+          return .repaired
+        }
+        throw MLSSQLCipherError.storageUnavailable(
+          reason: "MLS storage corruption persists after pool reopen + WAL repair: \(description)"
+        )
+      default:
+        throw MLSSQLCipherError.storageUnavailable(
+          reason: "MLS foreground resume failed after pool reopen: \(description)"
+        )
+      }
+
+    case .unexpected(let description):
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "MLS foreground resume integrity check failed: \(description)"
+      )
+
+    case .corruption(let description):
+      logger.error(
+        "🚨 [RESUME] Verified corruption before foreground reopen for \(userDID.prefix(20), privacy: .private): \(description, privacy: .public)"
+      )
+      logger.warning(
+        "🔧 [RESUME] Performing WAL/SHM cleanup before any foreground database reopen"
+      )
+      try await repairDatabase(for: userDID)
+
+      let verificationCheck = await runQuickIntegrityCheckWithRetry(for: userDID)
+
+      switch verificationCheck {
+      case .ok:
+        clearRepairState(for: userDID)
+        clearHardResetFlag(for: userDID)
+        clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "prepareForForegroundResume")
+        logger.info("✅ [RESUME] Foreground corruption resolved after WAL/SHM cleanup")
+        return .repaired
+
+      case .transient(let verificationDescription):
+        throw MLSSQLCipherError.storageUnavailable(
+          reason:
+            "MLS foreground resume is still waiting on storage after repair: \(verificationDescription)"
+        )
+
+      case .unexpected(let verificationDescription):
+        throw MLSSQLCipherError.storageUnavailable(
+          reason: "MLS foreground verification failed after repair: \(verificationDescription)"
+        )
+
+      case .corruption(let verificationDescription):
+        // WAL repair didn't fix page-level corruption. Do NOT wipe immediately.
+        // Let the walRepairState counter in recordDatabaseAccessFailure handle
+        // escalation after multiple failed attempts. This prevents data loss
+        // on transient corruption that resolves after a full pool close/reopen cycle.
+        logger.error(
+          "🚨 [RESUME] Persistent corruption after WAL/SHM cleanup for \(userDID.prefix(20), privacy: .private): \(verificationDescription, privacy: .public)"
+        )
+        logger.warning(
+          "⏳ [RESUME] Not wiping database — walRepairState counter will escalate if corruption persists across attempts"
+        )
+        throw MLSSQLCipherError.storageUnavailable(
+          reason: "MLS storage corruption persists after WAL repair. Will retry on next access."
+        )
+      }
     }
   }
 

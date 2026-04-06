@@ -34,6 +34,14 @@ public struct MLSDeliveryAckModel: Codable, FetchableRecord, PersistableRecord, 
   /// Per-user DB partition key — matches the DB file owner.
   public let currentUserDID: String
 
+  public enum Columns {
+    public static let messageId = Column(CodingKeys.messageId)
+    public static let conversationId = Column(CodingKeys.conversationId)
+    public static let senderDID = Column(CodingKeys.senderDID)
+    public static let ackedAt = Column(CodingKeys.ackedAt)
+    public static let currentUserDID = Column(CodingKeys.currentUserDID)
+  }
+
   public init(
     messageId: String,
     conversationId: String,
