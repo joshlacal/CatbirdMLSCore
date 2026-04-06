@@ -10,6 +10,9 @@ public enum MLSMessageType: String, Codable, Sendable, Equatable {
   case typing
   case adminRoster
   case adminAction
+  case system
+  case deliveryAck       // proof of successful decryption
+  case recoveryRequest   // request re-delivery of a missed message
 }
 
 // MARK: - Embed Types
@@ -19,6 +22,9 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
   case link(MLSLinkEmbed)
   case gif(MLSGIFEmbed)
   case post(MLSPostEmbed)
+  case image(MLSImageEmbed)
+  case audio(MLSAudioEmbed)
+  case unknown(type: String)
 
   enum CodingKeys: String, CodingKey {
     case type
@@ -29,22 +35,35 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case link
     case gif
     case post
+    case image
+    case audio
   }
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    let type = try container.decode(EmbedType.self, forKey: .type)
+    let typeString = try container.decode(String.self, forKey: .type)
+
+    guard let type = EmbedType(rawValue: typeString) else {
+      self = .unknown(type: typeString)
+      return
+    }
 
     switch type {
     case .link:
-      let link = try container.decode(MLSLinkEmbed.self, forKey: .data)
-      self = .link(link)
+      let data = try container.decode(MLSLinkEmbed.self, forKey: .data)
+      self = .link(data)
     case .gif:
-      let gif = try container.decode(MLSGIFEmbed.self, forKey: .data)
-      self = .gif(gif)
+      let data = try container.decode(MLSGIFEmbed.self, forKey: .data)
+      self = .gif(data)
     case .post:
-      let post = try container.decode(MLSPostEmbed.self, forKey: .data)
-      self = .post(post)
+      let data = try container.decode(MLSPostEmbed.self, forKey: .data)
+      self = .post(data)
+    case .image:
+      let data = try container.decode(MLSImageEmbed.self, forKey: .data)
+      self = .image(data)
+    case .audio:
+      let data = try container.decode(MLSAudioEmbed.self, forKey: .data)
+      self = .audio(data)
     }
   }
 
@@ -61,6 +80,16 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case .post(let post):
       try container.encode(EmbedType.post, forKey: .type)
       try container.encode(post, forKey: .data)
+    case .image(let data):
+      try container.encode(EmbedType.image, forKey: .type)
+      try container.encode(data, forKey: .data)
+    case .audio(let data):
+      try container.encode(EmbedType.audio, forKey: .type)
+      try container.encode(data, forKey: .data)
+    case .unknown(let type):
+      try container.encode(type, forKey: .type)
+      // Encode empty object for data to maintain structure
+      try container.encode([String: String](), forKey: .data)
     }
   }
 
@@ -68,7 +97,7 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     switch self {
     case .post(let post):
       return post.cid
-    case .link, .gif:
+    case .link, .gif, .image, .audio, .unknown:
       return nil
     }
   }
@@ -231,6 +260,104 @@ public struct MLSPostImage: Codable, Sendable, Hashable {
   }
 }
 
+// MARK: - Image Embed
+
+/// A first-class image attachment in MLS DMs.
+/// The image bytes are encrypted separately (AES-256-GCM) and stored as a blob.
+/// This embed carries the decryption key and metadata inside the E2EE MLS message.
+public struct MLSImageEmbed: Codable, Sendable, Hashable {
+  public let blobId: String
+  public let key: Data
+  public let iv: Data
+  public let sha256: String
+  public let contentType: String
+  public let size: Int
+  public let width: Int
+  public let height: Int
+  public let altText: String?
+  public let blurhash: String?
+
+  public init(
+    blobId: String,
+    key: Data,
+    iv: Data,
+    sha256: String,
+    contentType: String,
+    size: Int,
+    width: Int,
+    height: Int,
+    altText: String? = nil,
+    blurhash: String? = nil
+  ) {
+    self.blobId = blobId
+    self.key = key
+    self.iv = iv
+    self.sha256 = sha256
+    self.contentType = contentType
+    self.size = size
+    self.width = width
+    self.height = height
+    self.altText = altText
+    self.blurhash = blurhash
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case blobId = "blob_id"
+    case key, iv, sha256
+    case contentType = "content_type"
+    case size, width, height
+    case altText = "alt_text"
+    case blurhash
+  }
+}
+
+// MARK: - Audio Embed
+
+/// Encrypted voice message attachment
+public struct MLSAudioEmbed: Codable, Sendable, Hashable {
+  public let blobId: String
+  public let key: Data
+  public let iv: Data
+  public let sha256: String
+  public let contentType: String
+  public let size: UInt64
+  public let durationMs: UInt64
+  public let waveform: [Float]
+  public let transcript: String?
+
+  public init(
+    blobId: String,
+    key: Data,
+    iv: Data,
+    sha256: String,
+    contentType: String,
+    size: UInt64,
+    durationMs: UInt64,
+    waveform: [Float],
+    transcript: String? = nil
+  ) {
+    self.blobId = blobId
+    self.key = key
+    self.iv = iv
+    self.sha256 = sha256
+    self.contentType = contentType
+    self.size = size
+    self.durationMs = durationMs
+    self.waveform = waveform
+    self.transcript = transcript
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case blobId = "blob_id"
+    case key, iv, sha256
+    case contentType = "content_type"
+    case size
+    case durationMs = "duration_ms"
+    case waveform
+    case transcript
+  }
+}
+
 // MARK: - Reaction Payload
 
 /// Encrypted reaction to a message (add or remove emoji)
@@ -259,6 +386,32 @@ public struct MLSReadReceiptPayload: Codable, Sendable, Equatable {
 
   public init(messageId: String) {
     self.messageId = messageId
+  }
+}
+
+// MARK: - Delivery Ack Payload
+
+/// Emitted immediately after a device successfully decrypts a message.
+/// Sender DID is proven via MLS credential — not included in payload.
+public struct MLSDeliveryAckPayload: Codable, Sendable, Equatable {
+  public let messageId: String
+
+  public init(messageId: String) {
+    self.messageId = messageId
+  }
+}
+
+/// Emitted by a recipient device that failed to decrypt or missed a message.
+/// Distinct from MLS group recovery (epoch/tree divergence).
+public struct MLSMessageRecoveryRequestPayload: Codable, Sendable, Equatable {
+  public let messageId: String
+  public let epoch: Int64
+  public let sequenceNumber: Int64
+
+  public init(messageId: String, epoch: Int64, sequenceNumber: Int64) {
+    self.messageId = messageId
+    self.epoch = epoch
+    self.sequenceNumber = sequenceNumber
   }
 }
 
@@ -347,6 +500,16 @@ public struct MLSMessagePayload: Codable, Sendable {
   /// Admin action payload (for messageType: adminAction)
   public let adminAction: MLSAdminActionPayload?
 
+  /// Delivery ack payload (for messageType: deliveryAck)
+  public let deliveryAck: MLSDeliveryAckPayload?
+
+  /// Message recovery request payload (for messageType: recoveryRequest)
+  public let recoveryRequest: MLSMessageRecoveryRequestPayload?
+
+  /// Set on a re-sent message to identify which original message this recovers.
+  /// Nil on normal messages.
+  public let recoveredMessageId: String?
+
   // MARK: - Memberwise Init
 
   public init(
@@ -358,7 +521,10 @@ public struct MLSMessagePayload: Codable, Sendable {
     readReceipt: MLSReadReceiptPayload? = nil,
     typing: MLSTypingPayload? = nil,
     adminRoster: MLSAdminRosterPayload? = nil,
-    adminAction: MLSAdminActionPayload? = nil
+    adminAction: MLSAdminActionPayload? = nil,
+    deliveryAck: MLSDeliveryAckPayload? = nil,
+    recoveryRequest: MLSMessageRecoveryRequestPayload? = nil,
+    recoveredMessageId: String? = nil
   ) {
     self.version = version
     self.messageType = messageType
@@ -369,6 +535,9 @@ public struct MLSMessagePayload: Codable, Sendable {
     self.typing = typing
     self.adminRoster = adminRoster
     self.adminAction = adminAction
+    self.deliveryAck = deliveryAck
+    self.recoveryRequest = recoveryRequest
+    self.recoveredMessageId = recoveredMessageId
   }
 
   // MARK: - Factory Methods
@@ -429,6 +598,30 @@ public struct MLSMessagePayload: Codable, Sendable {
     MLSMessagePayload(
       messageType: .adminAction,
       adminAction: MLSAdminActionPayload(action: action, targetDid: targetDid, reason: reason)
+    )
+  }
+
+  /// Create a delivery ack payload (sent after successful decryption)
+  public static func deliveryAck(messageId: String) -> MLSMessagePayload {
+    MLSMessagePayload(
+      messageType: .deliveryAck,
+      deliveryAck: MLSDeliveryAckPayload(messageId: messageId)
+    )
+  }
+
+  /// Create a message recovery request (sent when decryption fails after retries)
+  public static func recoveryRequest(
+    messageId: String,
+    epoch: Int64,
+    sequenceNumber: Int64
+  ) -> MLSMessagePayload {
+    MLSMessagePayload(
+      messageType: .recoveryRequest,
+      recoveryRequest: MLSMessageRecoveryRequestPayload(
+        messageId: messageId,
+        epoch: epoch,
+        sequenceNumber: sequenceNumber
+      )
     )
   }
 }
