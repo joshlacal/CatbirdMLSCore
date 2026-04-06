@@ -76,6 +76,16 @@ public actor MLSCoreContext {
     staticLogger.warning("🚨 [0xdead10cc-FIX] Suspension flag SET - blocking all MLS operations")
   }
 
+  /// Fire sqlite3_interrupt() on all cached contexts WITHOUT closing them.
+  /// Safe to call from any thread — InterruptHandle is Send+Sync and doesn't require the Rust Mutex.
+  /// Call this SYNCHRONOUSLY in handleScenePhaseChange before the async emergency close Task.
+  public nonisolated static func interruptAllContexts() {
+    let contexts = emergencyState.withLock { Array($0.contexts.values) }
+    for context in contexts {
+      context.interrupt()
+    }
+  }
+
   /// Clear suspension flag - call this when returning to foreground
   public nonisolated static func clearSuspensionFlag() {
     emergencyState.withLock { $0.suspensionInProgress = false }
@@ -103,6 +113,15 @@ public actor MLSCoreContext {
       details: "MLSCoreContext emergencyCloseAllContexts: closing \(contextsToClose.count)",
       process: process
     )
+
+    // CRITICAL FIX: Set suspension flag + interrupt all in-flight SQLCipher operations FIRST.
+    // setSuspended causes long-running Rust operations to bail out at their next check point.
+    // interrupt() causes in-flight sqlite3_step to return SQLITE_INTERRUPT immediately,
+    // releasing the Mutex so flushAndPrepareClose can acquire it promptly.
+    for (_, context) in contextsToClose {
+      context.setSuspended(value: true)
+      context.interrupt()
+    }
 
     for (userDID, context) in contextsToClose {
       do {
@@ -1214,6 +1233,14 @@ public actor MLSCoreContext {
         case .adminAction:
           plaintext = "Admin update"
           embedData = nil
+
+        case .system:
+          plaintext = payload.text ?? "System message"
+          embedData = nil
+
+        case .deliveryAck, .recoveryRequest:
+          plaintext = "Delivery ack"
+          embedData = nil
         }
       } else {
         plaintext = String(data: payloadData, encoding: .utf8) ?? ""
@@ -1864,7 +1891,7 @@ public actor MLSCoreContext {
             conversationID: resolvedConversationID,  // Use the resolved ID
             messageID: messageID,
             epoch: nil,
-            sequenceNumber: nil,
+            sequenceNumber: sequenceNumber,
             senderID: nil,
             useEphemeralAccess: useEphemeralAccess
           )
@@ -1940,6 +1967,14 @@ public actor MLSCoreContext {
         "[MLSCoreContext] User \(userDid.prefix(20)) is NOT active - ephemeral access recommended")
     }
     return !isActive
+  }
+
+  public func isStorageAccessSuspended(for userDid: String) async -> Bool {
+    await databaseManager.isDatabaseAccessSuspended(for: userDid)
+  }
+
+  public func storageAccessSuspensionDescription(for userDid: String) async -> String? {
+    await databaseManager.databaseAccessSuspensionDescription(for: userDid)
   }
 
   private func inferMessageType(from cachedPlaintext: String) -> MLSMessageType? {
@@ -2094,6 +2129,10 @@ public actor MLSCoreContext {
       return "Typing..."
     case .adminRoster, .adminAction:
       return "Group update"
+    case .system:
+      return payload.text ?? "System message"
+    case .deliveryAck, .recoveryRequest:
+      return "Delivery ack"
     }
   }
 
@@ -2115,6 +2154,10 @@ public actor MLSCoreContext {
       return "Roster update"
     case .adminAction:
       return "Admin update"
+    case .system:
+      return payload.text ?? "System message"
+    case .deliveryAck, .recoveryRequest:
+      return "Delivery ack"
     }
   }
 

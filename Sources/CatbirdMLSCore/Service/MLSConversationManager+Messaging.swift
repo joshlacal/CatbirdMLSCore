@@ -144,35 +144,13 @@ public extension MLSConversationManager {
     if count < 3 { return }
     if await conversationNeedsRejoin(conversationID) { return }
 
-    try? await markConversationNeedsRejoin(conversationID)
-
-    guard beginRejoinAttempt(conversationID: conversationID, source: source) else { return }
-
     logger.error(
-      "🔴 [MLS-REJOIN] CannotDecryptOwnMessage x\(count) for \(conversationID.prefix(16)) source=\(source) - forcing rejoin"
+      "🔴 [MLS-REJOIN] CannotDecryptOwnMessage x\(count) for \(conversationID.prefix(16)) source=\(source) — deferring rejoin to avoid epoch inflation"
     )
 
-    let taskId = registerTask()
-    Task { [weak self] in
-      guard let self else { return }
-      defer {
-        self.unregisterTask(taskId)
-        self.endRejoinAttempt(conversationID: conversationID)
-      }
-      guard !self.isSuspending, !self.isShuttingDown else { return }
-      do {
-        try await self.forceRejoin(for: conversationID)
-        await self.clearConversationRejoinFlag(conversationID)
-      } catch {
-        self.logger.error(
-          "❌ [MLS-REJOIN] forceRejoin failed for \(conversationID.prefix(16)): \(error.localizedDescription)"
-        )
-        await self.requestRejoinIfPossible(
-          convoId: conversationID,
-          reason: "CannotDecryptOwnMessage x\(count) source=\(source)"
-        )
-      }
-    }
+    // Mark for deferred rejoin — the sync loop will handle recovery with backoff.
+    // Do NOT launch an immediate External Commit here.
+    try? await markConversationNeedsRejoin(conversationID)
   }
 
   private func clearSelfDecryptFailures(conversationID: String) {
@@ -199,34 +177,17 @@ public extension MLSConversationManager {
     logger.warning("⚠️ [MLS-DESYNC] Message \(messageID.prefix(16)) decryption failure #\(count)/\(self.nuclearRejoinThreshold)")
     
     if count >= nuclearRejoinThreshold {
-      logger.error("🔴 [MLS-NUCLEAR] Message \(messageID.prefix(16)) failed decryption \(count)x - triggering nuclear rejoin for \(conversationID.prefix(16))")
-      
+      logger.error("🔴 [MLS-NUCLEAR] Message \(messageID.prefix(16)) failed decryption \(count)x for \(conversationID.prefix(16)) — deferring rejoin to avoid epoch inflation")
+
       // Clear the failure counter for this message
       persistentDecryptionFailures.withLock { failures in
         failures.removeValue(forKey: messageID)
       }
-      
-      // Mark conversation as needing rejoin
+
+      // Mark for deferred rejoin — the sync loop will handle recovery with backoff.
+      // Do NOT launch an immediate External Commit here.
       try? await markConversationNeedsRejoin(conversationID)
-      
-      // Attempt nuclear rejoin
-      guard beginRejoinAttempt(conversationID: conversationID, source: "nuclear-\(source)") else {
-        return false
-      }
-      
-      Task { [weak self] in
-        guard let self else { return }
-        defer { self.endRejoinAttempt(conversationID: conversationID) }
-        
-        do {
-          try await self.forceRejoin(for: conversationID)
-          await self.clearConversationRejoinFlag(conversationID)
-          self.logger.info("✅ [MLS-NUCLEAR] Nuclear rejoin succeeded for \(conversationID.prefix(16))")
-        } catch {
-          self.logger.error("❌ [MLS-NUCLEAR] Nuclear rejoin failed for \(conversationID.prefix(16)): \(error.localizedDescription)")
-        }
-      }
-      
+
       return true
     }
     
@@ -259,6 +220,9 @@ public extension MLSConversationManager {
     context: ProcessingContext
   ) async throws -> [AdoptedReaction] {
     guard let userDid = userDid else { throw MLSConversationError.noAuthentication }
+
+    // Reconnect database pool if it was closed during recovery
+    try await refreshDatabaseIfNeeded()
 
     let cursorBefore = (try? await storage.getLastProcessedSeq(
       conversationID: message.convoId,
@@ -336,6 +300,9 @@ public extension MLSConversationManager {
     // EARLY VALIDATION: Run outside the queue to fail fast
     // ═══════════════════════════════════════════════════════════════════════════
     try throwIfShuttingDown("sendMessage")
+
+    // Reconnect database pool if it was closed during recovery
+    try await refreshDatabaseIfNeeded()
 
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
@@ -421,6 +388,10 @@ public extension MLSConversationManager {
           )
         }
 
+        // 4a. Get confirmation tag for tree divergence detection
+        let confirmationTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+        let confirmationTagB64 = confirmationTagData?.base64EncodedString()
+
         // 4. Build and encrypt payload (inside lock)
         let payload = MLSMessagePayload.text(plaintext, embed: embed)
         let payloadData = try payload.encodeToJSON()
@@ -436,11 +407,24 @@ public extension MLSConversationManager {
         // 6. Generate deterministic message ID for atomic caching
         let localMsgId = UUID().uuidString
 
+        // Optimistic seq: current max + 1 so the message sorts at the bottom
+        // immediately rather than appearing at the top with seq=0.
+        let optimisticSeq: Int
+        if let cursor = try? await storage.fetchLastMessageCursor(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          optimisticSeq = Int(cursor.seq) + 1
+        } else {
+          optimisticSeq = 1
+        }
+
         // 🔒 Pre-cache payload for self-sent message BEFORE network call
         // CRITICAL FIX: Re-check shutdown status before attempting DB write
         // This prevents "SQLite error 21" if account switch started during encryption
         try throwIfShuttingDown("sendMessage-preCache")
-        
+
         do {
           // Use shared helper with retry logic (3 attempts)
           try await cacheControlMessageEnvelope(
@@ -449,9 +433,9 @@ public extension MLSConversationManager {
               convoId: convoId,
               ciphertext: Bytes(data: paddedCiphertext),
               epoch: Int(localEpoch),
-              seq: 0,
+              seq: optimisticSeq,
               createdAt: ATProtocolDate(date: Date()),
-              messageType: "app" 
+              messageType: "app"
             ),
             payload: payload,
             senderDID: userDid,
@@ -472,9 +456,33 @@ public extension MLSConversationManager {
             ciphertext: paddedCiphertext,
             epoch: Int(localEpoch),
             paddedSize: paddedSize,
-            senderDid: try DID(didString: userDid)
+            senderDid: try DID(didString: userDid),
+            confirmationTag: confirmationTagB64
           )
           return (localMsgId, sendResult)
+        } catch let apiError as MLSAPIError {
+          if case .httpError(let code, _) = apiError, code == 409 {
+            // 409 = epoch mismatch — sync pending commits, re-encrypt, retry once
+            logger.warning("⚠️ [SEND] 409 epoch mismatch at epoch \(localEpoch) — syncing and retrying")
+            try? await syncWithServer()
+            let freshEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+            let freshCiphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+            let freshTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+            let freshTagB64 = freshTagData?.base64EncodedString()
+            let retryResult = try await apiClient.sendMessage(
+              convoId: convoId,
+              msgId: localMsgId,
+              ciphertext: freshCiphertext,
+              epoch: Int(freshEpoch),
+              paddedSize: freshCiphertext.count,
+              senderDid: try DID(didString: userDid),
+              confirmationTag: freshTagB64
+            )
+            logger.info("✅ [SEND] 409 retry succeeded at epoch \(freshEpoch)")
+            return (localMsgId, retryResult)
+          }
+          logger.error("❌ [Gen: \(self.currentCoordinationGeneration)] [Epoch: \(localEpoch)] Network send failed for \(localMsgId): \(apiError.localizedDescription)")
+          throw apiError
         } catch {
           logger.error("❌ [Gen: \(self.currentCoordinationGeneration)] [Epoch: \(localEpoch)] Network send failed for \(localMsgId): \(error.localizedDescription)")
           throw error
@@ -513,6 +521,18 @@ public extension MLSConversationManager {
         )
       } catch {
         logger.warning("Failed to persist epoch after send: \(error.localizedDescription)")
+      }
+
+      // Update lastMessageAt so conversation list sorts correctly after sending
+      do {
+        try await storage.updateConversationLastMessageAt(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          timestamp: sendResult.receivedAt.date,
+          database: database
+        )
+      } catch {
+        logger.warning("Failed to update lastMessageAt after send: \(error.localizedDescription)")
       }
 
       logger.info("✅ [Gen: \(self.currentCoordinationGeneration)] [Epoch: \(sendResult.epoch)] Message \(localMsgId) confirmed by server (Seq: \(sendResult.sequenceNumber))")
@@ -555,6 +575,10 @@ public extension MLSConversationManager {
       let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
         let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
 
+        // Get confirmation tag for tree divergence detection
+        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+        let tagB64 = tagData?.base64EncodedString()
+
         let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
         // Ciphertext is already padded by catbird-mls encrypt_message
         let paddedCiphertext = ciphertext
@@ -563,17 +587,29 @@ public extension MLSConversationManager {
         // Generate local ID for atomic cache
         let localMsgId = UUID().uuidString
 
+        // Optimistic seq so the reaction sorts correctly before server echo
+        let optimisticSeq: Int
+        if let cursor = try? await storage.fetchLastMessageCursor(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          optimisticSeq = Int(cursor.seq) + 1
+        } else {
+          optimisticSeq = 1
+        }
+
         // 🔒 CRITICAL FIX: Cache BEFORE network call
         // Use a synthetic MessageView for the pre-cache step
         // Must succeed or we abort to avoid "CannotDecryptOwnMessage" later
         try throwIfShuttingDown("sendEncryptedReaction-preCache")
         try await cacheControlMessageEnvelope(
           message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId, // Matches expected server echo (idempotent)
+            id: localMsgId,
             convoId: convoId,
             ciphertext: Bytes(data: paddedCiphertext),
             epoch: Int(localEpoch),
-            seq: 0, // Placeholder, updated on echo
+            seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
             messageType: "reaction"
           ),
@@ -589,7 +625,8 @@ public extension MLSConversationManager {
           ciphertext: paddedCiphertext,
           epoch: Int(localEpoch),
           paddedSize: paddedSize,
-          senderDid: try DID(didString: userDid)
+          senderDid: try DID(didString: userDid),
+          confirmationTag: tagB64
         )
         return (localMsgId, sendResult)
       }
@@ -766,6 +803,9 @@ public extension MLSConversationManager {
     // Check if we're shutting down - abort early to avoid racing with DB close
     try throwIfShuttingDown("processServerMessage")
 
+    // Reconnect database pool if it was closed during recovery
+    try await refreshDatabaseIfNeeded()
+
     // Validate session generation hasn't changed (account switch)
     try validateSessionGeneration(capturedGeneration: myGeneration)
 
@@ -802,6 +842,26 @@ public extension MLSConversationManager {
 
     switch decision {
     case .alreadyProcessed:
+      // FIX: Correct sequence number if the stored message has a wrong seq
+      // (e.g., NSE saved with MLS generation counter instead of server seq)
+      do {
+        if let existingMsg = try await storage.fetchMessage(
+          messageID: message.id,
+          currentUserDID: userDid,
+          database: database
+        ), existingMsg.sequenceNumber != Int64(message.seq) {
+          logger.warning("🔧 [SEQ-FIX] Message \(message.id.prefix(16)) has stored seq=\(existingMsg.sequenceNumber) but server says seq=\(message.seq) - correcting")
+          try await storage.updateMessageSequenceNumber(
+            messageID: message.id,
+            currentUserDID: userDid,
+            sequenceNumber: Int64(message.seq),
+            epoch: Int64(message.epoch),
+            database: database
+          )
+        }
+      } catch {
+        logger.warning("⚠️ [SEQ-FIX] Failed to correct seq for \(message.id.prefix(16)): \(error.localizedDescription)")
+      }
       logger.warning("⏭️ [SEQ-ORDER] Skipping already-processed message \(message.id) seq=\(message.seq) - returning .nonApplication")
       return .nonApplication
 
@@ -817,16 +877,22 @@ public extension MLSConversationManager {
       // Try to fetch missing commits that would advance our epoch
       if let convo = conversations[message.convoId] {
         let localEpoch = UInt64(localEpochForOrdering ?? 0)
-        let fetched = await fetchAndProcessMissingCommits(
+        let result = await fetchAndProcessMissingCommits(
           conversationID: message.convoId,
           groupId: convo.groupId,
           localEpoch: localEpoch,
           targetEpoch: message.epoch
         )
-        if fetched {
+        switch result {
+        case .advanced:
           // Commits fetched - try to process the buffered message now
           logger.info("[SEQ-ORDER] Commits fetched, attempting to process buffered message \(message.id)")
           // Don't recursively call here - let the caller retry
+        case .needsDeferredRejoin(_, let reason):
+          logger.warning("[SEQ-ORDER] Epoch catch-up needs deferred rejoin for \(message.convoId.prefix(16))...: \(reason)")
+          try? await markConversationNeedsRejoin(message.convoId)
+        case .noGap, .serverDataGap, .transientFetchError:
+          break
         }
       }
       return .nonApplication
@@ -916,17 +982,10 @@ public extension MLSConversationManager {
           queueIndex: 0
         )
 
-        // CRITICAL FIX: Handle MLSError.cannotDecryptOwnMessage - this is a permanent failure
-        // for self-sent messages. Reloading state won't fix it because we don't have the keys.
+        // CannotDecryptOwnMessage is a definitive self-echo signal from MLS.
+        // Recover the pre-cached payload from the pending send instead of saving an error placeholder.
         if case MLSError.cannotDecryptOwnMessage = error {
-          logger.warning("⚠️ [PROCESS] cannotDecryptOwnMessage for \(message.id) - marking as processed (unrecoverable self-message)")
-          let outcome = try await saveErrorPlaceholder(
-            message: message,
-            error: "Self-sent message (cache missing)",
-            validationReason: "CannotDecryptOwnMessage: Sender is current user",
-            context: context
-          )
-          await recordSelfDecryptFailure(conversationID: message.convoId, source: source)
+          let outcome = try await recoverSelfSentMessage(message: message, context: context, source: source)
           // CRITICAL: Record as processed to prevent re-processing loop
           _ = await withAdvisoryLockBestEffort(for: userDid) {
             try await self.messageOrderingCoordinator.recordMessageProcessed(
@@ -939,29 +998,21 @@ public extension MLSConversationManager {
           }
           return outcome
         }
-        
+
         // Also check string description for backward compatibility with FFI errors
         if errorDesc.contains("CannotDecryptOwnMessage") || errorDesc.contains("cannotDecryptOwnMessage") {
-             logger.warning("⚠️ [PROCESS] CannotDecryptOwnMessage for \(message.id) - marking as processed (unrecoverable self-message)")
-             // Save placeholder to advance sequence
-             let outcome = try await saveErrorPlaceholder(
-               message: message,
-               error: "Self-sent message (cache missing)",
-               validationReason: "CannotDecryptOwnMessage: Sender is current user",
-               context: context
-             )
-             await recordSelfDecryptFailure(conversationID: message.convoId, source: source)
-             // CRITICAL: Record as processed to prevent re-processing loop
-             _ = await withAdvisoryLockBestEffort(for: userDid) {
-               try await self.messageOrderingCoordinator.recordMessageProcessed(
-                 messageID: message.id,
-                 conversationID: message.convoId,
-                 sequenceNumber: Int64(message.seq),
-                 currentUserDID: userDid,
-                 database: self.database
-               )
-             }
-             return outcome
+          let outcome = try await recoverSelfSentMessage(message: message, context: context, source: source)
+          // CRITICAL: Record as processed to prevent re-processing loop
+          _ = await withAdvisoryLockBestEffort(for: userDid) {
+            try await self.messageOrderingCoordinator.recordMessageProcessed(
+              messageID: message.id,
+              conversationID: message.convoId,
+              sequenceNumber: Int64(message.seq),
+              currentUserDID: userDid,
+              database: self.database
+            )
+          }
+          return outcome
         }
 
         // Check for SecretReuseError (NSE race condition indicator), Future Epoch, or Decryption Failure
@@ -1029,6 +1080,16 @@ public extension MLSConversationManager {
               return .controlMessage
             }
 
+            // Fix ordering: update NSE-cached metadata with server values
+            try? await storage.updateMessageMetadata(
+              messageID: message.id,
+              currentUserDID: userDid,
+              epoch: Int64(message.epoch),
+              sequenceNumber: Int64(message.seq),
+              timestamp: message.createdAt.date,
+              database: database
+            )
+
             return .application(payload: cachedPayload, sender: cachedMessage.senderID)
           }
 
@@ -1052,19 +1113,25 @@ public extension MLSConversationManager {
                 
                 if UInt64(message.epoch) > currentLocalEpoch {
                   logger.info("🔄 [EPOCH-RECOVERY] Message epoch \(message.epoch) > local \(currentLocalEpoch) - fetching missing commits")
-                  let fetched = await fetchAndProcessMissingCommits(
+                  let catchUpResult = await fetchAndProcessMissingCommits(
                     conversationID: message.convoId,
                     groupId: convo.groupId,
                     localEpoch: currentLocalEpoch,
                     targetEpoch: message.epoch
                   )
-                  if fetched {
+                  switch catchUpResult {
+                  case .advanced:
                     logger.info("✅ [EPOCH-RECOVERY] Commits fetched successfully - retrying message processing")
+                  case .needsDeferredRejoin(_, let reason):
+                    logger.warning("⚠️ [EPOCH-RECOVERY] Deferred rejoin needed for \(message.convoId.prefix(16))...: \(reason)")
+                    try? await markConversationNeedsRejoin(message.convoId)
+                  case .noGap, .serverDataGap, .transientFetchError:
+                    break
                   }
                 }
               }
             }
-            
+
             // Exponential backoff: 50ms, 100ms, 200ms
             let delayMs = UInt64(50 * (1 << attempt))
             try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
@@ -1127,10 +1194,20 @@ public extension MLSConversationManager {
                 }
                 return .controlMessage
               }
-              
+
+              // Fix ordering: update NSE-cached metadata with server values
+              try? await storage.updateMessageMetadata(
+                messageID: message.id,
+                currentUserDID: userDid,
+                epoch: Int64(message.epoch),
+                sequenceNumber: Int64(message.seq),
+                timestamp: message.createdAt.date,
+                database: database
+              )
+
               return .application(payload: cachedPayload, sender: cachedMessage.senderID)
             }
-            
+
             logger.error("❌ [MLS-RETRY] Retry exhausted and cache empty for message \(message.id)")
             
             // FIX D: Record persistent decryption failure - may trigger nuclear rejoin
@@ -1221,21 +1298,21 @@ public extension MLSConversationManager {
     groupId: String,
     localEpoch: UInt64,
     targetEpoch: Int
-  ) async -> Bool {
+  ) async -> EpochCatchUpResult {
     guard let userDid = userDid else {
       logger.warning("⚠️ [EPOCH-RECOVERY] Cannot fetch commits - no user DID")
-      return false
+      return .needsDeferredRejoin(failedEpoch: localEpoch, reason: "No user DID")
     }
-    
+
     // Sanity check: only fetch if we're actually behind
     guard UInt64(targetEpoch) > localEpoch else {
       logger.debug("[EPOCH-RECOVERY] No epoch gap: local=\(localEpoch), target=\(targetEpoch)")
-      return true // No gap, so "success" (nothing to do)
+      return .noGap
     }
-    
+
     let epochGap = UInt64(targetEpoch) - localEpoch
     logger.info("🔄 [EPOCH-RECOVERY] Fetching commits for epoch gap: local=\(localEpoch) → target=\(targetEpoch) (gap=\(epochGap))")
-    
+
     do {
       // Fetch commits from server for the epoch range we're missing.
       // Server stores commits at their POST-advance epoch (commit at epoch N advanced the group TO N).
@@ -1245,17 +1322,17 @@ public extension MLSConversationManager {
         fromEpoch: Int(localEpoch) + 1,
         toEpoch: targetEpoch
       )
-      
+
       guard !commits.isEmpty else {
         logger.warning("⚠️ [EPOCH-RECOVERY] Server returned no commits for epoch range \(localEpoch + 1)-\(targetEpoch)")
-        return false
+        return .serverDataGap
       }
-      
+
       logger.info("📥 [EPOCH-RECOVERY] Received \(commits.count) commits from server")
-      
+
       // Sort commits by epoch (ascending) to process in order
       let sortedCommits = commits.sorted { $0.epoch < $1.epoch }
-      
+
       var processedCount = 0
       var currentEpoch = localEpoch
       for commit in sortedCommits {
@@ -1264,7 +1341,7 @@ public extension MLSConversationManager {
           logger.debug("[EPOCH-RECOVERY] Skipping already-processed commit epoch=\(commit.epoch)")
           continue
         }
-        
+
         // NOTE: We intentionally do NOT skip commits from the same user DID.
         // The sender DID is the user's base DID (e.g. did:plc:xxx), which is shared
         // across all devices. Skipping by DID prefix would also skip commits from
@@ -1272,21 +1349,21 @@ public extension MLSConversationManager {
         // catmos created the group), preventing epoch advancement.
         // Truly already-applied commits are caught by the epoch <= currentEpoch
         // check above.
-        
+
         // Get commit data (MessageView.ciphertext is non-optional Bytes)
         let commitData = commit.ciphertext.data
         guard !commitData.isEmpty else {
           logger.warning("⚠️ [EPOCH-RECOVERY] Commit data empty for epoch=\(commit.epoch)")
           break  // Can't skip — sequential processing required
         }
-        
+
         logger.info("📍 [EPOCH-RECOVERY] Processing commit: epoch=\(commit.epoch), size=\(commitData.count) bytes, currentFFI=\(currentEpoch)")
-        
+
         do {
           // Process the commit through OpenMLS (stages + merges)
           try await processCommit(groupId: groupId, commitData: commitData)
           processedCount += 1
-          
+
           // Re-read actual epoch from FFI after successful merge
           if let groupIdData = Data(hexEncoded: groupId) {
             currentEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? currentEpoch
@@ -1294,7 +1371,7 @@ public extension MLSConversationManager {
           logger.info("✅ [EPOCH-RECOVERY] Processed commit for epoch=\(commit.epoch), FFI now at \(currentEpoch)")
         } catch {
           logger.error("❌ [EPOCH-RECOVERY] Failed to process commit epoch=\(commit.epoch): \(error.localizedDescription)")
-          
+
           // Check if epoch advanced despite the error (commit may have been partially applied)
           if let groupIdData = Data(hexEncoded: groupId) {
             let newEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? currentEpoch
@@ -1305,29 +1382,52 @@ public extension MLSConversationManager {
               continue
             }
           }
-          
-          await handleRatchetDesync(
-            for: conversationID,
-            reason:
-              "Commit catch-up failed at epoch \(commit.epoch) with local epoch still at \(currentEpoch): \(error.localizedDescription)"
-          )
-          logger.warning("⚠️ [EPOCH-RECOVERY] Stopping commit processing - sequential order required")
-          break
+
+          // ⭐ FIX: Do NOT call handleRatchetDesync here. Return a deferred result
+          // so the sync caller can flag needsRejoin without launching an immediate
+          // External Commit from the sync hot-path. This breaks the epoch inflation
+          // feedback loop between sibling devices.
+          let reason = "Commit catch-up failed at epoch \(commit.epoch) with local epoch still at \(currentEpoch): \(error.localizedDescription)"
+          logger.warning("⚠️ [EPOCH-RECOVERY] Deferring rejoin for \(conversationID.prefix(16))... - \(reason)")
+          return .needsDeferredRejoin(failedEpoch: currentEpoch, reason: reason)
         }
       }
-      
+
       if processedCount > 0 {
         logger.info("🎉 [EPOCH-RECOVERY] Processed \(processedCount) commits")
-        return true
+        return .advanced
       } else {
         logger.warning("⚠️ [EPOCH-RECOVERY] No commits were successfully processed")
-        return false
+        return .serverDataGap
       }
-      
+
     } catch {
+      // Transport/auth/server errors fetching commits are transient — retry next sync,
+      // do NOT escalate to needsRejoin which would strand the conversation.
       logger.error("❌ [EPOCH-RECOVERY] Failed to fetch commits: \(error.localizedDescription)")
-      return false
+      return .transientFetchError(reason: error.localizedDescription)
     }
+  }
+
+  // MARK: - Epoch Catch-Up Result
+
+  /// Result of an epoch catch-up attempt via `fetchAndProcessMissingCommits`.
+  /// Allows callers to distinguish successful advancement from conditions
+  /// that need deferred recovery (instead of immediate `forceRejoin`).
+  enum EpochCatchUpResult {
+    /// Successfully processed all missing commits; local epoch matches target.
+    case advanced
+    /// No epoch gap existed; nothing to do.
+    case noGap
+    /// One or more commits could not be processed (e.g. sibling-device external
+    /// commit changed the ratchet tree). The conversation should be flagged
+    /// `needsRejoin` and recovered outside the sync hot-path with backoff.
+    case needsDeferredRejoin(failedEpoch: UInt64, reason: String)
+    /// Server returned no commits for the expected range (data gap on server).
+    case serverDataGap
+    /// Transient error (network, auth, server 5xx) fetching commits. Caller
+    /// should retry on next sync pass without marking `needsRejoin`.
+    case transientFetchError(reason: String)
   }
 
   // MARK: - Gap Filling (Locked)
@@ -1361,18 +1461,46 @@ public extension MLSConversationManager {
       
       let gen = currentCoordinationGeneration
       logger.info("🧩 [Gap Fill] [Gen: \(gen)] Processing \(relevantMessages.count) gap messages...")
-      
+
       // Sort: App messages first, then commits (within same epoch)
       // Since we are filling a gap, strictly following sequence order is safest
       let sortedMessages = relevantMessages.sorted { $0.seq < $1.seq }
-      
+
+      var successCount = 0
+      var decryptionFailures = 0
+
       for msg in sortedMessages {
         // Break early if shutdown initiated during gap fill
         if isShuttingDown { break }
 
+        // ⭐ FIX: If the conversation was flagged needsRejoin during this gap-fill
+        // (e.g. epoch catch-up failed with AeadError), stop processing — all
+        // subsequent messages at the newer epoch will fail too. Save placeholders
+        // for the remaining range to advance the sequence counter and prevent
+        // re-triggering the same gap-fill on next sync.
+        if await conversationNeedsRejoin(conversationID) {
+          logger.warning("🧩 [Gap Fill] Conversation \(conversationID.prefix(8)) flagged needsRejoin - saving placeholders for remaining \(sortedMessages.count - successCount - decryptionFailures) messages")
+          for remaining in sortedMessages where Int(remaining.seq) >= Int(msg.seq) {
+            do {
+              let ctx = ProcessingContext(
+                attemptID: nextProcessingAttemptID(),
+                source: "gap-fill-needsRejoin",
+                queueIndex: 0
+              )
+              _ = try await saveErrorPlaceholder(
+                message: remaining,
+                error: "Awaiting Rejoin",
+                validationReason: "Conversation needs rejoin - epoch desync",
+                context: ctx
+              )
+            } catch {
+              logger.error("🧩 [Gap Fill] Failed to save placeholder for seq \(remaining.seq): \(error.localizedDescription)")
+            }
+          }
+          break
+        }
+
         do {
-          // RECURSIVE CALL: Directly call the locked processing method
-          // This bypasses the coordinator lock acquisition since we already hold it
           let context = ProcessingContext(
             attemptID: nextProcessingAttemptID(),
             source: "gap-fill",
@@ -1380,13 +1508,46 @@ public extension MLSConversationManager {
           )
           _ = try await processServerMessageLocked(msg, context: context, gapFillDepth: depth)
           logger.debug("🧩 [Gap Fill] Successfully processed gap message seq: \(msg.seq)")
+          successCount += 1
         } catch {
-          logger.error("🧩 [Gap Fill] Failed to process gap message \(msg.seq): \(error.localizedDescription)")
-          // Continue with next message - don't abort the whole gap fill
+          let desc = error.localizedDescription
+          let isPermanentDecryptionFailure =
+            desc.contains("TooDistantInThePast")
+            || desc.contains("SecretTreeError")
+            || desc.contains("forward secrecy")
+            || desc.contains("Cannot decrypt message from epoch")
+            || desc.contains("old epoch")
+            || desc.contains("UnableToDecrypt")
+
+          if isPermanentDecryptionFailure {
+            decryptionFailures += 1
+            logger.warning("🧩 [Gap Fill] Permanent decryption failure for seq \(msg.seq) - saving placeholder")
+            do {
+              let ctx = ProcessingContext(
+                attemptID: nextProcessingAttemptID(),
+                source: "gap-fill",
+                queueIndex: 0
+              )
+              _ = try await saveErrorPlaceholder(
+                message: msg,
+                error: "Decryption Failed (Gap Fill)",
+                validationReason: desc,
+                context: ctx
+              )
+            } catch {
+              logger.error("🧩 [Gap Fill] Failed to save placeholder for seq \(msg.seq): \(error.localizedDescription)")
+            }
+          } else {
+            logger.error("🧩 [Gap Fill] Failed to process gap message \(msg.seq): \(desc)")
+          }
         }
       }
-      
-      logger.info("🧩 [Gap Fill] Completed processing batch")
+
+      if decryptionFailures > 0 {
+        logger.warning("🧩 [Gap Fill] Completed with \(decryptionFailures) permanent decryption failures (placeholders saved), \(successCount) successes")
+      } else {
+        logger.info("🧩 [Gap Fill] Completed processing batch (\(successCount) successes)")
+      }
     } catch {
       logger.error("🧩 [Gap Fill] Failed to fetch gap messages: \(error.localizedDescription)")
     }
@@ -1436,28 +1597,29 @@ public extension MLSConversationManager {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // CRITICAL FIX: Gap Detection & Prevention using Recursive Fill
+    // Gap Detection & Prevention using Recursive Fill
     // ═══════════════════════════════════════════════════════════════════════════
     // Prevents "Old Epoch" errors by maximizing the chance that we process strictly in order.
     // If we receive Seq 10 (Commit) but DB only has Seq 8, we MUST try to fetch/process Seq 9
     // BEFORE processing Seq 10. Otherwise, Seq 10 advances epoch and Seq 9 becomes undecryptable.
+    //
+    // ⭐ FIX: ONLY run gap detection at the top level (gapFillDepth == 0).
+    // When we're already inside a gap-fill, the outer fillGapsLocked has already
+    // fetched the correct range in order. Querying lastStoredSequenceNumber here
+    // would return stale results (the in-flight batch isn't committed yet),
+    // causing spurious "gap from 1..N" detections that recurse infinitely.
     // ═══════════════════════════════════════════════════════════════════════════
-    if let lastSeq = await lastStoredSequenceNumber(for: message.convoId) {
-      // If lastSeq is 0, it might be a fresh convo, so we apply loose rules or check against 0.
-      // Message Seq 1 should proceed if lastSeq is 0.
-      // Gap condition: message.seq > lastSeq + 1
+    if gapFillDepth == 0, let lastSeq = await lastStoredSequenceNumber(for: message.convoId) {
       let serverSeq = Int(message.seq)
       if serverSeq > lastSeq + 1 {
         let missingStart = lastSeq + 1
         let missingEnd = serverSeq - 1
-        
+
         logger.warning("🚧 GAP DETECTED: Incoming Seq \(serverSeq) > Last Stored \(lastSeq) + 1")
-        logger.info("   Initiating locked recursive fill for range \(missingStart)...\(missingEnd)")
-        
-        // This is a synchronous await within the lock - safe because fillGapsLocked is recursive
-        // and does NOT spawn new tasks/locks.
-        await fillGapsLocked(conversationID: message.convoId, startSeq: missingStart, endSeq: missingEnd, depth: gapFillDepth + 1)
-        
+        logger.info("   Initiating locked gap fill for range \(missingStart)...\(missingEnd)")
+
+        await fillGapsLocked(conversationID: message.convoId, startSeq: missingStart, endSeq: missingEnd, depth: 1)
+
         // After filling, we proceed with the current message.
         // Note: effectively we updated the state, so 'localEpoch' retrieval below will be fresh.
       }
@@ -1618,6 +1780,22 @@ public extension MLSConversationManager {
 
           logger.debug("♻️ Using cached payload for message \(message.id)")
           clearSelfDecryptFailures(conversationID: message.convoId)
+
+          // Fix ordering: NSE stores MLS protocol epoch/seq which differ from server values.
+          // Update with server-authoritative metadata so sort order is correct.
+          do {
+            try await storage.updateMessageMetadata(
+              messageID: message.id,
+              currentUserDID: userDid,
+              epoch: Int64(message.epoch),
+              sequenceNumber: Int64(message.seq),
+              timestamp: message.createdAt.date,
+              database: database
+            )
+          } catch {
+            logger.warning("⚠️ Failed to update NSE-cached message metadata: \(error.localizedDescription)")
+          }
+
           return .application(payload: cachedPayload, sender: cachedMessage.senderID ?? "unknown")
         }
       }
@@ -1794,6 +1972,17 @@ public extension MLSConversationManager {
             validationReason: nil,
             context: context
           )
+
+        case .deliveryAck, .recoveryRequest:
+          // Handled in MLSConversationManager+DeliveryAcks — stub for compilation
+          _ = try await persistProcessedPayload(
+            message: message,
+            payload: payload,
+            senderID: senderDID,
+            processingError: nil,
+            validationReason: nil,
+            context: context
+          )
         }
 
         return .application(payload: payload, sender: senderDID)
@@ -1854,20 +2043,12 @@ public extension MLSConversationManager {
 
       let errorDescription = error.localizedDescription
       
-      // CRITICAL FIX: Handle CannotDecryptOwnMessage
-      // This happens when we self-send a message/reaction, lose the local cache (optimistic write failed),
-      // and then receive it back from the server.
-      // We cannot decrypt it because we are the sender.
       if errorDescription.contains("CannotDecryptOwnMessage") {
-        logger.warning("⚠️ [PROCESS] CannotDecryptOwnMessage for \(message.id) - this is a self-sent message with missing local cache. Marking as processed.")
-        
-        // We must save a placeholder to advance the sequence number and prevent valid lookback loops
-        return try await saveErrorPlaceholder(
-          message: message,
-          error: "Self-sent message (cache missing)",
-          validationReason: "CannotDecryptOwnMessage: Sender is current user",
-          context: context
-        )
+          return try await recoverSelfSentMessage(
+            message: message,
+            context: context,
+            source: context.source ?? "unknown"
+          )
       }
 
       if errorDescription.contains("SecretReuseError") || errorDescription.contains("Decryption failed") {
@@ -1885,16 +2066,9 @@ public extension MLSConversationManager {
         context: context
       )
     } catch {
-       // Also check generic error description for "CannotDecryptOwnMessage" string
        let errorDescr = error.localizedDescription
        if errorDescr.contains("CannotDecryptOwnMessage") {
-         logger.warning("⚠️ [PROCESS] CannotDecryptOwnMessage (generic) for \(message.id) - marking as processed.")
-         return try await saveErrorPlaceholder(
-           message: message,
-           error: "Self-sent message (cache missing)",
-           validationReason: "CannotDecryptOwnMessage: Sender is current user",
-           context: context
-         )
+         return try await recoverSelfSentMessage(message: message, context: context, source: context.source ?? "unknown")
        }
     
       logger.error("❌ Failed to process MLS message \(message.id): \(error.localizedDescription)")
@@ -1966,6 +2140,79 @@ public extension MLSConversationManager {
       processingError: processingError,
       validationReason: validationReason,
       context: resolvedContext
+    )
+  }
+
+  /// Recover a self-sent message when CannotDecryptOwnMessage is encountered.
+  ///
+  /// MLS authoritatively tells us this message was sent by the current user (senders
+  /// cannot decrypt their own ciphertext). Instead of saving an error placeholder,
+  /// we look up the oldest unconfirmed pre-cached send for this conversation
+  /// (identifiable by senderID == userDid AND sequenceNumber == 0) and adopt its
+  /// payload. This eliminates the race between SSE delivery and the HTTP send response.
+  ///
+  /// Falls back to error placeholder only if no pending send is found.
+  private func recoverSelfSentMessage(
+    message: BlueCatbirdMlsChatDefs.MessageView,
+    context: ProcessingContext?,
+    source: String
+  ) async throws -> MessageProcessingOutcome {
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    // CannotDecryptOwnMessage IS the self-echo signal — sender is definitively current user
+    if let pendingMsg = try? await storage.fetchOldestUnconfirmedSelfSentMessage(
+      conversationID: message.convoId,
+      senderDID: userDid,
+      currentUserDID: userDid,
+      database: database
+    ), let cachedPayload = pendingMsg.parsedPayload, pendingMsg.processingError == nil {
+      logger.info("[SELF-ECHO-RECOVER] Adopting pre-cached payload from pending send \(pendingMsg.messageID.prefix(16)) for SSE message \(message.id.prefix(16))")
+
+      // Persist the recovered payload under the server-assigned message ID
+      let resolvedContext = context ?? ProcessingContext(
+        attemptID: nextProcessingAttemptID(),
+        source: source,
+        queueIndex: 0
+      )
+      _ = try await persistProcessedPayload(
+        message: message,
+        payload: cachedPayload,
+        senderID: userDid,
+        processingError: nil,
+        validationReason: nil,
+        context: resolvedContext
+      )
+
+      // Delete the orphaned local-ID record (server ID record now has the payload)
+      if pendingMsg.messageID != message.id {
+        try? await database.write { db in
+          try db.execute(
+            sql: "DELETE FROM MLSMessageModel WHERE messageID = ? AND currentUserDID = ?",
+            arguments: [pendingMsg.messageID, MLSStorageHelpers.normalizeDID(userDid)]
+          )
+        }
+        logger.debug("[SELF-ECHO-RECOVER] Cleaned up orphaned local record \(pendingMsg.messageID.prefix(16))")
+      }
+
+      clearSelfDecryptFailures(conversationID: message.convoId)
+
+      let normalizedType = (message.messageType ?? "app").lowercased()
+      if normalizedType == "app" || normalizedType == "application" {
+        return .application(payload: cachedPayload, sender: userDid)
+      }
+      return .nonApplication
+    }
+
+    // Fallback: no pending send found — save error placeholder to advance sequence
+    logger.warning("[SELF-ECHO-RECOVER] No pending self-sent payload found for \(message.id.prefix(16)) — saving placeholder")
+    await recordSelfDecryptFailure(conversationID: message.convoId, source: source)
+    return try await saveErrorPlaceholder(
+      message: message,
+      error: "Self-sent message (cache missing)",
+      validationReason: "CannotDecryptOwnMessage: Sender is current user",
+      context: context
     )
   }
 
@@ -2151,6 +2398,21 @@ public extension MLSConversationManager {
       }
     }
 
+    // Update lastMessageAt so conversation list sorts correctly after receiving messages
+    if !processedPayloads.isEmpty {
+      let latestTimestamp = messages.map(\.createdAt.date).max() ?? Date()
+      do {
+        try await storage.updateConversationLastMessageAt(
+          conversationID: conversationID,
+          currentUserDID: userDid,
+          timestamp: latestTimestamp,
+          database: database
+        )
+      } catch {
+        logger.warning("Failed to update lastMessageAt after receive: \(error.localizedDescription)")
+      }
+    }
+
     return processedPayloads
   }
 
@@ -2192,7 +2454,27 @@ public extension MLSConversationManager {
       return .success(outcome)
 
     } catch MLSError.ignoredOldEpochMessage {
-      return .skipped
+      // CRITICAL FIX: Save placeholder to advance sequence number.
+      // Without this, the gap-fill loop re-fetches these messages forever.
+      // processServerMessageLocked may have already saved a placeholder,
+      // but if the error propagated before that, we need to handle it here.
+      do {
+        let ctx = ProcessingContext(
+          attemptID: nextProcessingAttemptID(),
+          source: source,
+          queueIndex: 0
+        )
+        let _ = try await saveErrorPlaceholder(
+          message: message,
+          error: "Message from old epoch",
+          validationReason: "Forward secrecy prevents decrypting old epochs",
+          context: ctx
+        )
+        return .success(.nonApplication)
+      } catch {
+        logger.error("Failed to save old-epoch placeholder for \(message.id): \(error.localizedDescription)")
+        return .skipped
+      }
     } catch MLSError.secretReuseSkipped {
       if let userDid = userDid {
         do {
@@ -2217,8 +2499,29 @@ public extension MLSConversationManager {
       case .ratchetStateDesync(let reason):
         if reason.contains("Cannot decrypt message from epoch")
           || reason.contains("forward secrecy")
+          || reason.contains("TooDistantInThePast")
+          || reason.contains("SecretTreeError")
         {
-          return .skipped
+          // CRITICAL FIX: These are PERMANENT decryption failures.
+          // Save placeholder and advance sequence to break gap-fill loop.
+          logger.warning("⚠️ [RECOVERY] Permanent decryption failure for \(message.id) seq=\(message.seq): \(reason)")
+          do {
+            let ctx = ProcessingContext(
+              attemptID: nextProcessingAttemptID(),
+              source: source,
+              queueIndex: 0
+            )
+            let _ = try await saveErrorPlaceholder(
+              message: message,
+              error: "Decryption Failed (Forward Secrecy)",
+              validationReason: reason,
+              context: ctx
+            )
+            return .success(.nonApplication)
+          } catch {
+            logger.error("Failed to save decryption-failure placeholder for \(message.id): \(error.localizedDescription)")
+            return .skipped
+          }
         }
         if retryCount < maxRetries {
           try? await Task.sleep(nanoseconds: 100_000_000)
@@ -2880,33 +3183,14 @@ public extension MLSConversationManager {
   internal func handleRatchetDesync(for conversationID: String, reason: String) async {
     if await conversationNeedsRejoin(conversationID) { return }
 
-    do {
-      try await markConversationNeedsRejoin(conversationID)
-    } catch {}
-
-    guard beginRejoinAttempt(conversationID: conversationID, source: "ratchet-desync")
-    else { return }
-
     logger.error(
-      "🔴 [MLS-DESYNC] Unrecoverable ratchet desync for \(conversationID.prefix(16)): \(reason)"
+      "🔴 [MLS-DESYNC] \(conversationID.prefix(16)) needs rejoin — deferring to avoid epoch inflation. Reason: \(reason)"
     )
 
-    Task { [weak self] in
-      guard let self else { return }
-      defer { self.endRejoinAttempt(conversationID: conversationID) }
-
-      do {
-        try await self.forceRejoin(for: conversationID)
-        await self.clearConversationRejoinFlag(conversationID)
-        self.logger.info(
-          "✅ [MLS-DESYNC] Force rejoin completed for \(conversationID.prefix(16))")
-      } catch {
-        self.logger.error(
-          "❌ [MLS-DESYNC] forceRejoin failed for \(conversationID.prefix(16)): \(error.localizedDescription)"
-        )
-        await self.requestRejoinIfPossible(convoId: conversationID, reason: reason)
-      }
-    }
+    // Mark for deferred rejoin — the sync loop's recoverDeferredRejoins will handle it
+    // with backoff. Do NOT launch an immediate External Commit from here, as concurrent
+    // auto-rejoins across devices are the primary cause of epoch inflation.
+    try? await markConversationNeedsRejoin(conversationID)
   }
 
   // MARK: - Epoch Management
@@ -2955,7 +3239,8 @@ public extension MLSConversationManager {
       cipherSuite: convo.cipherSuite,
       createdAt: convo.createdAt,
       lastMessageAt: convo.lastMessageAt,
-      metadata: convo.metadata
+      metadata: convo.metadata,
+      confirmationTag: convo.confirmationTag
     )
     conversations[convoId] = updatedConvo
 
@@ -3278,43 +3563,47 @@ public extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
-    // Step 1: Delete local group state
-    logger.info("🗑️ [forceRejoin] Step 1/4: Deleting local group state...")
+    // Step 1: Publish our current GroupInfo BEFORE deleting local state.
+    // This ensures the server has GroupInfo that other devices (and we ourselves
+    // after the rejoin) can use for External Commit. Without this, deleting local
+    // state when server GroupInfo is NULL creates an unrecoverable deadlock.
+    logger.info("📤 [forceRejoin] Step 1/5: Publishing current GroupInfo before state deletion...")
+    do {
+      try await mlsClient.publishGroupInfo(
+        for: userDid, convoId: convoId, groupId: groupIdData,
+        knownServerEpoch: nil  // Bypass stale check — we need ANY GroupInfo on the server
+      )
+      logger.info("✅ [forceRejoin] GroupInfo published at current epoch")
+    } catch {
+      logger.warning(
+        "⚠️ [forceRejoin] Pre-delete GroupInfo publish failed: \(error.localizedDescription)")
+      // If we can't publish, at least try to request a refresh from other members
+      do {
+        let (requested, _) = try await apiClient.groupInfoRefresh(convoId: convoId)
+        if requested {
+          logger.info("✅ [forceRejoin] Requested GroupInfo refresh from active members")
+          try await Task.sleep(for: .seconds(2))
+        }
+      } catch {
+        logger.warning("⚠️ [forceRejoin] GroupInfo refresh request also failed: \(error.localizedDescription)")
+      }
+    }
+
+    // Step 2: Delete local group state
+    logger.info("🗑️ [forceRejoin] Step 2/5: Deleting local group state...")
     do {
       try await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
       logger.info("✅ [forceRejoin] Local group state deleted")
     } catch {
       logger.warning(
         "⚠️ [forceRejoin] Delete group failed (may not exist): \(error.localizedDescription)")
-      // Continue anyway - group might not exist locally
     }
 
     // Also clear local tracking state
     groupStates.removeValue(forKey: convo.groupId)
 
-    // Step 2: Request fresh GroupInfo from active members
-    logger.info("📡 [forceRejoin] Step 2/4: Requesting GroupInfo refresh from active members...")
-    do {
-      let (requested, activeMembers) = try await apiClient.groupInfoRefresh(convoId: convoId)
-      if requested {
-        logger.info(
-          "✅ [forceRejoin] GroupInfo refresh requested - \(activeMembers ?? 0) active members notified"
-        )
-      } else {
-        logger.warning("⚠️ [forceRejoin] No active members to refresh GroupInfo - proceeding anyway")
-      }
-    } catch {
-      logger.warning(
-        "⚠️ [forceRejoin] Failed to request GroupInfo refresh: \(error.localizedDescription)")
-      // Continue anyway - maybe GroupInfo is already fresh
-    }
-
-    // Step 3: Wait for fresh GroupInfo to be published
-    logger.info("⏳ [forceRejoin] Step 3/4: Waiting 3s for fresh GroupInfo...")
-    try await Task.sleep(for: .seconds(3))
-
-    // Step 4: Rejoin via External Commit
-    logger.info("🔐 [forceRejoin] Step 4/4: Rejoining via External Commit...")
+    // Step 3: Rejoin via External Commit (using the GroupInfo we just published or any existing)
+    logger.info("🔐 [forceRejoin] Step 3/5: Rejoining via External Commit...")
     let newGroupId = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convoId)
 
     // Verify we rejoined the same group
@@ -3335,6 +3624,14 @@ public extension MLSConversationManager {
       convoId: convoId,
       epoch: newEpoch,
       members: []
+    )
+
+    // Insert history boundary marker for device rejoin
+    await insertHistoryBoundaryMarker(
+      conversationId: convoId,
+      senderDID: userDid,
+      epoch: newEpoch,
+      contentKey: "history_boundary.device_rejoined"
     )
 
     // Note: The conversation record in `conversations` dictionary uses ConvoView from server
@@ -3515,13 +3812,21 @@ public extension MLSConversationManager {
       // Wait 15 seconds before first check to let initial sync complete
       try? await Task.sleep(for: .seconds(15))
 
+      // Track consecutive DB errors for backoff
+      var consecutiveDBErrors = 0
+      let normalInterval: Duration = .seconds(30)
+      let backoffInterval: Duration = .seconds(60)
+      let maxConsecutiveDBErrors = 3
+
       while !Task.isCancelled {
         do {
           // Validate session before work
           try self.validateSessionGeneration(capturedGeneration: myGeneration)
 
-          // Check every 30 seconds for faster orphan recovery
-          try await Task.sleep(for: .seconds(30))
+          // Use backoff interval if DB has been repeatedly unavailable
+          let sleepInterval = consecutiveDBErrors >= maxConsecutiveDBErrors
+            ? backoffInterval : normalInterval
+          try await Task.sleep(for: sleepInterval)
 
           guard !Task.isCancelled, !isShuttingDown else { break }
 
@@ -3529,6 +3834,16 @@ public extension MLSConversationManager {
           try self.validateSessionGeneration(capturedGeneration: myGeneration)
 
           guard let userDid = userDid else { continue }
+
+          // Guard: skip iteration if database is suspended/closed
+          let dbOpen = await databaseManager.isDatabaseOpen(for: userDid)
+          guard dbOpen else {
+            if consecutiveDBErrors == 0 {
+              logger.info("[ORPHAN] Database suspended for \(userDid.prefix(16)) — skipping iteration")
+            }
+            consecutiveDBErrors += 1
+            continue
+          }
 
           // 1. Adopt orphaned reactions
           await adoptPendingOrphans(userDID: userDid)
@@ -3545,12 +3860,25 @@ public extension MLSConversationManager {
           } catch {
             logger.error("[SEQ-ORDER] Failed to cleanup stale messages: \(error.localizedDescription)")
           }
+
+          // Success — reset error counter
+          consecutiveDBErrors = 0
         } catch {
           if error is CancellationError {
             self.logger.info("Orphan adoption task cancelled")
             break
           }
-          self.logger.error("Orphan adoption error: \(error)")
+          // Detect SQLite "connection closed" / "out of memory" errors (code 21)
+          let desc = error.localizedDescription
+          if desc.contains("Connection is closed") || desc.contains("error 21") {
+            consecutiveDBErrors += 1
+            if consecutiveDBErrors == maxConsecutiveDBErrors {
+              self.logger.warning("[ORPHAN] \(consecutiveDBErrors) consecutive DB errors — backing off to \(Int(backoffInterval.components.seconds))s interval")
+            }
+          } else {
+            self.logger.error("Orphan adoption error: \(error)")
+            consecutiveDBErrors = 0
+          }
         }
       }
     }
@@ -3706,10 +4034,18 @@ public extension MLSConversationManager {
     for candidate in candidates {
       guard !isShuttingDown, !Task.isCancelled else { break }
 
-      // Check local epoch vs known server epoch before attempting upload
+      // Check local epoch vs known server epoch before attempting upload.
+      // If the conversation needs rejoin (epoch gap is unrecoverable via commits),
+      // skip the stale check so we publish whatever GroupInfo we have — a stale
+      // GroupInfo is better than nothing for other devices trying to external commit.
       let groupIdHex = candidate.groupId.hexEncodedString()
       let knownServerEpoch: UInt64?
-      if let state = groupStates[groupIdHex] {
+      let needsRejoin = await conversationNeedsRejoin(candidate.convoId)
+      if needsRejoin {
+        // Bypass stale check — this conversation has an unrecoverable epoch gap,
+        // publishing our current GroupInfo helps other devices join
+        knownServerEpoch = nil
+      } else if let state = groupStates[groupIdHex] {
         knownServerEpoch = state.knownServerEpoch
       } else {
         knownServerEpoch = nil
@@ -3740,6 +4076,10 @@ public extension MLSConversationManager {
 
   /// Adopt pending orphaned reactions by fetching missing parent messages
   internal func adoptPendingOrphans(userDID: String) async {
+    // Guard: skip if database is suspended/closed to avoid spamming errors
+    let dbOpen = await databaseManager.isDatabaseOpen(for: userDID)
+    guard dbOpen else { return }
+
     do {
       // Get list of missing parent message IDs
       let missingParents = try await storage.fetchMissingParentMessageIDs(
@@ -4531,6 +4871,18 @@ public extension MLSConversationManager {
     }
 
     logger.info("Successfully initialized group from Welcome for conversation \(convo.groupId)")
+
+    // Insert history boundary marker for Welcome join
+    if let groupIdData = Data(hexEncoded: groupIdHex) {
+      let ffiEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
+      await insertHistoryBoundaryMarker(
+        conversationId: convo.groupId,
+        senderDID: userDid,
+        epoch: ffiEpoch,
+        contentKey: "history_boundary.new_member"
+      )
+    }
+
     await bootstrapMetadataAfterJoin(
       groupIdHex: groupIdHex,
       joinSource: "Welcome"
@@ -4699,6 +5051,11 @@ public extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
+    // Track whether we had prior local state — determines the history boundary content key.
+    // If we had state, this is a device recovery (device_rejoined).
+    // If not, this is a first-time join via External Commit fallback (new_member).
+    let hadPriorState = groupStates[convo.groupId] != nil
+
     // Update local group state with correct epoch from FFI
     if var state = groupStates[convo.groupId] {
       let serverEpoch = UInt64(convo.epoch)
@@ -4741,6 +5098,20 @@ public extension MLSConversationManager {
       }
     }
 
+
+    // Insert history boundary marker for External Commit join.
+    // Use device_rejoined only when recovering from prior state (desync recovery).
+    // Use new_member when this is a first-time join via External Commit fallback.
+    let ecEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
+    let contentKey = hadPriorState
+      ? "history_boundary.device_rejoined"
+      : "history_boundary.new_member"
+    await insertHistoryBoundaryMarker(
+      conversationId: convo.groupId,
+      senderDID: userDid,
+      epoch: ecEpoch,
+      contentKey: contentKey
+    )
 
     // Log diagnostic info
     await logGroupStateDiagnostics(
