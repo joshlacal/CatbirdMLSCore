@@ -160,15 +160,200 @@ extension MLSConversationManager {
     }
   }
 
-  // MARK: - Recovery Request (stub — full implementation in Task 5)
+  // MARK: - Recovery Request
 
-  /// Placeholder called from `.recoveryRequest` message switch case.
-  /// Full jitter + re-send logic implemented in Task 5.
+  /// Sends an encrypted recovery request for a message this device failed to decrypt.
+  /// Called by the message ordering coordinator after its buffer timeout exhausts.
+  func sendRecoveryRequest(
+    messageId: String,
+    epoch: Int64,
+    sequenceNumber: Int64,
+    conversationId: String
+  ) async {
+    guard let userDid = userDid, let convo = conversations[conversationId] else { return }
+    guard let groupIdData = Data(hexEncoded: convo.groupId) else { return }
+
+    _ = try? await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
+      try throwIfShuttingDown("sendRecoveryRequest-queued")
+
+      let payload = MLSMessagePayload.recoveryRequest(
+        messageId: messageId,
+        epoch: epoch,
+        sequenceNumber: sequenceNumber
+      )
+      let payloadData = try payload.encodeToJSON()
+
+      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+        let tagB64 = tagData?.base64EncodedString()
+        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+        let paddedSize = ciphertext.count
+        let localMsgId = UUID().uuidString
+
+        let optimisticSeq: Int
+        if let cursor = try? await storage.fetchLastMessageCursor(
+          conversationID: conversationId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          optimisticSeq = Int(cursor.seq) + 1
+        } else {
+          optimisticSeq = 1
+        }
+
+        try throwIfShuttingDown("sendRecoveryRequest-preCache")
+        try await cacheControlMessageEnvelope(
+          message: BlueCatbirdMlsChatDefs.MessageView(
+            id: localMsgId,
+            convoId: conversationId,
+            ciphertext: Bytes(data: ciphertext),
+            epoch: Int(localEpoch),
+            seq: optimisticSeq,
+            createdAt: ATProtocolDate(date: Date()),
+            messageType: "recoveryRequest"
+          ),
+          payload: payload,
+          senderDID: userDid,
+          currentUserDID: userDid
+        )
+
+        let sendResult = try await apiClient.sendMessage(
+          convoId: conversationId,
+          msgId: localMsgId,
+          ciphertext: ciphertext,
+          epoch: Int(localEpoch),
+          paddedSize: paddedSize,
+          senderDid: try DID(didString: userDid),
+          confirmationTag: tagB64
+        )
+        return (localMsgId, sendResult)
+      }
+
+      let (localMsgId, sendResult) = result
+      try? await storage.updateMessageMetadata(
+        messageID: localMsgId,
+        currentUserDID: userDid,
+        epoch: sendResult.epoch,
+        sequenceNumber: sendResult.sequenceNumber,
+        timestamp: sendResult.receivedAt.date,
+        database: database,
+        newMessageID: sendResult.messageId
+      )
+    }
+  }
+
+  /// Handles an incoming recovery request from another group member.
+  /// If this device holds the requested plaintext, it re-sends the original content
+  /// after a random jitter window (500–2000ms) to avoid duplicate responses.
   func handleRecoveryRequest(
     payload: MLSMessageRecoveryRequestPayload,
     requesterDID: String,
     conversationId: String
   ) async {
-    // Task 5 will implement: lookup plaintext in local DB, apply jitter, re-send if no other member responded.
+    guard let userDid = userDid else { return }
+    guard requesterDID != userDid else { return }
+
+    // Check if we hold the plaintext for the requested message.
+    guard let storedMessage = try? await database.read({ db in
+      try MLSMessageModel
+        .filter(
+          MLSMessageModel.Columns.messageID == payload.messageId &&
+          MLSMessageModel.Columns.currentUserDID == MLSStorageHelpers.normalizeDID(userDid)
+        )
+        .fetchOne(db)
+    }),
+    let payloadJSONData = storedMessage.payloadJSON,
+    let originalPayload = try? JSONDecoder().decode(MLSMessagePayload.self, from: payloadJSONData)
+    else { return }
+
+    // Jitter: 500–2000ms random delay before responding.
+    // First responder wins; others observe the recovered message arrive on SSE and skip.
+    let jitterNs = UInt64.random(in: 500_000_000...2_000_000_000) // nanoseconds
+    try? await Task.sleep(nanoseconds: jitterNs)
+
+    // Check if another device already responded (recovered message would reference our messageId).
+    let alreadyRecovered = (try? await database.read({ db in
+      try MLSMessageModel
+        .filter(
+          sql: "payloadJSON LIKE ?",
+          arguments: ["%\"\(payload.messageId)\"%"]
+        )
+        .filter(MLSMessageModel.Columns.conversationID == conversationId)
+        .fetchOne(db)
+    })) != nil
+    guard !alreadyRecovered else { return }
+
+    guard let convo = conversations[conversationId],
+          let groupIdData = Data(hexEncoded: convo.groupId)
+    else { return }
+
+    _ = try? await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
+      let recoveryPayload = MLSMessagePayload(
+        messageType: originalPayload.messageType,
+        text: originalPayload.text,
+        embed: originalPayload.embed,
+        recoveredMessageId: payload.messageId
+      )
+      let payloadData = try recoveryPayload.encodeToJSON()
+
+      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+        let tagB64 = tagData?.base64EncodedString()
+        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+        let paddedSize = ciphertext.count
+        let localMsgId = UUID().uuidString
+
+        let optimisticSeq: Int
+        if let cursor = try? await storage.fetchLastMessageCursor(
+          conversationID: conversationId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          optimisticSeq = Int(cursor.seq) + 1
+        } else {
+          optimisticSeq = 1
+        }
+
+        try throwIfShuttingDown("handleRecoveryRequest-preCache")
+        try await cacheControlMessageEnvelope(
+          message: BlueCatbirdMlsChatDefs.MessageView(
+            id: localMsgId,
+            convoId: conversationId,
+            ciphertext: Bytes(data: ciphertext),
+            epoch: Int(localEpoch),
+            seq: optimisticSeq,
+            createdAt: ATProtocolDate(date: Date()),
+            messageType: originalPayload.messageType.rawValue
+          ),
+          payload: recoveryPayload,
+          senderDID: userDid,
+          currentUserDID: userDid
+        )
+
+        let sendResult = try await apiClient.sendMessage(
+          convoId: conversationId,
+          msgId: localMsgId,
+          ciphertext: ciphertext,
+          epoch: Int(localEpoch),
+          paddedSize: paddedSize,
+          senderDid: try DID(didString: userDid),
+          confirmationTag: tagB64
+        )
+        return (localMsgId, sendResult)
+      }
+
+      let (localMsgId, sendResult) = result
+      try? await storage.updateMessageMetadata(
+        messageID: localMsgId,
+        currentUserDID: userDid,
+        epoch: sendResult.epoch,
+        sequenceNumber: sendResult.sequenceNumber,
+        timestamp: sendResult.receivedAt.date,
+        database: database,
+        newMessageID: sendResult.messageId
+      )
+    }
   }
 }

@@ -1861,6 +1861,16 @@ public extension MLSConversationManager {
             logger.info("[ORPHAN-ADOPT] Notified UI of \(adopted.count) adopted reaction(s) for \(message.id.prefix(16))")
           }
 
+          // If this is a recovery response, mark the original failed message as recovered.
+          if let originalId = payload.recoveredMessageId {
+            try? await database.write { db in
+              try db.execute(
+                sql: "UPDATE MLSMessageModel SET processingState = 'recovered' WHERE messageID = ? AND conversationID = ? AND currentUserDID = ?",
+                arguments: [originalId, message.convoId, MLSStorageHelpers.normalizeDID(userDid)]
+              )
+            }
+          }
+
           // Enqueue delivery ack — proof of successful decryption.
           // Only ack messages from other users (not our own SSE echo).
           if senderDID != userDid {
