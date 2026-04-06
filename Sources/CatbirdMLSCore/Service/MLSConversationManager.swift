@@ -45,6 +45,10 @@ public final class MLSConversationManager {
   public let storage: MLSStorage
   @ObservationIgnored public var database: MLSDatabase
   public let configuration: MLSConfiguration
+
+  /// Called when the database pool is refreshed after recovery.
+  /// Allows the app layer to update its own cached pool references.
+  @ObservationIgnored public var onDatabaseRefreshed: ((any DatabaseWriter) -> Void)?
   
   /// Trust checker for determining if incoming conversations are from trusted senders
   /// Used to set initial requestState when syncing new conversations
@@ -135,6 +139,11 @@ public final class MLSConversationManager {
   /// during account switching as External Commit operations continued running
   public var missingConversationsTask: Task<Void, Never>?
 
+  /// Background task for deferred epoch recovery (conversations flagged needsRejoin during sync).
+  /// Single-flight: only one recovery pass runs at a time, subsequent sync passes skip if active.
+  /// Tracked for cancellation during shutdown/account switch.
+  public var deferredEpochRecoveryTask: Task<Void, Never>?
+
   /// Background task for initial key package refresh during startup
   public var keyPackageRefreshTask: Task<Void, Never>?
 
@@ -162,6 +171,11 @@ public final class MLSConversationManager {
   public var recentlySentMessages: [String: [String: Date]] = [:]
   private let deduplicationWindow: TimeInterval = 60  // 60 seconds
   public var deduplicationCleanupTimer: Timer?
+
+  /// In-memory dedup gate for delivery acks: messageIds currently being sent or already confirmed.
+  /// Primary dedup check (DB check is the persistent fallback for restarts).
+  /// Protected by actor isolation of MLSConversationManager.
+  var pendingDeliveryAcks: Set<String> = []
 
   /// Pending sent messages for proactive own-message identification (messageID -> PendingMessage)
   /// Prevents re-processing own messages through FFI which would advance ratchet incorrectly
@@ -374,6 +388,32 @@ public final class MLSConversationManager {
     logger.info("✅ [deinit] MLSConversationManager cleanup completed")
   }
 
+  // MARK: - Database Pool Refresh
+
+  /// Checks if the current database pool has been closed (e.g., after WAL corruption
+  /// recovery or account-switch drain) and transparently reconnects via `databaseManager`.
+  ///
+  /// Call this at the top of key async entry points (`syncWithServer`, `sendMessage`,
+  /// `processServerMessage`, etc.) to prevent cascading "Connection is closed" errors
+  /// when the pool has been recycled underneath us.
+  public func refreshDatabaseIfNeeded() async throws {
+    guard let userDid = userDid else { return }
+
+    // Fast path: databaseManager still holds our pool — nothing to do.
+    if await databaseManager.isDatabaseOpen(for: userDid) { return }
+
+    // Pool was closed (recovery, corruption repair, account switch, etc.) — get a fresh one.
+    logger.warning(
+      "🔄 [DB-REFRESH] Database pool was closed for \(userDid.prefix(20))... - reconnecting"
+    )
+    let newPool = try await databaseManager.getDatabasePool(for: userDid)
+    database = newPool
+    logger.info(
+      "✅ [DB-REFRESH] Got fresh database pool for \(userDid.prefix(20))..."
+    )
+    onDatabaseRefreshed?(newPool)
+  }
+
   /// Stop all network streams and pause synchronization
   /// Call this BEFORE beginning shutdown sequence
   public func stopAllStreams() {
@@ -417,12 +457,12 @@ public final class MLSConversationManager {
     return try? await deviceRecordService.fetchChatPolicy(for: did)
   }
 
-  public func removeDeviceRecord(deviceId: String) async throws {
-    try throwIfShuttingDown("removeDeviceRecord")
+  public func removeCurrentDeviceRecord() async throws {
+    try throwIfShuttingDown("removeCurrentDeviceRecord")
     guard let activeDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-    try await deviceRecordService.removeDeviceRecord(userDid: activeDid, deviceId: deviceId)
+    try await deviceRecordService.removeCurrentDeviceRecord(userDid: activeDid)
   }
 
   public func ensureDeviceRecordPublished() async throws {
@@ -817,6 +857,94 @@ public final class MLSConversationManager {
         "❌ [handleGroupInfoRefreshRequest] Failed to publish GroupInfo for \(convoId): \(error.localizedDescription)"
       )
     }
+  }
+
+  /// Handle a group reset event from the SSE/WebSocket stream.
+  ///
+  /// When an admin resets a conversation's MLS group, the conversation identity (`convoId`)
+  /// stays the same but the underlying MLS group changes (`newGroupId`). Clients must:
+  /// 1. Delete old MLS group state
+  /// 2. Join the new group via External Commit
+  /// 3. Notify UI observers
+  ///
+  /// - Parameters:
+  ///   - event: The GroupResetEvent containing reset details
+  public func handleGroupReset(
+    event: BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent
+  ) async {
+    let convoId = event.convoId
+    let newGroupId = event.newGroupId
+
+    logger.info(
+      "🔄 [handleGroupReset] Conversation \(convoId.prefix(16)) reset to group \(newGroupId.prefix(16)) (gen \(event.resetGeneration))"
+    )
+
+    guard let userDid = userDid else {
+      logger.warning("⚠️ [handleGroupReset] No user DID available")
+      return
+    }
+
+    guard await ensureActiveAccount(for: userDid, operation: "handleGroupReset") else {
+      return
+    }
+
+    // 1. Delete old MLS group state
+    // Try to resolve the old group ID from memory or database
+    var oldGroupId: Data?
+    if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
+      oldGroupId = gid
+    } else {
+      do {
+        if let model = try await storage.fetchConversation(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          oldGroupId = model.groupID
+        }
+      } catch {
+        logger.warning("⚠️ [handleGroupReset] Database lookup for old group failed: \(error.localizedDescription)")
+      }
+    }
+
+    if let oldGroupId = oldGroupId {
+      do {
+        try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
+        logger.info("🗑️ [handleGroupReset] Deleted old MLS state for \(convoId.prefix(16))")
+      } catch {
+        logger.warning("⚠️ [handleGroupReset] Failed to delete old MLS state: \(error.localizedDescription)")
+        // Continue anyway - old state may already be gone
+      }
+    } else {
+      logger.info("ℹ️ [handleGroupReset] No old group ID found for \(convoId.prefix(16)) - may already be cleaned up")
+    }
+
+    // 2. Remove old group state from in-memory caches
+    if let convo = conversations[convoId] {
+      groupStates[convo.groupId] = nil
+    }
+
+    // 3. Join the new MLS group via External Commit
+    do {
+      let joinedGroupId = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convoId)
+      logger.info(
+        "✅ [handleGroupReset] Joined new group \(newGroupId.prefix(16)) for \(convoId.prefix(16)) (returned groupId: \(joinedGroupId.hexEncodedString().prefix(16)))"
+      )
+    } catch {
+      logger.error(
+        "❌ [handleGroupReset] Failed to join new group: \(error.localizedDescription)")
+      // Signal that this conversation needs recovery so the sync loop can retry
+      notifyObservers(.conversationNeedsRecovery(convoId: convoId, reason: .groupReset))
+    }
+
+    // 4. Notify observers
+    notifyObservers(.groupReset(
+      convoId: convoId,
+      newGroupId: newGroupId,
+      resetGeneration: event.resetGeneration,
+      resetBy: event.resetBy,
+      reason: event.reason
+    ))
   }
 
   /// Handle re-addition request from SSE stream

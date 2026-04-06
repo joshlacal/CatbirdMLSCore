@@ -40,16 +40,20 @@ extension MLSConversationManager {
       }) != nil
       guard !alreadyAcked else { return }
 
-      try? await self.sendDeliveryAck(messageId: messageId, conversationId: conversationId)
+      // In-memory dedup gate: prevent concurrent calls for the same messageId from each
+      // racing past the DB check (TOCTOU). Insert before sending; removed on SSE echo.
+      guard self.pendingDeliveryAcks.insert(messageId).inserted else { return }
+
+      try? await self.sendDeliveryAck(messageId: messageId, conversationId: conversationId, userDid: userDid)
     }
   }
 
   /// Sends an encrypted `deliveryAck` MLS application message.
   /// Follows the same pre-cache-before-send pattern as `sendEncryptedReaction`.
-  private func sendDeliveryAck(messageId: String, conversationId: String) async throws {
+  private func sendDeliveryAck(messageId: String, conversationId: String, userDid: String) async throws {
     try throwIfShuttingDown("sendDeliveryAck")
 
-    guard let userDid = userDid, let convo = conversations[conversationId] else { return }
+    guard let convo = conversations[conversationId] else { return }
     guard let groupIdData = Data(hexEncoded: convo.groupId) else { return }
 
     try await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
@@ -139,6 +143,9 @@ extension MLSConversationManager {
     )
 
     try? await database.write { db in try ack.save(db) }
+
+    // Clear in-memory pending gate now that the ack is durably stored.
+    pendingDeliveryAcks.remove(payload.messageId)
 
     await MainActor.run {
       NotificationCenter.default.post(
