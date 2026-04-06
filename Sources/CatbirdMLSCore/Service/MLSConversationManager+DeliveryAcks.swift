@@ -12,6 +12,39 @@ import Petrel
 
 extension MLSConversationManager {
 
+  // MARK: - Fetch
+
+  /// Batch-fetches delivery acks for a set of messageIds in one DB query.
+  public func fetchDeliveryAcks(
+    messageIds: [String],
+    conversationId: String,
+    currentUserDID: String
+  ) async throws -> [MLSDeliveryAckModel] {
+    guard !messageIds.isEmpty else { return [] }
+    return try await database.read { db in
+      try MLSDeliveryAckModel
+        .filter(
+          sql: "messageId IN (\(messageIds.map { _ in "?" }.joined(separator: ","))) AND conversationId = ? AND currentUserDID = ?",
+          arguments: StatementArguments(messageIds + [conversationId, currentUserDID])
+        )
+        .fetchAll(db)
+    }
+  }
+
+  /// Returns the active member count for a conversation (includes sender).
+  public func memberCount(for conversationId: String) async -> Int? {
+    guard let userDid = userDid else { return nil }
+    return try? await database.read { db in
+      try MLSMemberModel
+        .filter(
+          MLSMemberModel.Columns.conversationID == conversationId &&
+          MLSMemberModel.Columns.currentUserDID == userDid &&
+          MLSMemberModel.Columns.isActive == true
+        )
+        .fetchCount(db)
+    }
+  }
+
   // MARK: - Send
 
   /// Enqueues an encrypted delivery ack for a message that was successfully decrypted.
