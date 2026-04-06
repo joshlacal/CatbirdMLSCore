@@ -1861,6 +1861,12 @@ public extension MLSConversationManager {
             logger.info("[ORPHAN-ADOPT] Notified UI of \(adopted.count) adopted reaction(s) for \(message.id.prefix(16))")
           }
 
+          // Enqueue delivery ack — proof of successful decryption.
+          // Only ack messages from other users (not our own SSE echo).
+          if senderDID != userDid {
+            enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
+          }
+
         case .reaction:
           logger.info("🔍 [REACTION-DEBUG] Received reaction message \(message.id) from \(senderDID)")
           logger.info("🔍 [REACTION-DEBUG] payload.reaction is \(payload.reaction == nil ? "NIL ⚠️" : "present ✅")")
@@ -1973,8 +1979,7 @@ public extension MLSConversationManager {
             context: context
           )
 
-        case .deliveryAck, .recoveryRequest:
-          // Handled in MLSConversationManager+DeliveryAcks — stub for compilation
+        case .deliveryAck:
           _ = try await persistProcessedPayload(
             message: message,
             payload: payload,
@@ -1983,6 +1988,30 @@ public extension MLSConversationManager {
             validationReason: nil,
             context: context
           )
+          if let ackPayload = payload.deliveryAck {
+            await handleReceivedDeliveryAck(
+              payload: ackPayload,
+              senderDID: senderDID,
+              conversationId: message.convoId
+            )
+          }
+
+        case .recoveryRequest:
+          _ = try await persistProcessedPayload(
+            message: message,
+            payload: payload,
+            senderID: senderDID,
+            processingError: nil,
+            validationReason: nil,
+            context: context
+          )
+          if let recoveryPayload = payload.recoveryRequest {
+            await handleRecoveryRequest(
+              payload: recoveryPayload,
+              requesterDID: senderDID,
+              conversationId: message.convoId
+            )
+          }
         }
 
         return .application(payload: payload, sender: senderDID)
