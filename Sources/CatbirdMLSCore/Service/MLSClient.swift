@@ -1,4 +1,5 @@
 import Combine
+import CatbirdMLS
 import Foundation
 import GRDB
 import OSLog
@@ -18,7 +19,7 @@ public actor MLSClient {
 
   /// Per-user MLS contexts to prevent state contamination
   /// With SQLite storage, persistence is automatic - no manual hydration needed
-  private var contexts: [String: MlsContext] = [:]
+    private var contexts: [String: MlsContext] = [:]
 
   // MARK: - Emergency Suspension Close (0xdead10cc Prevention)
 
@@ -45,6 +46,17 @@ public actor MLSClient {
       details: "MLSClient markSuspensionInProgress: \(reason)",
       process: "app"
     )
+  }
+
+  /// Fire sqlite3_interrupt() on all cached contexts WITHOUT closing them.
+  /// Safe to call from any thread — InterruptHandle is Send+Sync and doesn't require the Rust Mutex.
+  /// Call this SYNCHRONOUSLY in handleScenePhaseChange before the async emergency close Task,
+  /// so in-flight sqlite3_step calls abort immediately even if iOS suspends before the Task runs.
+  public nonisolated static func interruptAllContexts() {
+    let contexts = emergencyState.withLock { Array($0.contexts.values) }
+    for context in contexts {
+      context.interrupt()
+    }
   }
 
   /// Clear suspension flag (idempotent). Call when the app returns to foreground, or when BGTasks
@@ -74,6 +86,15 @@ public actor MLSClient {
       details: "MLSClient emergencyCloseAllContexts(\(reason)): closing \(contextsToClose.count)",
       process: "app"
     )
+
+    // CRITICAL FIX: Set suspension flag + interrupt all in-flight SQLCipher operations FIRST.
+    // setSuspended causes long-running Rust operations to bail out at their next check point.
+    // interrupt() causes in-flight sqlite3_step to return SQLITE_INTERRUPT immediately,
+    // releasing the Rust Mutex so flushAndPrepareClose can acquire it promptly.
+    for (_, context) in contextsToClose {
+      context.setSuspended(value: true)
+      context.interrupt()
+    }
 
     for (userDID, context) in contextsToClose {
       do {
@@ -115,6 +136,9 @@ public actor MLSClient {
 
   /// Per-user recovery managers for silent auto-recovery from desync
   private var recoveryManagers: [String: MLSRecoveryManager] = [:]
+
+  /// Deduplicates concurrent External Commit joins per (user, conversation).
+  private var inFlightExternalCommits: [String: Task<Data, any Error>] = [:]
 
   /// Optional app-provided coordinator for storage maintenance flows.
   private var storageMaintenanceCoordinator: MLSStorageMaintenanceCoordinating?
@@ -174,7 +198,8 @@ public actor MLSClient {
     apiClients.removeValue(forKey: normalizedDID)
     deviceManagers.removeValue(forKey: normalizedDID)
     recoveryManagers.removeValue(forKey: normalizedDID)
-    logger.info("[E2E] Invalidated cached MLS clients for \(normalizedDID.prefix(20))...")
+    contexts.removeValue(forKey: normalizedDID)
+    logger.info("[E2E] Invalidated cached MLS clients and context for \(normalizedDID.prefix(20))...")
   }
 
   /// Provide an app-level storage maintenance coordinator (optional).
@@ -236,8 +261,24 @@ public actor MLSClient {
   private func runFFI<T: Sendable>(_ operation: @Sendable @escaping () throws -> T) async throws
     -> T
   {
-    try await withCheckedThrowingContinuation { continuation in
+    // Pre-dispatch check: fail fast before queuing work that may execute during suspension.
+    // This prevents the race where suspension is signaled after the dispatch is queued
+    // but before the block starts executing on the background thread.
+    guard !Self.isSuspensionInProgress else {
+      throw MLSError.contextCreationBlocked(
+        reason: "App is transitioning to background - MLS operations suspended (pre-dispatch)")
+    }
+    return try await withCheckedThrowingContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
+        // Double-check suspension flag INSIDE the dispatch block, right before executing.
+        // This catches the race where suspension is signaled after the pre-dispatch check
+        // but before the actual SQLCipher operation starts on this background thread.
+        guard !Self.isSuspensionInProgress else {
+          continuation.resume(
+            throwing: MLSError.contextCreationBlocked(
+              reason: "App is transitioning to background - MLS operations suspended"))
+          return
+        }
         do {
           let result = try operation()
           continuation.resume(returning: result)
@@ -254,7 +295,7 @@ public actor MLSClient {
     for userDID: String,
     operation: @Sendable @escaping (MlsContext) throws -> T
   ) async throws -> T {
-    var context = try getContext(for: userDID)
+    var context = try await getContext(for: userDID)
 
     for attempt in 1...2 {
       do {
@@ -267,7 +308,7 @@ public actor MLSClient {
             "⚠️ [MLSClient] Context poisoned for user \(userDID.prefix(20))..., clearing and retrying (attempt \(attempt))"
           )
           clearPoisonedContext(for: userDID)
-          context = try getContext(for: userDID)
+          context = try await getContext(for: userDID)
           continue
         }
         throw error
@@ -290,7 +331,7 @@ public actor MLSClient {
       try assertGeneration(generation, for: normalizedDID)
 
       // No advisory lock needed - SQLite WAL handles concurrent access
-      // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+      // Cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`
 
       try assertGeneration(generation, for: normalizedDID)
 
@@ -347,7 +388,7 @@ public actor MLSClient {
   }
 
   /// Get or create a context for a specific user.
-  private func getContext(for userDID: String) throws -> MlsContext {
+  private func getContext(for userDID: String) async throws -> MlsContext {
     let normalizedDID = normalizeUserDID(userDID)
 
     // Block creation/use while app is suspending to avoid 0xdead10cc termination.
@@ -409,7 +450,7 @@ public actor MLSClient {
     logger.debug("   ✅ Created fresh context from SQLite storage")
 
     // Check if bundles were recovered
-    let bundleCount = try newContext.getKeyPackageBundleCount()
+    let bundleCount = UInt64(try newContext.getKeyPackageBundleCount())
     logger.info("   📊 Bundle count after reload: \(bundleCount)")
 
     if bundleCount > 0 {
@@ -422,19 +463,52 @@ public actor MLSClient {
     return bundleCount
   }
 
+  private func getDatabasePoolBlocking(for userDID: String) throws -> DatabasePool {
+    let semaphore = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var result: Result<DatabasePool, Error>?
+
+    Task {
+      do {
+        result = .success(try await MLSGRDBManager.shared.getDatabasePool(for: userDID))
+      } catch {
+        result = .failure(error)
+      }
+      semaphore.signal()
+    }
+
+    semaphore.wait()
+    guard let result else {
+      throw MLSError.operationFailed
+    }
+    return try result.get()
+  }
+
   /// Create a new MLS context with per-DID SQLite storage
   /// Storage path: {appSupport}/mls-state/{did_hash}.db
+  ///
+  /// IMPORTANT: This method opens SQLCipher databases which acquire POSIX file locks
+  /// during WAL recovery (walIndexRecover). If iOS suspends the app while these locks
+  /// are held, it terminates with 0xdead10cc. We protect the operation with a background
+  /// task assertion to prevent suspension during context creation.
   private func createContext(for userDID: String) throws -> MlsContext {
-    // Create storage directory if needed
-    let appSupport: URL
-    if let sharedContainer = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared")
-    {
-      appSupport = sharedContainer
-    } else {
-      appSupport =
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    #if os(iOS)
+    // Acquire a background task assertion to prevent iOS from suspending the app
+    // while SQLCipher is opening the database and performing WAL recovery.
+    // This specifically addresses the launch-and-immediately-suspend crash path
+    // (Crash 1: app suspended 2.3s after launch during walIndexRecover).
+    var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+    bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "MLSContextCreation") {
+      UIApplication.shared.endBackgroundTask(bgTaskId)
+      bgTaskId = .invalid
     }
+    defer {
+      if bgTaskId != .invalid {
+        UIApplication.shared.endBackgroundTask(bgTaskId)
+      }
+    }
+    #endif
+    // Use the MLSStoragePaths override if set (e.g. BIRDaemon CLI), otherwise app group or AppSupport.
+    let appSupport = MLSStoragePaths.baseContainerURL()
     let mlsStateDir = appSupport.appendingPathComponent("mls-state", isDirectory: true)
 
     do {
@@ -564,6 +638,11 @@ public actor MLSClient {
       // Non-fatal - context can still function without epoch storage
     }
 
+    let normalizedForLookup = normalizeUserDID(userDID)
+    guard apiClients[normalizedForLookup] != nil else {
+      logger.error("❌ MLS API client not configured for user \(normalizedForLookup.prefix(20))...")
+      throw MLSError.configurationError
+    }
     return context
   }
 
@@ -636,6 +715,10 @@ public actor MLSClient {
 
   /// Create a new MLS group using client identity (did#deviceUUID)
   /// Each device is a unique MLS leaf node for proper multi-device support.
+  /// - Parameters:
+  ///   - userDID: The user's DID
+  ///   - configuration: Group configuration (security parameters + optional metadata)
+  /// - Returns: The group ID as raw bytes
   public func createGroup(for userDID: String, configuration: MLSGroupConfiguration = .default)
     async throws -> Data
   {
@@ -652,7 +735,7 @@ public actor MLSClient {
     )
 
     // Log bundle count BEFORE group creation
-    let context = try getContext(for: userDID)
+    let context = try await getContext(for: userDID)
     if let bundleCount = try? context.getKeyPackageBundleCount() {
       logger.debug("[MLSClient.createGroup] Bundle count BEFORE group creation: \(bundleCount)")
       if bundleCount == 0 {
@@ -695,6 +778,105 @@ public actor MLSClient {
       logger.error("❌ [MLSClient.createGroup] FAILED: \(error.localizedDescription)")
       throw MLSError.operationFailed
     }
+  }
+
+  /// Create a new MLS group and return the full GroupCreationResult including metadata v2 artifacts.
+  /// This is the v2 variant that exposes encrypted_metadata_blob, metadata_reference_json,
+  /// and metadata_blob_locator fields for the metadata v2 flow.
+  ///
+  /// - Parameters:
+  ///   - userDID: The user's DID
+  ///   - configuration: Group configuration (security parameters + optional metadata)
+  /// - Returns: The full GroupCreationResult from the Rust FFI
+  public func createGroupV2(for userDID: String, configuration: MLSGroupConfiguration = .default)
+    async throws -> GroupCreationResult
+  {
+    logger.info("📍 [MLSClient.createGroupV2] START - user: \(userDID.prefix(20), privacy: .private)")
+
+    guard let clientIdentity = await getClientIdentity(for: userDID) else {
+      logger.error("❌ [MLSClient.createGroupV2] Device not registered")
+      throw MLSError.configurationError
+    }
+
+    let identityBytes = Data(clientIdentity.utf8)
+
+    do {
+      let result = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.createGroup(identityBytes: identityBytes, config: configuration)
+      }
+      logger.info(
+        "✅ [MLSClient.createGroupV2] Group created - ID: \(result.groupId.hexEncodedString().prefix(16))"
+      )
+
+      // Log metadata v2 artifacts if present
+      if let blob = result.encryptedMetadataBlob {
+        logger.info(
+          "📋 [MLSClient.createGroupV2] Metadata v2 blob present: \(blob.count) bytes, locator: \(result.metadataBlobLocator ?? "nil")"
+        )
+      }
+
+      // Force database sync
+      do {
+        try await runFFIWithRecovery(for: userDID) { ctx in
+          try ctx.syncDatabase()
+        }
+        logger.info("✅ [MLSClient.createGroupV2] Database synced after group creation")
+      } catch {
+        logger.error("⚠️ [MLSClient.createGroupV2] Database sync failed: \(error.localizedDescription)")
+      }
+
+      return result
+    } catch let error as MlsError {
+      logger.error("❌ [MLSClient.createGroupV2] FAILED: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
+  // MARK: - Group Metadata
+
+  /// Get decrypted metadata from MLS group context extension
+  /// - Parameters:
+  ///   - userDID: The user's DID
+  ///   - groupId: Raw group ID bytes
+  /// - Returns: Decoded group metadata, or nil if no metadata is set
+  public func getGroupMetadata(for userDID: String, groupId: Data) async throws -> GroupMetadataPayload? {
+    let metadataBytes = try await runFFIWithRecovery(for: userDID) { ctx in
+      try ctx.getGroupMetadata(groupId: groupId)
+    }
+
+    guard !metadataBytes.isEmpty else {
+      return nil
+    }
+
+    do {
+      return try JSONDecoder().decode(GroupMetadataPayload.self, from: metadataBytes)
+    } catch {
+      logger.error("❌ [MLSClient.getGroupMetadata] Failed to decode metadata JSON: \(error.localizedDescription)")
+      return nil
+    }
+  }
+
+  /// Update encrypted metadata in MLS group context extension
+  /// - Parameters:
+  ///   - userDID: The user's DID
+  ///   - groupId: Raw group ID bytes
+  ///   - name: New group name (nil to leave unchanged)
+  ///   - description: New group description (nil to leave unchanged)
+  /// - Returns: Commit data to send to server
+  public func updateGroupMetadata(
+    for userDID: String,
+    groupId: Data,
+    name: String?,
+    description: String?
+  ) async throws -> Data {
+    let payload = GroupMetadataPayload(v: 1, name: name, description: description)
+    let metadataJson = try JSONEncoder().encode(payload)
+
+    let commitData = try await runFFIWithRecovery(for: userDID) { ctx in
+      try ctx.updateGroupMetadata(groupId: groupId, metadataJson: metadataJson)
+    }
+
+    return commitData
   }
 
   /// Join an existing group using a welcome message (low-level with explicit identity)
@@ -746,7 +928,7 @@ public actor MLSClient {
           "🔍 [MLSClient.joinGroup] NoMatchingKeyPackage - Listing local manifest hashes...")
 
         do {
-          let context = try getContext(for: userDID)
+          let context = try await getContext(for: userDID)
           let localHashes = try context.debugListKeyPackageHashes()
           logger.error("🔍 Local manifest contains \(localHashes.count) key package hashes:")
           for (i, hash) in localHashes.prefix(10).enumerated() {
@@ -789,9 +971,41 @@ public actor MLSClient {
   /// This allows joining without a Welcome message from an existing member
   /// Includes retry logic for transient deserialization errors (EndOfStream, truncated data)
   public func joinByExternalCommit(for userDID: String, convoId: String) async throws -> Data {
+    let normalizedDID = normalizeUserDID(userDID)
+    let dedupeKey = "\(normalizedDID)::\(convoId)"
+
+    if let inFlight = inFlightExternalCommits[dedupeKey] {
+      logger.info(
+        "⏳ [MLSClient.joinByExternalCommit] Reusing in-flight External Commit for convoId: \(convoId, privacy: .private)"
+      )
+      return try await inFlight.value
+    }
+
+    let task = Task<Data, any Error> {
+      try await self.joinByExternalCommitUncoalesced(
+        for: userDID,
+        convoId: convoId,
+        normalizedDID: normalizedDID
+      )
+    }
+
+    inFlightExternalCommits[dedupeKey] = task
+    defer {
+      if inFlightExternalCommits[dedupeKey] == task {
+        inFlightExternalCommits[dedupeKey] = nil
+      }
+    }
+
+    return try await task.value
+  }
+
+  private func joinByExternalCommitUncoalesced(
+    for userDID: String,
+    convoId: String,
+    normalizedDID: String
+  ) async throws -> Data {
     logger.info("📍 [MLSClient.joinByExternalCommit] START - user: \(userDID, privacy: .private), convoId: \(convoId, privacy: .private)")
 
-    let normalizedDID = normalizeUserDID(userDID)
     guard let apiClient = self.apiClients[normalizedDID] else {
       throw MLSError.configurationError
     }
@@ -933,41 +1147,63 @@ public actor MLSClient {
             groupInfoBytes: groupInfo, identityBytes: identityBytes)
         }
 
-        // 6. Send Commit to Server
+        // 6. Send Commit to Server — capture the returned server epoch
+        // Get confirmation tag from the new local group state after external commit
+        let tagData = try? await getConfirmationTag(for: userDID, groupId: Data(result.groupId))
+        let tagB64 = tagData?.base64EncodedString()
+
+        var serverEpochAfterCommit: UInt64? = nil
         do {
-          let _ = try await apiClient.processExternalCommit(
+          let (_, serverNewEpoch) = try await apiClient.processExternalCommit(
             convoId: convoId,
             externalCommit: result.commitData,
-            groupInfo: nil  // We don't need to update GroupInfo here, just joining
+            groupInfo: groupInfo,  // Send pre-commit GroupInfo so server can sync epoch
+            confirmationTag: tagB64
           )
+          serverEpochAfterCommit = UInt64(serverNewEpoch)
         } catch let apiError as MLSAPIError {
-          if case .httpError(let statusCode, _) = apiError, statusCode == 403 {
-            logger.warning(
-              "⚠️ [MLSClient.joinByExternalCommit] External Commit rejected (HTTP 403) - requesting GroupInfo refresh"
-            )
-            do {
-              let (requested, activeMembers) = try await apiClient.groupInfoRefresh(convoId: convoId)
-              if requested {
-                logger.info(
-                  "✅ [MLSClient.joinByExternalCommit] GroupInfo refresh requested - \(activeMembers ?? 0) active members notified"
-                )
-              } else {
-                logger.warning(
-                  "⚠️ [MLSClient.joinByExternalCommit] No active members to refresh GroupInfo")
-              }
-            } catch {
+          if case .httpError(let statusCode, _) = apiError {
+            if statusCode == 409 {
+              // 409 = epoch conflict — another commit landed between our GroupInfo fetch
+              // and our External Commit send. Discard pending state and retry with fresh GroupInfo.
               logger.warning(
-                "⚠️ [MLSClient.joinByExternalCommit] GroupInfo refresh request failed: \(error.localizedDescription)"
+                "⚠️ [MLSClient.joinByExternalCommit] 409 epoch conflict on attempt \(attempt) — retrying with fresh GroupInfo"
               )
-            }
+              if attempt < maxRetries {
+                let waitSeconds = 1 * attempt
+                let jitterMs = UInt64.random(in: 0...500)
+                try await Task.sleep(for: .seconds(waitSeconds))
+                try await Task.sleep(for: .milliseconds(jitterMs))
+                continue
+              }
+            } else if statusCode == 403 {
+              logger.warning(
+                "⚠️ [MLSClient.joinByExternalCommit] External Commit rejected (HTTP 403) - requesting GroupInfo refresh"
+              )
+              do {
+                let (requested, activeMembers) = try await apiClient.groupInfoRefresh(convoId: convoId)
+                if requested {
+                  logger.info(
+                    "✅ [MLSClient.joinByExternalCommit] GroupInfo refresh requested - \(activeMembers ?? 0) active members notified"
+                  )
+                } else {
+                  logger.warning(
+                    "⚠️ [MLSClient.joinByExternalCommit] No active members to refresh GroupInfo")
+                }
+              } catch {
+                logger.warning(
+                  "⚠️ [MLSClient.joinByExternalCommit] GroupInfo refresh request failed: \(error.localizedDescription)"
+                )
+              }
 
-            if attempt < maxRetries {
-              let waitSeconds = 2 * attempt
-              logger.info(
-                "🔄 [MLSClient.joinByExternalCommit] Waiting ~\(waitSeconds)s before retry after 403..."
-              )
-              try await Task.sleep(for: .seconds(waitSeconds))
-              continue
+              if attempt < maxRetries {
+                let waitSeconds = 2 * attempt
+                logger.info(
+                  "🔄 [MLSClient.joinByExternalCommit] Waiting ~\(waitSeconds)s before retry after 403..."
+                )
+                try await Task.sleep(for: .seconds(waitSeconds))
+                continue
+              }
             }
           }
           throw apiError
@@ -977,28 +1213,33 @@ public actor MLSClient {
           "✅ [MLSClient.joinByExternalCommit] Success - Joined group \(convoId) on attempt \(attempt)"
         )
 
-        // Warn about epoch advancement - External Commit always advances the epoch
-        // This means messages from previous epochs may be undecryptable due to forward secrecy
+        // Compare local epoch vs server epoch to detect race conditions
+        let groupIdData = Data(result.groupId)
+        var localEpoch: UInt64 = 0
         do {
-          let groupIdData = Data(result.groupId)
-          let newEpoch = try await getEpoch(for: userDID, groupId: groupIdData)
-          if newEpoch > 1 {
-            logger.warning("⚠️ [EPOCH WARNING] External Commit joined at epoch \(newEpoch)")
+          localEpoch = try await getEpoch(for: userDID, groupId: groupIdData)
+          if localEpoch > 1 {
+            logger.warning("⚠️ [EPOCH WARNING] External Commit joined at epoch \(localEpoch)")
+          }
+          if let serverEpoch = serverEpochAfterCommit, serverEpoch != localEpoch {
             logger.warning(
-              "   Messages from epochs 1-\(newEpoch - 1) may be undecryptable due to forward secrecy"
+              "⚠️ [EPOCH GAP] Local epoch \(localEpoch) != server epoch \(serverEpoch) after external commit for \(convoId.prefix(16))"
+            )
+            logger.warning(
+              "   A concurrent commit occurred between GroupInfo fetch and external commit send"
             )
           }
         } catch {
-          // Non-fatal - just skip the warning if we can't get epoch
-          logger.debug("Could not fetch epoch for warning: \(error.localizedDescription)")
+          logger.debug("Could not fetch epoch for comparison: \(error.localizedDescription)")
         }
-        
+
         // PHASE 3.1: Publish fresh GroupInfo after successful External Commit
-        // This ensures other devices can External Commit to the new state
-        // Critical for device-sync: we advanced the epoch, so we must publish the new state
+        // Pass the server epoch so publishGroupInfo can skip if we're behind
         do {
-          let groupIdData = Data(result.groupId)
-          try await publishGroupInfo(for: userDID, convoId: convoId, groupId: groupIdData)
+          try await publishGroupInfo(
+            for: userDID, convoId: convoId, groupId: groupIdData,
+            knownServerEpoch: serverEpochAfterCommit
+          )
           logger.info("✅ [MLSClient.joinByExternalCommit] GroupInfo published after External Commit")
         } catch {
           // Non-fatal: GroupInfo upload failure shouldn't block the join
@@ -1758,6 +1999,46 @@ public actor MLSClient {
     }
   }
 
+  /// Get the confirmation tag for the current epoch of a group.
+  /// The confirmation tag is a cryptographic value unique to each MLS tree state,
+  /// used by the server to detect tree divergence between clients.
+  /// Returns nil if the group is not found or context is unavailable.
+  public func getConfirmationTag(for userDID: String, groupId: Data) async throws -> Data? {
+    do {
+      return try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.getConfirmationTag(groupId: groupId)
+      }
+    } catch let error as MlsError {
+      switch error {
+      case .GroupNotFound, .ContextNotInitialized, .ContextClosed:
+        logger.debug(
+          "[MLSClient.getConfirmationTag] Group not available: \(error.localizedDescription)")
+        return nil
+      default:
+        logger.warning(
+          "⚠️ [MLSClient.getConfirmationTag] Failed: \(error.localizedDescription)")
+        return nil
+      }
+    }
+  }
+
+  /// Get the current metadata bootstrap info for an already-joined group.
+  /// Returns nil only when the group is unavailable or still in legacy state without
+  /// a committed MetadataReference; groups using the cleaned-up protocol should return
+  /// a metadata key plus the current reference from MLS state.
+  public func getCurrentMetadata(for userDID: String, groupId: Data) async throws
+    -> CurrentMetadataInfo?
+  {
+    do {
+      return try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.getCurrentMetadata(groupId: groupId)
+      }
+    } catch let error as MlsError {
+      logger.error("Get current metadata failed: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
   /// Get debug information about group members
   public func debugGroupMembers(for userDID: String, groupId: Data) async throws -> GroupDebugInfo {
     do {
@@ -1788,8 +2069,8 @@ public actor MLSClient {
   }
 
   /// Check if a group exists in local storage
-  public func groupExists(for userDID: String, groupId: Data) -> Bool {
-    (try? getContext(for: userDID).groupExists(groupId: groupId)) ?? false
+  public func groupExists(for userDID: String, groupId: Data) async -> Bool {
+    (try? await getContext(for: userDID).groupExists(groupId: groupId)) ?? false
   }
 
   /// Get group info for external parties
@@ -1849,10 +2130,10 @@ public actor MLSClient {
       "📍 [MLSClient.mergePendingCommit] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
     do {
-      let newEpoch = try await runFFIWithRecovery(for: userDID) { ctx in
+      let result = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.mergePendingCommit(groupId: groupId)
       }
-      logger.info("✅ [MLSClient.mergePendingCommit] Success - newEpoch: \(newEpoch)")
+      logger.info("✅ [MLSClient.mergePendingCommit] Success - newEpoch: \(result.newEpoch)")
 
       // If convoId is provided, publish the new GroupInfo
       // CRITICAL: Now awaited instead of fire-and-forget
@@ -1860,9 +2141,47 @@ public actor MLSClient {
         try await self.publishGroupInfo(for: userDID, convoId: convoId, groupId: groupId)
       }
 
-      return newEpoch
+      return result.newEpoch
     } catch let error as MlsError {
       logger.error("❌ [MLSClient.mergePendingCommit] FAILED: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
+  /// Merge a pending commit and return metadata key material for the new epoch.
+  /// This variant returns CommitMetadataInfo so the sender can
+  /// re-encrypt and upload metadata blobs after merge.
+  ///
+  /// - Note: `mergePendingCommit` in the FFI returns
+  ///   `MergePendingCommitResult` (with `commitMetadata: Option<CommitMetadataInfo>`).
+  public func mergePendingCommitV2(for userDID: String, groupId: Data, convoId: String? = nil)
+    async throws -> (newEpoch: UInt64, metadataKey: Data?, metadataEpoch: UInt64?)
+  {
+    logger.info(
+      "📍 [MLSClient.mergePendingCommitV2] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
+    )
+    do {
+      let result = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.mergePendingCommit(groupId: groupId)
+      }
+      logger.info("✅ [MLSClient.mergePendingCommitV2] Success - newEpoch: \(result.newEpoch)")
+
+      // If convoId is provided, publish the new GroupInfo
+      if let convoId = convoId {
+        try await self.publishGroupInfo(for: userDID, convoId: convoId, groupId: groupId)
+      }
+
+      // Extract metadata key material from the MergePendingCommitResult
+      if let metadataInfo = result.commitMetadata {
+        logger.info(
+          "📋 [MLSClient.mergePendingCommitV2] Metadata key available for epoch \(metadataInfo.epoch)"
+        )
+        return (result.newEpoch, metadataInfo.metadataKey, metadataInfo.epoch)
+      }
+
+      return (result.newEpoch, nil, nil)
+    } catch let error as MlsError {
+      logger.error("❌ [MLSClient.mergePendingCommitV2] FAILED: \(error.localizedDescription)")
       throw MLSError.operationFailed
     }
   }
@@ -2428,7 +2747,7 @@ public actor MLSClient {
 
     try await withMLSUserPermit(for: normalizedDID) {
       // No advisory lock needed - SQLite WAL handles concurrent access
-      // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+      // Cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`
 
       try await self.flushStorageLocked(normalizedDID: normalizedDID)
     }
@@ -2469,7 +2788,7 @@ public actor MLSClient {
     do {
       return try await withMLSUserPermit(for: normalizedDID) {
         // No advisory lock needed - SQLite WAL handles concurrent access
-        // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+        // Cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`
 
         return await self.closeContextLocked(normalizedDID: normalizedDID)
       }
@@ -2602,15 +2921,7 @@ public actor MLSClient {
     try await MLSGRDBManager.shared.quarantineAndResetDatabase(for: normalizedDID)
 
     // Quarantine the Rust SQLite file (mls-state) so it can be recreated fresh.
-    let appSupport: URL
-    if let sharedContainer = FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared")
-    {
-      appSupport = sharedContainer
-    } else {
-      appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    }
-
+    let appSupport = MLSStoragePaths.baseContainerURL()
     let mlsStateDir = appSupport.appendingPathComponent("mls-state", isDirectory: true)
 
     let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()

@@ -34,6 +34,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let joinEpoch: Int64
   public let title: String?
   public let avatarURL: String?
+  public let avatarImageData: Data?
   public let createdAt: Date
   public let updatedAt: Date
   public let lastMessageAt: Date?
@@ -41,16 +42,21 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let unacknowledgedMemberChanges: Int
   public let isActive: Bool
   public let needsRejoin: Bool
+  public let needsReset: Bool
   public let rejoinRequestedAt: Date?
   public let lastRecoveryAttempt: Date?  // When we last attempted automatic recovery
   public let consecutiveFailures: Int  // Count of consecutive decryption failures
   public let isPlaceholder: Bool  // True if created by NSE as a placeholder (needs metadata sync)
   public let requestState: MLSRequestState  // Local-only: pending inbound request or accepted
+  public let mutedUntil: Date?
 
   public var id: String { conversationID }
-  
+
   /// Whether this conversation is pending user acceptance (inbound chat request)
   public var isPendingRequest: Bool { requestState == .pendingInbound }
+
+  /// Whether this conversation is currently muted
+  public var isMuted: Bool { mutedUntil.map { $0 > Date() } ?? false }
 
   // MARK: - Initialization
 
@@ -63,6 +69,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     joinEpoch: Int64 = 0,
     title: String? = nil,
     avatarURL: String? = nil,
+    avatarImageData: Data? = nil,
     createdAt: Date = Date(),
     updatedAt: Date = Date(),
     lastMessageAt: Date? = nil,
@@ -70,11 +77,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     unacknowledgedMemberChanges: Int = 0,
     isActive: Bool = true,
     needsRejoin: Bool = false,
+    needsReset: Bool = false,
     rejoinRequestedAt: Date? = nil,
     lastRecoveryAttempt: Date? = nil,
     consecutiveFailures: Int = 0,
     isPlaceholder: Bool = false,
-    requestState: MLSRequestState = .none
+    requestState: MLSRequestState = .none,
+    mutedUntil: Date? = nil
   ) {
     self.conversationID = conversationID
     self.currentUserDID = currentUserDID
@@ -84,6 +93,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.joinEpoch = joinEpoch
     self.title = title
     self.avatarURL = avatarURL
+    self.avatarImageData = avatarImageData
     self.createdAt = createdAt
     self.updatedAt = updatedAt
     self.lastMessageAt = lastMessageAt
@@ -91,11 +101,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.unacknowledgedMemberChanges = unacknowledgedMemberChanges
     self.isActive = isActive
     self.needsRejoin = needsRejoin
+    self.needsReset = needsReset
     self.rejoinRequestedAt = rejoinRequestedAt
     self.lastRecoveryAttempt = lastRecoveryAttempt
     self.consecutiveFailures = consecutiveFailures
     self.isPlaceholder = isPlaceholder
     self.requestState = requestState
+    self.mutedUntil = mutedUntil
   }
 
   // MARK: - Update Methods
@@ -111,6 +123,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -118,11 +131,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -136,6 +151,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: epoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -143,11 +159,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -162,6 +180,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: timestamp,
@@ -169,11 +188,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -188,6 +209,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -195,17 +217,19 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: active,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
-  /// Create updated copy with new title and avatar
+  /// Create updated copy with new title, avatar URL, and optional avatar image data
   /// Note: Setting metadata clears the isPlaceholder flag (placeholder healed)
-  func withMetadata(title: String?, avatarURL: String?) -> MLSConversationModel {
+  func withMetadata(title: String?, avatarURL: String?, avatarImageData: Data? = nil) -> MLSConversationModel {
     MLSConversationModel(
       conversationID: conversationID,
       currentUserDID: currentUserDID,
@@ -215,6 +239,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -222,11 +247,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: false,  // Clear placeholder flag when metadata is set
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -241,6 +268,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -248,11 +276,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -269,6 +299,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -276,11 +307,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -295,6 +328,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: updatedAt,
       lastMessageAt: lastMessageAt,
@@ -302,11 +336,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: 0,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -321,6 +357,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -328,11 +365,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges + unacknowledged,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -347,6 +386,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -354,11 +394,13 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: 0,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: requestState
+      requestState: requestState,
+      mutedUntil: mutedUntil
     )
   }
 
@@ -373,6 +415,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinEpoch: joinEpoch,
       title: title,
       avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
       createdAt: createdAt,
       updatedAt: Date(),
       lastMessageAt: lastMessageAt,
@@ -380,11 +423,42 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       unacknowledgedMemberChanges: unacknowledgedMemberChanges,
       isActive: isActive,
       needsRejoin: needsRejoin,
+      needsReset: needsReset,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
-      requestState: state
+      requestState: state,
+      mutedUntil: mutedUntil
+    )
+  }
+
+  /// Create updated copy with new muted-until date
+  public func withMutedUntil(_ date: Date?) -> MLSConversationModel {
+    MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      groupID: groupID,
+      epoch: epoch,
+      joinMethod: joinMethod,
+      joinEpoch: joinEpoch,
+      title: title,
+      avatarURL: avatarURL,
+      avatarImageData: avatarImageData,
+      createdAt: createdAt,
+      updatedAt: Date(),
+      lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: lastMembershipChangeAt,
+      unacknowledgedMemberChanges: unacknowledgedMemberChanges,
+      isActive: isActive,
+      needsRejoin: needsRejoin,
+      needsReset: needsReset,
+      rejoinRequestedAt: rejoinRequestedAt,
+      lastRecoveryAttempt: lastRecoveryAttempt,
+      consecutiveFailures: consecutiveFailures,
+      isPlaceholder: isPlaceholder,
+      requestState: requestState,
+      mutedUntil: date
     )
   }
 }
@@ -402,6 +476,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let joinEpoch = Column("joinEpoch")
     public static let title = Column("title")
     public static let avatarURL = Column("avatarURL")
+    public static let avatarImageData = Column("avatarImageData")
     public static let createdAt = Column("createdAt")
     public static let updatedAt = Column("updatedAt")
     public static let lastMessageAt = Column("lastMessageAt")
@@ -409,11 +484,13 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let unacknowledgedMemberChanges = Column("unacknowledgedMemberChanges")
     public static let isActive = Column("isActive")
     public static let needsRejoin = Column("needsRejoin")
+    public static let needsReset = Column("needsReset")
     public static let rejoinRequestedAt = Column("rejoinRequestedAt")
     public static let lastRecoveryAttempt = Column("lastRecoveryAttempt")
     public static let consecutiveFailures = Column("consecutiveFailures")
     public static let isPlaceholder = Column("isPlaceholder")
     public static let requestState = Column("requestState")
+    public static let mutedUntil = Column("mutedUntil")
   }
 
   enum CodingKeys: String, CodingKey {
@@ -425,6 +502,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case joinEpoch
     case title
     case avatarURL
+    case avatarImageData
     case createdAt
     case updatedAt
     case lastMessageAt
@@ -432,10 +510,12 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case unacknowledgedMemberChanges
     case isActive
     case needsRejoin
+    case needsReset
     case rejoinRequestedAt
     case lastRecoveryAttempt
     case consecutiveFailures
     case isPlaceholder
     case requestState
+    case mutedUntil
   }
 }

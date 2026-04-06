@@ -55,7 +55,8 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
   /// Clears the MLS suspension flag so Rust FFI contexts can be re-created on demand.
   public func resumeFromSuspension() {
     MLSCoreContext.clearSuspensionFlag()
-    logger.debug("Resumed from suspension - cleared MLS suspension flag")
+    MLSClient.clearSuspensionFlag(reason: "MLSDatabaseCoordinator.resumeFromSuspension")
+    logger.debug("Resumed from suspension - cleared MLS suspension flags")
   }
 
   // MARK: - Public API

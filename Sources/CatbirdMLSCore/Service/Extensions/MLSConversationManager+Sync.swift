@@ -50,11 +50,13 @@ public extension MLSConversationManager {
   /// Sync conversations with server
   /// - Parameter fullSync: Whether to perform full sync or incremental
   public func syncWithServer(fullSync: Bool = false) async throws {
-    print("[syncWithServer] START fullSync=\(fullSync)")
     // CRITICAL: Capture session generation at start to detect account switches
     let myGeneration = sessionGeneration
 
     try throwIfShuttingDown("syncWithServer")
+
+    // Reconnect database pool if it was closed during recovery
+    try await refreshDatabaseIfNeeded()
 
     // Do not start sync while lifecycle has MLS paused/suspending.
     if isSyncPaused || isSuspending || MLSClient.isSuspensionInProgress {
@@ -73,7 +75,6 @@ public extension MLSConversationManager {
         logger.warning(
           "⛔ Sync paused due to \(self.consecutiveSyncFailures) consecutive failures (\(remaining)s remaining)"
         )
-        print("[syncWithServer] PAUSED due to failures")
         return
       } else {
         // Reset circuit breaker after pause period
@@ -85,7 +86,6 @@ public extension MLSConversationManager {
 
     // CRITICAL FIX: Use Mutex to atomically check and set sync state
     // This prevents race conditions where multiple syncs start simultaneously
-    print("[syncWithServer] Acquiring sync lock...")
     let didAcquire = syncState.withLock { syncing -> Bool in
       if syncing {
         return false
@@ -129,18 +129,14 @@ public extension MLSConversationManager {
     // current session. If not, gracefully skip the sync (this manager's account
     // is not active right now) rather than throwing an error.
     // ═══════════════════════════════════════════════════════════════════════════
-    print("[syncWithServer] Checking if this account is active...")
     let isActiveAccount = await apiClient.isAuthenticatedAs(userDid)
     if !isActiveAccount {
       // This is normal in multi-account scenarios - just skip silently
       logger.info("⏸️ [SYNC] Skipping sync - this account (\(userDid.prefix(20))...) is not the active account")
-      print("[syncWithServer] Account not active, skipping sync")
       return
     }
-    print("[syncWithServer] Account is active, proceeding with sync")
 
     logger.info("Starting server sync (full: \(fullSync))")
-    print("[syncWithServer] Fetching conversations...")
 
     do {
       // Fetch conversations from server
@@ -150,13 +146,11 @@ public extension MLSConversationManager {
 
       repeat {
         pageCount += 1
-        print("[syncWithServer] Fetching page \(pageCount)...")
         // CRITICAL FIX: Check shutdown state during pagination loop
         // This prevents continuing to fetch while account is switching
         try throwIfShuttingDown("syncWithServer pagination")
         
         let result = try await apiClient.getConversations(limit: 100, cursor: cursor)
-        print("[syncWithServer] Page \(pageCount): got \(result.convos.count) convos")
         allConvos.append(contentsOf: result.convos)
         cursor = result.cursor
       } while cursor != nil
@@ -227,24 +221,35 @@ public extension MLSConversationManager {
               logger.warning("⚠️ EPOCH MISMATCH in syncWithServer (new group):")
               logger.warning("   Server: \(serverEpoch), FFI: \(ffiEpoch)")
 
+              // ⭐ Skip epoch catch-up for conversations already flagged needsRejoin.
+              // Deferred recovery will handle these outside the sync hot-path.
+              if await conversationNeedsRejoin(convo.groupId) {
+                logger.info("⏭️ [SYNC] Skipping epoch catch-up for \(convo.groupId.prefix(16))... - already flagged needsRejoin")
+              } else
               // Attempt to catch up by processing missed commits
               if serverEpoch > ffiEpoch {
-                let caught = await fetchAndProcessMissingCommits(
+                let result = await fetchAndProcessMissingCommits(
                   conversationID: convo.groupId,
                   groupId: convo.groupId,
                   localEpoch: ffiEpoch,
                   targetEpoch: Int(serverEpoch)
                 )
-                if caught {
+                switch result {
+                case .advanced, .noGap:
                   ffiEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? ffiEpoch
                   logger.info("✅ Epoch catch-up successful (new group): now at \(ffiEpoch)")
-                } else {
-                  // Don't forceRejoin here — it creates an External Commit that bumps the
-                  // server epoch by 1, causing an infinite rejoin spiral on the next sync.
-                  // Instead, just accept the FFI epoch. The conversation will work at whatever
-                  // epoch the FFI is at; if messages fail to decrypt, the message-level epoch
-                  // recovery will handle it.
-                  logger.warning("⚠️ Epoch catch-up failed (new group) - accepting FFI epoch \(ffiEpoch) (server: \(serverEpoch))")
+                case .needsDeferredRejoin(let failedEpoch, let reason):
+                  // ⭐ FIX: Do NOT call handleRatchetDesync/forceRejoin from the sync
+                  // hot-path. Flag the conversation for deferred recovery instead.
+                  // This breaks the epoch inflation feedback loop between devices.
+                  logger.warning("⚠️ Epoch catch-up failed (new group) - deferring rejoin for \(convo.groupId.prefix(16))...")
+                  logger.warning("   Local epoch \(failedEpoch) cannot process commits to reach server epoch \(serverEpoch)")
+                  logger.warning("   Reason: \(reason)")
+                  try? await markConversationNeedsRejoin(convo.groupId)
+                case .serverDataGap:
+                  logger.warning("⚠️ Server data gap (new group) for \(convo.groupId.prefix(16))... - will retry next sync")
+                case .transientFetchError(let reason):
+                  logger.warning("⚠️ Transient fetch error (new group) for \(convo.groupId.prefix(16))...: \(reason) - will retry next sync")
                 }
               }
             }
@@ -282,22 +287,34 @@ public extension MLSConversationManager {
                 logger.warning("⚠️ EPOCH MISMATCH in syncWithServer (update):")
                 logger.warning("   Server: \(serverEpoch), FFI: \(ffiEpoch)")
 
+                // ⭐ Skip epoch catch-up for conversations already flagged needsRejoin.
+                // Deferred recovery will handle these outside the sync hot-path.
+                if await conversationNeedsRejoin(convo.groupId) {
+                  logger.info("⏭️ [SYNC] Skipping epoch catch-up for \(convo.groupId.prefix(16))... - already flagged needsRejoin")
+                } else
                 // Attempt to catch up by processing missed commits
                 if serverEpoch > ffiEpoch {
-                  let caught = await fetchAndProcessMissingCommits(
+                  let result = await fetchAndProcessMissingCommits(
                     conversationID: convo.groupId,
                     groupId: convo.groupId,
                     localEpoch: ffiEpoch,
                     targetEpoch: Int(serverEpoch)
                   )
-                  if caught {
+                  switch result {
+                  case .advanced, .noGap:
                     ffiEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? ffiEpoch
                     logger.info("✅ Epoch catch-up successful (update): now at \(ffiEpoch)")
-                  } else {
-                    // Don't forceRejoin here — it creates an External Commit that bumps the
-                    // server epoch by 1, causing an infinite rejoin spiral on the next sync.
-                    // Message-level epoch recovery will handle decryption failures.
-                    logger.warning("⚠️ Epoch catch-up failed (update) - accepting FFI epoch \(ffiEpoch) (server: \(serverEpoch))")
+                  case .needsDeferredRejoin(let failedEpoch, let reason):
+                    // ⭐ FIX: Do NOT call handleRatchetDesync/forceRejoin from the sync
+                    // hot-path. Flag the conversation for deferred recovery instead.
+                    logger.warning("⚠️ Epoch catch-up failed (update) - deferring rejoin for \(convo.groupId.prefix(16))...")
+                    logger.warning("   Local epoch \(failedEpoch) cannot process commits to reach server epoch \(serverEpoch)")
+                    logger.warning("   Reason: \(reason)")
+                    try? await markConversationNeedsRejoin(convo.groupId)
+                  case .serverDataGap:
+                    logger.warning("⚠️ Server data gap (update) for \(convo.groupId.prefix(16))... - will retry next sync")
+                  case .transientFetchError(let reason):
+                    logger.warning("⚠️ Transient fetch error (update) for \(convo.groupId.prefix(16))...: \(reason) - will retry next sync")
                   }
                 }
               }
@@ -311,8 +328,32 @@ public extension MLSConversationManager {
             state.members = Set(convo.members.map { $0.did.description })
             groupStates[convo.groupId] = state
 
+            // Persist epoch to GRDB so DataSource reads are consistent
+            do {
+              try await storage.updateConversationEpoch(
+                conversationID: convo.groupId,
+                currentUserDID: userDid,
+                epoch: Int64(ffiEpoch),
+                database: database
+              )
+            } catch {
+              logger.warning("Failed to persist epoch during sync for \(convo.groupId.prefix(16)): \(error.localizedDescription)")
+            }
+
             // Notify epoch update
             notifyObservers(.epochUpdated(convo.groupId, Int(ffiEpoch)))
+          }
+        }
+
+        // Check confirmation tag divergence (only if server provides one and epochs match)
+        if let serverTag = convo.confirmationTag,
+           let groupIdData = Data(hexEncoded: convo.groupId),
+           !(await conversationNeedsRejoin(convo.groupId)) {
+          let localTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+          let localTagB64 = localTagData?.base64EncodedString()
+          if let localTagB64 = localTagB64, localTagB64 != serverTag {
+            logger.warning("⚠️ [SYNC] Tree divergence detected for \(convo.groupId.prefix(16))... - local tag != server tag")
+            try? await markConversationNeedsRejoin(convo.groupId)
           }
         }
 
@@ -478,6 +519,22 @@ public extension MLSConversationManager {
       // Reset circuit breaker on success
       consecutiveSyncFailures = 0
 
+      // ⭐ FIX: Schedule deferred recovery for any conversations flagged needsRejoin
+      // during this sync pass. Without this, needsRejoin set mid-session would only
+      // be consumed at next app launch (detectAndRejoinMissingConversations is one-shot).
+      // Single-flight: skip if a previous recovery pass is still running.
+      if deferredEpochRecoveryTask == nil {
+        deferredEpochRecoveryTask = Task(priority: .utility) { [weak self] in
+          guard let self else { return }
+          defer { self.deferredEpochRecoveryTask = nil }
+          do {
+            try await self.runDeferredEpochRecovery()
+          } catch {
+            self.logger.warning("⚠️ [SYNC] Deferred epoch recovery failed: \(error.localizedDescription)")
+          }
+        }
+      }
+
     } catch {
       if isSuspensionRelatedSyncError(error) {
         logger.info(
@@ -506,6 +563,220 @@ public extension MLSConversationManager {
 
       notifyObservers(.syncFailed(error))
       throw MLSConversationError.syncFailed(error)
+    }
+  }
+
+  // MARK: - Deferred Epoch Recovery
+
+  /// Recover conversations flagged `needsRejoin` during a sync pass.
+  /// Runs outside the sync hot-path with MLSRecoveryManager backoff to
+  /// prevent the epoch inflation feedback loop.
+  ///
+  /// Key difference from `detectAndRejoinMissingConversations`: this method
+  /// **deletes stale local group state** before attempting rejoin so that
+  /// `attemptExternalCommitFallback` doesn't short-circuit on `groupExists`.
+  internal func runDeferredEpochRecovery() async throws {
+    guard !isShuttingDown, !Task.isCancelled else { return }
+    guard let userDid = userDid else { return }
+    guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
+      return
+    }
+
+    // Phase 1: Handle needsReset conversations (group reset — fresh MLS group at epoch 0)
+    // This MUST run before needsRejoin to prevent External Commits on diverged groups.
+    let resetConvos = try await database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+        .filter(MLSConversationModel.Columns.needsReset == true)
+        .fetchAll(db)
+    }
+
+    for convo in resetConvos {
+      if isShuttingDown || Task.isCancelled { return }
+
+      // Gate through MLSRecoveryManager backoff
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationID)
+        if shouldSkip {
+          logger.info(
+            "⏭️ [EPOCH-RESET] Skipping \(convo.conversationID.prefix(16))... — backoff active")
+          continue
+        }
+      }
+
+      logger.warning(
+        "🔄 [EPOCH-RESET] Starting automatic group reset for \(convo.conversationID.prefix(16))...")
+
+      do {
+        // 1. Create a fresh MLS group
+        let newGroupIdData = try await mlsClient.createGroup(for: userDid)
+        let newGroupIdHex = newGroupIdData.hexEncodedString()
+
+        // 2. Get GroupInfo for the new group (may not be implemented yet)
+        let groupInfoData = try? await mlsClient.getGroupInfo(for: userDid, groupId: newGroupIdData)
+        let groupInfoBase64 = groupInfoData?.base64EncodedString()
+
+        // 3. Call server resetGroup endpoint
+        let result = try await apiClient.resetGroup(
+          convoId: convo.conversationID,
+          newGroupId: newGroupIdHex,
+          cipherSuite: "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+          groupInfo: groupInfoBase64,
+          reason: "Automatic reset: epoch divergence exceeded threshold"
+        )
+
+        // 4. Update local state
+        try await database.write { db in
+          try db.execute(
+            sql: """
+                UPDATE MLSConversationModel
+                SET needsReset = 0, needsRejoin = 0, epoch = 0, updatedAt = ?
+                WHERE conversationID = ? AND currentUserDID = ?;
+            """, arguments: [Date(), convo.conversationID, userDid])
+        }
+
+        // 5. Clear old group state
+        groupStates.removeValue(forKey: convo.conversationID)
+
+        logger.warning(
+          "✅ [EPOCH-RESET] Successfully reset \(convo.conversationID.prefix(16)) — newGroupId=\(newGroupIdHex.prefix(16)), generation=\(result.resetGeneration)"
+        )
+
+        // Clear recovery tracking
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
+        }
+
+      } catch {
+        let errorDesc = error.localizedDescription.lowercased()
+
+        if errorDesc.contains("notadmin") {
+          logger.error(
+            "❌ [EPOCH-RESET] Not admin for \(convo.conversationID.prefix(16)) — cannot reset, clearing flag"
+          )
+          await clearConversationResetFlag(convo.conversationID)
+        } else if errorDesc.contains("resetinprogress") {
+          logger.info(
+            "⏭️ [EPOCH-RESET] Reset already in progress for \(convo.conversationID.prefix(16))")
+        } else {
+          logger.error(
+            "❌ [EPOCH-RESET] Failed for \(convo.conversationID.prefix(16)): \(error.localizedDescription)"
+          )
+          // Record failure for backoff
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
+          }
+        }
+      }
+    }
+
+    // Phase 2: Handle needsRejoin conversations (external commit rejoin)
+    let flaggedConvos = try await database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+        .filter(MLSConversationModel.Columns.needsRejoin == true)
+        .filter(MLSConversationModel.Columns.needsReset == false)
+        .fetchAll(db)
+    }
+
+    guard !flaggedConvos.isEmpty else { return }
+
+    logger.info(
+      "🔄 [DEFERRED-RECOVERY] Found \(flaggedConvos.count) conversation(s) needing deferred epoch recovery"
+    )
+
+    for convo in flaggedConvos {
+      if isShuttingDown || Task.isCancelled { return }
+
+      // Gate through MLSRecoveryManager backoff (30s → 2m → 10m → 1h)
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationID)
+        if shouldSkip {
+          logger.info(
+            "⏭️ [DEFERRED-RECOVERY] Skipping \(convo.conversationID.prefix(16))... - backoff active"
+          )
+          continue
+        }
+      }
+
+      guard beginRejoinAttempt(
+        conversationID: convo.conversationID,
+        source: "deferred-epoch-recovery"
+      ) else {
+        continue
+      }
+
+      // P1: Try commit catch-up BEFORE deleting local state and doing external commit.
+      // If we have local MLS state at a non-zero epoch, we might be able to advance
+      // by processing pending commits — avoiding an external commit entirely.
+      let groupIdData = convo.groupID
+      var caughtUp = false
+      if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
+        let localEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
+        if localEpoch > 0 {
+          logger.info(
+            "🔄 [DEFERRED-RECOVERY] Local state at epoch \(localEpoch) for \(convo.conversationID.prefix(16)) — trying commit catch-up before external commit"
+          )
+          let serverEpoch = convo.epoch
+          if serverEpoch > Int64(localEpoch) {
+            let groupIdHex = convo.conversationID  // conversationID is the hex group ID
+            let result = await fetchAndProcessMissingCommits(
+              conversationID: groupIdHex,
+              groupId: groupIdHex,
+              localEpoch: localEpoch,
+              targetEpoch: Int(serverEpoch)
+            )
+            switch result {
+            case .advanced, .noGap:
+              logger.info(
+                "✅ [DEFERRED-RECOVERY] Commit catch-up succeeded for \(convo.conversationID.prefix(16)) — no external commit needed"
+              )
+              await clearConversationRejoinFlag(convo.conversationID)
+              endRejoinAttempt(conversationID: convo.conversationID)
+              caughtUp = true
+            default:
+              logger.info(
+                "⚠️ [DEFERRED-RECOVERY] Commit catch-up did not advance epoch — falling back to external commit"
+              )
+            }
+          }
+        }
+      }
+
+      if caughtUp { continue }
+
+      // Delete stale local group state BEFORE attempting rejoin.
+      // Without this, `attemptExternalCommitFallback` sees `groupExists == true`
+      // and returns immediately without repairing the desynchronized ratchet state.
+      if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
+        logger.info(
+          "🗑️ [DEFERRED-RECOVERY] Deleting stale local group state for \(convo.conversationID.prefix(16))..."
+        )
+        do {
+          try await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
+        } catch {
+          logger.warning(
+            "⚠️ [DEFERRED-RECOVERY] Failed to delete stale group: \(error.localizedDescription)"
+          )
+        }
+        groupStates.removeValue(forKey: convo.conversationID)
+      }
+
+      let succeeded = await attemptRejoinWithWelcomeFallback(
+        convoId: convo.conversationID,
+        displayName: convo.conversationID,
+        reason: "deferred epoch recovery (sync catch-up failed)"
+      )
+      endRejoinAttempt(conversationID: convo.conversationID)
+
+      // Record success/failure in MLSRecoveryManager for backoff tracking
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        if succeeded {
+          await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
+        } else {
+          await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
+        }
+      }
     }
   }
 
@@ -576,6 +847,21 @@ public extension MLSConversationManager {
       }
     }
 
+    // Pre-fetch MLS metadata for all conversations (encrypted in group context extensions).
+    // This runs outside the database write block since FFI calls are async.
+    var mlsMetadataByGroupId: [String: GroupMetadataPayload] = [:]
+    for convo in convos {
+      guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
+      do {
+        if let metadata = try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData) {
+          mlsMetadataByGroupId[convo.groupId] = metadata
+        }
+      } catch {
+        // Non-fatal: group may not exist locally yet (e.g., pending welcome)
+        logger.debug("⚠️ Could not read MLS metadata for \(convo.groupId.prefix(16))...: \(error.localizedDescription)")
+      }
+    }
+
     try await database.write { db in
       for convo in convos {
         guard let groupIdData = Data(hexEncoded: convo.groupId) else {
@@ -583,21 +869,53 @@ public extension MLSConversationManager {
           continue
         }
 
-        let title = convo.metadata?.name
+        // Prefer MLS-encrypted metadata over server plaintext metadata
+        let mlsMeta = mlsMetadataByGroupId[convo.groupId]
+        let title = mlsMeta?.name ?? convo.metadata?.name
         let requestState = trustCheckResults[convo.groupId] ?? .none
+
+        // Merge with existing row to preserve local-only state (lastMessageAt,
+        // mutedUntil, joinMethod, consecutiveFailures, etc.) that would be
+        // clobbered by a blind INSERT OR REPLACE.
+        let existing = try MLSConversationModel
+          .filter(MLSConversationModel.Columns.conversationID == convo.groupId)
+          .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+          .fetchOne(db)
+
+        // For lastMessageAt, prefer the most recent value between server and local
+        let serverLastMessage = convo.lastMessageAt?.date
+        let mergedLastMessage: Date? = {
+          switch (existing?.lastMessageAt, serverLastMessage) {
+          case let (local?, server?): return max(local, server)
+          case let (local?, nil): return local
+          case let (nil, server?): return server
+          case (nil, nil): return nil
+          }
+        }()
 
         let model = MLSConversationModel(
           conversationID: convo.groupId,
           currentUserDID: userDid,
           groupID: groupIdData,
           epoch: Int64(convo.epoch),
+          joinMethod: existing?.joinMethod ?? .unknown,
+          joinEpoch: existing?.joinEpoch ?? 0,
           title: title,
-          avatarURL: nil,
+          avatarURL: existing?.avatarURL,
+          avatarImageData: existing?.avatarImageData,
           createdAt: convo.createdAt.date,
           updatedAt: Date(),
-          lastMessageAt: convo.lastMessageAt?.date,
+          lastMessageAt: mergedLastMessage,
+          lastMembershipChangeAt: existing?.lastMembershipChangeAt,
+          unacknowledgedMemberChanges: existing?.unacknowledgedMemberChanges ?? 0,
           isActive: true,
-          requestState: requestState
+          needsRejoin: existing?.needsRejoin ?? false,
+          rejoinRequestedAt: existing?.rejoinRequestedAt,
+          lastRecoveryAttempt: existing?.lastRecoveryAttempt,
+          consecutiveFailures: existing?.consecutiveFailures ?? 0,
+          isPlaceholder: existing?.isPlaceholder ?? false,
+          requestState: existing?.requestState ?? requestState,
+          mutedUntil: existing?.mutedUntil
         )
 
         try model.save(db)
@@ -618,7 +936,8 @@ public extension MLSConversationManager {
       return
     }
 
-    try await database.write { [self] db in
+    let normalizedUserDid = MLSStorageHelpers.normalizeDID(userDid)
+    try await database.write { db in
       for convo in convos {
         try db.execute(
           sql: """
@@ -626,28 +945,35 @@ public extension MLSConversationManager {
             SET isActive = 0, removedAt = ?, updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ? AND isActive = 1
             """,
-          arguments: [Date(), Date(), convo.groupId, userDid]
+          arguments: [Date(), Date(), convo.groupId, normalizedUserDid]
         )
 
         for (index, apiMember) in convo.members.enumerated() {
-          let member = MLSMemberModel(
-            memberID: "\(convo.groupId)_\(apiMember.did.description)",
-            conversationID: convo.groupId,
-            currentUserDID: userDid,
-            did: apiMember.did.description,
-            handle: nil,
-            displayName: nil,
-            leafIndex: index,
-            credentialData: nil,
-            signaturePublicKey: nil,
-            addedAt: Date(),
-            updatedAt: Date(),
-            removedAt: nil,
-            isActive: true,
-            role: apiMember.isAdmin ? .admin : .member,
-            capabilities: nil
-          )
-          try member.save(db)
+          let memberID = "\(convo.groupId)_\(apiMember.did.description)"
+          let normalizedDid = MLSStorageHelpers.normalizeDID(apiMember.did.description)
+          let normalizedUserDid = MLSStorageHelpers.normalizeDID(userDid)
+          let now = Date()
+          let role = apiMember.isAdmin ? "admin" : "member"
+
+          // UPSERT: insert new members, but preserve existing profile fields
+          // (handle, displayName, avatarURL) that the profile enricher populated.
+          try db.execute(
+            sql: """
+              INSERT INTO MLSMemberModel
+                (memberID, conversationID, currentUserDID, did, handle, displayName, avatarURL,
+                 leafIndex, addedAt, updatedAt, isActive, role)
+              VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, 1, ?)
+              ON CONFLICT(memberID) DO UPDATE SET
+                leafIndex = excluded.leafIndex,
+                updatedAt = excluded.updatedAt,
+                isActive = 1,
+                removedAt = NULL,
+                role = excluded.role
+              """,
+            arguments: [
+              memberID, convo.groupId, normalizedUserDid, normalizedDid,
+              index, now, now, role,
+            ])
         }
       }
     }
@@ -728,15 +1054,21 @@ public extension MLSConversationManager {
       return
     }
 
-    // ⭐ RACE CONDITION FIX: Filter out groups that are currently being created.
-    // During group creation, there's a window where the group exists locally but
-    // hasn't been pushed to the server yet. We must not delete these groups.
-    let pendingCreations = groupsBeingCreated.withLock { $0 }
-    let safeToDelete = remainingRemoved.subtracting(pendingCreations)
+    // ⭐ RACE CONDITION FIX: Filter out groups that were recently created.
+    // A sync response fetched before creation completes will not include the new conversation.
+    // By keeping a 120s grace window after creation, we prevent stale sync responses from
+    // triggering force-deletion of conversations that actually exist on the server.
+    let recentCreationWindow: TimeInterval = 120
+    let recentlyCreated: Set<String> = groupsBeingCreated.withLock { entries in
+      // Prune entries older than the window
+      entries = entries.filter { now.timeIntervalSince($0.value) < recentCreationWindow }
+      return Set(entries.keys)
+    }
+    let safeToDelete = remainingRemoved.subtracting(recentlyCreated)
 
     if safeToDelete.count != remainingRemoved.count {
       let skipped = remainingRemoved.subtracting(safeToDelete)
-      logger.info("⏳ [RECONCILE] Skipping \(skipped.count) conversation(s) being created: \(skipped.map { $0.prefix(16) })")
+      logger.info("⏳ [RECONCILE] Skipping \(skipped.count) recently-created conversation(s): \(skipped.map { $0.prefix(16) })")
     }
 
     guard !safeToDelete.isEmpty else { return }

@@ -16,7 +16,8 @@ enum MLSUserOperationCoordinatorError: Error, Sendable {
 /// Serializes MLS operations that mutate per-user state (Rust MLS SQLite + Swift SQLCipher).
 ///
 /// This is intentionally process-local; cross-process safety is provided separately by
-/// Darwin notifications (`MLSCrossProcess`) and SQLite WAL-mode busy timeouts.
+/// Darwin notification coordination (`MLSNotificationCoordinator` / `MLSStateChangeNotifier`)
+/// and SQLite WAL-mode busy timeouts.
 public actor MLSUserOperationCoordinator {
   public static let shared = MLSUserOperationCoordinator()
 

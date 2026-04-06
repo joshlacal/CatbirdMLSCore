@@ -56,6 +56,12 @@ extension MLSConversationManager {
     }
     missingConversationsTask = nil
 
+    if let task = deferredEpochRecoveryTask {
+      task.cancel()
+      logger.debug("   Cancelled deferredEpochRecoveryTask")
+    }
+    deferredEpochRecoveryTask = nil
+
     if let task = keyPackageRefreshTask {
       task.cancel()
       logger.debug("   Cancelled keyPackageRefreshTask")
@@ -215,6 +221,9 @@ extension MLSConversationManager {
     // CRITICAL: Cancel the missing conversations task to prevent hang during reset
     missingConversationsTask?.cancel()
     missingConversationsTask = nil
+
+    deferredEpochRecoveryTask?.cancel()
+    deferredEpochRecoveryTask = nil
 
     keyPackageRefreshTask?.cancel()
     keyPackageRefreshTask = nil
@@ -376,6 +385,9 @@ extension MLSConversationManager {
     // External Commit operations inside detectAndRejoinMissingConversations() are long-running
     missingConversationsTask?.cancel()
     missingConversationsTask = nil
+
+    deferredEpochRecoveryTask?.cancel()
+    deferredEpochRecoveryTask = nil
 
     keyPackageRefreshTask?.cancel()
     keyPackageRefreshTask = nil
@@ -764,6 +776,11 @@ extension MLSConversationManager {
     keyPackageRefreshTask = Task(priority: .utility) { [weak self] in
       guard let self else { return }
       do {
+        // Wait for app to settle before heavy FFI work.
+        // If user backgrounds immediately after launch, suspendMLSOperations() cancels
+        // this task and the sleep throws CancellationError — preventing the 0xdead10cc
+        // crash seen when create_key_package races against suspension (3-second crash).
+        try await Task.sleep(nanoseconds: 5_000_000_000)
         try Task.checkCancellation()
         try await self.smartRefreshKeyPackages()
         try Task.checkCancellation()
@@ -784,7 +801,8 @@ extension MLSConversationManager {
     missingConversationsTask = Task(priority: .utility) { [weak self] in
       guard let self else { return }
       do {
-        // Check for cancellation before starting potentially long operation
+        // Wait for app to settle before heavy FFI work (External Commits).
+        try await Task.sleep(nanoseconds: 5_000_000_000)
         try Task.checkCancellation()
         try await self.detectAndRejoinMissingConversations()
       } catch is CancellationError {
@@ -930,21 +948,58 @@ extension MLSConversationManager {
             return
           }
 
+          // ⭐ FIX: Gate deferred rejoins through MLSRecoveryManager backoff (30s → 2m → 10m → 1h)
+          // instead of the weaker 60s beginRejoinAttempt cooldown. This prevents sync-triggered
+          // epoch inflation from repeatedly External-Committing every minute.
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationID)
+            if shouldSkip {
+              logger.info(
+                "⏭️ [REJOIN] Skipping \(convo.conversationID.prefix(16))... - MLSRecoveryManager backoff active")
+              continue
+            }
+          }
+
           guard
             beginRejoinAttempt(
               conversationID: convo.conversationID,
-              source: "corrupted-local"
+              source: "deferred-epoch-recovery"
             )
           else {
             continue
           }
 
-          let _ = await attemptRejoinWithWelcomeFallback(
+          // ⭐ FIX P1b: Delete stale local group state BEFORE attempting rejoin.
+          // Without this, `attemptExternalCommitFallback` sees `groupExists == true`
+          // and returns immediately without repairing the desynchronized ratchet state.
+          let groupIdData = convo.groupID
+          if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
+            logger.info(
+              "🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))...")
+            do {
+              try await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
+            } catch {
+              logger.warning(
+                "⚠️ [REJOIN] Failed to delete stale group: \(error.localizedDescription)")
+            }
+            groupStates.removeValue(forKey: convo.conversationID)
+          }
+
+          let succeeded = await attemptRejoinWithWelcomeFallback(
             convoId: convo.conversationID,
             displayName: convo.conversationID,
-            reason: "corrupted local state"
+            reason: "deferred epoch recovery (sync catch-up failed)"
           )
           endRejoinAttempt(conversationID: convo.conversationID)
+
+          // Record success/failure in MLSRecoveryManager for backoff tracking
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            if succeeded {
+              await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
+            } else {
+              await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
+            }
+          }
         }
       }
 

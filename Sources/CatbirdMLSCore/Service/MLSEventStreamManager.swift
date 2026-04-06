@@ -39,6 +39,7 @@ public actor MLSEventStreamManager {
     public struct EventHandler {
         public var onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)?
         public var onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)?
+        public var onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)?
         public var onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
         public var onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)?
         public var onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
@@ -47,14 +48,17 @@ public actor MLSEventStreamManager {
         public var onMembershipChanged: ((String, DID, MembershipAction) async -> Void)?
         public var onKickedFromConversation: ((String, DID, String?) async -> Void)?
         public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
+        public var onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)?
+        public var onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)?
         public var onError: ((Error) async -> Void)?
         public var onReconnected: (() async -> Void)?
-        
+
         public init() {}
 
         public init(
             onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)? = nil,
             onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)? = nil,
+            onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)? = nil,
             onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
             onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)? = nil,
             onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
@@ -62,11 +66,14 @@ public actor MLSEventStreamManager {
             onMembershipChanged: ((String, DID, MembershipAction) async -> Void)? = nil,
             onKickedFromConversation: ((String, DID, String?) async -> Void)? = nil,
             onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)? = nil,
+            onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)? = nil,
+            onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)? = nil,
             onError: ((Error) async -> Void)? = nil,
             onReconnected: (() async -> Void)? = nil
         ) {
             self.onMessage = onMessage
             self.onReaction = onReaction
+            self.onTyping = onTyping
             self.onInfo = onInfo
             self.onNewDevice = onNewDevice
             self.onGroupInfoRefreshRequested = onGroupInfoRefreshRequested
@@ -74,6 +81,8 @@ public actor MLSEventStreamManager {
             self.onMembershipChanged = onMembershipChanged
             self.onKickedFromConversation = onKickedFromConversation
             self.onConversationNeedsRecovery = onConversationNeedsRecovery
+            self.onTreeChanged = onTreeChanged
+            self.onGroupReset = onGroupReset
             self.onError = onError
             self.onReconnected = onReconnected
         }
@@ -400,8 +409,8 @@ public actor MLSEventStreamManager {
             await handler.onReaction?(reactionEvent)
 
         case .typingEvent(let typingEvent):
-            // Typing indicators removed - ignore event
             saveCursor(typingEvent.cursor, for: convoId)
+            await handler.onTyping?(typingEvent)
 
         case .infoEvent(let infoEvent):
             logger.info(
@@ -434,10 +443,17 @@ public actor MLSEventStreamManager {
             logger.info("Conversation updated: convo=\(updateEvent.convoId)")
             saveCursor(updateEvent.cursor, for: convoId)
 
-        // MARK: - Read Receipt Events (Removed)
-        case .readEvent(let readEvent):
-            // Read receipts removed - ignore event
-            saveCursor(readEvent.cursor, for: convoId)
+        case .treeChanged(let treeChanged):
+            logger.info("Tree changed: convo=\(treeChanged.convoId), epoch=\(treeChanged.epoch)")
+            saveCursor(treeChanged.cursor, for: convoId)
+            await handler.onTreeChanged?(treeChanged)
+
+        case .groupResetEvent(let groupReset):
+            logger.info(
+                "Group reset: convo=\(groupReset.convoId), newGroup=\(groupReset.newGroupId.prefix(16)), gen=\(groupReset.resetGeneration)")
+            saveCursor(groupReset.cursor, for: convoId)
+            await handler.onGroupReset?(groupReset)
+
         }
     }
     

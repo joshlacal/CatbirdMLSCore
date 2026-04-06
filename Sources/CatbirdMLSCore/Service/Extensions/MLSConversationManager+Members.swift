@@ -447,8 +447,17 @@ public extension MLSConversationManager {
           "🔵 [MLSConversationManager.removeMember] Server authorized removal - epochHint: \(epochHint.map { String($0) } ?? "nil")"
         )
 
-        try await mlsClient.mergePendingCommit(for: userDid, groupId: groupIdData, convoId: convoId)
-        let newEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+        // Server accepted the removal — merge locally. If merge fails, the removal
+        // still succeeded server-side; the local state will catch up on next sync.
+        do {
+          try await mlsClient.mergePendingCommit(for: userDid, groupId: groupIdData, convoId: convoId)
+        } catch {
+          logger.warning(
+            "⚠️ [MLSConversationManager.removeMember] Local merge failed (server removal succeeded, will sync): \(error.localizedDescription)"
+          )
+        }
+
+        let newEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? UInt64(epochHint ?? 0)
 
         // Record membership event
         do {
@@ -468,7 +477,13 @@ public extension MLSConversationManager {
             "Failed to record membership event for removal: \(error.localizedDescription)")
         }
 
-        try await syncGroupState(for: convoId)
+        do {
+          try await syncGroupState(for: convoId)
+        } catch {
+          logger.warning(
+            "⚠️ [MLSConversationManager.removeMember] Post-removal sync failed (non-fatal): \(error.localizedDescription)"
+          )
+        }
       }
     } catch {
       logger.error("❌ [MLSConversationManager.removeMember] Failed: \(error.localizedDescription)")
@@ -503,12 +518,10 @@ public extension MLSConversationManager {
 
       try await syncGroupState(for: convoId)
 
-      // Force refresh conversation metadata
-      let (convos, _) = try await apiClient.getConversations(limit: 100)
-      if let updatedConvo = convos.first(where: { $0.groupId == convo.groupId }) {
-        conversations[convoId] = updatedConvo
-        notifyObservers(.conversationJoined(updatedConvo))
-      }
+      try await refreshConversationSnapshotAfterAdminRoleChange(
+        convoId: convoId,
+        groupId: convo.groupId
+      )
     }
   }
 
@@ -539,125 +552,29 @@ public extension MLSConversationManager {
 
       try await syncGroupState(for: convoId)
 
-      // Force refresh conversation metadata
-      let (convos, _) = try await apiClient.getConversations(limit: 100)
-      if let updatedConvo = convos.first(where: { $0.groupId == convo.groupId }) {
-        conversations[convoId] = updatedConvo
-        notifyObservers(.conversationJoined(updatedConvo))
-      }
-    }
-  }
-
-  // MARK: - Moderation
-
-  public func reportMember(in convoId: String, memberDid: String, reason: String, details: String? = nil)
-    async throws -> String
-  {
-    logger.info(
-      "🔵 [MLSConversationManager.reportMember] START - convoId: \(convoId), memberDid: \(memberDid), reason: \(reason)"
-    )
-
-    guard conversations[convoId] != nil else {
-      logger.error("❌ [MLSConversationManager.reportMember] Conversation not found")
-      throw MLSConversationError.conversationNotFound
-    }
-
-    do {
-      let reportId = try await apiClient.reportMember(
+      try await refreshConversationSnapshotAfterAdminRoleChange(
         convoId: convoId,
-        targetDid: try DID(didString: memberDid),
-        reason: reason,
-        details: details
+        groupId: convo.groupId
       )
-
-      logger.info("✅ [MLSConversationManager.reportMember] SUCCESS - reportId: \(reportId)")
-      return reportId
-    } catch {
-      logger.error("❌ [MLSConversationManager.reportMember] Failed: \(error.localizedDescription)")
-      throw MLSConversationError.serverError(error)
     }
   }
 
-  public func loadReports(for convoId: String, limit: Int = 50, cursor: String? = nil) async throws -> (
-    reports: [BlueCatbirdMlsChatReport.ReportView], cursor: String?
-  ) {
-    logger.info("🔵 [MLSConversationManager.loadReports] START - convoId: \(convoId)")
+  private func refreshConversationSnapshotAfterAdminRoleChange(
+    convoId: String,
+    groupId: String
+  ) async throws {
+    let (convos, _) = try await apiClient.getConversations(limit: 100)
 
-    guard conversations[convoId] != nil else {
-      logger.error("❌ [MLSConversationManager.loadReports] Conversation not found")
-      throw MLSConversationError.conversationNotFound
-    }
-
-    do {
-      let (reports, nextCursor) = try await apiClient.getReports(
-        convoId: convoId,
-        limit: limit,
-        cursor: cursor
+    guard let updatedConvo = convos.first(where: { $0.groupId == groupId }) else {
+      logger.warning(
+        "⚠️ [MLSConversationManager.refreshConversationSnapshotAfterAdminRoleChange] Conversation refresh missing for \(convoId)"
       )
-
-      logger.info("✅ [MLSConversationManager.loadReports] SUCCESS - \(reports.count) reports")
-      return (reports, nextCursor)
-    } catch {
-      logger.error("❌ [MLSConversationManager.loadReports] Failed: \(error.localizedDescription)")
-      throw MLSConversationError.serverError(error)
+      return
     }
+
+    try await persistMembersToDatabase([updatedConvo])
+    conversations[convoId] = updatedConvo
+    notifyObservers(.conversationJoined(updatedConvo))
   }
 
-  public func resolveReport(_ reportId: String, action: String, notes: String? = nil) async throws {
-    logger.info(
-      "🔵 [MLSConversationManager.resolveReport] START - reportId: \(reportId), action: \(action)")
-
-    do {
-      let ok = try await apiClient.resolveReport(
-        reportId: reportId,
-        action: action,
-        notes: notes
-      )
-
-      guard ok else {
-        throw MLSConversationError.serverError(
-          NSError(
-            domain: "MLSConversationManager", code: -1,
-            userInfo: [NSLocalizedDescriptionKey: "Server returned failure for resolveReport"]))
-      }
-
-      logger.info("✅ [MLSConversationManager.resolveReport] SUCCESS")
-    } catch {
-      logger.error("❌ [MLSConversationManager.resolveReport] Failed: \(error.localizedDescription)")
-      throw MLSConversationError.serverError(error)
-    }
-  }
-
-  /// Warn a member in a conversation (admin-only)
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - memberDid: DID of member to warn
-  ///   - reason: Reason for warning
-  /// - Returns: Tuple of warning ID and delivery timestamp
-  public func warnMember(in convoId: String, memberDid: String, reason: String) async throws -> (
-    warningId: String, deliveredAt: Date
-  ) {
-    logger.info(
-      "🔵 [MLSConversationManager.warnMember] START - convoId: \(convoId), memberDid: \(memberDid)")
-
-    guard conversations[convoId] != nil else {
-      logger.error("❌ [MLSConversationManager.warnMember] Conversation not found")
-      throw MLSConversationError.conversationNotFound
-    }
-
-    do {
-      let (warningId, deliveredAt) = try await apiClient.warnMember(
-        convoId: convoId,
-        memberDid: try DID(didString: memberDid),
-        reason: reason
-      )
-
-      logger.info("✅ [MLSConversationManager.warnMember] SUCCESS - warningId: \(warningId)")
-      return (warningId, deliveredAt)
-
-    } catch {
-      logger.error("❌ [MLSConversationManager.warnMember] Failed: \(error.localizedDescription)")
-      throw MLSConversationError.serverError(error)
-    }
-  }
 }

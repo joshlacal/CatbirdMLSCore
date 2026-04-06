@@ -1,9 +1,6 @@
 import Foundation
 import OSLog
 import Petrel
-#if canImport(UIKit)
-import UIKit
-#endif
 
 internal actor MLSDeviceRecordService {
   private let logger = Logger(subsystem: "blue.catbird", category: "MLSDeviceRecordService")
@@ -25,11 +22,6 @@ internal actor MLSDeviceRecordService {
 
   func ensureDeviceRecordPublished(userDid: String) async throws {
     let normalized = userDid.lowercased()
-    let deviceInfo = await mlsClient.getDeviceInfo(for: normalized)
-    guard let deviceId = deviceInfo?.deviceId else {
-      logger.info("No device registered yet, skipping device record publish")
-      return
-    }
 
     let sigMaterial = try await resolveDeviceSignatureKey(for: normalized)
     let did = try DID(didString: normalized)
@@ -42,11 +34,10 @@ internal actor MLSDeviceRecordService {
     }
 
     if alreadyPublished {
-      logger.debug("Device record already published for \(deviceId)")
+      logger.debug("Device record already published")
     } else {
       try await publishDeviceRecord(
         did: did,
-        deviceId: deviceId,
         signaturePublicKey: sigMaterial.publicKey,
         algorithm: sigMaterial.algorithm
       )
@@ -61,15 +52,17 @@ internal actor MLSDeviceRecordService {
     }
   }
 
-  func removeDeviceRecord(userDid: String, deviceId: String) async throws {
+  /// Remove a device record by matching its public key.
+  func removeDeviceRecord(userDid: String, signaturePublicKey: Data) async throws {
     let normalized = userDid.lowercased()
     let did = try DID(didString: normalized)
     let collection = try NSID(nsidString: Self.deviceCollection)
     let records = try await fetchDeviceRecordsFromPDS(did: did)
+    let targetKeyB64 = signaturePublicKey.base64EncodedString()
 
     for record in records {
       guard let device = decodeDeviceRecord(from: record.value),
-            device.deviceId == deviceId,
+            device.mlsSignaturePublicKey.data.base64EncodedString() == targetKeyB64,
             let rkey = record.uri.recordKey
       else { continue }
 
@@ -80,9 +73,16 @@ internal actor MLSDeviceRecordService {
       )
       let (code, _) = try await atProtoClient.com.atproto.repo.deleteRecord(input: input)
       if (200...299).contains(code) {
-        logger.info("Deleted device record for deviceId: \(deviceId)")
+        logger.info("Deleted device record matching public key")
       }
     }
+  }
+
+  /// Remove the current device's record.
+  func removeCurrentDeviceRecord(userDid: String) async throws {
+    let normalized = userDid.lowercased()
+    let sigMaterial = try await resolveDeviceSignatureKey(for: normalized)
+    try await removeDeviceRecord(userDid: normalized, signaturePublicKey: sigMaterial.publicKey)
   }
 
   // MARK: - Key Package Verification
@@ -292,29 +292,14 @@ internal actor MLSDeviceRecordService {
 
   private func publishDeviceRecord(
     did: DID,
-    deviceId: String,
     signaturePublicKey: Data,
     algorithm: String
   ) async throws {
     let collection = try NSID(nsidString: Self.deviceCollection)
 
-    #if os(iOS)
-    let platform = "ios"
-    let deviceName: String? = await UIDevice.current.name
-    #elseif os(macOS)
-    let platform = "macos"
-    let deviceName: String? = Host.current().localizedName
-    #else
-    let platform = "unknown"
-    let deviceName: String? = nil
-    #endif
-
     let record = BlueCatbirdMlsChatDevice(
-      deviceId: deviceId,
-      deviceName: deviceName,
       mlsSignaturePublicKey: Bytes(data: signaturePublicKey),
       algorithm: algorithm,
-      platform: platform,
       createdAt: ATProtocolDate(date: Date())
     )
 
@@ -331,7 +316,7 @@ internal actor MLSDeviceRecordService {
     guard (200...299).contains(code) else {
       throw DeviceRecordError.networkFailure("Failed to publish device record (status: \(code))")
     }
-    logger.info("Published device record for deviceId: \(deviceId)")
+    logger.info("Published device record")
   }
 
   private func decodeDeviceRecord(from value: ATProtocolValueContainer) -> BlueCatbirdMlsChatDevice? {

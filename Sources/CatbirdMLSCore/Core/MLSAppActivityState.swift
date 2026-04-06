@@ -27,7 +27,7 @@ public enum MLSAppActivityState {
   /// A stale timeout avoids permanently suppressing NSE decryption after crashes.
   public static func shouldNSEDecrypt(
     recipientUserDID: String,
-    staleAfter seconds: TimeInterval = 300
+    staleAfter seconds: TimeInterval = 30
   ) -> Bool {
     guard let defaults else { return true }
 

@@ -445,7 +445,12 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.updateChatRequestSettings] START - followers: \(allowFollowersBypass?.description ?? "nil"), following: \(allowFollowingBypass?.description ?? "nil"), expire: \(autoExpireDays?.description ?? "nil")"
     )
 
-    let input = BlueCatbirdMlsChatOptIn.Input(action: "updateSettings")
+    let input = BlueCatbirdMlsChatOptIn.Input(
+      action: "updateSettings",
+      allowFollowersBypass: allowFollowersBypass,
+      allowFollowingBypass: allowFollowingBypass,
+      autoExpireDays: autoExpireDays
+    )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
 
@@ -646,6 +651,52 @@ public final class MLSAPIClient {
     return (output.success, output.newEpoch)
   }
 
+  // MARK: - Reset Group
+
+  /// Reset the MLS cryptographic state of a conversation (admin only)
+  ///
+  /// Creates a fresh MLS group while preserving conversation identity, members, and
+  /// message history. All clients will receive a `groupResetEvent` and must join the new group.
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier
+  ///   - newGroupId: New MLS group identifier (hex-encoded)
+  ///   - cipherSuite: Cipher suite for the new group
+  ///   - groupInfo: Optional base64-encoded GroupInfo for the new group
+  ///   - reason: Optional human-readable reason for the reset
+  /// - Returns: Reset result with the new group ID and generation number
+  public func resetGroup(
+    convoId: String,
+    newGroupId: String,
+    cipherSuite: String,
+    groupInfo: String? = nil,
+    reason: String? = nil
+  ) async throws -> BlueCatbirdMlsChatResetGroup.Output {
+    logger.debug("Resetting group for conversation: \(convoId)")
+
+    let input = BlueCatbirdMlsChatResetGroup.Input(
+      convoId: convoId,
+      newGroupId: newGroupId,
+      cipherSuite: cipherSuite,
+      groupInfo: groupInfo,
+      reason: reason
+    )
+
+    let (responseCode, output) = try await client.blue.catbird.mlschat.resetGroup(input: input)
+
+    guard responseCode == 200, let output = output else {
+      throw MLSAPIError.httpError(
+        statusCode: responseCode,
+        message: "Failed to reset group for conversation \(convoId)"
+      )
+    }
+
+    logger.info(
+      "Group reset for \(convoId): newGroupId=\(output.newGroupId.prefix(16)), gen=\(output.resetGeneration)"
+    )
+    return output
+  }
+
   // MARK: Members
 
   /// Add members to an existing MLS conversation using Petrel client
@@ -663,6 +714,7 @@ public final class MLSAPIClient {
     commit: Data? = nil,
     welcomeMessage: Data? = nil,
     keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry]? = nil,
+    confirmationTag: String? = nil,
     idempotencyKey: String? = nil
   ) async throws -> (success: Bool, newEpoch: Int) {
     // Generate idempotency key if not provided
@@ -682,7 +734,8 @@ public final class MLSAPIClient {
       commit: commitBase64,
       welcome: welcomeBase64,
       keyPackageHashes: keyPackageHashes,
-      idempotencyKey: idemKey
+      idempotencyKey: idemKey,
+      confirmationTag: confirmationTag
     )
 
     do {
@@ -759,15 +812,13 @@ public final class MLSAPIClient {
     epoch: Int,
     paddedSize: Int,
     senderDid: DID,
-    idempotencyKey: String? = nil
+    confirmationTag: String? = nil,
   ) async throws -> (
     messageId: String, receivedAt: ATProtocolDate, sequenceNumber: Int64, epoch: Int64
   ) {
     let startTime = Date()
-    // Generate idempotency key if not provided
-    let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
     logger.info(
-      "🌐 [MLSAPIClient.sendMessage] START - convoId: \(convoId), msgId: \(msgId), epoch: \(epoch), ciphertext: \(ciphertext.count) bytes, paddedSize: \(paddedSize) (actual size hidden), idempotencyKey: \(idemKey)"
+      "🌐 [MLSAPIClient.sendMessage] START - convoId: \(convoId), msgId: \(msgId), epoch: \(epoch), ciphertext: \(ciphertext.count) bytes, paddedSize: \(paddedSize) (actual size hidden)"
     )
 
     let input = BlueCatbirdMlsChatSendMessage.Input(
@@ -776,7 +827,7 @@ public final class MLSAPIClient {
       ciphertext: Bytes(data: ciphertext),
       epoch: epoch,
       paddedSize: paddedSize,
-      idempotencyKey: idemKey
+      confirmationTag: confirmationTag
     )
 
     logger.debug("📍 [MLSAPIClient.sendMessage] Calling API...")
@@ -795,35 +846,82 @@ public final class MLSAPIClient {
     return (output.messageId, output.receivedAt, Int64(output.seq), Int64(output.epoch))
   }
 
-  /// Mark messages as read in a conversation
+  /// Update the read cursor position for a conversation
   /// - Parameters:
   ///   - convoId: Conversation identifier
-  ///   - messageId: Optional message ID to mark as read. If nil, marks all messages as read.
-  /// - Returns: The timestamp when messages were marked as read
-  public func updateRead(convoId: String, messageId: String? = nil) async throws -> Date {
+  ///   - cursor: Cursor position string (e.g. messageID or opaque cursor)
+  /// - Returns: The timestamp when the cursor was updated
+  public func updateCursor(convoId: String, cursor: String) async throws -> Date {
     logger.debug(
-      "Marking messages as read for conversation: \(convoId), messageId: \(messageId ?? "all")")
+      "Updating cursor for conversation: \(convoId), cursor: \(cursor)")
 
     let input = BlueCatbirdMlsChatUpdateCursor.Input(
       convoId: convoId,
-      messageId: messageId,
-      markRead: true
+      cursor: cursor
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.updateCursor(input: input)
 
     guard responseCode == 200, let output = output else {
-      logger.error("❌ Failed to update read status for \(convoId): HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to update read status")
+      logger.error("❌ Failed to update cursor for \(convoId): HTTP \(responseCode)")
+      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to update cursor")
     }
 
-    logger.debug("✅ Updated read status for \(convoId)")
-    return output.readAt?.date ?? output.updatedAt.date
+    logger.debug("✅ Updated cursor for \(convoId)")
+    return output.updatedAt.date
   }
 
-  // MARK: - Typing Indicators (Removed)
-  // Typing indicator functionality has been removed to reduce complexity.
-  // The sendTypingIndicator function was previously here.
+  /// Sync private read cursor position without emitting participant-visible read receipts
+  /// - Parameters:
+  ///   - convoId: Conversation identifier
+  ///   - cursor: Cursor position to persist
+  /// - Returns: The timestamp when cursor position was updated
+  public func syncPrivateReadCursor(convoId: String, cursor: String) async throws -> Date {
+    logger.debug("Syncing private read cursor for conversation: \(convoId), cursor: \(cursor)")
+
+    let input = BlueCatbirdMlsChatUpdateCursor.Input(
+      convoId: convoId,
+      cursor: cursor
+    )
+
+    let (responseCode, output) = try await client.blue.catbird.mlschat.updateCursor(input: input)
+
+    guard responseCode == 200, let output = output else {
+      logger.error("❌ Failed to sync private read cursor for \(convoId): HTTP \(responseCode)")
+      throw MLSAPIError.httpError(
+        statusCode: responseCode, message: "Failed to sync private read cursor")
+    }
+
+    logger.debug("✅ Synced private read cursor for \(convoId)")
+    return output.updatedAt.date
+  }
+
+  // MARK: - Typing Indicators
+
+  /// Send an ephemeral typing indicator event.
+  /// - Parameters:
+  ///   - convoId: Conversation identifier
+  ///   - isTyping: `true` for start/heartbeat, `false` for stop
+  public func sendTypingIndicator(convoId: String, isTyping: Bool) async throws {
+    let action = isTyping ? "typing" : "typingStop"
+    let noOpCiphertext = Data(repeating: 0, count: 512)
+    let input = BlueCatbirdMlsChatSendMessage.Input(
+      convoId: convoId,
+      msgId: UUID().uuidString,
+      ciphertext: Bytes(data: noOpCiphertext),
+      epoch: 0,
+      paddedSize: noOpCiphertext.count,
+      delivery: "ephemeral",
+      action: action
+    )
+
+    let (responseCode, _) = try await client.blue.catbird.mlschat.sendMessage(input: input)
+    guard responseCode == 200 else {
+      logger.error("❌ Failed to send typing indicator for \(convoId): HTTP \(responseCode)")
+      throw MLSAPIError.httpError(
+        statusCode: responseCode, message: "Failed to send typing indicator")
+    }
+  }
 
 
   // MARK: Key Packages
@@ -1051,6 +1149,27 @@ public final class MLSAPIClient {
   /// Minimum valid GroupInfo size in bytes
   private static let minGroupInfoSize = 100
 
+  internal enum GroupInfoVerificationDisposition: Equatable {
+    case verifyStoredBytes
+    case acceptConcurrentAdvance(serverEpoch: Int)
+    case retryStaleRead(serverEpoch: Int)
+  }
+
+  internal static func groupInfoVerificationDisposition(
+    uploadedEpoch: Int,
+    storedEpoch: Int
+  ) -> GroupInfoVerificationDisposition {
+    if storedEpoch == uploadedEpoch {
+      return .verifyStoredBytes
+    }
+
+    if storedEpoch > uploadedEpoch {
+      return .acceptConcurrentAdvance(serverEpoch: storedEpoch)
+    }
+
+    return .retryStaleRead(serverEpoch: storedEpoch)
+  }
+
   /// Update GroupInfo for a conversation with retry logic and post-upload verification
   ///
   /// CRITICAL: This method now verifies the upload by fetching the stored data back.
@@ -1107,19 +1226,57 @@ public final class MLSAPIClient {
 
           // CRITICAL: Verify the upload by fetching back and comparing size
           if verifyUpload {
+            let fetchedVerificationPayload: (data: Data, epoch: Int)?
             do {
               let (storedData, storedEpoch, _) = try await getGroupInfo(
                 convoId: convoId, maxRetries: 2)
+              fetchedVerificationPayload = (data: storedData, epoch: storedEpoch)
+            } catch {
+              // If verification fetch fails, log but don't fail the whole operation
+              // The upload itself succeeded
+              logger.warning(
+                "⚠️ [MLSAPIClient.updateGroupInfo] Verification fetch failed: \(error.localizedDescription)"
+              )
+              logger.warning("   Upload succeeded but could not verify - proceeding anyway")
+              fetchedVerificationPayload = nil
+            }
 
-              // Verify epoch matches
-              if storedEpoch != epoch {
-                logger.error(
-                  "❌ [MLSAPIClient.updateGroupInfo] VERIFICATION FAILED: Epoch mismatch!")
-                logger.error("   Uploaded epoch: \(epoch), Server epoch: \(storedEpoch)")
-                // This could be a race condition - another member advanced the epoch
-                // Log but don't fail since the newer GroupInfo is probably fine
+            if let fetchedVerificationPayload {
+              let storedData = fetchedVerificationPayload.data
+              let storedEpoch = fetchedVerificationPayload.epoch
+
+              switch Self.groupInfoVerificationDisposition(
+                uploadedEpoch: epoch,
+                storedEpoch: storedEpoch
+              ) {
+              case .verifyStoredBytes:
+                break
+
+              case .acceptConcurrentAdvance(let serverEpoch):
                 logger.warning(
-                  "⚠️ [MLSAPIClient.updateGroupInfo] Epoch advanced during upload - another member may have committed"
+                  "⚠️ [MLSAPIClient.updateGroupInfo] Verification skipped: server advanced from epoch \(epoch) to \(serverEpoch) during upload"
+                )
+                logger.warning(
+                  "   Another member committed while we were publishing GroupInfo; stored bytes belong to a newer epoch"
+                )
+                return
+
+              case .retryStaleRead(let serverEpoch):
+                logger.error(
+                  "❌ [MLSAPIClient.updateGroupInfo] VERIFICATION FAILED: Server returned stale epoch \(serverEpoch) after uploading epoch \(epoch)"
+                )
+
+                if attempt < maxRetries {
+                  logger.info(
+                    "🔄 [MLSAPIClient.updateGroupInfo] Retrying upload due to stale verification read..."
+                  )
+                  try await Task.sleep(nanoseconds: UInt64(1_000_000_000))
+                  continue
+                }
+
+                throw MLSAPIError.invalidResponse(
+                  message:
+                    "GroupInfo verification failed: server returned stale epoch \(serverEpoch) after uploading epoch \(epoch)"
                 )
               }
 
@@ -1173,14 +1330,6 @@ public final class MLSAPIClient {
               logger.info(
                 "✅ [MLSAPIClient.updateGroupInfo] Verification PASSED - size: \(storedData.count) bytes, epoch: \(storedEpoch)"
               )
-
-            } catch let verifyError as MLSAPIError {
-              // If verification fetch fails, log but don't fail the whole operation
-              // The upload itself succeeded
-              logger.warning(
-                "⚠️ [MLSAPIClient.updateGroupInfo] Verification fetch failed: \(verifyError.localizedDescription)"
-              )
-              logger.warning("   Upload succeeded but could not verify - proceeding anyway")
             }
           }
 
@@ -1438,6 +1587,7 @@ public final class MLSAPIClient {
     convoId: String,
     externalCommit: Data,
     groupInfo: Data? = nil,
+    confirmationTag: String? = nil,
     idempotencyKey: String? = nil
   ) async throws -> (success: Bool, newEpoch: Int) {
     let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
@@ -1453,7 +1603,8 @@ public final class MLSAPIClient {
       action: "externalCommit",
       commit: commitBase64,
       groupInfo: groupInfoBase64,
-      idempotencyKey: idemKey
+      idempotencyKey: idemKey,
+      confirmationTag: confirmationTag
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
@@ -1691,7 +1842,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
-      action: "addMembers",
+      action: "commit",
       commit: commit,
       idempotencyKey: idemKey
     )
@@ -1781,147 +1932,36 @@ public final class MLSAPIClient {
 
   // MARK: - Moderation
 
-  /// Report a member for ToS violations
+  /// Report an account as spam in an MLS conversation
   /// - Parameters:
   ///   - convoId: Conversation identifier
-  ///   - targetDid: DID of member to report
-  ///   - reason: Reason for report (e.g., "harassment", "spam", "inappropriate")
-  ///   - details: Optional additional details about the report
-  ///   - idempotencyKey: Optional client-generated UUID for idempotent retries (auto-generated if nil)
-  /// - Returns: Report ID
-  public func reportMember(
+  ///   - reportedDid: DID of account to report
+  ///   - reason: Optional reason for the report
+  /// - Returns: Tuple of HTTP response code and optional output
+  public func reportSpam(
     convoId: String,
-    targetDid: DID,
-    reason: String,
-    details: String? = nil,
-    idempotencyKey: String? = nil
-  ) async throws -> String {
-    let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
+    reportedDid: String,
+    reason: String? = nil
+  ) async throws -> (Int, BlueCatbirdMlsChatReportSpam.Output?) {
     logger.info(
-      "🌐 [MLSAPIClient.reportMember] START - convoId: \(convoId), targetDid: \(targetDid), reason: \(reason), idempotencyKey: \(idemKey)"
+      "🌐 [MLSAPIClient.reportSpam] START - convoId: \(convoId), reportedDid: \(reportedDid)"
     )
 
-    // Encode details as encrypted content using Bytes
-    let detailsData = (details ?? "").data(using: .utf8) ?? Data()
-    let encryptedContent = Bytes(data: detailsData)
-
-    let input = BlueCatbirdMlsChatReport.Input(
+    let input = BlueCatbirdMlsChatReportSpam.Input(
       convoId: convoId,
-      action: "submit",
-      targetDid: targetDid,
-      reason: reason,
-      details: encryptedContent
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.report(input: input)
-
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [MLSAPIClient.reportMember] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to report member")
-    }
-
-    logger.info("✅ [MLSAPIClient.reportMember] SUCCESS - reportId: \(output.reportId ?? "")")
-    return output.reportId ?? ""
-  }
-
-  /// Get moderation reports for a conversation (admin-only)
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - limit: Maximum number of reports to return (1-100, default: 50)
-  ///   - cursor: Pagination cursor from previous response
-  /// - Returns: Tuple of reports array and optional next cursor
-  public func getReports(
-    convoId: String,
-    limit: Int = 50,
-    cursor: String? = nil
-  ) async throws -> (reports: [BlueCatbirdMlsChatReport.ReportView], cursor: String?) {
-    logger.info("🌐 [MLSAPIClient.getReports] START - convoId: \(convoId), limit: \(limit)")
-
-    let input = BlueCatbirdMlsChatReport.Input(
-      convoId: convoId,
-      action: "list"
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.report(input: input)
-
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [MLSAPIClient.getReports] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch reports")
-    }
-
-    let reports = output.reports ?? []
-    logger.info("✅ [MLSAPIClient.getReports] SUCCESS - \(reports.count) reports")
-    return (reports, nil)
-  }
-
-  /// Resolve a moderation report (admin-only)
-  /// - Parameters:
-  ///   - reportId: Report identifier
-  ///   - action: Action taken (e.g., "removed", "warned", "dismissed")
-  ///   - notes: Optional notes about the resolution
-  ///   - idempotencyKey: Optional client-generated UUID for idempotent retries (auto-generated if nil)
-  /// - Returns: Success status
-  public func resolveReport(
-    reportId: String,
-    action: String,
-    notes: String? = nil,
-    idempotencyKey: String? = nil
-  ) async throws -> Bool {
-    let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
-    logger.info(
-      "🌐 [MLSAPIClient.resolveReport] START - reportId: \(reportId), action: \(action), idempotencyKey: \(idemKey)"
-    )
-
-    let input = BlueCatbirdMlsChatReport.Input(
-      convoId: "",
-      action: "resolve",
-      reportId: reportId
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.report(input: input)
-
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [MLSAPIClient.resolveReport] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to resolve report")
-    }
-
-    logger.info("✅ [MLSAPIClient.resolveReport] SUCCESS")
-    return output.success ?? false
-  }
-
-  /// Warn a member in a conversation (admin-only)
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - memberDid: DID of member to warn
-  ///   - reason: Reason for warning (max 500 characters)
-  ///   - expiresAt: Optional expiration time for warning
-  /// - Returns: Tuple of warning ID and delivery timestamp
-  public func warnMember(
-    convoId: String,
-    memberDid: DID,
-    reason: String,
-    expiresAt: Date? = nil
-  ) async throws -> (warningId: String, deliveredAt: Date) {
-    logger.info(
-      "🌐 [MLSAPIClient.warnMember] START - convoId: \(convoId), memberDid: \(memberDid), reason: \(reason.prefix(50))..."
-    )
-
-    let input = BlueCatbirdMlsChatReport.Input(
-      convoId: convoId,
-      action: "warn",
-      targetDid: memberDid,
+      reportedDid: try DID(didString: reportedDid),
       reason: reason
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.report(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlschat.reportSpam(input: input)
 
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [MLSAPIClient.warnMember] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to warn member")
+    if let output = output {
+      logger.info("✅ [MLSAPIClient.reportSpam] SUCCESS - id: \(output.id)")
+    } else {
+      logger.error("❌ [MLSAPIClient.reportSpam] HTTP \(responseCode)")
     }
 
-    logger.info("✅ [MLSAPIClient.warnMember] SUCCESS - warningId: \(output.reportId ?? "")")
-    return (output.reportId ?? "", output.submittedAt?.date ?? Date())
+    return (responseCode, output)
   }
 
   // MARK: - Blocking
@@ -2721,6 +2761,151 @@ public extension MLSAPIClient {
 
     logger.info("✅ [MLSAPIClient.getSubscriptionTicket] SUCCESS - endpoint: \(output.endpoint?.description ?? "default"), expiresAt: \(output.expiresAt.date)")
     return output
+  }
+
+  // MARK: - Metadata v2 Blob Storage
+
+  /// Upload an encrypted group metadata blob to the server.
+  /// The blob is opaque ciphertext -- the server never sees plaintext metadata.
+  /// The blobLocator (UUIDv4) is client-generated and serves as the idempotency key.
+  ///
+  /// - Parameters:
+  ///   - blobLocator: Client-generated UUIDv4 blob locator
+  ///   - groupId: Hex-encoded MLS group ID
+  ///   - encryptedBlob: Encrypted blob bytes (nonce || ciphertext || tag)
+  /// - Returns: The confirmed blob locator and stored size
+  /// - Throws: MLSAPIError on failure
+  public func putGroupMetadataBlob(
+    blobLocator: String,
+    groupId: String,
+    encryptedBlob: Data
+  ) async throws -> (blobLocator: String, size: Int) {
+    logger.info(
+      "📤 [MLSAPIClient.putGroupMetadataBlob] START - locator: \(blobLocator.prefix(8))..., group: \(groupId.prefix(16))..., size: \(encryptedBlob.count) bytes"
+    )
+
+    let (responseCode, output) = try await client.blue.catbird.mlschat.putGroupMetadataBlob(
+      data: encryptedBlob,
+      mimeType: "application/octet-stream",
+      blobLocator: blobLocator,
+      groupId: groupId,
+      stripMetadata: false
+    )
+
+    guard responseCode == 200, let output = output else {
+      logger.error(
+        "❌ [MLSAPIClient.putGroupMetadataBlob] HTTP \(responseCode) for locator \(blobLocator.prefix(8))..."
+      )
+      throw MLSAPIError.httpError(
+        statusCode: responseCode,
+        message: "Failed to upload metadata blob (HTTP \(responseCode))"
+      )
+    }
+
+    logger.info(
+      "✅ [MLSAPIClient.putGroupMetadataBlob] SUCCESS - locator: \(output.blobLocator.prefix(8))..., size: \(output.size) bytes"
+    )
+    return (output.blobLocator, output.size)
+  }
+
+  /// Fetch an encrypted group metadata blob from the server by locator.
+  /// Returns raw encrypted bytes that require the MLS epoch key for decryption.
+  ///
+  /// - Parameters:
+  ///   - blobLocator: The blob locator to fetch
+  ///   - groupId: Hex-encoded MLS group ID (for server-side membership check)
+  /// - Returns: The encrypted blob bytes
+  /// - Throws: MLSAPIError on failure (including BlobNotFound for GC'd blobs)
+  public func getGroupMetadataBlob(
+    blobLocator: String,
+    groupId: String
+  ) async throws -> Data {
+    logger.info(
+      "📥 [MLSAPIClient.getGroupMetadataBlob] START - locator: \(blobLocator.prefix(8))..., group: \(groupId.prefix(16))..."
+    )
+
+    let input = BlueCatbirdMlsChatGetGroupMetadataBlob.Parameters(
+      blobLocator: blobLocator,
+      groupId: groupId
+    )
+
+    let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupMetadataBlob(
+      input: input
+    )
+
+    guard responseCode == 200, let output = output else {
+      if responseCode == 404 {
+        logger.warning(
+          "⚠️ [MLSAPIClient.getGroupMetadataBlob] BlobNotFound - locator: \(blobLocator.prefix(8))... (may be GC'd)"
+        )
+        throw MLSAPIError.httpError(
+          statusCode: 404,
+          message: "Metadata blob not found (locator: \(blobLocator))"
+        )
+      }
+      logger.error(
+        "❌ [MLSAPIClient.getGroupMetadataBlob] HTTP \(responseCode) for locator \(blobLocator.prefix(8))..."
+      )
+      throw MLSAPIError.httpError(
+        statusCode: responseCode,
+        message: "Failed to fetch metadata blob (HTTP \(responseCode))"
+      )
+    }
+
+    logger.info(
+      "✅ [MLSAPIClient.getGroupMetadataBlob] SUCCESS - locator: \(blobLocator.prefix(8))..., size: \(output.data.count) bytes"
+    )
+    return output.data
+  }
+
+  /// Fetch the latest encrypted group metadata blob from the server by group ID alone.
+  /// Used when no blob locator is available (e.g., after a Welcome join where the
+  /// AppDataDictionary doesn't contain a MetadataReference yet).
+  ///
+  /// The server returns the most recently uploaded blob for this group.
+  ///
+  /// - Parameter groupId: Hex-encoded MLS group ID
+  /// - Returns: The encrypted blob bytes
+  /// - Throws: MLSAPIError on failure (including 404 if no blob exists for this group)
+  public func getLatestGroupMetadataBlob(
+    groupId: String
+  ) async throws -> Data {
+    logger.info(
+      "📥 [MLSAPIClient.getLatestGroupMetadataBlob] START - group: \(groupId.prefix(16))... (no locator, fetching latest)"
+    )
+
+    // Pass nil blobLocator — server will return the latest blob for this group
+    let input = BlueCatbirdMlsChatGetGroupMetadataBlob.Parameters(
+      groupId: groupId
+    )
+
+    let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupMetadataBlob(
+      input: input
+    )
+
+    guard responseCode == 200, let output = output else {
+      if responseCode == 404 {
+        logger.warning(
+          "⚠️ [MLSAPIClient.getLatestGroupMetadataBlob] No blob found for group \(groupId.prefix(16))..."
+        )
+        throw MLSAPIError.httpError(
+          statusCode: 404,
+          message: "No metadata blob found for group \(groupId)"
+        )
+      }
+      logger.error(
+        "❌ [MLSAPIClient.getLatestGroupMetadataBlob] HTTP \(responseCode) for group \(groupId.prefix(16))..."
+      )
+      throw MLSAPIError.httpError(
+        statusCode: responseCode,
+        message: "Failed to fetch latest metadata blob (HTTP \(responseCode))"
+      )
+    }
+
+    logger.info(
+      "✅ [MLSAPIClient.getLatestGroupMetadataBlob] SUCCESS - group: \(groupId.prefix(16))..., size: \(output.data.count) bytes"
+    )
+    return output.data
   }
 }
 

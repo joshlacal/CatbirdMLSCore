@@ -18,7 +18,8 @@ public extension MLSConversationModel {
       cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
       createdAt: ATProtocolDate(date: createdAt),
       lastMessageAt: lastMessageAt.map { ATProtocolDate(date: $0) },
-      metadata: nil
+      metadata: nil,
+      confirmationTag: nil
     )
   }
 }

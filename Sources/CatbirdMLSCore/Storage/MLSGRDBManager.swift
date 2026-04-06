@@ -5201,6 +5201,13 @@ public actor MLSGRDBManager {
       """)
     }
 
+    // MARK: v26 - needsReset column
+    migrator.registerMigration("addNeedsResetColumn") { db in
+      try db.alter(table: "MLSConversationModel") { t in
+        t.add(column: "needsReset", .boolean).notNull().defaults(to: false)
+      }
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }

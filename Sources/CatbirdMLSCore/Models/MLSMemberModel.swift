@@ -27,6 +27,7 @@ public struct MLSMemberModel: Codable, Sendable, Hashable, Identifiable {
   public   let isActive: Bool
   public   let role: Role
   public   let capabilitiesData: Data?
+  public   let avatarURL: String?
 
   public var id: String { memberID }
 
@@ -76,6 +77,7 @@ extension MLSMemberModel: FetchableRecord, PersistableRecord {
     public static let isActive = Column("isActive")
     public static let role = Column("role")
     public static let capabilitiesData = Column("capabilities")
+    public static let avatarURL = Column("avatarURL")
   }
 
   enum CodingKeys: String, CodingKey {
@@ -96,6 +98,7 @@ extension MLSMemberModel: FetchableRecord, PersistableRecord {
     case isActive
     case role
     case capabilitiesData = "capabilities"
+    case avatarURL
   }
 }
 
@@ -121,7 +124,8 @@ extension MLSMemberModel {
     removalReason: String? = nil,
     isActive: Bool = true,
     role: Role = .member,
-    capabilities: [String]? = nil
+    capabilities: [String]? = nil,
+    avatarURL: String? = nil
   ) {
     self.memberID = memberID
     self.conversationID = conversationID
@@ -140,6 +144,7 @@ extension MLSMemberModel {
     self.isActive = isActive
     self.role = role
     self.capabilitiesData = Self.encodeCapabilities(capabilities)
+    self.avatarURL = avatarURL
   }
 
   // MARK: - Update Methods

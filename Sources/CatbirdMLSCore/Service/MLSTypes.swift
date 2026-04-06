@@ -236,6 +236,8 @@ public enum RecoveryReason: String, Codable, Sendable {
   case keyPackageDesync
   case memberRemoval
   case serverStateInconsistent
+  case treeDiverged
+  case groupReset
 }
 
 /// Outcome of processing a single MLS message

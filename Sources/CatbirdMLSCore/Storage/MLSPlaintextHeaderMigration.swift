@@ -60,19 +60,24 @@ public enum MLSPlaintextHeaderMigration {
     let defaults = UserDefaults(suiteName: appGroupSuite)
     let migrationKey = migrationKey(for: userDID, type: databaseType)
 
-    // Already migrated - verify the header is actually plaintext
+    // Already migrated - trust the flag, never delete
     if defaults?.bool(forKey: migrationKey) == true {
       let dbPath = databasePath(for: userDID, type: databaseType)
       if FileManager.default.fileExists(atPath: dbPath) && !verifyPlaintextHeader(at: dbPath) {
-        // Flag says migrated but header is still encrypted!
-        // Clear flag and fall through to re-migration
-        logger.warning("🔧 [PlaintextHeader] Migration flag set but header still encrypted - re-migrating")
-        defaults?.removeObject(forKey: migrationKey)
-        defaults?.synchronize()
-        // Fall through to the migration logic below
-      } else {
-        return false  // Verified good
+        // Header corrupted on a previously-migrated database.
+        // This is post-migration corruption (e.g., interrupted WAL checkpoint),
+        // NOT a pre-migration encrypted-header database.
+        // Route through normal corruption recovery (WAL repair, salvage) -- NEVER delete.
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: dbPath)[.size] as? Int) ?? 0
+        logger.error(
+          """
+          [PlaintextHeader] Header corrupted on previously-migrated \(databaseType.rawValue) database (\(fileSize) bytes).
+          Routing to corruption recovery - will NOT delete.
+          Path: \(dbPath, privacy: .private)
+          """
+        )
       }
+      return false
     }
 
     let dbPath = databasePath(for: userDID, type: databaseType)
@@ -251,7 +256,7 @@ public enum MLSPlaintextHeaderMigration {
         Path: \(path, privacy: .private)
         Header: \(hexHeader, privacy: .public)
         Expected: 53 51 4C 69 74 65 20 66 6F 72 6D 61 74 20 33 00
-        Action: Will re-migrate (delete and recreate)
+        Action: Caller will determine recovery path
         """
       )
     }

@@ -6,6 +6,51 @@ import Petrel
 import Synchronization
 
 extension MLSConversationManager {
+  // MARK: - Direct Conversation Lookup
+
+  /// Find an existing active 1:1 conversation with the given DID.
+  /// - Parameter did: The target user's DID string
+  /// - Returns: The conversation ID if an active 1:1 conversation exists, nil otherwise
+  public func findDirectConversation(with did: DID) async throws -> String? {
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    let targetDid = did.description
+
+    return try await database.read { db in
+      // Find conversations where:
+      // 1. The conversation belongs to the current user and is active
+      // 2. The conversation has exactly 2 active members
+      // 3. One of the members is the target DID
+      let conversationID = try String.fetchOne(db, sql: """
+        SELECT c.conversationID
+        FROM MLSConversationModel c
+        WHERE c.currentUserDID = ?
+          AND c.isActive = 1
+          AND (
+            SELECT COUNT(*) FROM MLSMemberModel m
+            WHERE m.conversationID = c.conversationID
+              AND m.currentUserDID = c.currentUserDID
+              AND m.isActive = 1
+          ) = 2
+          AND EXISTS (
+            SELECT 1 FROM MLSMemberModel m
+            WHERE m.conversationID = c.conversationID
+              AND m.currentUserDID = c.currentUserDID
+              AND m.isActive = 1
+              AND LOWER(m.did) = LOWER(?)
+          )
+        ORDER BY c.updatedAt DESC
+        LIMIT 1
+        """,
+        arguments: [userDid, targetDid]
+      )
+
+      return conversationID
+    }
+  }
+
   // MARK: - Group Initialization
 
   /// Create a new MLS group/conversation
@@ -97,19 +142,25 @@ extension MLSConversationManager {
 
     // ⭐ CRITICAL FIX: Create MLS group locally FIRST to get the groupID
     // Uses mlsDid (device-specific DID) automatically
-    let groupId = try await mlsClient.createGroup(
-      for: userDid, configuration: configuration.groupConfiguration)
+    // Pass name/description via GroupConfig so they are encrypted in MLS group context extensions
+    let groupConfig = configuration.toFFI(
+      groupName: name.isEmpty ? nil : name,
+      groupDescription: description
+    )
+
+    // Use createGroupV2 to get full result including metadata artifacts
+    let mlsCreationResult = try await mlsClient.createGroupV2(
+      for: userDid, configuration: groupConfig)
+    let groupId = mlsCreationResult.groupId
     let groupIdHex = groupId.hexEncodedString()
     logger.info(
       "🔵 [MLSConversationManager.createGroup] Local group created: \(groupIdHex.prefix(16))...")
 
-    // ⭐ RACE CONDITION FIX: Track this group as "being created" to prevent background sync
-    // from deleting it during the window before server creation completes.
-    // This protects against reconcileDatabase() seeing a local-only group and deleting it.
-    groupsBeingCreated.withLock { $0.insert(groupIdHex) }
-    defer {
-      groupsBeingCreated.withLock { $0.remove(groupIdHex) }
-    }
+    // ⭐ RACE CONDITION FIX: Track this group as "being created" with a timestamp.
+    // The timestamp persists after creation completes so that reconcileDatabase() won't
+    // delete a newly-created conversation when its sync response was fetched before creation.
+    // Entries are pruned after 120s in reconcileDatabase().
+    groupsBeingCreated.withLock { $0[groupIdHex] = Date() }
 
     // 🔬 CRITICAL DIAGNOSTIC: Log creator's initial state (before adding members)
     await logGroupStateDiagnostics(
@@ -135,6 +186,23 @@ extension MLSConversationManager {
         database: database
       )
 
+      // Write the group title to the local DB immediately so the creator sees it.
+      // The encrypted metadata blob is uploaded to the server later, but the
+      // local conversation record needs the plaintext title right away.
+      if !name.isEmpty {
+        try await database.write { db in
+          try db.execute(
+            sql: """
+              UPDATE MLSConversationModel
+              SET title = ?, updatedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ?
+              """,
+            arguments: [name, Date(), groupIdHex, userDid]
+          )
+        }
+        logger.info("✅ Wrote group title '\(name)' to local conversation record")
+      }
+
       logger.info("✅ Created SQLCipher conversation record with ID: \(groupIdHex.prefix(16))...")
     } catch {
       logger.error("❌ Failed to create SQLCipher conversation: \(error.localizedDescription)")
@@ -158,16 +226,9 @@ extension MLSConversationManager {
     var welcomeDataArray: [Data] = []
     var commitData: Data?
 
-    // Build metadata for conversation
-    let metadataInput: BlueCatbirdMlsChatCreateConvo.MetadataInput?
-    if !name.isEmpty || description != nil {
-      metadataInput = BlueCatbirdMlsChatCreateConvo.MetadataInput(
-        name: name.isEmpty ? nil : name,
-        description: description
-      )
-    } else {
-      metadataInput = nil
-    }
+    // Metadata is now encrypted inside MLS group context extensions (via GroupConfig).
+    // Do NOT send plaintext metadata to the server.
+    let metadataInput: BlueCatbirdMlsChatCreateConvo.MetadataInput? = nil
 
     // Create conversation on server (handles key package retries internally)
     let creationResult: ServerConversationCreationResult
@@ -282,9 +343,10 @@ extension MLSConversationManager {
         logger.info("✅ Server already processed members during createConvo (epoch: \(serverEpoch))")
         logger.info("   Merging pending commit locally to sync epochs...")
         
-        let mergedEpoch = try await mlsClient.mergePendingCommit(for: userDid, groupId: groupId)
+        let (mergedEpoch, metadataKey, metadataEpoch) = try await mlsClient.mergePendingCommitV2(
+          for: userDid, groupId: groupId)
         logger.info("✅ [createGroup] Commit merged - local epoch now: \(mergedEpoch)")
-        
+
         // Verify merged epoch matches server's epoch
         if mergedEpoch != serverEpoch {
           logger.error(
@@ -293,10 +355,19 @@ extension MLSConversationManager {
           logger.error("   This indicates a protocol violation - secret trees are now desynced")
           throw MLSConversationError.epochMismatch
         }
-        
+
         groupStates[groupIdHex]?.epoch = mergedEpoch
         logger.debug("📊 Updated local group state: epoch=\(mergedEpoch)")
-        
+
+        // METADATA: Re-wrap metadata for the new epoch after adding members
+        if let key = metadataKey, let epoch = metadataEpoch {
+          await reWrapMetadataAfterMerge(
+            groupIdHex: groupIdHex,
+            metadataKey: key,
+            epoch: epoch
+          )
+        }
+
         // Mark conversation as active
         conversationStates[groupIdHex] = .active
         return convo
@@ -366,47 +437,29 @@ extension MLSConversationManager {
           }
 
           logger.debug("📍 Server returned epoch: \(addResult.newEpoch)")
+          logger.info("🔄 [createGroup] Merging pending commit after successful addMembers...")
 
-          // ✅ CRITICAL: Only merge if server actually processed the commit and advanced epoch
-          // If server epoch didn't advance, it means the addMembers was a no-op (idempotent)
-          // Merging in this case would desync secret trees
-          if addResult.newEpoch > currentEpoch {
-            logger.info(
-              "🔄 [createGroup] Server advanced epoch (\(currentEpoch) → \(addResult.newEpoch)), merging commit..."
+          // Always merge after a successful addMembers. The server may return newEpoch=0 when
+          // it nil-defaults the epoch field (idempotency hit), but that does NOT mean the commit
+          // was a no-op locally — the OpenMLS group still has a pending staged commit that must
+          // be merged. Skipping the merge breaks all subsequent message encryption.
+          let (mergedEpoch, metadataKey2, metadataEpoch2) = try await mlsClient.mergePendingCommitV2(
+            for: userDid, groupId: groupId)
+          logger.info("✅ [createGroup] Commit merged - local epoch now: \(mergedEpoch)")
+          groupStates[groupIdHex]?.epoch = mergedEpoch
+          logger.debug("📊 Updated local group state: epoch=\(mergedEpoch)")
+
+          // METADATA: Re-wrap metadata for the new epoch after addMembers
+          if let key = metadataKey2, let epoch = metadataEpoch2 {
+            await reWrapMetadataAfterMerge(
+              groupIdHex: groupIdHex,
+              metadataKey: key,
+              epoch: epoch
             )
-            let mergedEpoch = try await mlsClient.mergePendingCommit(for: userDid, groupId: groupId)
-            logger.info("✅ [createGroup] Commit merged - local epoch now: \(mergedEpoch)")
-
-            // Verify merged epoch matches server's epoch
-            if mergedEpoch != addResult.newEpoch {
-              logger.error(
-                "❌ CRITICAL: Merged epoch (\(mergedEpoch)) doesn't match server epoch (\(addResult.newEpoch))"
-              )
-              logger.error("   This indicates a protocol violation - secret trees are now desynced")
-              throw MLSConversationError.epochMismatch
-            }
-
-            groupStates[groupIdHex]?.epoch = mergedEpoch
-            logger.debug("📊 Updated local group state: epoch=\(mergedEpoch)")
-
-            // 🔬 DIAGNOSTIC: Log complete group state after merging commit
-            await logGroupStateDiagnostics(
-              userDid: userDid, groupId: groupId, context: "After Merge Commit (Creator)")
-          } else {
-            logger.warning(
-              "⚠️ Server did NOT advance epoch (returned: \(addResult.newEpoch), current: \(currentEpoch))"
-            )
-            logger.warning("   Likely idempotent no-op - members already exist on server")
-            logger.warning("   NOT merging commit to prevent secret tree desync")
-            logger.warning("   Conversation will remain at epoch \(currentEpoch)")
-
-            // Keep local epoch unchanged
-            groupStates[groupIdHex]?.epoch = currentEpoch
-
-            // 🔬 DIAGNOSTIC: Log group state when skipping merge
-            await logGroupStateDiagnostics(
-              userDid: userDid, groupId: groupId, context: "Skipped Merge (Idempotent)")
           }
+
+          await logGroupStateDiagnostics(
+            userDid: userDid, groupId: groupId, context: "After Merge Commit (Creator)")
         } onCancel: {
           logger.warning(
             "⚠️ [createGroup] Commit operation was cancelled - allowing completion to prevent epoch desync"
@@ -433,6 +486,21 @@ extension MLSConversationManager {
       groupId: groupId,
       context: "after createGroup"
     )
+
+    // METADATA: Upload encrypted metadata blob if present in creation result.
+    // The Rust FFI encrypts metadata during group creation and returns the blob
+    // along with a locator. We upload the blob to the server so other members
+    // can fetch and decrypt it after processing the Welcome/commit.
+    if let encryptedBlob = mlsCreationResult.encryptedMetadataBlob,
+      let locator = mlsCreationResult.metadataBlobLocator
+    {
+      await uploadMetadataBlobAfterCreation(
+        groupIdHex: groupIdHex,
+        encryptedBlob: encryptedBlob,
+        blobLocator: locator,
+        metadataReferenceJSON: mlsCreationResult.metadataReferenceJson
+      )
+    }
 
     // Notify observers AFTER state is active
     notifyObservers(.conversationCreated(convo))
@@ -517,11 +585,85 @@ extension MLSConversationManager {
       members: Set(convo.members.map { $0.did.description })
     )
 
+    // Insert history boundary marker so the UI shows "You joined this conversation"
+    await insertHistoryBoundaryMarker(
+      conversationId: groupId,
+      senderDID: userDid,
+      epoch: ffiEpoch,
+      contentKey: "history_boundary.new_member"
+    )
+
     // Notify observers
     notifyObservers(.conversationJoined(convo))
 
     logger.info("Successfully joined conversation: \(convo.groupId)")
     return convo
+  }
+
+  // MARK: - History Boundary Markers
+
+  /// Insert a history boundary system message into the local database.
+  /// These markers appear as inline pills in the chat UI to indicate where the user's
+  /// message history begins (e.g., after joining or rejoining a conversation).
+  ///
+  /// - Parameters:
+  ///   - conversationId: The group/conversation ID (hex-encoded)
+  ///   - senderDID: The DID of the user who triggered the boundary
+  ///   - epoch: The MLS epoch at which the boundary occurred
+  ///   - contentKey: The system message content key (e.g., "history_boundary.new_member")
+  internal func insertHistoryBoundaryMarker(
+    conversationId: String,
+    senderDID: String,
+    epoch: UInt64,
+    contentKey: String
+  ) async {
+    let markerID = "hb-\(conversationId)-\(epoch)"
+    let normalizedDID = MLSStorageHelpers.normalizeDID(senderDID)
+
+    let payload = MLSMessagePayload(
+      messageType: .system,
+      text: contentKey
+    )
+
+    guard let payloadData = try? payload.encodeToJSON() else {
+      logger.warning("⚠️ Failed to encode history boundary payload")
+      return
+    }
+
+    let model = MLSMessageModel(
+      messageID: markerID,
+      currentUserDID: normalizedDID,
+      conversationID: conversationId,
+      senderID: normalizedDID,
+      payloadJSON: payloadData,
+      wireFormat: nil,
+      contentType: "application/json",
+      timestamp: Date(),
+      epoch: Int64(epoch),
+      sequenceNumber: 0,
+      authenticatedData: nil,
+      signature: nil,
+      isDelivered: true,
+      isRead: false,
+      isSent: true,
+      sendAttempts: 0,
+      error: nil,
+      processingState: "delivered",
+      gapBefore: false,
+      payloadExpired: false,
+      processingError: nil,
+      processingAttempts: 0,
+      validationFailureReason: nil
+    )
+
+    do {
+      try await database.write { db in
+        try model.save(db)
+      }
+      logger.info("📌 Inserted history boundary marker: \(markerID)")
+    } catch {
+      logger.warning("⚠️ Failed to store history boundary marker: \(error.localizedDescription)")
+    }
   }
 
   /// Remove current user from conversation
@@ -742,12 +884,127 @@ extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.contextNotInitialized
     }
-    
+
     return try await storage.fetchMembers(
       conversationID: convoId,
       currentUserDID: userDid,
       database: database
     )
+  }
+
+  // MARK: - Group Metadata (Encrypted)
+
+  /// Read decrypted group metadata from the MLS group context extension.
+  /// Metadata is encrypted with a per-group MEK and never stored in plaintext on the server.
+  ///
+  /// - Parameter conversationId: Conversation/group ID (hex string)
+  /// - Returns: Decoded metadata payload, or nil if no metadata is set
+  public func getGroupMetadata(conversationId: String) async throws -> GroupMetadataPayload? {
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    guard isInitialized else {
+      throw MLSConversationError.contextNotInitialized
+    }
+
+    guard let groupIdData = Data(hexEncoded: conversationId) else {
+      throw MLSConversationError.invalidGroupId
+    }
+
+    return try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData)
+  }
+
+  /// Update encrypted group metadata in the MLS group context extension.
+  /// This creates an MLS commit that re-encrypts the metadata and sends it to the server.
+  /// Other group members will receive the updated metadata through the commit.
+  ///
+  /// - Parameters:
+  ///   - conversationId: Conversation/group ID (hex string)
+  ///   - name: New group name (nil to leave unchanged)
+  ///   - description: New group description (nil to leave unchanged)
+  public func updateGroupMetadata(
+    conversationId: String,
+    name: String?,
+    description: String?
+  ) async throws {
+    logger.info(
+      "🔵 [updateGroupMetadata] START - convo: \(conversationId.prefix(16))..., name: \(name ?? "nil")"
+    )
+
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    guard isInitialized else {
+      throw MLSConversationError.contextNotInitialized
+    }
+
+    guard let groupIdData = Data(hexEncoded: conversationId) else {
+      throw MLSConversationError.invalidGroupId
+    }
+
+    // 1. Create the MLS commit with updated metadata
+    let commitData = try await mlsClient.updateGroupMetadata(
+      for: userDid,
+      groupId: groupIdData,
+      name: name,
+      description: description
+    )
+
+    // 2. Send commit to server via commitGroupChange
+    let commitBase64 = commitData.base64EncodedString()
+    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+      convoId: conversationId,
+      action: "updateMetadata",
+      commit: commitBase64
+    )
+
+    let (responseCode, output) = try await apiClient.client.blue.catbird.mlschat.commitGroupChange(
+      input: input
+    )
+
+    guard responseCode == 200, let output = output else {
+      logger.error("❌ [updateGroupMetadata] Server rejected commit: HTTP \(responseCode)")
+      // Clear pending commit on failure
+      do {
+        try await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
+      } catch {
+        logger.warning("⚠️ [updateGroupMetadata] Failed to clear pending commit: \(error.localizedDescription)")
+      }
+      throw MLSConversationError.operationFailed(
+        "Server rejected metadata update commit (HTTP \(responseCode))"
+      )
+    }
+
+    // 3. Merge pending commit locally to advance epoch (v2: also get metadata key)
+    let (mergedEpoch, metadataKey, metadataEpoch) = try await mlsClient.mergePendingCommitV2(
+      for: userDid, groupId: groupIdData)
+    logger.info("✅ [updateGroupMetadata] Commit merged - epoch now: \(mergedEpoch)")
+
+    // 4. Update local group state
+    groupStates[conversationId]?.epoch = mergedEpoch
+
+    // 5. METADATA: Re-wrap metadata for the new epoch.
+    // After a metadata update commit, the metadata must be re-encrypted
+    // with the new epoch's key and uploaded to the server.
+    if let key = metadataKey, let epoch = metadataEpoch {
+      await reWrapMetadataAfterMerge(
+        groupIdHex: conversationId,
+        metadataKey: key,
+        epoch: epoch
+      )
+    }
+
+    // 6. Publish updated GroupInfo for external joins
+    try await publishLatestGroupInfo(
+      userDid: userDid,
+      convoId: conversationId,
+      groupId: groupIdData,
+      context: "after updateGroupMetadata"
+    )
+
+    logger.info("✅ [updateGroupMetadata] COMPLETE - convo: \(conversationId.prefix(16))...")
   }
 
 }

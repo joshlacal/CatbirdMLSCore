@@ -447,6 +447,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
+    typealias FfiType = Float
+    typealias SwiftType = Float
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
+        return try lift(readFloat(&buf))
+    }
+
+    public static func write(_ value: Float, into buf: inout [UInt8]) {
+        writeFloat(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -565,11 +581,6 @@ public protocol CatbirdClientBridgeProtocol : AnyObject {
     func leaveConversation(conversationId: String) throws 
     
     /**
-     * Mark a conversation as read up to a specific message.
-     */
-    func markRead(conversationId: String, messageId: String) throws 
-    
-    /**
      * Get message history for a conversation.
      */
     func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64?) throws  -> [ChatMessage]
@@ -598,6 +609,11 @@ public protocol CatbirdClientBridgeProtocol : AnyObject {
      * Sync conversations and messages with the server.
      */
     func sync(fullSync: Bool) throws 
+    
+    /**
+     * Update the read cursor for a conversation.
+     */
+    func updateCursor(conversationId: String, cursor: String) throws 
     
     /**
      * Get the current user's DID.
@@ -743,17 +759,6 @@ open func leaveConversation(conversationId: String)throws  {try rustCallWithErro
 }
     
     /**
-     * Mark a conversation as read up to a specific message.
-     */
-open func markRead(conversationId: String, messageId: String)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-    uniffi_catbird_mls_fn_method_catbirdclientbridge_mark_read(self.uniffiClonePointer(),
-        FfiConverterString.lower(conversationId),
-        FfiConverterString.lower(messageId),$0
-    )
-}
-}
-    
-    /**
      * Get message history for a conversation.
      */
 open func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64?)throws  -> [ChatMessage] {
@@ -814,6 +819,17 @@ open func shutdown() {try! rustCall() {
 open func sync(fullSync: Bool)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
     uniffi_catbird_mls_fn_method_catbirdclientbridge_sync(self.uniffiClonePointer(),
         FfiConverterBool.lower(fullSync),$0
+    )
+}
+}
+    
+    /**
+     * Update the read cursor for a conversation.
+     */
+open func updateCursor(conversationId: String, cursor: String)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_catbirdclientbridge_update_cursor(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterString.lower(cursor),$0
     )
 }
 }
@@ -901,6 +917,11 @@ public protocol MlsContextProtocol : AnyObject {
      * Async variant of add_members - offloads crypto work to avoid blocking
      */
     func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws  -> AddMembersResult
+    
+    /**
+     * Check if suspension has been requested. Returns MLSError::ContextClosed if so.
+     */
+    func checkSuspended() throws 
     
     /**
      * Clear pending commit for a group
@@ -1065,10 +1086,11 @@ public protocol MlsContextProtocol : AnyObject {
      *
      * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
      * is transitioning to background/inactive state. It:
-     * 1. Flushes all pending SQLite writes to disk
-     * 2. Performs WAL checkpoint to consolidate data
-     * 3. CLOSES all database connections by dropping the inner context
-     * 4. Releases all file handles so iOS doesn't kill the app
+     * 1. Interrupts any in-flight SQLCipher operations (unblocks the Mutex)
+     * 2. Flushes all pending SQLite writes to disk
+     * 3. Performs WAL checkpoint to consolidate data
+     * 4. CLOSES all database connections by dropping the inner context
+     * 5. Releases all file handles so iOS doesn't kill the app
      *
      * After calling this, the context is CLOSED and cannot be used for any operations.
      * The Swift side must create a new context if MLS operations are needed again.
@@ -1086,6 +1108,21 @@ public protocol MlsContextProtocol : AnyObject {
      * - Throws: MLSError if flush fails
      */
     func flushStorage() throws 
+    
+    /**
+     * Get the MLS confirmation tag for a group.
+     * Returns the TLS-serialized confirmation tag bytes from storage.
+     */
+    func getConfirmationTag(groupId: Data) throws  -> Data
+    
+    /**
+     * Derive the current metadata key for an already-joined group.
+     *
+     * Call this immediately after joining a group via Welcome or External Commit
+     * to bootstrap metadata decryption without waiting for a subsequent commit.
+     * Returns `None` if the group is not found or key derivation fails.
+     */
+    func getCurrentMetadata(groupId: Data) throws  -> CurrentMetadataInfo?
     
     func getEpoch(groupId: Data) throws  -> UInt64
     
@@ -1115,6 +1152,12 @@ public protocol MlsContextProtocol : AnyObject {
      * - Throws: MLSError if group not found
      */
     func getGroupMemberCount(groupId: Data) throws  -> UInt32
+    
+    /**
+     * Read encrypted group metadata from MLS group context.
+     * Returns JSON bytes of the metadata, or empty vec if none set.
+     */
+    func getGroupMetadata(groupId: Data) throws  -> Data
     
     /**
      * Get the number of key package bundles currently cached
@@ -1167,6 +1210,19 @@ public protocol MlsContextProtocol : AnyObject {
     func importIdentityKey(identity: String, keyData: Data) throws 
     
     /**
+     * Interrupt all in-flight SQLCipher operations on this context.
+     *
+     * Safe to call from any thread — does NOT require the inner Mutex.
+     * Causes any running sqlite3_step/sqlite3_exec to return SQLITE_INTERRUPT.
+     * The interrupted operation will release the Mutex, allowing flush_and_prepare_close
+     * to acquire it promptly.
+     *
+     * Call this BEFORE flush_and_prepare_close to avoid blocking on the Mutex
+     * while an in-flight FFI operation holds it (which causes 0xdead10cc).
+     */
+    func interrupt() 
+    
+    /**
      * Check if this context has been closed.
      * Returns true if close_database() or flush_and_prepare_close() has been called.
      */
@@ -1188,7 +1244,7 @@ public protocol MlsContextProtocol : AnyObject {
      * Merge a pending commit after validation
      * This should be called after the commit has been accepted by the delivery service
      */
-    func mergePendingCommit(groupId: Data) throws  -> UInt64
+    func mergePendingCommit(groupId: Data) throws  -> MergePendingCommitResult
     
     /**
      * Merge a staged commit after validation
@@ -1328,6 +1384,13 @@ public protocol MlsContextProtocol : AnyObject {
     func setLogger(logger: MlsLogger) 
     
     /**
+     * Set the suspension flag. When true, long-running operations bail out early
+     * to release the Mutex and file locks before iOS suspends the process.
+     * Safe to call from any thread — uses atomic store.
+     */
+    func setSuspended(value: Bool) 
+    
+    /**
      * Sign arbitrary bytes using the persistent MLS signer for an identity.
      *
      * This is used for declaration device proof-of-possession. The signature
@@ -1352,6 +1415,11 @@ public protocol MlsContextProtocol : AnyObject {
      * - Throws: MLSError if flush fails
      */
     func syncDatabase() throws 
+    
+    /**
+     * Update group metadata. Returns commit bytes to send to server.
+     */
+    func updateGroupMetadata(groupId: Data, metadataJson: Data) throws  -> Data
     
     /**
      * 🔒 FIX #3: Validate GroupInfo format before upload
@@ -1474,6 +1542,15 @@ open func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData])async thr
             liftFunc: FfiConverterTypeAddMembersResult.lift,
             errorHandler: FfiConverterTypeMLSError.lift
         )
+}
+    
+    /**
+     * Check if suspension has been requested. Returns MLSError::ContextClosed if so.
+     */
+open func checkSuspended()throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_check_suspended(self.uniffiClonePointer(),$0
+    )
+}
 }
     
     /**
@@ -1809,10 +1886,11 @@ open func exportSecret(groupId: Data, label: String, context: Data, keyLength: U
      *
      * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
      * is transitioning to background/inactive state. It:
-     * 1. Flushes all pending SQLite writes to disk
-     * 2. Performs WAL checkpoint to consolidate data
-     * 3. CLOSES all database connections by dropping the inner context
-     * 4. Releases all file handles so iOS doesn't kill the app
+     * 1. Interrupts any in-flight SQLCipher operations (unblocks the Mutex)
+     * 2. Flushes all pending SQLite writes to disk
+     * 3. Performs WAL checkpoint to consolidate data
+     * 4. CLOSES all database connections by dropping the inner context
+     * 5. Releases all file handles so iOS doesn't kill the app
      *
      * After calling this, the context is CLOSED and cannot be used for any operations.
      * The Swift side must create a new context if MLS operations are needed again.
@@ -1837,6 +1915,33 @@ open func flushStorage()throws  {try rustCallWithError(FfiConverterTypeMLSError.
     uniffi_catbird_mls_fn_method_mlscontext_flush_storage(self.uniffiClonePointer(),$0
     )
 }
+}
+    
+    /**
+     * Get the MLS confirmation tag for a group.
+     * Returns the TLS-serialized confirmation tag bytes from storage.
+     */
+open func getConfirmationTag(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_get_confirmation_tag(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
+    /**
+     * Derive the current metadata key for an already-joined group.
+     *
+     * Call this immediately after joining a group via Welcome or External Commit
+     * to bootstrap metadata decryption without waiting for a subsequent commit.
+     * Returns `None` if the group is not found or key derivation fails.
+     */
+open func getCurrentMetadata(groupId: Data)throws  -> CurrentMetadataInfo? {
+    return try  FfiConverterOptionTypeCurrentMetadataInfo.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_get_current_metadata(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
 }
     
 open func getEpoch(groupId: Data)throws  -> UInt64 {
@@ -1881,6 +1986,18 @@ open func getGroupDebugState(groupId: Data)throws  -> String {
 open func getGroupMemberCount(groupId: Data)throws  -> UInt32 {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_get_group_member_count(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
+    /**
+     * Read encrypted group metadata from MLS group context.
+     * Returns JSON bytes of the metadata, or empty vec if none set.
+     */
+open func getGroupMetadata(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_get_group_metadata(self.uniffiClonePointer(),
         FfiConverterData.lower(groupId),$0
     )
 })
@@ -1972,6 +2089,23 @@ open func importIdentityKey(identity: String, keyData: Data)throws  {try rustCal
 }
     
     /**
+     * Interrupt all in-flight SQLCipher operations on this context.
+     *
+     * Safe to call from any thread — does NOT require the inner Mutex.
+     * Causes any running sqlite3_step/sqlite3_exec to return SQLITE_INTERRUPT.
+     * The interrupted operation will release the Mutex, allowing flush_and_prepare_close
+     * to acquire it promptly.
+     *
+     * Call this BEFORE flush_and_prepare_close to avoid blocking on the Mutex
+     * while an in-flight FFI operation holds it (which causes 0xdead10cc).
+     */
+open func interrupt() {try! rustCall() {
+    uniffi_catbird_mls_fn_method_mlscontext_interrupt(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
      * Check if this context has been closed.
      * Returns true if close_database() or flush_and_prepare_close() has been called.
      */
@@ -2008,8 +2142,8 @@ open func listPendingProposals(groupId: Data)throws  -> [ProposalRef] {
      * Merge a pending commit after validation
      * This should be called after the commit has been accepted by the delivery service
      */
-open func mergePendingCommit(groupId: Data)throws  -> UInt64 {
-    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+open func mergePendingCommit(groupId: Data)throws  -> MergePendingCommitResult {
+    return try  FfiConverterTypeMergePendingCommitResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_merge_pending_commit(self.uniffiClonePointer(),
         FfiConverterData.lower(groupId),$0
     )
@@ -2256,6 +2390,18 @@ open func setLogger(logger: MlsLogger) {try! rustCall() {
 }
     
     /**
+     * Set the suspension flag. When true, long-running operations bail out early
+     * to release the Mutex and file locks before iOS suspends the process.
+     * Safe to call from any thread — uses atomic store.
+     */
+open func setSuspended(value: Bool) {try! rustCall() {
+    uniffi_catbird_mls_fn_method_mlscontext_set_suspended(self.uniffiClonePointer(),
+        FfiConverterBool.lower(value),$0
+    )
+}
+}
+    
+    /**
      * Sign arbitrary bytes using the persistent MLS signer for an identity.
      *
      * This is used for declaration device proof-of-possession. The signature
@@ -2296,6 +2442,18 @@ open func syncDatabase()throws  {try rustCallWithError(FfiConverterTypeMLSError.
     uniffi_catbird_mls_fn_method_mlscontext_sync_database(self.uniffiClonePointer(),$0
     )
 }
+}
+    
+    /**
+     * Update group metadata. Returns commit bytes to send to server.
+     */
+open func updateGroupMetadata(groupId: Data, metadataJson: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(metadataJson),$0
+    )
+})
 }
     
     /**
@@ -2395,6 +2553,12 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func createGroup(name: String, initialMembers: [String]?, description: String?) throws  -> FfiConversationView
     
     /**
+     * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
+     * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
+     */
+    func decodeOpusToPcm(opusData: Data) throws  -> Data
+    
+    /**
      * Ensure device is registered with MLS service.
      */
     func ensureDeviceRegistered() throws  -> String
@@ -2440,6 +2604,12 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func performSilentRecovery(conversationIds: [String]) throws 
     
     /**
+     * Encode PCM audio to Opus, extract waveform, encrypt blob.
+     * Returns the encrypted data + metadata needed to upload and send.
+     */
+    func prepareVoiceMessage(pcmPath: String, sampleRate: UInt32) throws  -> FfiVoicePrepareResult
+    
+    /**
      * Process an incoming encrypted envelope.
      */
     func processIncoming(envelope: FfiIncomingEnvelope) throws  -> FfiMessage?
@@ -2468,6 +2638,13 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
      * Send a text message.
      */
     func sendMessage(conversationId: String, text: String) throws  -> FfiMessage
+    
+    /**
+     * Send a voice message (audio embed) to a conversation.
+     * Call prepare_voice_message first, upload the encrypted blob,
+     * then call this with the blob_id from the upload.
+     */
+    func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv: Data, sha256: String, size: UInt64, durationMs: UInt64, waveform: [Float], transcript: String?) throws  -> FfiMessage
     
     /**
      * Shut down the orchestrator.
@@ -2583,6 +2760,18 @@ open func createGroup(name: String, initialMembers: [String]?, description: Stri
 }
     
     /**
+     * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
+     * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
+     */
+open func decodeOpusToPcm(opusData: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_decode_opus_to_pcm(self.uniffiClonePointer(),
+        FfiConverterData.lower(opusData),$0
+    )
+})
+}
+    
+    /**
      * Ensure device is registered with MLS service.
      */
 open func ensureDeviceRegistered()throws  -> String {
@@ -2677,6 +2866,19 @@ open func performSilentRecovery(conversationIds: [String])throws  {try rustCallW
 }
     
     /**
+     * Encode PCM audio to Opus, extract waveform, encrypt blob.
+     * Returns the encrypted data + metadata needed to upload and send.
+     */
+open func prepareVoiceMessage(pcmPath: String, sampleRate: UInt32)throws  -> FfiVoicePrepareResult {
+    return try  FfiConverterTypeFFIVoicePrepareResult.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_prepare_voice_message(self.uniffiClonePointer(),
+        FfiConverterString.lower(pcmPath),
+        FfiConverterUInt32.lower(sampleRate),$0
+    )
+})
+}
+    
+    /**
      * Process an incoming encrypted envelope.
      */
 open func processIncoming(envelope: FfiIncomingEnvelope)throws  -> FfiMessage? {
@@ -2734,6 +2936,27 @@ open func sendMessage(conversationId: String, text: String)throws  -> FfiMessage
     uniffi_catbird_mls_fn_method_orchestratorbridge_send_message(self.uniffiClonePointer(),
         FfiConverterString.lower(conversationId),
         FfiConverterString.lower(text),$0
+    )
+})
+}
+    
+    /**
+     * Send a voice message (audio embed) to a conversation.
+     * Call prepare_voice_message first, upload the encrypted blob,
+     * then call this with the blob_id from the upload.
+     */
+open func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv: Data, sha256: String, size: UInt64, durationMs: UInt64, waveform: [Float], transcript: String?)throws  -> FfiMessage {
+    return try  FfiConverterTypeFFIMessage.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_send_voice_message(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterString.lower(blobId),
+        FfiConverterData.lower(key),
+        FfiConverterData.lower(iv),
+        FfiConverterString.lower(sha256),
+        FfiConverterUInt64.lower(size),
+        FfiConverterUInt64.lower(durationMs),
+        FfiConverterSequenceFloat.lower(waveform),
+        FfiConverterOptionString.lower(transcript),$0
     )
 })
 }
@@ -3045,6 +3268,109 @@ public func FfiConverterTypeChatMessage_lower(_ value: ChatMessage) -> RustBuffe
 }
 
 
+/**
+ * Metadata key material derived from a commit's next-epoch exporter.
+ *
+ * Returned alongside commit processing results so the caller (Swift/FFI layer)
+ * can fetch, decrypt, or re-encrypt metadata blobs without the Rust layer
+ * making any HTTP calls.
+ */
+public struct CommitMetadataInfo {
+    /**
+     * 32-byte ChaCha20-Poly1305 key derived from the new epoch's MLS exporter.
+     * Use with `metadata::decrypt_metadata_blob` / `encrypt_metadata_blob`.
+     */
+    public var metadataKey: Data
+    /**
+     * The epoch this key is bound to (the post-commit epoch).
+     */
+    public var epoch: UInt64
+    /**
+     * JSON-serialized `MetadataReference` from the group's AppDataDictionary,
+     * if present for this epoch.
+     */
+    public var metadataReferenceJson: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 32-byte ChaCha20-Poly1305 key derived from the new epoch's MLS exporter.
+         * Use with `metadata::decrypt_metadata_blob` / `encrypt_metadata_blob`.
+         */metadataKey: Data, 
+        /**
+         * The epoch this key is bound to (the post-commit epoch).
+         */epoch: UInt64, 
+        /**
+         * JSON-serialized `MetadataReference` from the group's AppDataDictionary,
+         * if present for this epoch.
+         */metadataReferenceJson: Data?) {
+        self.metadataKey = metadataKey
+        self.epoch = epoch
+        self.metadataReferenceJson = metadataReferenceJson
+    }
+}
+
+
+
+extension CommitMetadataInfo: Equatable, Hashable {
+    public static func ==(lhs: CommitMetadataInfo, rhs: CommitMetadataInfo) -> Bool {
+        if lhs.metadataKey != rhs.metadataKey {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.metadataReferenceJson != rhs.metadataReferenceJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(metadataKey)
+        hasher.combine(epoch)
+        hasher.combine(metadataReferenceJson)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCommitMetadataInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CommitMetadataInfo {
+        return
+            try CommitMetadataInfo(
+                metadataKey: FfiConverterData.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                metadataReferenceJson: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CommitMetadataInfo, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.metadataKey, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterOptionData.write(value.metadataReferenceJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCommitMetadataInfo_lift(_ buf: RustBuffer) throws -> CommitMetadataInfo {
+    return try FfiConverterTypeCommitMetadataInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCommitMetadataInfo_lower(_ value: CommitMetadataInfo) -> RustBuffer {
+    return FfiConverterTypeCommitMetadataInfo.lower(value)
+}
+
+
 public struct CommitResult {
     public var newEpoch: UInt64
 
@@ -3270,6 +3596,107 @@ public func FfiConverterTypeCredentialData_lower(_ value: CredentialData) -> Rus
 }
 
 
+/**
+ * Current metadata key material for an already-joined group.
+ *
+ * Used for bootstrapping metadata after a Welcome join or External Commit,
+ * where no `StagedCommit` is available. The key is derived from the group's
+ * current epoch exporter and can immediately decrypt the metadata blob.
+ */
+public struct CurrentMetadataInfo {
+    /**
+     * 32-byte ChaCha20-Poly1305 key for the group's current epoch.
+     */
+    public var metadataKey: Data
+    /**
+     * The epoch this key is bound to.
+     */
+    public var epoch: UInt64
+    /**
+     * JSON-serialized `MetadataReference` from the group's AppDataDictionary,
+     * if present for the current epoch.
+     */
+    public var metadataReferenceJson: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 32-byte ChaCha20-Poly1305 key for the group's current epoch.
+         */metadataKey: Data, 
+        /**
+         * The epoch this key is bound to.
+         */epoch: UInt64, 
+        /**
+         * JSON-serialized `MetadataReference` from the group's AppDataDictionary,
+         * if present for the current epoch.
+         */metadataReferenceJson: Data?) {
+        self.metadataKey = metadataKey
+        self.epoch = epoch
+        self.metadataReferenceJson = metadataReferenceJson
+    }
+}
+
+
+
+extension CurrentMetadataInfo: Equatable, Hashable {
+    public static func ==(lhs: CurrentMetadataInfo, rhs: CurrentMetadataInfo) -> Bool {
+        if lhs.metadataKey != rhs.metadataKey {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.metadataReferenceJson != rhs.metadataReferenceJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(metadataKey)
+        hasher.combine(epoch)
+        hasher.combine(metadataReferenceJson)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCurrentMetadataInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CurrentMetadataInfo {
+        return
+            try CurrentMetadataInfo(
+                metadataKey: FfiConverterData.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                metadataReferenceJson: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CurrentMetadataInfo, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.metadataKey, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterOptionData.write(value.metadataReferenceJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCurrentMetadataInfo_lift(_ buf: RustBuffer) throws -> CurrentMetadataInfo {
+    return try FfiConverterTypeCurrentMetadataInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCurrentMetadataInfo_lower(_ value: CurrentMetadataInfo) -> RustBuffer {
+    return FfiConverterTypeCurrentMetadataInfo.lower(value)
+}
+
+
 public struct DecryptResult {
     public var plaintext: Data
     public var epoch: UInt64
@@ -3479,12 +3906,22 @@ public func FfiConverterTypeExportedSecret_lower(_ value: ExportedSecret) -> Rus
 public struct ExternalCommitResult {
     public var commitData: Data
     public var groupId: Data
+    /**
+     * Exported GroupInfo after the external commit — send back to the server
+     * so other clients can use it for future joins.
+     */
+    public var groupInfo: Data?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(commitData: Data, groupId: Data) {
+    public init(commitData: Data, groupId: Data, 
+        /**
+         * Exported GroupInfo after the external commit — send back to the server
+         * so other clients can use it for future joins.
+         */groupInfo: Data?) {
         self.commitData = commitData
         self.groupId = groupId
+        self.groupInfo = groupInfo
     }
 }
 
@@ -3498,12 +3935,16 @@ extension ExternalCommitResult: Equatable, Hashable {
         if lhs.groupId != rhs.groupId {
             return false
         }
+        if lhs.groupInfo != rhs.groupInfo {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(commitData)
         hasher.combine(groupId)
+        hasher.combine(groupInfo)
     }
 }
 
@@ -3516,13 +3957,15 @@ public struct FfiConverterTypeExternalCommitResult: FfiConverterRustBuffer {
         return
             try ExternalCommitResult(
                 commitData: FfiConverterData.read(from: &buf), 
-                groupId: FfiConverterData.read(from: &buf)
+                groupId: FfiConverterData.read(from: &buf), 
+                groupInfo: FfiConverterOptionData.read(from: &buf)
         )
     }
 
     public static func write(_ value: ExternalCommitResult, into buf: inout [UInt8]) {
         FfiConverterData.write(value.commitData, into: &buf)
         FfiConverterData.write(value.groupId, into: &buf)
+        FfiConverterOptionData.write(value.groupInfo, into: &buf)
     }
 }
 
@@ -4472,10 +4915,11 @@ public struct FfiMessage {
     public var sequenceNumber: UInt64
     public var isOwn: Bool
     public var deliveryStatus: FfiDeliveryStatus?
+    public var payloadJson: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, conversationId: String, senderDid: String, text: String, timestamp: String, epoch: UInt64, sequenceNumber: UInt64, isOwn: Bool, deliveryStatus: FfiDeliveryStatus?) {
+    public init(id: String, conversationId: String, senderDid: String, text: String, timestamp: String, epoch: UInt64, sequenceNumber: UInt64, isOwn: Bool, deliveryStatus: FfiDeliveryStatus?, payloadJson: String?) {
         self.id = id
         self.conversationId = conversationId
         self.senderDid = senderDid
@@ -4485,6 +4929,7 @@ public struct FfiMessage {
         self.sequenceNumber = sequenceNumber
         self.isOwn = isOwn
         self.deliveryStatus = deliveryStatus
+        self.payloadJson = payloadJson
     }
 }
 
@@ -4519,6 +4964,9 @@ extension FfiMessage: Equatable, Hashable {
         if lhs.deliveryStatus != rhs.deliveryStatus {
             return false
         }
+        if lhs.payloadJson != rhs.payloadJson {
+            return false
+        }
         return true
     }
 
@@ -4532,6 +4980,7 @@ extension FfiMessage: Equatable, Hashable {
         hasher.combine(sequenceNumber)
         hasher.combine(isOwn)
         hasher.combine(deliveryStatus)
+        hasher.combine(payloadJson)
     }
 }
 
@@ -4551,7 +5000,8 @@ public struct FfiConverterTypeFFIMessage: FfiConverterRustBuffer {
                 epoch: FfiConverterUInt64.read(from: &buf), 
                 sequenceNumber: FfiConverterUInt64.read(from: &buf), 
                 isOwn: FfiConverterBool.read(from: &buf), 
-                deliveryStatus: FfiConverterOptionTypeFFIDeliveryStatus.read(from: &buf)
+                deliveryStatus: FfiConverterOptionTypeFFIDeliveryStatus.read(from: &buf), 
+                payloadJson: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -4565,6 +5015,7 @@ public struct FfiConverterTypeFFIMessage: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.sequenceNumber, into: &buf)
         FfiConverterBool.write(value.isOwn, into: &buf)
         FfiConverterOptionTypeFFIDeliveryStatus.write(value.deliveryStatus, into: &buf)
+        FfiConverterOptionString.write(value.payloadJson, into: &buf)
     }
 }
 
@@ -4830,6 +5281,123 @@ public func FfiConverterTypeFFISyncCursor_lower(_ value: FfiSyncCursor) -> RustB
 }
 
 
+/**
+ * Result of preparing a voice message via the Rust Opus encoder.
+ */
+public struct FfiVoicePrepareResult {
+    public var opusData: Data
+    public var encryptedBlob: Data
+    public var key: Data
+    public var iv: Data
+    public var sha256: String
+    public var durationMs: UInt64
+    public var waveform: [Float]
+    public var size: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(opusData: Data, encryptedBlob: Data, key: Data, iv: Data, sha256: String, durationMs: UInt64, waveform: [Float], size: UInt64) {
+        self.opusData = opusData
+        self.encryptedBlob = encryptedBlob
+        self.key = key
+        self.iv = iv
+        self.sha256 = sha256
+        self.durationMs = durationMs
+        self.waveform = waveform
+        self.size = size
+    }
+}
+
+
+
+extension FfiVoicePrepareResult: Equatable, Hashable {
+    public static func ==(lhs: FfiVoicePrepareResult, rhs: FfiVoicePrepareResult) -> Bool {
+        if lhs.opusData != rhs.opusData {
+            return false
+        }
+        if lhs.encryptedBlob != rhs.encryptedBlob {
+            return false
+        }
+        if lhs.key != rhs.key {
+            return false
+        }
+        if lhs.iv != rhs.iv {
+            return false
+        }
+        if lhs.sha256 != rhs.sha256 {
+            return false
+        }
+        if lhs.durationMs != rhs.durationMs {
+            return false
+        }
+        if lhs.waveform != rhs.waveform {
+            return false
+        }
+        if lhs.size != rhs.size {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(opusData)
+        hasher.combine(encryptedBlob)
+        hasher.combine(key)
+        hasher.combine(iv)
+        hasher.combine(sha256)
+        hasher.combine(durationMs)
+        hasher.combine(waveform)
+        hasher.combine(size)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIVoicePrepareResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiVoicePrepareResult {
+        return
+            try FfiVoicePrepareResult(
+                opusData: FfiConverterData.read(from: &buf), 
+                encryptedBlob: FfiConverterData.read(from: &buf), 
+                key: FfiConverterData.read(from: &buf), 
+                iv: FfiConverterData.read(from: &buf), 
+                sha256: FfiConverterString.read(from: &buf), 
+                durationMs: FfiConverterUInt64.read(from: &buf), 
+                waveform: FfiConverterSequenceFloat.read(from: &buf), 
+                size: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiVoicePrepareResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.opusData, into: &buf)
+        FfiConverterData.write(value.encryptedBlob, into: &buf)
+        FfiConverterData.write(value.key, into: &buf)
+        FfiConverterData.write(value.iv, into: &buf)
+        FfiConverterString.write(value.sha256, into: &buf)
+        FfiConverterUInt64.write(value.durationMs, into: &buf)
+        FfiConverterSequenceFloat.write(value.waveform, into: &buf)
+        FfiConverterUInt64.write(value.size, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIVoicePrepareResult_lift(_ buf: RustBuffer) throws -> FfiVoicePrepareResult {
+    return try FfiConverterTypeFFIVoicePrepareResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIVoicePrepareResult_lower(_ value: FfiVoicePrepareResult) -> RustBuffer {
+    return FfiConverterTypeFFIVoicePrepareResult.lower(value)
+}
+
+
 public struct GroupConfig {
     public var maxPastEpochs: UInt32
     public var outOfOrderTolerance: UInt32
@@ -4840,6 +5408,14 @@ public struct GroupConfig {
      * Recommended: 86400 * 90 (90 days)
      */
     public var maxLeafLifetimeSeconds: UInt64
+    /**
+     * Optional group name (encrypted in MLS group context extension)
+     */
+    public var groupName: String?
+    /**
+     * Optional group description (encrypted in MLS group context extension)
+     */
+    public var groupDescription: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -4848,11 +5424,19 @@ public struct GroupConfig {
          * Maximum allowed lifetime for leaf nodes in seconds.
          * Set to 0 to disable lifetime validation.
          * Recommended: 86400 * 90 (90 days)
-         */maxLeafLifetimeSeconds: UInt64) {
+         */maxLeafLifetimeSeconds: UInt64, 
+        /**
+         * Optional group name (encrypted in MLS group context extension)
+         */groupName: String?, 
+        /**
+         * Optional group description (encrypted in MLS group context extension)
+         */groupDescription: String?) {
         self.maxPastEpochs = maxPastEpochs
         self.outOfOrderTolerance = outOfOrderTolerance
         self.maximumForwardDistance = maximumForwardDistance
         self.maxLeafLifetimeSeconds = maxLeafLifetimeSeconds
+        self.groupName = groupName
+        self.groupDescription = groupDescription
     }
 }
 
@@ -4872,6 +5456,12 @@ extension GroupConfig: Equatable, Hashable {
         if lhs.maxLeafLifetimeSeconds != rhs.maxLeafLifetimeSeconds {
             return false
         }
+        if lhs.groupName != rhs.groupName {
+            return false
+        }
+        if lhs.groupDescription != rhs.groupDescription {
+            return false
+        }
         return true
     }
 
@@ -4880,6 +5470,8 @@ extension GroupConfig: Equatable, Hashable {
         hasher.combine(outOfOrderTolerance)
         hasher.combine(maximumForwardDistance)
         hasher.combine(maxLeafLifetimeSeconds)
+        hasher.combine(groupName)
+        hasher.combine(groupDescription)
     }
 }
 
@@ -4894,7 +5486,9 @@ public struct FfiConverterTypeGroupConfig: FfiConverterRustBuffer {
                 maxPastEpochs: FfiConverterUInt32.read(from: &buf), 
                 outOfOrderTolerance: FfiConverterUInt32.read(from: &buf), 
                 maximumForwardDistance: FfiConverterUInt32.read(from: &buf), 
-                maxLeafLifetimeSeconds: FfiConverterUInt64.read(from: &buf)
+                maxLeafLifetimeSeconds: FfiConverterUInt64.read(from: &buf), 
+                groupName: FfiConverterOptionString.read(from: &buf), 
+                groupDescription: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -4903,6 +5497,8 @@ public struct FfiConverterTypeGroupConfig: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.outOfOrderTolerance, into: &buf)
         FfiConverterUInt32.write(value.maximumForwardDistance, into: &buf)
         FfiConverterUInt64.write(value.maxLeafLifetimeSeconds, into: &buf)
+        FfiConverterOptionString.write(value.groupName, into: &buf)
+        FfiConverterOptionString.write(value.groupDescription, into: &buf)
     }
 }
 
@@ -4924,11 +5520,41 @@ public func FfiConverterTypeGroupConfig_lower(_ value: GroupConfig) -> RustBuffe
 
 public struct GroupCreationResult {
     public var groupId: Data
+    /**
+     * Encrypted metadata blob (nonce || ciphertext || tag), if metadata was provided.
+     * The caller should upload this to the server via `putGroupMetadataBlob`.
+     */
+    public var encryptedMetadataBlob: Data?
+    /**
+     * JSON-serialized `MetadataReference` for the encrypted blob.
+     * The caller should include this in the group state / send to the server.
+     */
+    public var metadataReferenceJson: Data?
+    /**
+     * The blob locator (UUIDv4) for the encrypted metadata blob.
+     * Passed separately for convenience so the caller can use it as the upload key.
+     */
+    public var metadataBlobLocator: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(groupId: Data) {
+    public init(groupId: Data, 
+        /**
+         * Encrypted metadata blob (nonce || ciphertext || tag), if metadata was provided.
+         * The caller should upload this to the server via `putGroupMetadataBlob`.
+         */encryptedMetadataBlob: Data?, 
+        /**
+         * JSON-serialized `MetadataReference` for the encrypted blob.
+         * The caller should include this in the group state / send to the server.
+         */metadataReferenceJson: Data?, 
+        /**
+         * The blob locator (UUIDv4) for the encrypted metadata blob.
+         * Passed separately for convenience so the caller can use it as the upload key.
+         */metadataBlobLocator: String?) {
         self.groupId = groupId
+        self.encryptedMetadataBlob = encryptedMetadataBlob
+        self.metadataReferenceJson = metadataReferenceJson
+        self.metadataBlobLocator = metadataBlobLocator
     }
 }
 
@@ -4939,11 +5565,23 @@ extension GroupCreationResult: Equatable, Hashable {
         if lhs.groupId != rhs.groupId {
             return false
         }
+        if lhs.encryptedMetadataBlob != rhs.encryptedMetadataBlob {
+            return false
+        }
+        if lhs.metadataReferenceJson != rhs.metadataReferenceJson {
+            return false
+        }
+        if lhs.metadataBlobLocator != rhs.metadataBlobLocator {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(groupId)
+        hasher.combine(encryptedMetadataBlob)
+        hasher.combine(metadataReferenceJson)
+        hasher.combine(metadataBlobLocator)
     }
 }
 
@@ -4955,12 +5593,18 @@ public struct FfiConverterTypeGroupCreationResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupCreationResult {
         return
             try GroupCreationResult(
-                groupId: FfiConverterData.read(from: &buf)
+                groupId: FfiConverterData.read(from: &buf), 
+                encryptedMetadataBlob: FfiConverterOptionData.read(from: &buf), 
+                metadataReferenceJson: FfiConverterOptionData.read(from: &buf), 
+                metadataBlobLocator: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: GroupCreationResult, into buf: inout [UInt8]) {
         FfiConverterData.write(value.groupId, into: &buf)
+        FfiConverterOptionData.write(value.encryptedMetadataBlob, into: &buf)
+        FfiConverterOptionData.write(value.metadataReferenceJson, into: &buf)
+        FfiConverterOptionString.write(value.metadataBlobLocator, into: &buf)
     }
 }
 
@@ -5197,12 +5841,14 @@ public func FfiConverterTypeKeyPackageData_lower(_ value: KeyPackageData) -> Rus
 public struct KeyPackageResult {
     public var keyPackageData: Data
     public var hashRef: Data
+    public var signaturePublicKey: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(keyPackageData: Data, hashRef: Data) {
+    public init(keyPackageData: Data, hashRef: Data, signaturePublicKey: Data) {
         self.keyPackageData = keyPackageData
         self.hashRef = hashRef
+        self.signaturePublicKey = signaturePublicKey
     }
 }
 
@@ -5216,12 +5862,16 @@ extension KeyPackageResult: Equatable, Hashable {
         if lhs.hashRef != rhs.hashRef {
             return false
         }
+        if lhs.signaturePublicKey != rhs.signaturePublicKey {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(keyPackageData)
         hasher.combine(hashRef)
+        hasher.combine(signaturePublicKey)
     }
 }
 
@@ -5234,13 +5884,15 @@ public struct FfiConverterTypeKeyPackageResult: FfiConverterRustBuffer {
         return
             try KeyPackageResult(
                 keyPackageData: FfiConverterData.read(from: &buf), 
-                hashRef: FfiConverterData.read(from: &buf)
+                hashRef: FfiConverterData.read(from: &buf), 
+                signaturePublicKey: FfiConverterData.read(from: &buf)
         )
     }
 
     public static func write(_ value: KeyPackageResult, into buf: inout [UInt8]) {
         FfiConverterData.write(value.keyPackageData, into: &buf)
         FfiConverterData.write(value.hashRef, into: &buf)
+        FfiConverterData.write(value.signaturePublicKey, into: &buf)
     }
 }
 
@@ -5323,6 +5975,85 @@ public func FfiConverterTypeMemberCredential_lift(_ buf: RustBuffer) throws -> M
 #endif
 public func FfiConverterTypeMemberCredential_lower(_ value: MemberCredential) -> RustBuffer {
     return FfiConverterTypeMemberCredential.lower(value)
+}
+
+
+/**
+ * Result of merging a pending commit (sender-side).
+ * Includes metadata key material for the new epoch so the caller
+ * can re-encrypt and upload metadata blobs before or after merge.
+ */
+public struct MergePendingCommitResult {
+    public var newEpoch: UInt64
+    /**
+     * Metadata key for the new epoch. Present when key derivation succeeds.
+     * Sender uses this to re-encrypt metadata and upload the blob.
+     */
+    public var commitMetadata: CommitMetadataInfo?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(newEpoch: UInt64, 
+        /**
+         * Metadata key for the new epoch. Present when key derivation succeeds.
+         * Sender uses this to re-encrypt metadata and upload the blob.
+         */commitMetadata: CommitMetadataInfo?) {
+        self.newEpoch = newEpoch
+        self.commitMetadata = commitMetadata
+    }
+}
+
+
+
+extension MergePendingCommitResult: Equatable, Hashable {
+    public static func ==(lhs: MergePendingCommitResult, rhs: MergePendingCommitResult) -> Bool {
+        if lhs.newEpoch != rhs.newEpoch {
+            return false
+        }
+        if lhs.commitMetadata != rhs.commitMetadata {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(newEpoch)
+        hasher.combine(commitMetadata)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMergePendingCommitResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MergePendingCommitResult {
+        return
+            try MergePendingCommitResult(
+                newEpoch: FfiConverterUInt64.read(from: &buf), 
+                commitMetadata: FfiConverterOptionTypeCommitMetadataInfo.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MergePendingCommitResult, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.newEpoch, into: &buf)
+        FfiConverterOptionTypeCommitMetadataInfo.write(value.commitMetadata, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergePendingCommitResult_lift(_ buf: RustBuffer) throws -> MergePendingCommitResult {
+    return try FfiConverterTypeMergePendingCommitResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergePendingCommitResult_lower(_ value: MergePendingCommitResult) -> RustBuffer {
+    return FfiConverterTypeMergePendingCommitResult.lower(value)
 }
 
 
@@ -5570,14 +6301,24 @@ public struct ProcessCommitResult {
     public var updateProposals: [UpdateProposalInfo]
     public var addProposals: [AddProposalInfo]
     public var removeProposals: [RemoveProposalInfo]
+    /**
+     * Metadata key for the new epoch. Present when key derivation succeeds.
+     * Receiver uses this to fetch + decrypt the metadata blob from the server.
+     */
+    public var commitMetadata: CommitMetadataInfo?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(newEpoch: UInt64, updateProposals: [UpdateProposalInfo], addProposals: [AddProposalInfo], removeProposals: [RemoveProposalInfo]) {
+    public init(newEpoch: UInt64, updateProposals: [UpdateProposalInfo], addProposals: [AddProposalInfo], removeProposals: [RemoveProposalInfo], 
+        /**
+         * Metadata key for the new epoch. Present when key derivation succeeds.
+         * Receiver uses this to fetch + decrypt the metadata blob from the server.
+         */commitMetadata: CommitMetadataInfo?) {
         self.newEpoch = newEpoch
         self.updateProposals = updateProposals
         self.addProposals = addProposals
         self.removeProposals = removeProposals
+        self.commitMetadata = commitMetadata
     }
 }
 
@@ -5597,6 +6338,9 @@ extension ProcessCommitResult: Equatable, Hashable {
         if lhs.removeProposals != rhs.removeProposals {
             return false
         }
+        if lhs.commitMetadata != rhs.commitMetadata {
+            return false
+        }
         return true
     }
 
@@ -5605,6 +6349,7 @@ extension ProcessCommitResult: Equatable, Hashable {
         hasher.combine(updateProposals)
         hasher.combine(addProposals)
         hasher.combine(removeProposals)
+        hasher.combine(commitMetadata)
     }
 }
 
@@ -5619,7 +6364,8 @@ public struct FfiConverterTypeProcessCommitResult: FfiConverterRustBuffer {
                 newEpoch: FfiConverterUInt64.read(from: &buf), 
                 updateProposals: FfiConverterSequenceTypeUpdateProposalInfo.read(from: &buf), 
                 addProposals: FfiConverterSequenceTypeAddProposalInfo.read(from: &buf), 
-                removeProposals: FfiConverterSequenceTypeRemoveProposalInfo.read(from: &buf)
+                removeProposals: FfiConverterSequenceTypeRemoveProposalInfo.read(from: &buf), 
+                commitMetadata: FfiConverterOptionTypeCommitMetadataInfo.read(from: &buf)
         )
     }
 
@@ -5628,6 +6374,7 @@ public struct FfiConverterTypeProcessCommitResult: FfiConverterRustBuffer {
         FfiConverterSequenceTypeUpdateProposalInfo.write(value.updateProposals, into: &buf)
         FfiConverterSequenceTypeAddProposalInfo.write(value.addProposals, into: &buf)
         FfiConverterSequenceTypeRemoveProposalInfo.write(value.removeProposals, into: &buf)
+        FfiConverterOptionTypeCommitMetadataInfo.write(value.commitMetadata, into: &buf)
     }
 }
 
@@ -6853,6 +7600,8 @@ public enum OrchestratorBridgeError {
     )
     case InvalidInput(message: String
     )
+    case Voice(message: String
+    )
 }
 
 
@@ -6895,6 +7644,9 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
             )
         case 11: return .InvalidInput(
+            message: try FfiConverterString.read(from: &buf)
+            )
+        case 12: return .Voice(
             message: try FfiConverterString.read(from: &buf)
             )
 
@@ -6961,6 +7713,11 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(11))
             FfiConverterString.write(message, into: &buf)
             
+        
+        case let .Voice(message):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(message, into: &buf)
+            
         }
     }
 }
@@ -6983,7 +7740,11 @@ public enum ProcessedContent {
     )
     case proposal(proposal: ProposalInfo, proposalRef: ProposalRef
     )
-    case stagedCommit(newEpoch: UInt64
+    case stagedCommit(newEpoch: UInt64, 
+        /**
+         * Metadata key for the new epoch. Present when key derivation succeeds.
+         * Receiver uses this to fetch + decrypt the metadata blob from the server.
+         */commitMetadata: CommitMetadataInfo?
     )
 }
 
@@ -7004,7 +7765,7 @@ public struct FfiConverterTypeProcessedContent: FfiConverterRustBuffer {
         case 2: return .proposal(proposal: try FfiConverterTypeProposalInfo.read(from: &buf), proposalRef: try FfiConverterTypeProposalRef.read(from: &buf)
         )
         
-        case 3: return .stagedCommit(newEpoch: try FfiConverterUInt64.read(from: &buf)
+        case 3: return .stagedCommit(newEpoch: try FfiConverterUInt64.read(from: &buf), commitMetadata: try FfiConverterOptionTypeCommitMetadataInfo.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -7027,9 +7788,10 @@ public struct FfiConverterTypeProcessedContent: FfiConverterRustBuffer {
             FfiConverterTypeProposalRef.write(proposalRef, into: &buf)
             
         
-        case let .stagedCommit(newEpoch):
+        case let .stagedCommit(newEpoch,commitMetadata):
             writeInt(&buf, Int32(3))
             FfiConverterUInt64.write(newEpoch, into: &buf)
+            FfiConverterOptionTypeCommitMetadataInfo.write(commitMetadata, into: &buf)
             
         }
     }
@@ -9634,6 +10396,54 @@ fileprivate struct FfiConverterOptionTypeChatMessage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCommitMetadataInfo: FfiConverterRustBuffer {
+    typealias SwiftType = CommitMetadataInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCommitMetadataInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCommitMetadataInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeCurrentMetadataInfo: FfiConverterRustBuffer {
+    typealias SwiftType = CurrentMetadataInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCurrentMetadataInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCurrentMetadataInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFFIConversationView: FfiConverterRustBuffer {
     typealias SwiftType = FfiConversationView?
 
@@ -9772,6 +10582,31 @@ fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
         case 1: return try FfiConverterSequenceString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
+    typealias SwiftType = [Float]
+
+    public static func write(_ value: [Float], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterFloat.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Float] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Float]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterFloat.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -10362,6 +11197,30 @@ public func uniffiForeignFutureHandleCountCatbirdMls() -> Int {
     UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.count
 }
 /**
+ * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
+ * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
+ * This is a pure function — no bridge or MLS context needed.
+ */
+public func ffiDecodeOpusToPcm(opusData: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_func_ffi_decode_opus_to_pcm(
+        FfiConverterData.lower(opusData),$0
+    )
+})
+}
+/**
+ * Encode PCM audio to Opus, extract waveform, encrypt blob.
+ * This is a pure function — no bridge or MLS context needed.
+ */
+public func ffiPrepareVoiceMessage(pcmPath: String, sampleRate: UInt32)throws  -> FfiVoicePrepareResult {
+    return try  FfiConverterTypeFFIVoicePrepareResult.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_func_ffi_prepare_voice_message(
+        FfiConverterString.lower(pcmPath),
+        FfiConverterUInt32.lower(sampleRate),$0
+    )
+})
+}
+/**
  * Returns the build identifier for this FFI version.
  *
  * Call this at app startup in both main app and NSE to verify both processes
@@ -10398,6 +11257,83 @@ public func mlsComputeKeyPackageHash(keyPackageBytes: Data)throws  -> Data {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
     uniffi_catbird_mls_fn_func_mls_compute_key_package_hash(
         FfiConverterData.lower(keyPackageBytes),$0
+    )
+})
+}
+/**
+ * Decrypt an avatar blob back into raw image bytes.
+ *
+ * Uses domain-separated AAD (appends `b"avatar"`).
+ */
+public func mlsDecryptAvatarBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, ciphertext: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_func_mls_decrypt_avatar_blob(
+        FfiConverterData.lower(key),
+        FfiConverterString.lower(groupIdHex),
+        FfiConverterUInt64.lower(epoch),
+        FfiConverterUInt64.lower(metadataVersion),
+        FfiConverterData.lower(ciphertext),$0
+    )
+})
+}
+/**
+ * Decrypt a group metadata blob back into JSON.
+ *
+ * - `key`: 32-byte symmetric key derived from the MLS epoch exporter.
+ * - `group_id_hex`: Hex-encoded MLS group ID (used in AAD construction).
+ * - `epoch`: MLS epoch number (used in AAD construction).
+ * - `metadata_version`: Monotonic metadata version counter (used in AAD).
+ * - `ciphertext`: Encrypted blob: `nonce (12) || ciphertext || tag (16)`.
+ *
+ * Returns JSON-encoded `GroupMetadataV1`.
+ */
+public func mlsDecryptMetadataBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, ciphertext: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_func_mls_decrypt_metadata_blob(
+        FfiConverterData.lower(key),
+        FfiConverterString.lower(groupIdHex),
+        FfiConverterUInt64.lower(epoch),
+        FfiConverterUInt64.lower(metadataVersion),
+        FfiConverterData.lower(ciphertext),$0
+    )
+})
+}
+/**
+ * Encrypt raw avatar image bytes using ChaCha20-Poly1305.
+ *
+ * Uses domain-separated AAD (appends `b"avatar"`) to prevent confusion
+ * with metadata blobs encrypted under the same key.
+ */
+public func mlsEncryptAvatarBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, avatarBytes: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_func_mls_encrypt_avatar_blob(
+        FfiConverterData.lower(key),
+        FfiConverterString.lower(groupIdHex),
+        FfiConverterUInt64.lower(epoch),
+        FfiConverterUInt64.lower(metadataVersion),
+        FfiConverterData.lower(avatarBytes),$0
+    )
+})
+}
+/**
+ * Encrypt a group metadata JSON blob using ChaCha20-Poly1305.
+ *
+ * - `key`: 32-byte symmetric key derived from the MLS epoch exporter.
+ * - `group_id_hex`: Hex-encoded MLS group ID (used in AAD construction).
+ * - `epoch`: MLS epoch number (used in AAD construction).
+ * - `metadata_version`: Monotonic metadata version counter (used in AAD).
+ * - `metadata_json`: JSON-encoded `GroupMetadataV1` payload.
+ *
+ * Returns the encrypted blob: `nonce (12) || ciphertext || tag (16)`.
+ */
+public func mlsEncryptMetadataBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, metadataJson: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_func_mls_encrypt_metadata_blob(
+        FfiConverterData.lower(key),
+        FfiConverterString.lower(groupIdHex),
+        FfiConverterUInt64.lower(epoch),
+        FfiConverterUInt64.lower(metadataVersion),
+        FfiConverterData.lower(metadataJson),$0
     )
 })
 }
@@ -10486,6 +11422,12 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_catbird_mls_checksum_func_ffi_decode_opus_to_pcm() != 476) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_func_ffi_prepare_voice_message() != 58454) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_func_get_ffi_build_id() != 45475) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10493,6 +11435,18 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_func_mls_compute_key_package_hash() != 2576) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_func_mls_decrypt_avatar_blob() != 5383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_func_mls_decrypt_metadata_blob() != 40912) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_func_mls_encrypt_avatar_blob() != 59185) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_func_mls_encrypt_metadata_blob() != 58546) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_func_mls_extract_key_package_identity() != 50674) {
@@ -10528,9 +11482,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_leave_conversation() != 6136) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_mark_read() != 27482) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_messages() != 46800) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10549,6 +11500,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_sync() != 61177) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_update_cursor() != 30182) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_user_did() != 20723) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10556,6 +11510,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_add_members_async() != 21247) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_check_suspended() != 40714) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_clear_pending_commit() != 5572) {
@@ -10627,10 +11584,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_export_secret() != 18925) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_flush_and_prepare_close() != 29291) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_flush_and_prepare_close() != 26050) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_flush_storage() != 42921) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_get_confirmation_tag() != 39558) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_get_current_metadata() != 5665) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_get_epoch() != 51406) {
@@ -10640,6 +11603,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_get_group_member_count() != 41317) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_get_group_metadata() != 1765) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_get_key_package_bundle_count() != 28432) {
@@ -10660,6 +11626,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_import_identity_key() != 50229) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_interrupt() != 36452) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_is_closed() != 32703) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10669,7 +11638,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_list_pending_proposals() != 22913) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 22991) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 9121) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_merge_staged_commit() != 13981) {
@@ -10717,6 +11686,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_set_logger() != 31982) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_set_suspended() != 60875) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_sign_with_identity_key() != 63625) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10726,6 +11698,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_sync_database() != 29289) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata() != 18130) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_validate_group_info_format() != 57471) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10733,6 +11708,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_create_group() != 46751) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_decode_opus_to_pcm() != 46696) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_device_registered() != 54125) {
@@ -10762,6 +11740,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_perform_silent_recovery() != 48593) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_voice_message() != 64276) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_process_incoming() != 39528) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10778,6 +11759,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_send_message() != 21757) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_send_voice_message() != 34733) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932) {

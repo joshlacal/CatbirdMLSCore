@@ -61,7 +61,8 @@ public func assertMLSExclusiveAccessHeld(
 /// 2) caller opens/uses/closes database handles (SQLite WAL handles concurrent access)
 /// 3) caller checkpoints (when needed)
 ///
-/// Cross-process coordination uses Darwin notifications (MLSCrossProcess) instead of file locks.
+/// Cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`
+/// instead of file locks.
 /// This avoids 0xdead10cc crashes when iOS suspends the app with held file locks.
 public func withMLSExclusiveAccess<T>(
   userDID: String,
@@ -110,7 +111,7 @@ public func withMLSExclusiveAccess<T>(
   defer { Task { await MLSUserOperationCoordinator.shared.release(permit) } }
 
   // No advisory lock needed - SQLite WAL handles concurrent access
-  // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+  // Cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`
 
   return try await MLSExclusiveAccessContext.$heldUserDIDs.withValue(held.union([userDID])) {
     try await operation()
@@ -121,13 +122,13 @@ public func withMLSExclusiveAccess<T>(
 ///
 /// This function previously used advisory file locks to coordinate between processes.
 /// Now it always returns true since SQLite WAL mode handles concurrent access and
-/// cross-process coordination uses Darwin notifications (MLSCrossProcess) instead.
+/// cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`.
 ///
 /// Kept for API compatibility with existing callers.
 @available(*, deprecated, message: "Advisory locks removed. SQLite WAL handles concurrent access.")
 public func tryAcquireMLSCrossProcessStorageGate(userDID: String) -> Bool {
   // Always return true - SQLite WAL handles concurrent access
-  // Cross-process coordination uses Darwin notifications (MLSCrossProcess)
+  // Cross-process coordination uses `MLSStateChangeNotifier` / `MLSNotificationCoordinator`
   return true
 }
 

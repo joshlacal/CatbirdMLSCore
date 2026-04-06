@@ -87,15 +87,41 @@ public actor MLSMessageOrderingCoordinator {
     }
 
     // 1. Get the last processed sequence number for this conversation
-    let lastProcessedSeq = try await storage.getLastProcessedSeq(
+    let rawLastProcessedSeq = try await storage.getLastProcessedSeq(
       conversationID: conversationID,
       currentUserDID: currentUserDID,
       database: database
     )
 
+    // FIX: When no sequence state exists yet (rawLastProcessedSeq == -1),
+    // initialize from the max cached message seq for this conversation.
+    // Server sequences are 1-based, so defaulting to -1 would make
+    // expectedSeq=0, causing seq=1 to be buffered forever waiting for
+    // a seq=0 that will never arrive. Instead, we set lastProcessedSeq
+    // to 0 so expectedSeq=1 and the first server message processes immediately.
+    let lastProcessedSeq: Int64
+    if rawLastProcessedSeq == -1 {
+      // Check if there are already cached messages for this conversation
+      // (e.g., loaded during initial sync). Use their max seq as the baseline.
+      let maxCachedSeq = try await storage.getMaxCachedMessageSeq(
+        conversationID: conversationID,
+        currentUserDID: currentUserDID,
+        database: database
+      )
+      if let maxCachedSeq {
+        lastProcessedSeq = maxCachedSeq
+        logger.info("[SEQ-ORDER] Initialized lastProcessedSeq from cached messages: \(maxCachedSeq) for conversation \(conversationID.prefix(16))")
+      } else {
+        // No cached messages - use 0 so expectedSeq=1 (server sequences are 1-based)
+        lastProcessedSeq = 0
+        logger.info("[SEQ-ORDER] No sequence state or cached messages for conversation \(conversationID.prefix(16)) - initializing lastProcessedSeq to 0")
+      }
+    } else {
+      lastProcessedSeq = rawLastProcessedSeq
+    }
+
     logger.debug("[SEQ-ORDER] Checking message \(messageID.prefix(16))... seq=\(sequenceNumber), lastProcessed=\(lastProcessedSeq)")
 
-    // 2. Check if already processed (duplicate detection)
     // 2. Check if already processed (duplicate detection)
     if sequenceNumber <= lastProcessedSeq {
       // CRITICAL FIX: Even if seq <= lastProcessed, the message might be missing
@@ -108,10 +134,14 @@ public actor MLSMessageOrderingCoordinator {
       ) != nil
 
       if exists {
-        logger.info("[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) already processed & exists - skipping")
+        logger.debug("[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) already processed & exists - skipping")
         return .alreadyProcessed
       } else {
-        logger.warning("[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) is <= lastProcessed (\(lastProcessedSeq)) but MISSING from DB - re-processing")
+        let normalizedUserDID = MLSStorageHelpers.normalizeDID(currentUserDID)
+        let messageEpochValue = messageEpoch.map(String.init) ?? "unknown"
+        let localEpochValue = localEpoch.map(String.init) ?? "unknown"
+        logger.warning(
+          "[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) is <= lastProcessed (\(lastProcessedSeq)) but MISSING from DB - re-processing (user=\(normalizedUserDID), msg_epoch=\(messageEpochValue), local_epoch=\(localEpochValue))")
         return .processNow
       }
     }

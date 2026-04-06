@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import GRDB
 import Security
 import OSLog
 
@@ -242,14 +243,17 @@ public actor MLSSQLCipherEncryption {
 
   /// Store salt in Keychain
   private func storeSalt(_ salt: Data, keychainKey: String) throws {
+    let skipDP = MLSKeychainManager.shared.skipDataProtection
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: keychainService,
       kSecAttrAccount as String: keychainKey,
       kSecValueData as String: salt,
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-      kSecAttrSynchronizable as String: false
     ]
+    if !skipDP {
+      query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      query[kSecAttrSynchronizable as String] = false
+    }
 
     if let accessGroup = keychainAccessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
@@ -343,16 +347,18 @@ public actor MLSSQLCipherEncryption {
   /// Store key in Keychain with maximum security
   /// Uses shared access group when available for App/Extension sharing
   private func storeKey(_ key: Data, keychainKey: String, update: Bool = false) throws {
+    let skipDP = MLSKeychainManager.shared.skipDataProtection
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: keychainService,
       kSecAttrAccount as String: keychainKey,
       kSecValueData as String: key,
-
-      // Security attributes
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-      kSecAttrSynchronizable as String: false // NEVER sync to iCloud
     ]
+    // Security attributes – skip when running as a CLI daemon without Data Protection
+    if !skipDP {
+      query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      query[kSecAttrSynchronizable as String] = false // NEVER sync to iCloud
+    }
     
     // Add shared access group for App/Extension keychain sharing
     if let accessGroup = keychainAccessGroup {
@@ -403,10 +409,12 @@ public actor MLSSQLCipherEncryption {
         updateQuery[kSecAttrAccessGroup as String] = accessGroup
       }
 
-      let updateAttributes: [String: Any] = [
+      var updateAttributes: [String: Any] = [
         kSecValueData as String: key,
-        kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
       ]
+      if !skipDP {
+        updateAttributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      }
 
       let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
 
@@ -484,15 +492,81 @@ public actor MLSSQLCipherEncryption {
 // MARK: - Key Verification
 
 extension MLSSQLCipherEncryption {
-  /// Verify that a key can successfully decrypt a test database
+  /// Verify that a key can successfully decrypt a SQLCipher database.
+  ///
+  /// Opens a temporary read-only GRDB `DatabaseQueue` with the full SQLCipher
+  /// configuration (key, plaintext header, salt, page size, KDF iterations,
+  /// HMAC algorithm) and executes a test query against `sqlite_master`.
+  /// If the query succeeds the key is valid; any failure returns `false`.
+  ///
   /// - Parameters:
-  ///   - key: Encryption key to verify
-  ///   - testQuery: Optional test query to execute (defaults to SELECT count(*) FROM sqlite_master)
-  /// - Returns: True if key is valid and database can be accessed
-  func verifyKey(_ key: Data, testQuery: String = "SELECT 1 FROM sqlite_master LIMIT 1;") -> Bool {
-    // This will be implemented once we have the database connection
-    // For now, just verify key size
-    key.count == keySize
+  ///   - key: Encryption key to verify (must be 32 bytes for AES-256).
+  ///   - databaseURL: File URL of the SQLCipher database to test against.
+  ///   - salt: 16-byte salt used when the database was created
+  ///           (required because `cipher_plaintext_header_size = 32`).
+  ///   - testQuery: SQL to execute for verification.
+  /// - Returns: `true` if the key successfully decrypts the database.
+  func verifyKey(
+    _ key: Data,
+    databaseURL: URL,
+    salt: Data,
+    testQuery: String = "SELECT count(*) FROM sqlite_master;"
+  ) -> Bool {
+    // Quick sanity checks before hitting disk
+    guard key.count == keySize else {
+      logger.warning("[SQLCipher] verifyKey: key size \(key.count) != expected \(self.keySize)")
+      return false
+    }
+    guard salt.count == saltSize else {
+      logger.warning("[SQLCipher] verifyKey: salt size \(salt.count) != expected \(self.saltSize)")
+      return false
+    }
+    guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+      logger.warning("[SQLCipher] verifyKey: database file does not exist at \(databaseURL.path)")
+      return false
+    }
+
+    do {
+      var config = Configuration()
+      config.readonly = true
+      config.busyMode = .timeout(1.0)
+
+      config.prepareDatabase { db in
+        // Disable memory security to avoid mlock() overhead
+        try db.execute(sql: "PRAGMA cipher_memory_security = OFF;")
+
+        // PRAGMA key MUST be the first cipher operation
+        let hexKey = key.map { String(format: "%02x", $0) }.joined()
+        try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
+
+        // Plaintext header — MUST be after PRAGMA key
+        try db.execute(sql: "PRAGMA cipher_plaintext_header_size = 32;")
+
+        // Explicit salt (required with plaintext header)
+        let hexSalt = salt.map { String(format: "%02x", $0) }.joined()
+        try db.execute(sql: "PRAGMA cipher_salt = \"x'\(hexSalt)'\";")
+
+        // Match the SQLCipher 4 settings used by MLSGRDBManager
+        try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
+        try db.execute(sql: "PRAGMA kdf_iter = 256000;")
+        try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
+        try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+      }
+
+      let dbQueue = try DatabaseQueue(path: databaseURL.path, configuration: config)
+
+      // Execute the test query — this will fail with a decryption error
+      // if the key/salt combination is wrong.
+      try dbQueue.read { db in
+        _ = try Row.fetchOne(db, sql: testQuery)
+      }
+
+      logger.debug("[SQLCipher] verifyKey: key verified successfully for \(databaseURL.lastPathComponent)")
+      return true
+    } catch {
+      logger.warning("[SQLCipher] verifyKey: verification failed — \(error.localizedDescription)")
+      return false
+    }
   }
 }
 

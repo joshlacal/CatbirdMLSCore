@@ -32,6 +32,11 @@ public actor MLSDeviceSyncManager {
     private var recentlyCompletedAdditions: Set<String> = []
     private let completedAdditionsTTL: TimeInterval = 300 // 5 minutes
 
+    /// Track additions that repeatedly fail to claim -- skip permanently for this session
+    /// Key: pending addition ID, Value: number of failed claim attempts
+    private var failedClaimAttempts: [String: Int] = [:]
+    private let maxClaimAttempts = 2
+
     /// Current user's DID for filtering (don't add our own devices)
     private var currentUserDid: String?
 
@@ -152,8 +157,15 @@ public actor MLSDeviceSyncManager {
             if claimResult.claimedAddition == nil {
                 // No claimed addition returned - pending addition not found or already completed
                 if !claimResult.success {
-                    logger.info("   Pending addition not found or already completed - skipping")
-                    markAsCompleted(pendingId)  // Mark locally so we don't retry
+                    // Track failed claim attempts to avoid infinite retries
+                    let attempts = (failedClaimAttempts[pendingId] ?? 0) + 1
+                    failedClaimAttempts[pendingId] = attempts
+                    if attempts >= maxClaimAttempts {
+                        logger.info("   Pending addition \(pendingId.prefix(8)) failed to claim \(attempts) times - skipping permanently this session")
+                    } else {
+                        logger.info("   Pending addition not found or already completed - skipping (attempt \(attempts)/\(self.maxClaimAttempts))")
+                    }
+                    markAsCompleted(pendingId)  // Mark locally so we don't retry immediately
                     return
                 }
                 logger.info("   Claim returned no addition details")
@@ -441,9 +453,9 @@ public actor MLSDeviceSyncManager {
                 return
             }
 
-            logger.info("📊 Found \(pendingAdditions.count) pending additions via polling")
+            // Filter out additions we should skip before logging the count
+            var actionableCount = 0
 
-            // Process each pending addition
             for addition in pendingAdditions {
                 // Skip if already processing or completed
                 if processingAdditions.contains(addition.id) ||
@@ -453,11 +465,26 @@ public actor MLSDeviceSyncManager {
 
                 // Skip if not in pending status (already claimed by someone else)
                 if addition.status != "pending" {
-                    logger.debug("   Skipping \(addition.id) - status: \(addition.status)")
                     continue
                 }
 
+                // Skip same-user devices (they will self-join via External Commit)
+                if let currentUser = currentUserDid,
+                   addition.userDid.didString().lowercased() == currentUser.lowercased() {
+                    continue
+                }
+
+                // Skip additions that have repeatedly failed to claim
+                if let attempts = failedClaimAttempts[addition.id], attempts >= maxClaimAttempts {
+                    continue
+                }
+
+                actionableCount += 1
                 await processPendingAddition(pendingId: addition.id, convoId: addition.convoId)
+            }
+
+            if actionableCount > 0 {
+                logger.info("📊 Processed \(actionableCount) of \(pendingAdditions.count) pending additions via polling")
             }
 
         } catch {
@@ -479,10 +506,20 @@ public actor MLSDeviceSyncManager {
             )
 
             for addition in pendingAdditions where addition.status == "pending" {
-                if !processingAdditions.contains(addition.id) &&
-                   !recentlyCompletedAdditions.contains(addition.id) {
-                    await processPendingAddition(pendingId: addition.id, convoId: addition.convoId)
+                if processingAdditions.contains(addition.id) ||
+                   recentlyCompletedAdditions.contains(addition.id) {
+                    continue
                 }
+                // Skip same-user devices (they will self-join via External Commit)
+                if let currentUser = currentUserDid,
+                   addition.userDid.didString().lowercased() == currentUser.lowercased() {
+                    continue
+                }
+                // Skip additions that have repeatedly failed to claim
+                if let attempts = failedClaimAttempts[addition.id], attempts >= maxClaimAttempts {
+                    continue
+                }
+                await processPendingAddition(pendingId: addition.id, convoId: addition.convoId)
             }
 
         } catch {
@@ -505,6 +542,7 @@ public actor MLSDeviceSyncManager {
         processingAdditions.removeAll()
         recentlyCompletedAdditions.removeAll()
         failedAdditions.removeAll()
+        failedClaimAttempts.removeAll()
         currentUserDid = nil
         currentDeviceUUID = nil
         addDeviceHandler = nil

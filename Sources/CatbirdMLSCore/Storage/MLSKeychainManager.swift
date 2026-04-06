@@ -30,6 +30,11 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Set to a different value for standalone daemons to avoid conflicts with the main app.
   public var serviceName: String = "blue.catbird.mls"
 
+  /// When true, omits `kSecAttrAccessible` and `kSecAttrSynchronizable` from keychain queries.
+  /// Set this to `true` for CLI daemons running outside the app sandbox, where the Data
+  /// Protection keychain is unavailable and these attributes cause errSecNoSuchAttr (-25303).
+  public var skipDataProtection: Bool = false
+
   /// Resolve the fully-qualified keychain access group from entitlements.
   ///
   /// On macOS/Catalyst: Uses SecTask APIs to read entitlements directly.
@@ -506,7 +511,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     epoch: Int64
   ) throws {
     let key = KeychainKey.epochSecrets(conversationID: conversationID, epoch: epoch)
-    try store(secrets, forKey: key.key, accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+    try store(secrets, forKey: key.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored epoch secrets for conversation: \(conversationID), epoch: \(epoch)")
 
     // Store metadata for retention tracking
@@ -595,9 +600,14 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrAccount as String: key,
       kSecAttrService as String: serviceName,
       kSecValueData as String: data,
-      kSecAttrAccessible as String: accessible,
-      kSecAttrSynchronizable as String: synchronizable,
     ]
+
+    // Data Protection attributes are unavailable for non-sandboxed CLI tools on macOS;
+    // including them produces errSecNoSuchAttr (-25303).
+    if !skipDataProtection {
+      query[kSecAttrAccessible as String] = accessible
+      query[kSecAttrSynchronizable as String] = synchronizable
+    }
 
     if let accessGroup = accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
@@ -606,7 +616,6 @@ public final class MLSKeychainManager: @unchecked Sendable {
     let status = SecItemAdd(query as CFDictionary, nil)
 
     guard status == errSecSuccess else {
-      logger.error("Failed to store keychain item: \(key), status: \(status)")
       throw KeychainError.storeFailed(status)
     }
   }
@@ -618,8 +627,11 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrService as String: serviceName,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
-      kSecAttrSynchronizable as String: synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny,
     ]
+
+    if !skipDataProtection {
+      query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
+    }
 
     if let accessGroup = accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
@@ -647,7 +659,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrService as String: serviceName,
     ]
 
-    if synchronizable {
+    if !skipDataProtection && synchronizable {
       query[kSecAttrSynchronizable as String] = true
     }
 

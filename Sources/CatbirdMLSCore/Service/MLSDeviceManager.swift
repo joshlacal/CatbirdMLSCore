@@ -685,13 +685,16 @@ public actor MLSDeviceManager {
     // SECURITY: Use ThisDeviceOnly to prevent signature key from syncing via iCloud Keychain.
     // If a device is stolen and user gets a new phone, we want a fresh signature key,
     // not the compromised one from the stolen device.
-    let query: [String: Any] = [
+    let skipDP = MLSKeychainManager.shared.skipDataProtection
+    var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: signatureKeyKey,
       kSecAttrService as String: "blue.catbird.mls",
       kSecValueData as String: keyData,
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
     ]
+    if !skipDP {
+      query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    }
 
     // Delete existing key first
     SecItemDelete(query as CFDictionary)
@@ -705,10 +708,12 @@ public actor MLSDeviceManager {
         kSecAttrService as String: "blue.catbird.mls",
       ]
 
-      let updateAttributes: [String: Any] = [
+      var updateAttributes: [String: Any] = [
         kSecValueData as String: keyData,
-        kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
       ]
+      if !skipDP {
+        updateAttributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      }
 
       let updateStatus = SecItemUpdate(
         updateQuery as CFDictionary, updateAttributes as CFDictionary)
@@ -776,14 +781,17 @@ public actor MLSDeviceManager {
   /// Save device UUID to local Keychain (fallback for macOS or when IDFV unavailable)
   private static func saveDeviceUUID(_ uuid: String) throws {
     let data = uuid.data(using: .utf8)!
-    let query: [String: Any] = [
+    let skipDP = MLSKeychainManager.shared.skipDataProtection
+    var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: deviceUUIDKey,
       kSecAttrService as String: "blue.catbird.mls",
       kSecValueData as String: data,
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         // NOT synchronized - device-local storage only
     ]
+    if !skipDP {
+      query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+    }
 
     // Delete existing UUID first
     SecItemDelete(query as CFDictionary)

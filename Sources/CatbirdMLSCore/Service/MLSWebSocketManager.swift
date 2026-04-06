@@ -62,6 +62,7 @@ public actor MLSWebSocketManager {
   public struct EventHandler {
     public var onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)?
     public var onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)?
+    public var onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)?
     public var onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
     public var onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)?
     public var onGroupInfoRefreshRequested:
@@ -71,6 +72,8 @@ public actor MLSWebSocketManager {
     public var onMembershipChanged: ((String, DID, MembershipAction) async -> Void)?
     public var onKickedFromConversation: ((String, DID, String?) async -> Void)?
     public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
+    public var onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)?
+    public var onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)?
     public var onError: ((Error) async -> Void)?
     public var onReconnected: (() async -> Void)?
 
@@ -79,6 +82,7 @@ public actor MLSWebSocketManager {
     public init(
       onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)? = nil,
       onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)? = nil,
+      onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)? = nil,
       onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
       onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)? = nil,
       onGroupInfoRefreshRequested: (
@@ -90,11 +94,14 @@ public actor MLSWebSocketManager {
       onMembershipChanged: ((String, DID, MembershipAction) async -> Void)? = nil,
       onKickedFromConversation: ((String, DID, String?) async -> Void)? = nil,
       onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)? = nil,
+      onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)? = nil,
+      onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)? = nil,
       onError: ((Error) async -> Void)? = nil,
       onReconnected: (() async -> Void)? = nil
     ) {
       self.onMessage = onMessage
       self.onReaction = onReaction
+      self.onTyping = onTyping
       self.onInfo = onInfo
       self.onNewDevice = onNewDevice
       self.onGroupInfoRefreshRequested = onGroupInfoRefreshRequested
@@ -102,6 +109,8 @@ public actor MLSWebSocketManager {
       self.onMembershipChanged = onMembershipChanged
       self.onKickedFromConversation = onKickedFromConversation
       self.onConversationNeedsRecovery = onConversationNeedsRecovery
+      self.onTreeChanged = onTreeChanged
+      self.onGroupReset = onGroupReset
       self.onError = onError
       self.onReconnected = onReconnected
     }
@@ -136,7 +145,6 @@ public actor MLSWebSocketManager {
     let key = convoId ?? "__global__"
     let logPrefix = convoId != nil ? "convoId: \(convoId!)" : "GLOBAL"
 
-    print("[WS] subscribe() called for \(logPrefix)...")
     logger.info("🔌 WS: subscribe() called for \(logPrefix), cursor: \(cursor ?? "nil")")
 
     // Stop existing subscription if any
@@ -266,7 +274,6 @@ public actor MLSWebSocketManager {
 
   private func runSubscription(convoId: String?, key: String, cursor: String?) async {
     let logPrefix = convoId != nil ? "convoId: \(convoId!.prefix(12))..." : "GLOBAL"
-    print("[WS] runSubscription() started for \(logPrefix)...")
     logger.info("🔌 WS: runSubscription() started for \(key), cursor: \(cursor ?? "nil")")
     var reconnectAttempts = 0
     let maxReconnectAttempts = 5
@@ -276,7 +283,6 @@ public actor MLSWebSocketManager {
       let connectionStartTime = Date()
 
       do {
-        print("[WS] Attempting connection for: \(logPrefix), attempt: \(reconnectAttempts + 1)")
         logger.info("🔌 WS: Attempting connection for: \(key), attempt: \(reconnectAttempts + 1)")
 
         connectionState[key] = .connecting
@@ -299,7 +305,6 @@ public actor MLSWebSocketManager {
         )
 
         connectionState[key] = .connected
-        print("[WS] Connected to: \(logPrefix) - entering event loop")
         logger.info("🔌 WS: Connected for \(key) - entering event loop")
 
         // Trigger reconnected callback if this was a reconnection
@@ -311,7 +316,6 @@ public actor MLSWebSocketManager {
         }
 
         // 4. Process messages
-        print("[WS] Starting event loop for: \(logPrefix)...")
         var eventCount = 0
 
         for try await message in stream {
@@ -327,8 +331,6 @@ public actor MLSWebSocketManager {
           logger.info("🔌 WS: Exiting loop due to graceful shutdown for: \(key)")
           break
         }
-
-        print("[WS] Stream ended for: \(logPrefix), received \(eventCount) events")
 
         // Reset retries if connection was stable
         let duration = Date().timeIntervalSince(connectionStartTime)
@@ -350,7 +352,6 @@ public actor MLSWebSocketManager {
           break
         }
 
-        print("[WS] Connection error for \(logPrefix): \(error)")
         logger.error("🔌 WS: Connection error for \(key): \(error)")
 
         connectionState[key] = .error(error)
@@ -400,7 +401,6 @@ public actor MLSWebSocketManager {
 
     switch message {
     case .messageEvent(let messageEvent):
-      print("[WS] 📨 MESSAGE EVENT received - id: \(messageEvent.message.id.prefix(12))...")
       logger.info("🔌 WS: MESSAGE EVENT received - id: \(messageEvent.message.id)")
       saveCursor(messageEvent.cursor, for: convoId)
       await handler.onMessage?(messageEvent)
@@ -412,7 +412,7 @@ public actor MLSWebSocketManager {
 
     case .typingEvent(let typingEvent):
       saveCursor(typingEvent.cursor, for: convoId)
-    // Typing indicators removed - ignore
+      await handler.onTyping?(typingEvent)
 
     case .infoEvent(let infoEvent):
       logger.info("🔌 WS: INFO EVENT received - info: \(infoEvent.info)")
@@ -452,9 +452,17 @@ public actor MLSWebSocketManager {
       logger.info("🔌 WS: CONVERSATION UPDATED - convo: \(conversationUpdated.convoId.prefix(16))")
       saveCursor(conversationUpdated.cursor, for: convoId)
 
-    case .readEvent(let readEvent):
-      saveCursor(readEvent.cursor, for: convoId)
-    // Read receipts removed - ignore
+    case .treeChanged(let treeChanged):
+      logger.info("🔌 WS: TREE CHANGED - convo: \(treeChanged.convoId.prefix(16)), epoch: \(treeChanged.epoch)")
+      saveCursor(treeChanged.cursor, for: convoId)
+      await handler.onTreeChanged?(treeChanged)
+
+    case .groupResetEvent(let groupReset):
+      logger.info(
+        "🔌 WS: GROUP RESET - convo: \(groupReset.convoId.prefix(16)), newGroup: \(groupReset.newGroupId.prefix(16)), gen: \(groupReset.resetGeneration)")
+      saveCursor(groupReset.cursor, for: convoId)
+      await handler.onGroupReset?(groupReset)
+
     }
   }
 

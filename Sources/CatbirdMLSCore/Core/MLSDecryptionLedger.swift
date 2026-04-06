@@ -2,11 +2,12 @@
 //  MLSDecryptionLedger.swift
 //  CatbirdMLSCore
 //
-//  Cross-process decryption deduplication coordinator.
+//  Experimental cross-process decryption deduplication coordinator.
 //
-//  CRITICAL: This coordinator prevents double-decryption between NSE and main app.
-//  All MLS decrypt attempts MUST go through this ledger to check/claim before
-//  calling the actual FFI decrypt.
+//  NOTE:
+//  - This ledger is currently NOT wired into production decryption paths.
+//  - Production routing and signaling are handled by MLSNotificationCoordinator.
+//  - Keep this implementation for future experimentation only.
 //
 //  Decision Rules:
 //  - If ledger has `done`: Skip decrypt, return cached plaintext
@@ -61,10 +62,11 @@ public enum MLSDecryptionErrorClass: Sendable {
 
 /// Coordinates cross-process decryption to prevent double-decrypt.
 ///
-/// Both NSE and main app must consult this ledger before attempting MLS decryption.
-/// The ledger uses SQLCipher with immediate transactions for atomicity.
+/// Experimental implementation only; production decryption paths currently do not consult
+/// this ledger. The ledger uses SQLCipher with immediate transactions for atomicity.
 ///
 /// Thread-safe through actor isolation.
+@available(*, deprecated, message: "Experimental-only; not used in production decryption paths.")
 public actor MLSDecryptionLedger {
   
   // MARK: - Singleton

@@ -13,11 +13,11 @@
 
 import Foundation
 
-/// Cross-process notification coordination using Darwin notifications.
-/// Replaces advisory file locks to avoid 0xdead10cc crashes.
+/// Legacy cross-process notification coordination using Darwin notifications.
 ///
-/// Signal pattern: Post notification after writes, other processes listen
-/// and invalidate caches. No locks held = nothing for iOS to kill us for.
+/// Deprecated in favor of `MLSStateMutationNotifier` and `MLSNotificationCoordinator`,
+/// which also handle monotonic state version updates and structured diagnostics.
+@available(*, deprecated, message: "Use MLSNotificationCoordinator.publishMutation(...) instead")
 public final class MLSCrossProcess: @unchecked Sendable {
 
     // MARK: - Singleton
@@ -57,6 +57,7 @@ public final class MLSCrossProcess: @unchecked Sendable {
     ///
     /// - Parameter onChange: Callback invoked when another process notifies of changes.
     ///                       Use this to invalidate caches, reload data, etc.
+    @available(*, deprecated, message: "Use MLSNotificationCoordinator.configureAppObservers(...) instead")
     public func startListening(onChange: @escaping @Sendable () -> Void) {
         guard !isListening else { return }
 
@@ -91,6 +92,7 @@ public final class MLSCrossProcess: @unchecked Sendable {
     /// - Key updates
     ///
     /// This is fire-and-forget - no locks held, nothing for iOS to terminate us for.
+    @available(*, deprecated, message: "Use MLSNotificationCoordinator.publishMutation(...) instead")
     public func notifyChanged() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
 
@@ -110,6 +112,7 @@ public final class MLSCrossProcess: @unchecked Sendable {
     /// Stop listening for notifications from other processes.
     ///
     /// Call this on deinit or when shutting down. Safe to call multiple times.
+    @available(*, deprecated, message: "Use MLSNotificationCoordinator.stopAppObservers() instead")
     public func stopListening() {
         guard isListening else { return }
 

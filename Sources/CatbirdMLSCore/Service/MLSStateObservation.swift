@@ -17,6 +17,7 @@ public enum MLSStateEvent {
   case conversationNeedsRecovery(convoId: String, reason: RecoveryReason)
   case reactionReceived(
     convoId: String, messageId: String, emoji: String, senderDID: String, action: String)
+  case groupReset(convoId: String, newGroupId: String, resetGeneration: Int, resetBy: DID, reason: String?)
 
   public var description: String {
     switch self {
@@ -46,6 +47,8 @@ public enum MLSStateEvent {
       return "Conversation \(convoId) needs recovery: \(reason.rawValue)"
     case .reactionReceived(let convoId, let messageId, let emoji, let senderDID, let action):
       return "Reaction \(action) in \(convoId): \(emoji) on \(messageId) by \(senderDID)"
+    case .groupReset(let convoId, let newGroupId, let resetGeneration, let resetBy, let reason):
+      return "Group reset in \(convoId): newGroup=\(newGroupId), gen=\(resetGeneration), by=\(resetBy)\(reason.map { ": \($0)" } ?? "")"
     }
   }
 }

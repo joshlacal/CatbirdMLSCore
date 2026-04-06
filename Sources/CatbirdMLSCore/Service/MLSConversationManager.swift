@@ -295,6 +295,11 @@ public final class MLSConversationManager {
   /// This is critical for External Commit - stale GroupInfo blocks new device joins.
   public let groupInfoRefreshInterval: TimeInterval = 21600  // 6 hours
 
+  /// Maximum tolerable epoch divergence between local state and server messages.
+  /// Beyond this threshold, the group is considered irrecoverably diverged and
+  /// marked for automatic reset rather than continued decryption attempts.
+  let maxEpochDivergence: UInt64 = 50
+
   /// Maximum retry attempts for failed operations
   private let maxRetries = 3
 

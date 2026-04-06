@@ -40,6 +40,18 @@ public final class MLSStorage: @unchecked Sendable {
     return MLSStorageHelpers.normalizeDID(did)
   }
 
+  /// Only inbound text payloads should contribute to unread badges.
+  private func shouldPersistAsUnread(
+    payload: MLSMessagePayload,
+    senderID: String,
+    currentUserDID: String,
+    processingError: String? = nil
+  ) -> Bool {
+    guard payload.messageType == .text else { return false }
+    guard processingError == nil else { return false }
+    return normalizeDID(senderID) != normalizeDID(currentUserDID)
+  }
+
   // MARK: - Database Ownership Validation
 
   /// Verify that a database operation is being performed on the correct user's database
@@ -326,13 +338,31 @@ public final class MLSStorage: @unchecked Sendable {
     logger.debug("Encoded payload (\(payloadData.count) bytes)")
 
     let normalizedUserDID = normalizeDID(currentUserDID)
+    let shouldBeUnread = shouldPersistAsUnread(
+      payload: payload,
+      senderID: senderID,
+      currentUserDID: normalizedUserDID,
+      processingError: processingError
+    )
     let adopted = try await database.write { db -> [AdoptedReaction] in
       // Check if message exists and fetch its current state
-      let existingMessage =
+      var existingMessage =
         try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .fetchOne(db)
+
+      if existingMessage == nil, normalizedUserDID != currentUserDID {
+        existingMessage =
+          try MLSMessageModel
+          .filter(MLSMessageModel.Columns.messageID == messageID)
+          .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+          .fetchOne(db)
+        if existingMessage != nil {
+          logger.warning(
+            "⚠️ [DID-NORMALIZE] Found legacy row with non-normalized DID for \(messageID.prefix(16)); normalizing on write")
+        }
+      }
 
       let exists = existingMessage != nil
 
@@ -373,11 +403,12 @@ public final class MLSStorage: @unchecked Sendable {
                   epoch = ?,
                   sequenceNumber = ?,
                   timestamp = ?,
+                  isRead = CASE WHEN ? = 1 THEN 1 ELSE isRead END,
                   payloadExpired = 0,
                   processingError = ?,
                   processingAttempts = processingAttempts + 1,
                   validationFailureReason = ?
-              WHERE messageID = ? AND currentUserDID = ?;
+              WHERE messageID = ? AND currentUserDID IN (?, ?);
             """,
             arguments: [
               payloadData,
@@ -385,9 +416,11 @@ public final class MLSStorage: @unchecked Sendable {
               epoch,
               sequenceNumber,
               timestamp,
+              shouldBeUnread ? 0 : 1,
               processingError,
               validationFailureReason,
               messageID,
+              normalizedUserDID,
               currentUserDID,
             ])
 
@@ -397,7 +430,7 @@ public final class MLSStorage: @unchecked Sendable {
         // Create new message
         let message = MLSMessageModel(
           messageID: messageID,
-          currentUserDID: currentUserDID,
+          currentUserDID: normalizedUserDID,
           conversationID: conversationID,
           senderID: senderID,
           payloadJSON: payloadData,
@@ -409,7 +442,7 @@ public final class MLSStorage: @unchecked Sendable {
           authenticatedData: nil,
           signature: nil,
           isDelivered: true,
-          isRead: false,
+          isRead: !shouldBeUnread,
           isSent: true,
           sendAttempts: 0,
           error: nil,
@@ -424,6 +457,12 @@ public final class MLSStorage: @unchecked Sendable {
 
         logger.debug("Created new message with payload cache")
       }
+
+      _ = try MLSStorageHelpers.applyReadFrontierToMessagesSync(
+        in: db,
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID
+      )
 
       // Adopt any orphaned reactions for this message (within same transaction for atomicity)
       let orphans =
@@ -576,13 +615,14 @@ public final class MLSStorage: @unchecked Sendable {
                 SET epoch = ?,
                     sequenceNumber = ?,
                     timestamp = ?
-              WHERE messageID = ? AND currentUserDID = ?;
+              WHERE messageID = ? AND currentUserDID IN (?, ?);
             """,
           arguments: [
             epoch,
             sequenceNumber,
             timestamp,
             messageID,
+            normalizeDID(currentUserDID),
             currentUserDID,
           ]
         )
@@ -703,6 +743,38 @@ public final class MLSStorage: @unchecked Sendable {
     } else {
       logger.warning("⚠️ No cached sender found: \(messageID)")
       return nil
+    }
+  }
+
+  /// Fetch the oldest unconfirmed self-sent message for a conversation.
+  ///
+  /// Pre-cached self-sent messages are stored with sequenceNumber == 0 before the
+  /// server confirms them. When an SSE echo arrives before the HTTP send response,
+  /// the message is still stored under its local temp ID. This method finds that
+  /// pending message so its payload can be adopted for the server-assigned ID.
+  ///
+  /// - Parameters:
+  ///   - conversationID: Conversation identifier
+  ///   - senderDID: The DID of the sender (current user)
+  ///   - currentUserDID: The DID of the current user (for DB partitioning)
+  ///   - database: MLSDatabase to use for operations
+  /// - Returns: The oldest unconfirmed self-sent message, or nil
+  /// - Throws: MLSStorageError if fetch fails
+  public func fetchOldestUnconfirmedSelfSentMessage(
+    conversationID: String,
+    senderDID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> MLSMessageModel? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
+      try MLSMessageModel
+        .filter(MLSMessageModel.Columns.conversationID == conversationID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.senderID == senderDID)
+        .filter(MLSMessageModel.Columns.sequenceNumber == 0)
+        .order(MLSMessageModel.Columns.timestamp.asc)
+        .fetchOne(db)
     }
   }
 
@@ -1359,20 +1431,93 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - conversationID: Conversation identifier
   ///   - currentUserDID: Current user's DID
   ///   - database: Database writer
-  /// - Returns: Tuple of (epoch, sequenceNumber) or nil if no messages cached
+  /// - Returns: Tuple of (epoch, sequenceNumber, messageID) or nil if no messages cached
   public func fetchLastMessageCursor(
     conversationID: String,
     currentUserDID: String,
     database: MLSDatabase
-  ) async throws -> (epoch: Int64, seq: Int64)? {
+  ) async throws -> (epoch: Int64, seq: Int64, messageID: String)? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
         .limit(1)
         .fetchOne(db)
-        .map { ($0.epoch, $0.sequenceNumber) }
+        .map { ($0.epoch, $0.sequenceNumber, $0.messageID) }
+    }
+  }
+
+  /// Fetch the last successfully decrypted/displayable message cursor for a conversation.
+  ///
+  /// This excludes payloads that failed processing, expired payloads, and non-displayable
+  /// control payloads so read receipts only advance on messages the user can actually read.
+  public func fetchLastDecryptedMessageCursor(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> (epoch: Int64, seq: Int64, messageID: String)? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
+      guard let row = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT epoch, sequenceNumber, messageID
+          FROM MLSMessageModel
+          WHERE conversationID = ?
+            AND currentUserDID = ?
+            AND processingError IS NULL
+            AND payloadExpired = 0
+            AND json_valid(CAST(payloadJSON AS TEXT)) = 1
+            AND COALESCE(
+              json_extract(CAST(payloadJSON AS TEXT), '$.messageType'),
+              json_extract(CAST(payloadJSON AS TEXT), '$.type')
+            ) IN ('text', 'system')
+          ORDER BY epoch DESC, sequenceNumber DESC
+          LIMIT 1
+          """,
+        arguments: [conversationID, normalizedUserDID]
+      ) else {
+        return nil
+      }
+
+      let epoch: Int64 = row["epoch"]
+      let sequenceNumber: Int64 = row["sequenceNumber"]
+      let messageID: String = row["messageID"]
+      return (epoch, sequenceNumber, messageID)
+    }
+  }
+
+  /// Fetch the last successfully stored current-user message cursor for a conversation.
+  ///
+  /// Used to persist fallback remote read receipts when the server event omits a `messageId`.
+  public func fetchLastCurrentUserMessageCursor(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> (epoch: Int64, seq: Int64, messageID: String)? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    let senderCandidates = Array(Set([normalizedUserDID, currentUserDID]))
+
+    return try await database.read { db in
+      var request = MLSMessageModel
+        .filter(MLSMessageModel.Columns.conversationID == conversationID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.processingError == nil)
+        .filter(MLSMessageModel.Columns.payloadExpired == false)
+
+      if senderCandidates.count == 1, let senderCandidate = senderCandidates.first {
+        request = request.filter(MLSMessageModel.Columns.senderID == senderCandidate)
+      } else {
+        request = request.filter(senderCandidates.contains(MLSMessageModel.Columns.senderID))
+      }
+
+      return try request
+        .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
+        .limit(1)
+        .fetchOne(db)
+        .map { ($0.epoch, $0.sequenceNumber, $0.messageID) }
     }
   }
 
@@ -1388,72 +1533,142 @@ public final class MLSStorage: @unchecked Sendable {
     currentUserDID: String,
     database: MLSDatabase
   ) async throws -> MLSMessageModel? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
-      try MLSMessageModel
+      if let normalizedMatch = try MLSMessageModel
+        .filter(MLSMessageModel.Columns.messageID == messageID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)
+      {
+        return normalizedMatch
+      }
+
+      guard normalizedUserDID != currentUserDID else { return nil }
+
+      let legacyMatch = try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
         .fetchOne(db)
-    }
-  }
 
-  // MARK: - Reports
-
-  /// Upsert a batch of moderation reports for a conversation
-  /// - Parameters:
-  ///   - reports: Reports to store
-  ///   - database: Database writer
-  public func upsertReports(_ reports: [MLSReportModel], database: MLSDatabase) async throws {
-    guard !reports.isEmpty else { return }
-
-    try await database.write { db in
-      for report in reports {
-        try report.save(db)
+      if legacyMatch != nil {
+        logger.warning(
+          "⚠️ [DID-NORMALIZE] Legacy message row matched via raw DID for \(messageID.prefix(16))")
       }
+      return legacyMatch
     }
-
-    logger.info("✅ Upserted \(reports.count) MLS reports")
   }
 
-  /// Fetch reports for a conversation, optionally filtered by status
-  /// - Parameters:
-  ///   - conversationID: Conversation identifier
-  ///   - status: Optional status filter (e.g., pending/resolved)
-  ///   - limit: Maximum rows to return
-  ///   - database: Database reader
-  public func fetchReports(
-    conversationID: String,
-    status: String? = nil,
-    limit: Int = 50,
+  /// Update the sequence number (and epoch) for an existing message.
+  /// Used to correct messages saved by the NSE with wrong seq values.
+  public func updateMessageSequenceNumber(
+    messageID: String,
+    currentUserDID: String,
+    sequenceNumber: Int64,
+    epoch: Int64,
     database: MLSDatabase
-  ) async throws -> [MLSReportModel] {
-    try await database.read { db in
-      var request =
-        MLSReportModel
-        .filter(MLSReportModel.Columns.conversationID == conversationID)
-        .order(MLSReportModel.Columns.createdAt.desc)
-
-      if let status {
-        request = request.filter(MLSReportModel.Columns.status == status)
-      }
-
-      if limit > 0 {
-        request = request.limit(limit)
-      }
-
-      return try request.fetchAll(db)
+  ) async throws {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    try await database.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSMessageModel
+          SET sequenceNumber = ?, epoch = ?
+          WHERE messageID = ? AND currentUserDID = ?;
+          """,
+        arguments: [sequenceNumber, epoch, messageID, normalizedUserDID])
     }
   }
 
-  /// Remove all cached reports for a conversation
-  public func deleteReports(conversationID: String, database: MLSDatabase) async throws {
-    try await database.write { db in
-      _ =
-        try MLSReportModel
-        .filter(MLSReportModel.Columns.conversationID == conversationID)
-        .deleteAll(db)
-    }
+  // MARK: - Read Frontier
 
-    logger.info("🧹 Deleted reports for convo \(conversationID)")
+  /// Upsert/advance local read frontier for a conversation.
+  ///
+  /// Monotonicity is enforced by `(epoch, sequenceNumber)`.
+  ///
+  /// - Returns: `true` when frontier is inserted/advanced, `false` when ignored.
+  @discardableResult
+  public func upsertReadFrontier(
+    conversationID: String,
+    currentUserDID: String,
+    epoch: Int64,
+    sequenceNumber: Int64,
+    messageID: String? = nil,
+    database: MLSDatabase
+  ) async throws -> Bool {
+    try await MLSStorageHelpers.upsertReadFrontier(
+      in: database,
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      epoch: epoch,
+      sequenceNumber: sequenceNumber,
+      messageID: messageID
+    )
+  }
+
+  /// Fetch local read frontier for a conversation.
+  public func fetchReadFrontier(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> MLSReadFrontierModel? {
+    try await MLSStorageHelpers.fetchReadFrontier(
+      from: database,
+      conversationID: conversationID,
+      currentUserDID: currentUserDID
+    )
+  }
+
+  /// Apply local read frontier to mark late/backfilled messages as read.
+  ///
+  /// - Returns: Number of rows marked as read.
+  @discardableResult
+  public func applyReadFrontierToMessages(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> Int {
+    try await MLSStorageHelpers.applyReadFrontierToMessages(
+      in: database,
+      conversationID: conversationID,
+      currentUserDID: currentUserDID
+    )
+  }
+
+  // MARK: - Remote Read Cursor
+
+  /// Upsert/advance a persisted remote read cursor for another participant.
+  @discardableResult
+  public func upsertRemoteReadCursor(
+    conversationID: String,
+    currentUserDID: String,
+    readerDID: String,
+    epoch: Int64? = nil,
+    sequenceNumber: Int64? = nil,
+    messageID: String? = nil,
+    database: MLSDatabase
+  ) async throws -> Bool {
+    try await MLSStorageHelpers.upsertRemoteReadCursor(
+      in: database,
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      readerDID: readerDID,
+      epoch: epoch,
+      sequenceNumber: sequenceNumber,
+      messageID: messageID
+    )
+  }
+
+  /// Fetch persisted remote read cursors for a conversation.
+  public func fetchRemoteReadCursors(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> [MLSRemoteReadCursorModel] {
+    try await MLSStorageHelpers.fetchRemoteReadCursors(
+      from: database,
+      conversationID: conversationID,
+      currentUserDID: currentUserDID
+    )
   }
 
   // MARK: - Admin Roster
@@ -1531,6 +1746,46 @@ public final class MLSStorage: @unchecked Sendable {
         try query
         .order(MLSMemberModel.Columns.addedAt.desc)
         .fetchAll(db)
+    }
+  }
+
+  /// Update conversation's epoch in GRDB after epoch-advancing operations (send, commit, sync)
+  public func updateConversationEpoch(
+    conversationID: String,
+    currentUserDID: String,
+    epoch: Int64,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      if var conversation =
+        try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
+        .fetchOne(db)
+      {
+        let updated = conversation.withEpoch(epoch)
+        try updated.update(db)
+      }
+    }
+  }
+
+  /// Update conversation's lastMessageAt timestamp (e.g. after sending a message)
+  public func updateConversationLastMessageAt(
+    conversationID: String,
+    currentUserDID: String,
+    timestamp: Date,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      if let conversation =
+        try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
+        .fetchOne(db)
+      {
+        let updated = conversation.withLastMessageAt(timestamp)
+        try updated.update(db)
+      }
     }
   }
 
@@ -1617,6 +1872,27 @@ public final class MLSStorage: @unchecked Sendable {
         let updated = conversation.withRequestState(state)
         try updated.update(db)
       }
+    }
+  }
+
+  // MARK: - Timed Silence Methods
+
+  /// Set or clear the muted-until date for a conversation
+  public func setMutedUntil(
+    conversationID: String,
+    currentUserDID: String,
+    mutedUntil: Date?,
+    database: MLSDatabase
+  ) async throws {
+    try await database.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET mutedUntil = ?, updatedAt = ?
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [mutedUntil, Date(), conversationID, currentUserDID]
+      )
     }
   }
 
@@ -2152,6 +2428,30 @@ public final class MLSStorage: @unchecked Sendable {
         return state.lastProcessedSeq
       }
       return -1  // No messages processed yet
+    }
+  }
+
+  /// Get the maximum cached message sequence number for a conversation
+  /// Used to initialize lastProcessedSeq when no sequence state exists yet
+  /// (e.g., messages were loaded during initial sync before seq-order tracking was set up)
+  public func getMaxCachedMessageSeq(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> Int64? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+
+    return try await database.read { db in
+      let maxSeq = try Int64.fetchOne(
+        db,
+        sql: """
+          SELECT MAX(sequenceNumber)
+          FROM \(MLSMessageModel.databaseTableName)
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, normalizedUserDID]
+      )
+      return maxSeq
     }
   }
 

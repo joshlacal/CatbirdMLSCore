@@ -862,7 +862,7 @@ public extension MLSConversationManager {
       } catch {
         logger.warning("⚠️ [SEQ-FIX] Failed to correct seq for \(message.id.prefix(16)): \(error.localizedDescription)")
       }
-      logger.warning("⏭️ [SEQ-ORDER] Skipping already-processed message \(message.id) seq=\(message.seq) - returning .nonApplication")
+      logger.debug("⏭️ [SEQ-ORDER] Skipping already-processed message \(message.id) seq=\(message.seq) - returning .nonApplication")
       return .nonApplication
 
     case .bufferForFutureEpoch:
@@ -1394,6 +1394,12 @@ public extension MLSConversationManager {
       }
 
       if processedCount > 0 {
+        // Check if recovery pushed us too far ahead
+        if currentEpoch > localEpoch + maxEpochDivergence {
+          logger.error("🚨 [EPOCH-RECOVERY] Recovery advanced epoch from \(localEpoch) to \(currentEpoch) — exceeds divergence threshold, marking for reset")
+          try? await markConversationNeedsReset(conversationID)
+          return .needsDeferredRejoin(failedEpoch: currentEpoch, reason: "Epoch recovery exceeded divergence threshold")
+        }
         logger.info("🎉 [EPOCH-RECOVERY] Processed \(processedCount) commits")
         return .advanced
       } else {
@@ -1810,6 +1816,23 @@ public extension MLSConversationManager {
     // reject truly invalid epochs during decryption, so we must not skip here.
     // ═══════════════════════════════════════════════════════════════════════════
     if UInt64(message.epoch) < UInt64(localEpoch) {
+      let divergence = UInt64(localEpoch) - UInt64(message.epoch)
+      if divergence > maxEpochDivergence {
+        logger.error("🚨 [EPOCH-DIVERGENCE] local=\(localEpoch) server=\(message.epoch) divergence=\(divergence) for \(message.convoId.prefix(16)) — marking for reset")
+        try? await markConversationNeedsReset(message.convoId)
+        // Cache as undecryptable, skip MLS processing entirely
+        let ctx = ProcessingContext(
+          attemptID: context.attemptID,
+          source: context.source,
+          queueIndex: context.queueIndex
+        )
+        return try await saveErrorPlaceholder(
+          message: message,
+          error: "Epoch divergence (\(divergence)) exceeds threshold — group marked for reset",
+          validationReason: "Epoch divergence detected",
+          context: ctx
+        )
+      }
       logger.info("[EPOCH-INFO] Server-reported epoch \(message.epoch) < local epoch \(localEpoch) for \(message.id) — attempting decryption anyway")
     }
 
@@ -2662,10 +2685,29 @@ public extension MLSConversationManager {
     }
 
     if await conversationNeedsRejoin(convo.groupId) && !force { return }
+    if await conversationNeedsReset(convo.groupId) {
+      logger.debug("⏭️ [PROCESS] Skipping catchup for \(convo.groupId.prefix(16)) — marked for reset")
+      return
+    }
     guard let userDid = userDid else { return }
 
     do {
       var sinceSeq = await lastStoredSequenceNumber(for: convo.groupId)
+
+      // Safety guard: if sinceSeq resolved to nil/0 but conversation already has cached messages,
+      // something is wrong with the seq tracker. Skip rather than re-fetching entire history.
+      if sinceSeq == nil || sinceSeq == 0 {
+        let cachedMaxSeq = try? await storage.getMaxCachedMessageSeq(
+          conversationID: convo.groupId,
+          currentUserDID: userDid,
+          database: database
+        )
+        if let cachedMax = cachedMaxSeq, cachedMax > 0 {
+          logger.error("🚨 [CATCHUP] sinceSeq=\(sinceSeq.map(String.init) ?? "nil") but conversation \(convo.groupId.prefix(16)) has cached messages up to seq \(cachedMax) — skipping full re-fetch")
+          return
+        }
+      }
+
       let pageLimit = 10
       var pages = 0
 
@@ -3039,12 +3081,13 @@ public extension MLSConversationManager {
   internal func lastStoredSequenceNumber(for conversationId: String) async -> Int? {
     guard let userDid = userDid else { return nil }
     do {
-      let cursor = try await storage.fetchLastMessageCursor(
+      let seq = try await storage.getLastProcessedSeq(
         conversationID: conversationId,
         currentUserDID: userDid,
         database: database
       )
-      return cursor.map { Int($0.seq) }
+      // getLastProcessedSeq returns -1 when no record exists
+      return seq >= 0 ? Int(seq) : nil
     } catch {
       logger.error("Failed to get last sequence number: \(error.localizedDescription)")
       return nil
@@ -3099,6 +3142,33 @@ public extension MLSConversationManager {
 
   // MARK: - Recovery & Rejoin
 
+  internal func markConversationNeedsReset(_ convoId: String) async throws {
+    guard let userDID = userDid else { return }
+
+    try await database.write { db in
+      try db.execute(
+        sql: """
+              UPDATE MLSConversationModel
+              SET needsReset = 1, needsRejoin = 0, updatedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ?;
+          """, arguments: [Date(), convoId, userDID])
+    }
+    logger.warning("🔄 [EPOCH-RESET] Marked \(convoId.prefix(16)) for automatic group reset")
+  }
+
+  internal func clearConversationResetFlag(_ convoId: String) async {
+    guard let userDID = userDid else { return }
+
+    try? await database.write { db in
+      try db.execute(
+        sql: """
+              UPDATE MLSConversationModel
+              SET needsReset = 0, updatedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ?;
+          """, arguments: [Date(), convoId, userDID])
+    }
+  }
+
   internal func markConversationNeedsRejoin(_ convoId: String) async throws {
     guard let userDID = userDid else { return }
 
@@ -3135,6 +3205,24 @@ public extension MLSConversationManager {
           db,
           sql: """
                 SELECT needsRejoin FROM MLSConversationModel
+                WHERE conversationID = ? AND currentUserDID = ?;
+            """,
+          arguments: [convoId, userDID]
+        ) ?? false
+      }
+    } catch {
+      return false
+    }
+  }
+
+  internal func conversationNeedsReset(_ convoId: String) async -> Bool {
+    guard let userDID = userDid else { return false }
+    do {
+      return try await database.read { db in
+        try Bool.fetchOne(
+          db,
+          sql: """
+                SELECT needsReset FROM MLSConversationModel
                 WHERE conversationID = ? AND currentUserDID = ?;
             """,
           arguments: [convoId, userDID]
@@ -4984,6 +5072,24 @@ public extension MLSConversationManager {
       logger.info(
         "✅ [External Commit Fallback] Successfully joined \(convoId.prefix(16))... via External Commit"
       )
+
+      // Check if the External Commit pushed us too far ahead
+      if let groupIdDataCheck = Data(hexEncoded: groupIdHex) {
+        let newEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdDataCheck)) ?? 0
+        if newEpoch > maxEpochDivergence {
+          let convoModel = try? await database.read { db in
+            try MLSConversationModel
+              .filter(MLSConversationModel.Columns.conversationID == convoId)
+              .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+              .fetchOne(db)
+          }
+          let serverEpoch = UInt64(convoModel?.epoch ?? 0)
+          if serverEpoch > 0 && newEpoch > serverEpoch + maxEpochDivergence {
+            logger.error("🚨 [EPOCH-DIVERGENCE] External Commit joined at epoch \(newEpoch) but server epoch is \(serverEpoch) — marking for reset")
+            try? await markConversationNeedsReset(convoId)
+          }
+        }
+      }
 
       // Clear recovery tracking on success
       if let recoveryManager = await mlsClient.recovery(for: userDid) {

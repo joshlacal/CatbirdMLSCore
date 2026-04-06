@@ -11,7 +11,19 @@ CatbirdMLSCore provides the core MLS implementation shared between:
 
 ## Architecture
 
-```
+### Notification Coordination Boundary
+
+Catbird notification decryption is split across two layers:
+
+- `catbird-mls` (Rust): MLS lifecycle, cryptography, orchestration, storage-facing data plane.
+- `CatbirdMLSCore` (Swift host layer): Apple process coordination and OS IPC for app ↔ NSE.
+
+`CatbirdMLSCore` owns Darwin doorbells, tokenized App Group handshake, and monotonic
+state signaling (`MLSNotificationCoordinator`, `MLSStateMutationNotifier`).
+`catbird-mls` intentionally remains platform-neutral so Android and WASM builds do not
+depend on Apple-only APIs.
+
+```text
 CatbirdMLSCore/
 ├── Sources/CatbirdMLSCore/
 │   ├── Core/               # Core MLS context and managers

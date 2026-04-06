@@ -37,7 +37,13 @@ public enum MLSKeychainError: Error {
 /// Secure storage manager for MLS signature keys
 public class MLSKeychain {
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "blue.catbird", category: "MLSKeychain")
-    
+
+    /// Service name used when storing signature keys as GenericPassword (daemon / non-sandboxed CLI mode).
+    private static let signatureKeyService = "blue.catbird.mls.signature"
+
+    /// Service name used when storing group keys as GenericPassword (daemon / non-sandboxed CLI mode).
+    private static let groupKeyService = "blue.catbird.mls.groupkey"
+
     // MARK: - Keychain Storage
     
     /// Store a signature key in the Keychain
@@ -54,44 +60,72 @@ public class MLSKeychain {
         guard !key.isEmpty else {
             throw MLSKeychainError.invalidData
         }
-        
+
         let tag = "blue.catbird.mls.sig.\(identity)"
-        
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
         // Delete existing key first
         try? deleteSignatureKey(forIdentity: identity)
-        
+
+        // Non-sandboxed CLI tools on macOS cannot use kSecClassKey with key-type
+        // attributes (errSecNoSuchAttr -25303). Fall back to GenericPassword storage.
+        if skipDP {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: signatureKeyService,
+                kSecAttrAccount as String: tag,
+                kSecValueData as String: key,
+            ]
+
+            let status = SecItemAdd(query as CFDictionary, nil)
+            if status == errSecDuplicateItem {
+                let updateQuery: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: signatureKeyService,
+                    kSecAttrAccount as String: tag,
+                ]
+                let updateAttrs: [String: Any] = [kSecValueData as String: key]
+                let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+                guard updateStatus == errSecSuccess else {
+                    throw MLSKeychainError.storeFailed(updateStatus)
+                }
+            } else if status != errSecSuccess {
+                throw MLSKeychainError.storeFailed(status)
+            }
+            logger.info("Stored MLS signature key (GenericPassword) for identity: \(identity, privacy: .private)")
+            return
+        }
+
+        // Standard kSecClassKey path for sandboxed apps (iOS / macOS app sandbox)
         var query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecValueData as String: key,
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeySizeInBits as String: 256
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
-        
+
         // Attempt Secure Enclave storage if requested and available
         if useSecureEnclave {
             if isSecureEnclaveAvailable() {
                 query[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
                 query[kSecAttrIsPermanent as String] = true
             } else {
-                // Fallback to regular Keychain
                 logger.warning("Secure Enclave not available; using regular Keychain")
             }
         }
-        
+
         let status = SecItemAdd(query as CFDictionary, nil)
 
         if status == errSecDuplicateItem {
-            // Existing item is blocking add; attempt update, then delete+add as fallback
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassKey,
                 kSecAttrApplicationTag as String: tag
             ]
-
             let updateAttributes: [String: Any] = [
                 kSecValueData as String: key,
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             ]
 
             let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
@@ -115,7 +149,7 @@ public class MLSKeychain {
         if status != errSecSuccess {
             throw MLSKeychainError.storeFailed(status)
         }
-        
+
         logger.info("Stored MLS signature key for identity: \(identity, privacy: .private)")
     }
     
@@ -125,21 +159,33 @@ public class MLSKeychain {
     /// - Throws: MLSKeychainError if retrieval fails
     public static func retrieveSignatureKey(forIdentity identity: String) throws -> Data {
         let tag = "blue.catbird.mls.sig.\(identity)"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
+        let query: [String: Any]
+        if skipDP {
+            query = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: signatureKeyService,
+                kSecAttrAccount as String: tag,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+        } else {
+            query = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: tag,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+        }
+
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
+
         guard status == errSecSuccess, let keyData = result as? Data else {
             throw MLSKeychainError.retrieveFailed(status)
         }
-        
+
         return keyData
     }
     
@@ -148,14 +194,24 @@ public class MLSKeychain {
     /// - Throws: MLSKeychainError if deletion fails
     public static func deleteSignatureKey(forIdentity identity: String) throws {
         let tag = "blue.catbird.mls.sig.\(identity)"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag
-        ]
-        
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
+        let query: [String: Any]
+        if skipDP {
+            query = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: signatureKeyService,
+                kSecAttrAccount as String: tag,
+            ]
+        } else {
+            query = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: tag
+            ]
+        }
+
         let status = SecItemDelete(query as CFDictionary)
-        
+
         // errSecItemNotFound is acceptable (key didn't exist)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw MLSKeychainError.deleteFailed(status)
@@ -164,17 +220,40 @@ public class MLSKeychain {
     
     /// Delete all MLS keys from the Keychain (e.g., on logout)
     public static func deleteAllKeys() throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: "blue.catbird.mls.sig."
-        ]
-        
-        let status = SecItemDelete(query as CFDictionary)
-        
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw MLSKeychainError.deleteFailed(status)
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
+        // Delete signature keys
+        if skipDP {
+            // GenericPassword items: delete all with our service
+            let sigQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: signatureKeyService,
+            ]
+            let sigStatus = SecItemDelete(sigQuery as CFDictionary)
+            guard sigStatus == errSecSuccess || sigStatus == errSecItemNotFound else {
+                throw MLSKeychainError.deleteFailed(sigStatus)
+            }
+
+            // Group keys stored as GenericPassword
+            let groupQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: groupKeyService,
+            ]
+            let groupStatus = SecItemDelete(groupQuery as CFDictionary)
+            guard groupStatus == errSecSuccess || groupStatus == errSecItemNotFound else {
+                throw MLSKeychainError.deleteFailed(groupStatus)
+            }
+        } else {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: "blue.catbird.mls.sig."
+            ]
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw MLSKeychainError.deleteFailed(status)
+            }
         }
-        
+
         logger.info("Deleted all MLS keys from Keychain")
     }
     
@@ -212,60 +291,94 @@ public class MLSKeychain {
         guard !key.isEmpty else {
             throw MLSKeychainError.invalidData
         }
-        
+
         let groupIdHex = groupId.map { String(format: "%02x", $0) }.joined()
         let tag = "blue.catbird.mls.group.\(groupIdHex)"
-        
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
         try? deleteGroupKey(forGroupId: groupId)
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData as String: key
-        ]
-        
-        let status = SecItemAdd(query as CFDictionary, nil)
-        
-        if status != errSecSuccess {
-            throw MLSKeychainError.storeFailed(status)
+
+        if skipDP {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: groupKeyService,
+                kSecAttrAccount as String: tag,
+                kSecValueData as String: key,
+            ]
+            let status = SecItemAdd(query as CFDictionary, nil)
+            if status != errSecSuccess && status != errSecDuplicateItem {
+                throw MLSKeychainError.storeFailed(status)
+            }
+        } else {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: tag,
+                kSecValueData as String: key,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            ]
+            let status = SecItemAdd(query as CFDictionary, nil)
+            if status != errSecSuccess {
+                throw MLSKeychainError.storeFailed(status)
+            }
         }
     }
-    
+
     /// Retrieve a group's encryption key
     public static func retrieveGroupKey(forGroupId groupId: Data) throws -> Data {
         let groupIdHex = groupId.map { String(format: "%02x", $0) }.joined()
         let tag = "blue.catbird.mls.group.\(groupIdHex)"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
+        let query: [String: Any]
+        if skipDP {
+            query = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: groupKeyService,
+                kSecAttrAccount as String: tag,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+        } else {
+            query = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: tag,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+        }
+
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
+
         guard status == errSecSuccess, let keyData = result as? Data else {
             throw MLSKeychainError.retrieveFailed(status)
         }
-        
+
         return keyData
     }
-    
+
     /// Delete a group's encryption key
     public static func deleteGroupKey(forGroupId groupId: Data) throws {
         let groupIdHex = groupId.map { String(format: "%02x", $0) }.joined()
         let tag = "blue.catbird.mls.group.\(groupIdHex)"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag
-        ]
-        
+        let skipDP = MLSKeychainManager.shared.skipDataProtection
+
+        let query: [String: Any]
+        if skipDP {
+            query = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: groupKeyService,
+                kSecAttrAccount as String: tag,
+            ]
+        } else {
+            query = [
+                kSecClass as String: kSecClassKey,
+                kSecAttrApplicationTag as String: tag
+            ]
+        }
+
         let status = SecItemDelete(query as CFDictionary)
-        
+
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw MLSKeychainError.deleteFailed(status)
         }
