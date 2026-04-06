@@ -277,7 +277,7 @@ extension MLSConversationManager {
       try MLSMessageModel
         .filter(
           sql: "payloadJSON LIKE ?",
-          arguments: ["%\"\(payload.messageId)\"%"]
+          arguments: ["%\"recoveredMessageId\":\"\(payload.messageId)\"%"]
         )
         .filter(MLSMessageModel.Columns.conversationID == conversationId)
         .fetchOne(db)
