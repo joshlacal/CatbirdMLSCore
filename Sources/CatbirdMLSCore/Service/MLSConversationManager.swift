@@ -298,7 +298,10 @@ public final class MLSConversationManager {
   /// Maximum tolerable epoch divergence between local state and server messages.
   /// Beyond this threshold, the group is considered irrecoverably diverged and
   /// marked for automatic reset rather than continued decryption attempts.
-  let maxEpochDivergence: UInt64 = 50
+  /// A gap of even 2 means messages can't be decrypted (forward secrecy), but
+  /// small gaps (1-5) can occur normally during concurrent group operations.
+  /// Spec §10: EPOCH_DIVERGENCE_THRESHOLD = 5
+  let maxEpochDivergence: UInt64 = 5
 
   /// Maximum retry attempts for failed operations
   private let maxRetries = 3
