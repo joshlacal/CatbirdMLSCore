@@ -932,20 +932,25 @@ public final class MLSConversationManager {
       groupStates[convo.groupId] = nil
     }
 
-    // 3. Join the new MLS group via External Commit
+    // 3. Flag RESET_PENDING — deferred recovery (§8.5) will handle the External Commit.
+    //    DO NOT call joinByExternalCommit inline from SSE handler.
+    //    This prevents epoch inflation from concurrent/racing SSE events.
     do {
-      let joinedGroupId = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convoId)
+      try await markConversationNeedsReset(convoId)
       logger.info(
-        "✅ [handleGroupReset] Joined new group \(newGroupId.prefix(16)) for \(convoId.prefix(16)) (returned groupId: \(joinedGroupId.hexEncodedString().prefix(16)))"
+        "🏴 [handleGroupReset] Flagged \(convoId.prefix(16)) as RESET_PENDING — deferred recovery will rejoin"
       )
     } catch {
       logger.error(
-        "❌ [handleGroupReset] Failed to join new group: \(error.localizedDescription)")
-      // Signal that this conversation needs recovery so the sync loop can retry
-      notifyObservers(.conversationNeedsRecovery(convoId: convoId, reason: .groupReset))
+        "❌ [handleGroupReset] Failed to flag RESET_PENDING: \(error.localizedDescription)")
     }
 
-    // 4. Notify observers
+    // 4. Trigger a sync cycle to pick up the deferred recovery promptly
+    Task {
+      try? await self.syncWithServer(fullSync: false)
+    }
+
+    // 5. Notify observers
     notifyObservers(.groupReset(
       convoId: convoId,
       newGroupId: newGroupId,
