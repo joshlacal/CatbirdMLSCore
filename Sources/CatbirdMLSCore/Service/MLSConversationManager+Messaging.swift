@@ -4033,7 +4033,8 @@ public extension MLSConversationManager {
           try self.validateSessionGeneration(capturedGeneration: myGeneration)
 
           // Sync every 5 minutes
-          try await Task.sleep(for: .seconds(300))
+          // Spec §6.1: SYNC_INTERVAL_SEC = 5
+          try await Task.sleep(for: .seconds(5))
 
           guard !Task.isCancelled else { break }
 
@@ -4052,7 +4053,7 @@ public extension MLSConversationManager {
       }
     }
 
-    logger.info("Started periodic background sync task (interval: 5 minutes)")
+    logger.info("Started periodic background sync task (interval: 5 seconds)")
   }
 
   /// Start background task for adopting orphaned reactions
