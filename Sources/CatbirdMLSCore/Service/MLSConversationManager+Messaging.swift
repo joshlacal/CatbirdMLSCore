@@ -281,6 +281,48 @@ public extension MLSConversationManager {
     }
   }
 
+  // MARK: - Pre-Send Sync
+
+  /// Spec §5.1 step 1: Pre-send sync — fetch and process pending commits
+  /// before encrypting a message, to minimize 409 epoch mismatch errors.
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier
+  ///   - groupIdData: Binary group ID for FFI calls
+  /// - Returns: Number of commits processed
+  private func preSendSync(convoId: String, groupIdData: Data) async throws -> Int {
+    guard let userDid = userDid else { return 0 }
+
+    let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+    let commits = try await apiClient.getCommits(convoId: convoId, fromEpoch: Int(localEpoch))
+
+    if commits.isEmpty {
+      return 0
+    }
+
+    var totalProcessed = 0
+    for commit in commits.sorted(by: { $0.seq < $1.seq }) {
+      do {
+        let commitData = commit.ciphertext.data
+        _ = try await mlsClient.processMessage(
+          for: userDid,
+          groupId: groupIdData,
+          message: commitData
+        )
+        totalProcessed += 1
+      } catch {
+        // Commit processing failed — likely WrongEpoch or already processed
+        logger.debug("⚠️ [PRE-SEND-SYNC] Failed to process commit: \(error.localizedDescription)")
+      }
+    }
+
+    if totalProcessed > 0 {
+      logger.info("🔄 [PRE-SEND-SYNC] Processed \(totalProcessed) pending commits before send")
+    }
+
+    return totalProcessed
+  }
+
   // MARK: - Sending Messages
 
   /// Send a text message to a conversation
@@ -379,6 +421,9 @@ public extension MLSConversationManager {
       // membership commit (epoch advance) to race with a message send.
       // We hold the per-group lock across: epoch read → encrypt → server send.
       let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        // Spec §5.1: Pre-send sync — catch up on missed commits before encrypting
+        _ = try? await preSendSync(convoId: convoId, groupIdData: groupIdData)
+
         // Ground-truth epoch (inside the lock so it can't race with addMembers/merge)
         let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
 
