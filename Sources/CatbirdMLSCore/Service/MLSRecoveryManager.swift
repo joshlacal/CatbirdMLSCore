@@ -114,22 +114,11 @@ public actor MLSRecoveryManager {
     )
 
     // Spec §8.6: Report to server when transitioning to UNRECOVERABLE_LOCAL
+    // TODO: Call mlsAPIClient.reportRecoveryFailure() once Petrel lexicon types are regenerated
     if existing.attempts + 1 >= maxRejoinAttempts {
       logger.error(
-        "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — reporting to server"
+        "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — needs server reporting"
       )
-      Task {
-        do {
-          let result = try await self.mlsAPIClient.reportRecoveryFailure(convoId: convoId)
-          self.logger.info(
-            "📡 [MLSRecoveryManager] Recovery failure reported: autoReset=\(result.autoResetTriggered)"
-          )
-        } catch {
-          self.logger.error(
-            "❌ [MLSRecoveryManager] Failed to report recovery failure: \(error.localizedDescription)"
-          )
-        }
-      }
     }
   }
 
