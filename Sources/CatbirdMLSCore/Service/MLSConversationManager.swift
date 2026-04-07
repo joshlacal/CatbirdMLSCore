@@ -287,7 +287,8 @@ public final class MLSConversationManager {
   public let defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519"
 
   /// Key package refresh interval (in seconds) - reduced to 4 hours for proactive monitoring
-  public let keyPackageRefreshInterval: TimeInterval = 14400  // 4 hours (was 24 hours)
+  /// Spec §10: KEY_PACKAGE_CHECK_INTERVAL_SEC = 300
+  public let keyPackageRefreshInterval: TimeInterval = 300  // 5 minutes
 
   /// GroupInfo refresh interval (in seconds) - 6 hours proactive refresh
   /// Reduced from 12 hours to ensure GroupInfo doesn't expire before next refresh.

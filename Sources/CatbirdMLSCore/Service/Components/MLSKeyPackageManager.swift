@@ -29,7 +29,8 @@ public actor MLSKeyPackageManager {
   // MARK: - Configuration
 
   private let defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519"
-  private let keyPackageRefreshInterval: TimeInterval = 14400  // 4 hours
+  /// Spec §10: KEY_PACKAGE_CHECK_INTERVAL_SEC = 300
+  private let keyPackageRefreshInterval: TimeInterval = 300  // 5 minutes
 
   // MARK: - Initialization
 

@@ -87,7 +87,7 @@ public struct MLSConfiguration: Sendable {
     enableAutomaticCleanup: Bool = true,
     cleanupInterval: TimeInterval = 3600,
     defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-    keyPackageRefreshInterval: TimeInterval = 86400,
+    keyPackageRefreshInterval: TimeInterval = 300,
     skipDeviceRecordPublishing: Bool = false
   ) {
     self.maxPastEpochs = max(0, maxPastEpochs)
@@ -98,7 +98,7 @@ public struct MLSConfiguration: Sendable {
     self.enableAutomaticCleanup = enableAutomaticCleanup
     self.cleanupInterval = max(300, cleanupInterval)
     self.defaultCipherSuite = defaultCipherSuite
-    self.keyPackageRefreshInterval = max(3600, keyPackageRefreshInterval)
+    self.keyPackageRefreshInterval = max(60, keyPackageRefreshInterval)  // Floor at 1 minute
     self.skipDeviceRecordPublishing = skipDeviceRecordPublishing
   }
 
