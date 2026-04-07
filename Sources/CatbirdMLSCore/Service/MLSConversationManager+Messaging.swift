@@ -507,29 +507,64 @@ public extension MLSConversationManager {
           return (localMsgId, sendResult)
         } catch let apiError as MLSAPIError {
           if case .httpError(let code, _) = apiError, code == 409 {
-            // 409 = epoch mismatch — sync pending commits, re-encrypt, retry once
-            logger.warning("⚠️ [SEND] 409 epoch mismatch at epoch \(localEpoch) — syncing and retrying")
-            try? await syncWithServer()
-            let freshEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
-            let freshCiphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
-            let freshTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
-            let freshTagB64 = freshTagData?.base64EncodedString()
-            let retryResult = try await apiClient.sendMessage(
-              convoId: convoId,
-              msgId: localMsgId,
-              ciphertext: freshCiphertext,
-              epoch: Int(freshEpoch),
-              paddedSize: freshCiphertext.count,
-              senderDid: try DID(didString: userDid),
-              confirmationTag: freshTagB64
-            )
-            logger.info("✅ [SEND] 409 retry succeeded at epoch \(freshEpoch)")
-            return (localMsgId, retryResult)
-          }
-          // If the retry also gets 409, the conversation crypto is fundamentally broken
-          if case .httpError(let retryCode, _) = apiError, retryCode == 409 {
-            logger.error("🚨 [SEND] Double 409 for \(convoId.prefix(16)) — crypto state irrecoverable, marking for reset")
-            try? await markConversationNeedsReset(convoId)
+            // 409 = epoch mismatch — Approach B: fetch pending commits, process, retry once
+            logger.warning("⚠️ [SEND] 409 epoch mismatch at epoch \(localEpoch) — fetching pending commits")
+
+            // Fetch and process pending commits (up to 3 rounds of 50)
+            var totalProcessed = 0
+            var commitsFetched = true
+            for round in 1...3 {
+              let currentEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+              let commits = try await apiClient.getCommits(convoId: convoId, fromEpoch: Int(currentEpoch))
+              if commits.isEmpty {
+                commitsFetched = round > 1 // true if we processed at least one round
+                break
+              }
+              for commit in commits.sorted(by: { $0.seq < $1.seq }) {
+                do {
+                  let commitData = commit.ciphertext.data
+                  _ = try await mlsClient.processMessage(
+                    for: userDid,
+                    groupId: groupIdData,
+                    message: commitData
+                  )
+                  totalProcessed += 1
+                } catch {
+                  logger.debug("⚠️ [SEND-409] Failed to process commit in round \(round): \(error.localizedDescription)")
+                }
+              }
+              // If we got fewer than 50, we're caught up
+              if commits.count < 50 {
+                commitsFetched = true
+                break
+              }
+            }
+
+            logger.info("🔄 [SEND-409] Processed \(totalProcessed) pending commits")
+
+            // Re-encrypt and retry ONCE
+            do {
+              let freshEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+              let freshCiphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+              let freshTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+              let freshTagB64 = freshTagData?.base64EncodedString()
+              let retryResult = try await apiClient.sendMessage(
+                convoId: convoId,
+                msgId: localMsgId,
+                ciphertext: freshCiphertext,
+                epoch: Int(freshEpoch),
+                paddedSize: freshCiphertext.count,
+                senderDid: try DID(didString: userDid),
+                confirmationTag: freshTagB64
+              )
+              logger.info("✅ [SEND] 409 retry succeeded at epoch \(freshEpoch)")
+              return (localMsgId, retryResult)
+            } catch let retryError as MLSAPIError {
+              // Second 409 or commit processing failed — flag needsRejoin (NOT needsReset)
+              logger.error("🚨 [SEND] Retry failed after commit catch-up for \(convoId.prefix(16)) — flagging needsRejoin")
+              try? await markConversationNeedsRejoin(convoId)
+              throw retryError
+            }
           }
           logger.error("❌ [Gen: \(self.currentCoordinationGeneration)] [Epoch: \(localEpoch)] Network send failed for \(localMsgId): \(apiError.localizedDescription)")
           throw apiError
