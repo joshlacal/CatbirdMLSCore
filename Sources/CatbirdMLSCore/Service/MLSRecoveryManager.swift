@@ -112,6 +112,25 @@ public actor MLSRecoveryManager {
     logger.warning(
       "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(existing.attempts + 1)/\(self.maxRejoinAttempts)"
     )
+
+    // Spec §8.6: Report to server when transitioning to UNRECOVERABLE_LOCAL
+    if existing.attempts + 1 >= maxRejoinAttempts {
+      logger.error(
+        "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — reporting to server"
+      )
+      Task {
+        do {
+          let result = try await self.mlsAPIClient.reportRecoveryFailure(convoId: convoId)
+          self.logger.info(
+            "📡 [MLSRecoveryManager] Recovery failure reported: autoReset=\(result.autoResetTriggered)"
+          )
+        } catch {
+          self.logger.error(
+            "❌ [MLSRecoveryManager] Failed to report recovery failure: \(error.localizedDescription)"
+          )
+        }
+      }
+    }
   }
 
   /// Clear rejoin tracking for a conversation (on success)
@@ -127,6 +146,16 @@ public actor MLSRecoveryManager {
       return maxRejoinAttempts
     }
     return max(0, maxRejoinAttempts - record.attempts)
+  }
+
+  /// Load persisted unrecoverable state from database on startup.
+  /// This prevents retry loops after app restart for conversations that
+  /// already exhausted all rejoin attempts.
+  public func hydrateFromDatabase(unrecoverableConvoIds: [String]) {
+    for convoId in unrecoverableConvoIds {
+      failedRejoins[convoId] = (attempts: maxRejoinAttempts + 1, lastAttempt: Date.distantPast)
+      logger.info("📥 [MLSRecoveryManager] Hydrated unrecoverable state for \(convoId.prefix(16))")
+    }
   }
 
   // MARK: - Desync Detection

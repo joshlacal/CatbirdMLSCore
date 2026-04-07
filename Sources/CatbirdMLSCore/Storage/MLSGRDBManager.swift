@@ -5208,6 +5208,13 @@ public actor MLSGRDBManager {
       }
     }
 
+    // MARK: v27 - isUnrecoverable column (spec §8.1)
+    migrator.registerMigration("addIsUnrecoverable") { db in
+      try db.alter(table: "MLSConversationModel") { t in
+        t.add(column: "isUnrecoverable", .boolean).notNull().defaults(to: false)
+      }
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }

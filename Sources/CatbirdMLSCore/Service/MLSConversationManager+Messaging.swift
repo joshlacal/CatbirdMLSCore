@@ -481,6 +481,11 @@ public extension MLSConversationManager {
             logger.info("✅ [SEND] 409 retry succeeded at epoch \(freshEpoch)")
             return (localMsgId, retryResult)
           }
+          // If the retry also gets 409, the conversation crypto is fundamentally broken
+          if case .httpError(let retryCode, _) = apiError, retryCode == 409 {
+            logger.error("🚨 [SEND] Double 409 for \(convoId.prefix(16)) — crypto state irrecoverable, marking for reset")
+            try? await markConversationNeedsReset(convoId)
+          }
           logger.error("❌ [Gen: \(self.currentCoordinationGeneration)] [Epoch: \(localEpoch)] Network send failed for \(localMsgId): \(apiError.localizedDescription)")
           throw apiError
         } catch {
@@ -1261,7 +1266,8 @@ public extension MLSConversationManager {
         let (messages, _, _) = try await apiClient.getMessages(
           convoId: conversationID,
           limit: 50,
-          sinceSeq: sinceParam
+          sinceSeq: sinceParam,
+          type: "app"
         )
 
         // Filter to only the relevant range and sort by sequence
@@ -1455,7 +1461,8 @@ public extension MLSConversationManager {
       let (messages, _, _) = try await apiClient.getMessages(
         convoId: conversationID,
         limit: limit,
-        sinceSeq: sinceParam
+        sinceSeq: sinceParam,
+        type: "app"
       )
       
       let relevantMessages = messages.filter { Int($0.seq) <= endSeq }
@@ -1567,6 +1574,12 @@ public extension MLSConversationManager {
   {
     // CRITICAL FIX: Fail fast if shutdown in progress to avoid SQLite error 21
     try throwIfShuttingDown("processServerMessageLocked")
+
+    // Skip processing entirely for conversations marked for reset — don't spam
+    // the divergence detection log for every message in the batch.
+    if await conversationNeedsReset(message.convoId) {
+      return .nonApplication
+    }
 
     var localEpoch: Int64 = 0
     let gen = currentCoordinationGeneration
@@ -2722,7 +2735,8 @@ public extension MLSConversationManager {
         let (messages, _, gapInfo) = try await apiClient.getMessages(
           convoId: convo.groupId,
           limit: 100,
-          sinceSeq: sinceSeq
+          sinceSeq: sinceSeq,
+          type: "app"
         )
 
         guard !messages.isEmpty else { break }
@@ -2736,7 +2750,13 @@ public extension MLSConversationManager {
           conversationID: convo.groupId,
           source: "catchup"
         )
-        sinceSeq = messages.last?.seq
+
+        // Use the persisted lastProcessedSeq as the cursor — it reflects
+        // actual processing progress, not just what the server returned.
+        // This way interrupted catchups resume from the last successfully
+        // processed message rather than re-fetching the entire page.
+        let persistedSeq = await lastStoredSequenceNumber(for: convo.groupId)
+        sinceSeq = persistedSeq ?? messages.last?.seq
         pages += 1
         if messages.count < 100 || pages >= pageLimit { break }
       }
@@ -2778,7 +2798,8 @@ public extension MLSConversationManager {
         let (messages, _, _) = try await apiClient.getMessages(
           convoId: conversationID,
           limit: (endSeq - startSeq) + 10,
-          sinceSeq: max(0, startSeq - 1)
+          sinceSeq: max(0, startSeq - 1),
+          type: "app"
         )
         if !messages.isEmpty {
           try await processMessagesInOrder(
@@ -2830,7 +2851,8 @@ public extension MLSConversationManager {
       let (messages, _, _) = try await apiClient.getMessages(
         convoId: convo.groupId,
         limit: 100,
-        sinceSeq: lookbackSeq
+        sinceSeq: lookbackSeq,
+        type: "app"
       )
 
       if !messages.isEmpty {
@@ -3149,10 +3171,17 @@ public extension MLSConversationManager {
       try db.execute(
         sql: """
               UPDATE MLSConversationModel
-              SET needsReset = 1, needsRejoin = 0, updatedAt = ?
+              SET needsReset = 1, needsRejoin = 0, isUnrecoverable = 0, updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
           """, arguments: [Date(), convoId, userDID])
     }
+
+    // Clear any existing recovery backoff so the reset handler isn't blocked
+    // by prior failed rejoin attempts.
+    if let recoveryManager = await mlsClient.recovery(for: userDID) {
+      await recoveryManager.clearRejoinTracking(convoId: convoId)
+    }
+
     logger.warning("🔄 [EPOCH-RESET] Marked \(convoId.prefix(16)) for automatic group reset")
   }
 
@@ -3169,15 +3198,63 @@ public extension MLSConversationManager {
     }
   }
 
-  internal func markConversationNeedsRejoin(_ convoId: String) async throws {
+  // MARK: - Unrecoverable State (Spec §8.1)
+
+  internal func markConversationUnrecoverable(_ convoId: String) async throws {
     guard let userDID = userDid else { return }
 
     try await database.write { db in
       try db.execute(
         sql: """
               UPDATE MLSConversationModel
-              SET needsRejoin = 1, rejoinRequestedAt = NULL, updatedAt = ?
+              SET isUnrecoverable = 1, needsRejoin = 0, updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
+          """, arguments: [Date(), convoId, userDID])
+    }
+    logger.error("🚫 [UNRECOVERABLE] Marked \(convoId.prefix(16)) as unrecoverable")
+  }
+
+  internal func clearConversationUnrecoverable(_ convoId: String) async {
+    guard let userDID = userDid else { return }
+    try? await database.write { db in
+      try db.execute(
+        sql: """
+              UPDATE MLSConversationModel
+              SET isUnrecoverable = 0, updatedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ?;
+          """, arguments: [Date(), convoId, userDID])
+    }
+  }
+
+  internal func conversationIsUnrecoverable(_ convoId: String) async -> Bool {
+    guard let userDID = userDid else { return false }
+    do {
+      return try await database.read { db in
+        try Bool.fetchOne(
+          db,
+          sql: """
+                SELECT isUnrecoverable FROM MLSConversationModel
+                WHERE conversationID = ? AND currentUserDID = ?;
+            """,
+          arguments: [convoId, userDID]
+        ) ?? false
+      }
+    } catch {
+      return false
+    }
+  }
+
+  internal func markConversationNeedsRejoin(_ convoId: String) async throws {
+    guard let userDID = userDid else { return }
+
+    // Never override needsReset with needsRejoin — reset is the stronger recovery
+    // path and needsRejoin (External Commit) would make epoch divergence worse.
+    try await database.write { db in
+      try db.execute(
+        sql: """
+              UPDATE MLSConversationModel
+              SET needsRejoin = 1, rejoinRequestedAt = NULL, updatedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ? AND needsReset = 0;
           """, arguments: [Date(), convoId, userDID])
     }
   }
@@ -3281,13 +3358,23 @@ public extension MLSConversationManager {
     guard let userDid = userDid else { return }
 
     do {
-      try await database.write { db in
+      let newCount = try await database.write { db -> Int in
         try db.execute(
           sql: """
                 UPDATE MLSConversationModel
                 SET consecutiveFailures = consecutiveFailures + 1
                 WHERE conversationID = ? AND currentUserDID = ?;
             """, arguments: [conversationID, userDid])
+        return try Int.fetchOne(db,
+          sql: "SELECT consecutiveFailures FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [conversationID, userDid]) ?? 0
+      }
+
+      // After 5 consecutive failures, the conversation crypto is likely broken beyond
+      // what External Commit can repair. Escalate to full group reset.
+      if newCount >= 5 {
+        logger.error("🚨 [CONSECUTIVE-FAILURES] \(conversationID.prefix(16)) has \(newCount) consecutive failures — marking for reset")
+        try? await markConversationNeedsReset(conversationID)
       }
     } catch {}
   }
@@ -5055,6 +5142,10 @@ public extension MLSConversationManager {
     if let recoveryManager = await mlsClient.recovery(for: userDid) {
       let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convoId)
       if shouldSkip {
+        // Persist UNRECOVERABLE_LOCAL if max attempts exhausted (spec §8.1)
+        if await recoveryManager.remainingRejoinAttempts(convoId: convoId) == 0 {
+          try? await markConversationUnrecoverable(convoId)
+        }
         logger.warning(
           "⏭️ [External Commit Fallback] Skipping \(convoId.prefix(16))... - recovery tracking says skip"
         )

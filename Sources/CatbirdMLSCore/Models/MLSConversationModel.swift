@@ -43,6 +43,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let isActive: Bool
   public let needsRejoin: Bool
   public let needsReset: Bool
+  public let isUnrecoverable: Bool
   public let rejoinRequestedAt: Date?
   public let lastRecoveryAttempt: Date?  // When we last attempted automatic recovery
   public let consecutiveFailures: Int  // Count of consecutive decryption failures
@@ -78,6 +79,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     isActive: Bool = true,
     needsRejoin: Bool = false,
     needsReset: Bool = false,
+    isUnrecoverable: Bool = false,
     rejoinRequestedAt: Date? = nil,
     lastRecoveryAttempt: Date? = nil,
     consecutiveFailures: Int = 0,
@@ -102,6 +104,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.isActive = isActive
     self.needsRejoin = needsRejoin
     self.needsReset = needsReset
+    self.isUnrecoverable = isUnrecoverable
     self.rejoinRequestedAt = rejoinRequestedAt
     self.lastRecoveryAttempt = lastRecoveryAttempt
     self.consecutiveFailures = consecutiveFailures
@@ -132,6 +135,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -160,6 +164,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -189,6 +194,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -218,6 +224,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: active,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -248,6 +255,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -277,6 +285,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -308,6 +317,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -337,6 +347,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: 0,
@@ -366,6 +377,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -395,6 +407,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -424,6 +437,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -453,6 +467,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       isActive: isActive,
       needsRejoin: needsRejoin,
       needsReset: needsReset,
+      isUnrecoverable: isUnrecoverable,
       rejoinRequestedAt: rejoinRequestedAt,
       lastRecoveryAttempt: lastRecoveryAttempt,
       consecutiveFailures: consecutiveFailures,
@@ -485,6 +500,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let isActive = Column("isActive")
     public static let needsRejoin = Column("needsRejoin")
     public static let needsReset = Column("needsReset")
+    public static let isUnrecoverable = Column("isUnrecoverable")
     public static let rejoinRequestedAt = Column("rejoinRequestedAt")
     public static let lastRecoveryAttempt = Column("lastRecoveryAttempt")
     public static let consecutiveFailures = Column("consecutiveFailures")
@@ -511,6 +527,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case isActive
     case needsRejoin
     case needsReset
+    case isUnrecoverable
     case rejoinRequestedAt
     case lastRecoveryAttempt
     case consecutiveFailures
