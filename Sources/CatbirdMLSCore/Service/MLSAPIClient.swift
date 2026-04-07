@@ -697,60 +697,6 @@ public final class MLSAPIClient {
     return output
   }
 
-  // MARK: - Recovery Reporting (Spec §8.6)
-
-  /// Report that recovery has been exhausted for a conversation.
-  /// Server uses these reports for quorum-based auto-reset (>=50% of members must report
-  /// within 1 hour for auto-reset to trigger).
-  public func reportRecoveryFailure(
-    convoId: String,
-    failureType: String = "external_commit_exhausted"
-  ) async throws -> (recorded: Bool, autoResetTriggered: Bool) {
-    logger.info("Reporting recovery failure for conversation: \(convoId.prefix(16))")
-
-    let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
-      convoId: convoId,
-      failureType: failureType
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.reportRecoveryFailure(
-      input: input
-    )
-
-    guard responseCode == 200, let output = output else {
-      throw MLSAPIError.httpError(
-        statusCode: responseCode,
-        message: "Failed to report recovery failure for conversation \(convoId)"
-      )
-    }
-
-    logger.info(
-      "Recovery failure reported for \(convoId.prefix(16)): recorded=\(output.recorded), autoResetTriggered=\(output.autoResetTriggered)"
-    )
-    return (output.recorded, output.autoResetTriggered)
-  }
-
-  // MARK: - Sequencer Failover (Spec §8.8)
-
-  /// Request sequencer failover for a conversation.
-  /// Called when >= 3 consecutive send timeouts occur over >= 2 minutes.
-  public func requestFailover(convoId: String) async throws {
-    logger.info("Requesting sequencer failover for: \(convoId.prefix(16))")
-
-    let input = BlueCatbirdMlsChatRequestFailover.Input(convoId: convoId)
-
-    let (responseCode, _) = try await client.blue.catbird.mlschat.requestFailover(input: input)
-
-    guard (200...299).contains(responseCode) else {
-      throw MLSAPIError.httpError(
-        statusCode: responseCode,
-        message: "Failed to request failover for conversation \(convoId)"
-      )
-    }
-
-    logger.info("Sequencer failover requested for: \(convoId.prefix(16))")
-  }
-
   // MARK: Members
 
   /// Add members to an existing MLS conversation using Petrel client
@@ -816,26 +762,23 @@ public final class MLSAPIClient {
   ///   - convoId: Conversation identifier
   ///   - limit: Maximum number of messages to return (1-100, default: 50)
   ///   - sinceSeq: Sequence number to fetch messages after (pagination cursor). Messages with seq > sinceSeq are returned.
-  ///   - type: Message type filter — "app" (messages only), "commit" (commits only), "all" (both, default)
   /// - Returns: Tuple of messages array (guaranteed sorted by epoch ASC, seq ASC), optional lastSeq, and optional gapInfo
   /// - Note: Server GUARANTEES messages are pre-sorted by (epoch ASC, seq ASC). No client-side sorting needed.
   public func getMessages(
     convoId: String,
     limit: Int = 50,
-    sinceSeq: Int? = nil,
-    type: String? = nil
+    sinceSeq: Int? = nil
   ) async throws -> (
     messages: [BlueCatbirdMlsChatDefs.MessageView], lastSeq: Int?,
     gapInfo: BlueCatbirdMlsChatGetMessages.GapInfo?
   ) {
     logger.debug(
-      "Fetching messages for conversation: \(convoId), sinceSeq: \(sinceSeq?.description ?? "nil"), type: \(type ?? "all")")
+      "Fetching messages for conversation: \(convoId), sinceSeq: \(sinceSeq?.description ?? "nil")")
 
     let input = BlueCatbirdMlsChatGetMessages.Parameters(
       convoId: convoId,
       limit: limit,
-      sinceSeq: sinceSeq,
-      type: type
+      sinceSeq: sinceSeq
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getMessages(input: input)
