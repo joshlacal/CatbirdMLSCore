@@ -307,7 +307,7 @@ public extension MLSConversationManager {
         _ = try await mlsClient.processMessage(
           for: userDid,
           groupId: groupIdData,
-          message: commitData
+          messageData: commitData
         )
         totalProcessed += 1
       } catch {
@@ -526,7 +526,7 @@ public extension MLSConversationManager {
                   _ = try await mlsClient.processMessage(
                     for: userDid,
                     groupId: groupIdData,
-                    message: commitData
+                    messageData: commitData
                   )
                   totalProcessed += 1
                 } catch {
@@ -1346,8 +1346,7 @@ public extension MLSConversationManager {
         let (messages, _, _) = try await apiClient.getMessages(
           convoId: conversationID,
           limit: 50,
-          sinceSeq: sinceParam,
-          type: "app"
+          sinceSeq: sinceParam
         )
 
         // Filter to only the relevant range and sort by sequence
@@ -1541,8 +1540,7 @@ public extension MLSConversationManager {
       let (messages, _, _) = try await apiClient.getMessages(
         convoId: conversationID,
         limit: limit,
-        sinceSeq: sinceParam,
-        type: "app"
+        sinceSeq: sinceParam
       )
       
       let relevantMessages = messages.filter { Int($0.seq) <= endSeq }
@@ -2815,8 +2813,7 @@ public extension MLSConversationManager {
         let (messages, _, gapInfo) = try await apiClient.getMessages(
           convoId: convo.groupId,
           limit: 100,
-          sinceSeq: sinceSeq,
-          type: "app"
+          sinceSeq: sinceSeq
         )
 
         guard !messages.isEmpty else { break }
@@ -2878,8 +2875,7 @@ public extension MLSConversationManager {
         let (messages, _, _) = try await apiClient.getMessages(
           convoId: conversationID,
           limit: (endSeq - startSeq) + 10,
-          sinceSeq: max(0, startSeq - 1),
-          type: "app"
+          sinceSeq: max(0, startSeq - 1)
         )
         if !messages.isEmpty {
           try await processMessagesInOrder(
@@ -2931,8 +2927,7 @@ public extension MLSConversationManager {
       let (messages, _, _) = try await apiClient.getMessages(
         convoId: convo.groupId,
         limit: 100,
-        sinceSeq: lookbackSeq,
-        type: "app"
+        sinceSeq: lookbackSeq
       )
 
       if !messages.isEmpty {
