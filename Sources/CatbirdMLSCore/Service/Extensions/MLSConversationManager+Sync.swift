@@ -167,9 +167,9 @@ public extension MLSConversationManager {
         }
         if !isUserMember {
           logger.info(
-            "⏭️ [SYNC] Filtering out conversation \(convo.groupId.prefix(16))... - user is not a member"
+            "⏭️ [SYNC] Filtering out conversation \(convo.conversationId.prefix(16))... - user is not a member"
           )
-          staleConvoIds.append(convo.groupId)
+          staleConvoIds.append(convo.conversationId)
         }
         return isUserMember
       }
@@ -194,8 +194,8 @@ public extension MLSConversationManager {
           break
         }
         
-        let existingConvo = conversations[convo.groupId]
-        conversations[convo.groupId] = convo
+        let existingConvo = conversations[convo.conversationId]
+        conversations[convo.conversationId] = convo
 
         // Check if we need to initialize the MLS group
         let needsGroupInit = groupStates[convo.groupId] == nil
@@ -223,13 +223,13 @@ public extension MLSConversationManager {
 
               // ⭐ Skip epoch catch-up for conversations already flagged needsRejoin.
               // Deferred recovery will handle these outside the sync hot-path.
-              if await conversationNeedsRejoin(convo.groupId) {
-                logger.info("⏭️ [SYNC] Skipping epoch catch-up for \(convo.groupId.prefix(16))... - already flagged needsRejoin")
+              if await conversationNeedsRejoin(convo.conversationId) {
+                logger.info("⏭️ [SYNC] Skipping epoch catch-up for \(convo.conversationId.prefix(16))... - already flagged needsRejoin")
               } else
               // Attempt to catch up by processing missed commits
               if serverEpoch > ffiEpoch {
                 let result = await fetchAndProcessMissingCommits(
-                  conversationID: convo.groupId,
+                  conversationID: convo.conversationId,
                   groupId: convo.groupId,
                   localEpoch: ffiEpoch,
                   targetEpoch: Int(serverEpoch)
@@ -242,26 +242,26 @@ public extension MLSConversationManager {
                   // ⭐ FIX: Do NOT call handleRatchetDesync/forceRejoin from the sync
                   // hot-path. Flag the conversation for deferred recovery instead.
                   // This breaks the epoch inflation feedback loop between devices.
-                  logger.warning("⚠️ Epoch catch-up failed (new group) - deferring rejoin for \(convo.groupId.prefix(16))...")
+                  logger.warning("⚠️ Epoch catch-up failed (new group) - deferring rejoin for \(convo.conversationId.prefix(16))...")
                   logger.warning("   Local epoch \(failedEpoch) cannot process commits to reach server epoch \(serverEpoch)")
                   logger.warning("   Reason: \(reason)")
-                  try? await markConversationNeedsRejoin(convo.groupId)
+                  try? await markConversationNeedsRejoin(convo.conversationId)
                 case .serverDataGap:
-                  logger.warning("⚠️ Server data gap (new group) for \(convo.groupId.prefix(16))... - will retry next sync")
+                  logger.warning("⚠️ Server data gap (new group) for \(convo.conversationId.prefix(16))... - will retry next sync")
                 case .transientFetchError(let reason):
-                  logger.warning("⚠️ Transient fetch error (new group) for \(convo.groupId.prefix(16))...: \(reason) - will retry next sync")
+                  logger.warning("⚠️ Transient fetch error (new group) for \(convo.conversationId.prefix(16))...: \(reason) - will retry next sync")
                 }
               }
             }
           } catch {
             // Group may not exist in FFI yet (e.g., before processing Welcome)
-            logger.debug("Could not get FFI epoch for \(convo.groupId.prefix(16)): \(error)")
+            logger.debug("Could not get FFI epoch for \(convo.conversationId.prefix(16)): \(error)")
             logger.debug("Using server epoch \(serverEpoch) as fallback")
           }
 
           groupStates[convo.groupId] = MLSGroupState(
             groupId: convo.groupId,
-            convoId: convo.groupId,
+            convoId: convo.conversationId,
             epoch: ffiEpoch,  // Use FFI epoch if available, else server epoch
             members: Set(convo.members.map { $0.did.description }),
             knownServerEpoch: serverEpoch
@@ -289,13 +289,13 @@ public extension MLSConversationManager {
 
                 // ⭐ Skip epoch catch-up for conversations already flagged needsRejoin.
                 // Deferred recovery will handle these outside the sync hot-path.
-                if await conversationNeedsRejoin(convo.groupId) {
-                  logger.info("⏭️ [SYNC] Skipping epoch catch-up for \(convo.groupId.prefix(16))... - already flagged needsRejoin")
+                if await conversationNeedsRejoin(convo.conversationId) {
+                  logger.info("⏭️ [SYNC] Skipping epoch catch-up for \(convo.conversationId.prefix(16))... - already flagged needsRejoin")
                 } else
                 // Attempt to catch up by processing missed commits
                 if serverEpoch > ffiEpoch {
                   let result = await fetchAndProcessMissingCommits(
-                    conversationID: convo.groupId,
+                    conversationID: convo.conversationId,
                     groupId: convo.groupId,
                     localEpoch: ffiEpoch,
                     targetEpoch: Int(serverEpoch)
@@ -307,19 +307,19 @@ public extension MLSConversationManager {
                   case .needsDeferredRejoin(let failedEpoch, let reason):
                     // ⭐ FIX: Do NOT call handleRatchetDesync/forceRejoin from the sync
                     // hot-path. Flag the conversation for deferred recovery instead.
-                    logger.warning("⚠️ Epoch catch-up failed (update) - deferring rejoin for \(convo.groupId.prefix(16))...")
+                    logger.warning("⚠️ Epoch catch-up failed (update) - deferring rejoin for \(convo.conversationId.prefix(16))...")
                     logger.warning("   Local epoch \(failedEpoch) cannot process commits to reach server epoch \(serverEpoch)")
                     logger.warning("   Reason: \(reason)")
-                    try? await markConversationNeedsRejoin(convo.groupId)
+                    try? await markConversationNeedsRejoin(convo.conversationId)
                   case .serverDataGap:
-                    logger.warning("⚠️ Server data gap (update) for \(convo.groupId.prefix(16))... - will retry next sync")
+                    logger.warning("⚠️ Server data gap (update) for \(convo.conversationId.prefix(16))... - will retry next sync")
                   case .transientFetchError(let reason):
-                    logger.warning("⚠️ Transient fetch error (update) for \(convo.groupId.prefix(16))...: \(reason) - will retry next sync")
+                    logger.warning("⚠️ Transient fetch error (update) for \(convo.conversationId.prefix(16))...: \(reason) - will retry next sync")
                   }
                 }
               }
             } catch {
-              logger.debug("Could not get FFI epoch for \(convo.groupId.prefix(16)): \(error)")
+              logger.debug("Could not get FFI epoch for \(convo.conversationId.prefix(16)): \(error)")
               logger.debug("Using server epoch \(serverEpoch) as fallback")
             }
 
@@ -331,29 +331,29 @@ public extension MLSConversationManager {
             // Persist epoch to GRDB so DataSource reads are consistent
             do {
               try await storage.updateConversationEpoch(
-                conversationID: convo.groupId,
+                conversationID: convo.conversationId,
                 currentUserDID: userDid,
                 epoch: Int64(ffiEpoch),
                 database: database
               )
             } catch {
-              logger.warning("Failed to persist epoch during sync for \(convo.groupId.prefix(16)): \(error.localizedDescription)")
+              logger.warning("Failed to persist epoch during sync for \(convo.conversationId.prefix(16)): \(error.localizedDescription)")
             }
 
             // Notify epoch update
-            notifyObservers(.epochUpdated(convo.groupId, Int(ffiEpoch)))
+            notifyObservers(.epochUpdated(convo.conversationId, Int(ffiEpoch)))
           }
         }
 
         // Check confirmation tag divergence (only if server provides one and epochs match)
         if let serverTag = convo.confirmationTag,
            let groupIdData = Data(hexEncoded: convo.groupId),
-           !(await conversationNeedsRejoin(convo.groupId)) {
+           !(await conversationNeedsRejoin(convo.conversationId)) {
           let localTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
           let localTagB64 = localTagData?.base64EncodedString()
-          if let localTagB64 = localTagB64, localTagB64 != serverTag {
-            logger.warning("⚠️ [SYNC] Tree divergence detected for \(convo.groupId.prefix(16))... - local tag != server tag")
-            try? await markConversationNeedsRejoin(convo.groupId)
+          if let localTagB64 = localTagB64, localTagB64 != serverTag.data.base64EncodedString() {
+            logger.warning("⚠️ [SYNC] Tree divergence detected for \(convo.conversationId.prefix(16))... - local tag != server tag")
+            try? await markConversationNeedsRejoin(convo.conversationId)
           }
         }
 
@@ -361,7 +361,7 @@ public extension MLSConversationManager {
         if needsGroupInit {
           // Check if group exists locally via FFI
           guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-            logger.error("Invalid group ID format for \(convo.groupId)")
+            logger.error("Invalid group ID format for \(convo.conversationId)")
             continue
           }
 
@@ -395,7 +395,7 @@ public extension MLSConversationManager {
             // falling back to External Commit. We add 404 handling here for clarity.
             // ═══════════════════════════════════════════════════════════════════
 
-            logger.info("🔄 [SYNC] Member missing local group for \(convo.groupId.prefix(16))... - trying Welcome first")
+            logger.info("🔄 [SYNC] Member missing local group for \(convo.conversationId.prefix(16))... - trying Welcome first")
 
             do {
               try await initializeGroupFromWelcome(convo: convo)
@@ -409,14 +409,14 @@ public extension MLSConversationManager {
 
                 do {
                   let _ = try await mlsClient.joinByExternalCommit(
-                    for: userDid, convoId: convo.groupId)
+                    for: userDid, convoId: convo.conversationId)
                   logger.info("✅ [SYNC] Device successfully joined via External Commit")
                 } catch {
                   logger.error(
                     "❌ [SYNC] External Commit failed for device-sync: \(error.localizedDescription)"
                   )
                   logger.error(
-                    "   Conversation \(convo.groupId.prefix(16))... will be unavailable")
+                    "   Conversation \(convo.conversationId.prefix(16))... will be unavailable")
 
                   // Non-fatal: conversation will retry on next sync
                   continue  // Skip this conversation
@@ -424,7 +424,7 @@ public extension MLSConversationManager {
               } else {
                 // Other API error - log and skip
                 logger.error(
-                  "❌ CRITICAL: Failed to initialize MLS group for \(convo.groupId): MLSAPIError - \(mlsApiError.localizedDescription)"
+                  "❌ CRITICAL: Failed to initialize MLS group for \(convo.conversationId): MLSAPIError - \(mlsApiError.localizedDescription)"
                 )
                 if case .invalidResponse(let message) = mlsApiError {
                   logger.error("  → Invalid response details: \(message)")
@@ -442,7 +442,7 @@ public extension MLSConversationManager {
               }
             } catch {
               logger.error(
-                "❌ CRITICAL: Failed to initialize MLS group for \(convo.groupId): \(type(of: error)) - \(error.localizedDescription)"
+                "❌ CRITICAL: Failed to initialize MLS group for \(convo.conversationId): \(type(of: error)) - \(error.localizedDescription)"
               )
               logger.error("❌ This conversation cannot be used - cryptographic join failed")
               logger.error("❌ Skipping conversation to prevent zombie group state")
@@ -452,11 +452,11 @@ public extension MLSConversationManager {
                 let recovered = await recoveryManager.attemptRecoveryIfNeeded(
                   for: error,
                   userDid: userDid,
-                  convoIds: [convo.groupId]
+                  convoIds: [convo.conversationId]
                 )
                 if recovered {
                   logger.info(
-                    "🔄 Silent recovery initiated for conversation \(convo.groupId.prefix(16))")
+                    "🔄 Silent recovery initiated for conversation \(convo.conversationId.prefix(16))")
                 }
               }
 
@@ -469,7 +469,7 @@ public extension MLSConversationManager {
               continue
             }
           } else {
-            logger.debug("Group already exists locally for conversation: \(convo.groupId)")
+            logger.debug("Group already exists locally for conversation: \(convo.conversationId)")
           }
         }
 
@@ -818,30 +818,30 @@ public extension MLSConversationManager {
     for convo in convos {
       // Check if conversation already exists
       let existingConvo = try await storage.fetchConversation(
-        conversationID: convo.groupId,
+        conversationID: convo.conversationId,
         currentUserDID: userDid,
         database: database
       )
-      
+
       if existingConvo != nil {
         // Preserve existing request state
-        trustCheckResults[convo.groupId] = existingConvo!.requestState
+        trustCheckResults[convo.conversationId] = existingConvo!.requestState
       } else {
         // New conversation - determine initial request state
         let creatorDid = convo.creator.description
         let isCreator = creatorDid.lowercased() == userDid.lowercased()
-        
+
         if isCreator {
           // User created this conversation - not a request
-          trustCheckResults[convo.groupId] = .none
+          trustCheckResults[convo.conversationId] = .none
         } else {
           // Someone else created - check if we trust them
           let isTrusted = await trustChecker.isTrusted(did: creatorDid)
           if isTrusted {
-            trustCheckResults[convo.groupId] = .none
+            trustCheckResults[convo.conversationId] = .none
           } else {
             logger.info("📬 New inbound chat request from \(creatorDid.prefix(20))...")
-            trustCheckResults[convo.groupId] = .pendingInbound
+            trustCheckResults[convo.conversationId] = .pendingInbound
           }
         }
       }
@@ -854,31 +854,31 @@ public extension MLSConversationManager {
       guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
       do {
         if let metadata = try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData) {
-          mlsMetadataByGroupId[convo.groupId] = metadata
+          mlsMetadataByGroupId[convo.conversationId] = metadata
         }
       } catch {
         // Non-fatal: group may not exist locally yet (e.g., pending welcome)
-        logger.debug("⚠️ Could not read MLS metadata for \(convo.groupId.prefix(16))...: \(error.localizedDescription)")
+        logger.debug("⚠️ Could not read MLS metadata for \(convo.conversationId.prefix(16))...: \(error.localizedDescription)")
       }
     }
 
     try await database.write { db in
       for convo in convos {
         guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-          self.logger.error("Invalid group ID format for conversation \(convo.groupId)")
+          self.logger.error("Invalid group ID format for conversation \(convo.conversationId)")
           continue
         }
 
         // Prefer MLS-encrypted metadata over server plaintext metadata
-        let mlsMeta = mlsMetadataByGroupId[convo.groupId]
+        let mlsMeta = mlsMetadataByGroupId[convo.conversationId]
         let title = mlsMeta?.name ?? convo.metadata?.name
-        let requestState = trustCheckResults[convo.groupId] ?? .none
+        let requestState = trustCheckResults[convo.conversationId] ?? .none
 
         // Merge with existing row to preserve local-only state (lastMessageAt,
         // mutedUntil, joinMethod, consecutiveFailures, etc.) that would be
         // clobbered by a blind INSERT OR REPLACE.
         let existing = try MLSConversationModel
-          .filter(MLSConversationModel.Columns.conversationID == convo.groupId)
+          .filter(MLSConversationModel.Columns.conversationID == convo.conversationId)
           .filter(MLSConversationModel.Columns.currentUserDID == userDid)
           .fetchOne(db)
 
@@ -894,7 +894,7 @@ public extension MLSConversationManager {
         }()
 
         let model = MLSConversationModel(
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           currentUserDID: userDid,
           groupID: groupIdData,
           epoch: Int64(convo.epoch),
@@ -945,11 +945,11 @@ public extension MLSConversationManager {
             SET isActive = 0, removedAt = ?, updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ? AND isActive = 1
             """,
-          arguments: [Date(), Date(), convo.groupId, normalizedUserDid]
+          arguments: [Date(), Date(), convo.conversationId, normalizedUserDid]
         )
 
         for (index, apiMember) in convo.members.enumerated() {
-          let memberID = "\(convo.groupId)_\(apiMember.did.description)"
+          let memberID = "\(convo.conversationId)_\(apiMember.did.description)"
           let normalizedDid = MLSStorageHelpers.normalizeDID(apiMember.did.description)
           let normalizedUserDid = MLSStorageHelpers.normalizeDID(userDid)
           let now = Date()
@@ -971,7 +971,7 @@ public extension MLSConversationManager {
                 role = excluded.role
               """,
             arguments: [
-              memberID, convo.groupId, normalizedUserDid, normalizedDid,
+              memberID, convo.conversationId, normalizedUserDid, normalizedDid,
               index, now, now, role,
             ])
         }

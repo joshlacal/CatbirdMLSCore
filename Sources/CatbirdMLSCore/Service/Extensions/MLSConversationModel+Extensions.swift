@@ -11,7 +11,8 @@ public extension MLSConversationModel {
     }
 
     return BlueCatbirdMlsChatDefs.ConvoView(
-      groupId: conversationID,
+      conversationId: conversationID,
+      groupId: groupID.hexEncodedString(),
       creator: creatorDID,
       members: [],  // Members not stored in local model, fetched separately when needed
       epoch: Int(epoch),

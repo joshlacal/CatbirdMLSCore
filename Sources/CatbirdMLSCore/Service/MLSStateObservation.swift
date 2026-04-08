@@ -17,14 +17,14 @@ public enum MLSStateEvent {
   case conversationNeedsRecovery(convoId: String, reason: RecoveryReason)
   case reactionReceived(
     convoId: String, messageId: String, emoji: String, senderDID: String, action: String)
-  case groupReset(convoId: String, newGroupId: String, resetGeneration: Int, resetBy: DID, reason: String?)
+  case groupReset(convoId: String, newGroupId: String, resetGeneration: Int, resetBy: DID?, reason: String?)
 
   public var description: String {
     switch self {
     case .conversationCreated(let convo):
-      return "Conversation created: \(convo.groupId)"
+      return "Conversation created: \(convo.conversationId)"
     case .conversationJoined(let convo):
-      return "Conversation joined: \(convo.groupId)"
+      return "Conversation joined: \(convo.conversationId)"
     case .conversationLeft(let id):
       return "Conversation left: \(id)"
     case .conversationRequestAccepted(let id):

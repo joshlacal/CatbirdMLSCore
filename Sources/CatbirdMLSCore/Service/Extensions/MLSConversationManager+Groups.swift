@@ -561,7 +561,7 @@ extension MLSConversationManager {
     }
 
     // Store conversation state
-    self.conversations[convo.groupId] = convo
+    self.conversations[convo.conversationId] = convo
 
     // ⭐ CRITICAL FIX: Verify epoch from FFI instead of trusting server's response
     guard let groupIdData = Data(hexEncoded: groupId) else {
@@ -580,14 +580,14 @@ extension MLSConversationManager {
 
     groupStates[groupId] = MLSGroupState(
       groupId: groupId,
-      convoId: convo.groupId,
+      convoId: convo.conversationId,
       epoch: ffiEpoch,  // Use FFI epoch, not server epoch
       members: Set(convo.members.map { $0.did.description })
     )
 
     // Insert history boundary marker so the UI shows "You joined this conversation"
     await insertHistoryBoundaryMarker(
-      conversationId: groupId,
+      conversationId: convo.conversationId,
       senderDID: userDid,
       epoch: ffiEpoch,
       contentKey: "history_boundary.new_member"
@@ -596,7 +596,7 @@ extension MLSConversationManager {
     // Notify observers
     notifyObservers(.conversationJoined(convo))
 
-    logger.info("Successfully joined conversation: \(convo.groupId)")
+    logger.info("Successfully joined conversation: \(convo.conversationId)")
     return convo
   }
 

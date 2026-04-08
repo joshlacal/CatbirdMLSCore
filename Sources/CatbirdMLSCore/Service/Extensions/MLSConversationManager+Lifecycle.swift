@@ -1050,7 +1050,7 @@ extension MLSConversationManager {
         }
 
         guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-          logger.warning("⚠️ Invalid groupId format for \(convo.groupId) - skipping")
+          logger.warning("⚠️ Invalid groupId format for \(convo.conversationId) - skipping")
           failureCount += 1
           continue
         }
@@ -1061,24 +1061,24 @@ extension MLSConversationManager {
           do {
             let epoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
             logger.info(
-              "✅ Group \(convo.groupId.prefix(8))... already exists locally (epoch: \(epoch)) - server tracking stale, skipping rejoin"
+              "✅ Group \(convo.conversationId.prefix(8))... already exists locally (epoch: \(epoch)) - server tracking stale, skipping rejoin"
             )
             skippedCount += 1
-            await clearConversationRejoinFlag(convo.groupId)
+            await clearConversationRejoinFlag(convo.conversationId)
             continue
           } catch is CancellationError {
             logger.warning("⚠️ [REJOIN] Cancelled during epoch check - stopping")
             break
           } catch {
             logger.warning(
-              "⚠️ Group \(convo.groupId.prefix(8))... exists but cannot get epoch: \(error.localizedDescription)"
+              "⚠️ Group \(convo.conversationId.prefix(8))... exists but cannot get epoch: \(error.localizedDescription)"
             )
           }
         }
 
         guard
           beginRejoinAttempt(
-            conversationID: convo.groupId,
+            conversationID: convo.conversationId,
             source: "missing-convo"
           )
         else {
@@ -1087,11 +1087,11 @@ extension MLSConversationManager {
         }
 
         let joined = await attemptRejoinWithWelcomeFallback(
-          convoId: convo.groupId,
+          convoId: convo.conversationId,
           displayName: convo.metadata?.name,
           reason: "server reported missing"
         )
-        endRejoinAttempt(conversationID: convo.groupId)
+        endRejoinAttempt(conversationID: convo.conversationId)
 
         if joined {
           successCount += 1

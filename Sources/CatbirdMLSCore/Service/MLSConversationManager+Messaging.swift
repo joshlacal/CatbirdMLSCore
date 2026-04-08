@@ -1689,7 +1689,7 @@ public extension MLSConversationManager {
     }
 
     guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-      logger.error("Invalid groupId for conversation \(convo.groupId)")
+      logger.error("Invalid groupId for conversation \(convo.conversationId)")
       throw MLSConversationError.invalidGroupId
     }
 
@@ -2775,26 +2775,26 @@ public extension MLSConversationManager {
       return
     }
 
-    if await conversationNeedsRejoin(convo.groupId) && !force { return }
-    if await conversationNeedsReset(convo.groupId) {
-      logger.debug("⏭️ [PROCESS] Skipping catchup for \(convo.groupId.prefix(16)) — marked for reset")
+    if await conversationNeedsRejoin(convo.conversationId) && !force { return }
+    if await conversationNeedsReset(convo.conversationId) {
+      logger.debug("⏭️ [PROCESS] Skipping catchup for \(convo.conversationId.prefix(16)) — marked for reset")
       return
     }
     guard let userDid = userDid else { return }
 
     do {
-      var sinceSeq = await lastStoredSequenceNumber(for: convo.groupId)
+      var sinceSeq = await lastStoredSequenceNumber(for: convo.conversationId)
 
       // Safety guard: if sinceSeq resolved to nil/0 but conversation already has cached messages,
       // something is wrong with the seq tracker. Skip rather than re-fetching entire history.
       if sinceSeq == nil || sinceSeq == 0 {
         let cachedMaxSeq = try? await storage.getMaxCachedMessageSeq(
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           currentUserDID: userDid,
           database: database
         )
         if let cachedMax = cachedMaxSeq, cachedMax > 0 {
-          logger.error("🚨 [CATCHUP] sinceSeq=\(sinceSeq.map(String.init) ?? "nil") but conversation \(convo.groupId.prefix(16)) has cached messages up to seq \(cachedMax) — skipping full re-fetch")
+          logger.error("🚨 [CATCHUP] sinceSeq=\(sinceSeq.map(String.init) ?? "nil") but conversation \(convo.conversationId.prefix(16)) has cached messages up to seq \(cachedMax) — skipping full re-fetch")
           return
         }
       }
@@ -2811,7 +2811,7 @@ public extension MLSConversationManager {
           return
         }
         let (messages, _, gapInfo) = try await apiClient.getMessages(
-          convoId: convo.groupId,
+          convoId: convo.conversationId,
           limit: 100,
           sinceSeq: sinceSeq
         )
@@ -2819,12 +2819,12 @@ public extension MLSConversationManager {
         guard !messages.isEmpty else { break }
 
         if let gaps = gapInfo, gaps.hasGaps {
-          await fillGaps(conversationID: convo.groupId, missingSeqs: gaps.missingSeqs)
+          await fillGaps(conversationID: convo.conversationId, missingSeqs: gaps.missingSeqs)
         }
 
         let _ = try await processMessagesInOrder(
           messages: messages,
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           source: "catchup"
         )
 
@@ -2832,18 +2832,18 @@ public extension MLSConversationManager {
         // actual processing progress, not just what the server returned.
         // This way interrupted catchups resume from the last successfully
         // processed message rather than re-fetching the entire page.
-        let persistedSeq = await lastStoredSequenceNumber(for: convo.groupId)
+        let persistedSeq = await lastStoredSequenceNumber(for: convo.conversationId)
         sinceSeq = persistedSeq ?? messages.last?.seq
         pages += 1
         if messages.count < 100 || pages >= pageLimit { break }
       }
 
       // After catchup completes, flush any remaining buffered messages for this conversation
-      logger.debug("[SEQ-ORDER] Flushing buffered messages after catchup for \(convo.groupId)")
+      logger.debug("[SEQ-ORDER] Flushing buffered messages after catchup for \(convo.conversationId)")
       do {
         // Use self.database directly - it's already the correct database for this user
         let buffered = try await messageOrderingCoordinator.flushBufferedMessages(
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           currentUserDID: userDid,
           database: database
         )
@@ -2862,7 +2862,7 @@ public extension MLSConversationManager {
         logger.error("[SEQ-ORDER] Failed to flush buffered messages: \(error.localizedDescription)")
       }
     } catch {
-      logger.error("❌ Catch-up failed for \(convo.groupId): \(error.localizedDescription)")
+      logger.error("❌ Catch-up failed for \(convo.conversationId): \(error.localizedDescription)")
     }
   }
 
@@ -2909,23 +2909,23 @@ public extension MLSConversationManager {
     }
 
     guard let userDid = userDid else { return }
-    if await shouldSkipProcessingForRejoin(conversationID: convo.groupId, source: "lookback") {
+    if await shouldSkipProcessingForRejoin(conversationID: convo.conversationId, source: "lookback") {
       return
     }
 
     // Calculate lookback sequence
     // We want to re-fetch the last 50 messages to catch any that were skipped
     // Use lastStoredSequenceNumber which hits the DB directly
-    let lastSeq = await lastStoredSequenceNumber(for: convo.groupId) ?? 0
+    let lastSeq = await lastStoredSequenceNumber(for: convo.conversationId) ?? 0
     let lookbackSeq = max(0, lastSeq - 50)
 
-    logger.info("[ORPHAN-Lookback] Fetching messages for \(convo.groupId.prefix(16)) starting from seq \(lookbackSeq) (lookback from \(lastSeq))")
+    logger.info("[ORPHAN-Lookback] Fetching messages for \(convo.conversationId.prefix(16)) starting from seq \(lookbackSeq) (lookback from \(lastSeq))")
 
     do {
       // Fetch messages with lookback
       // This will return messages > lookbackSeq
       let (messages, _, _) = try await apiClient.getMessages(
-        convoId: convo.groupId,
+        convoId: convo.conversationId,
         limit: 100,
         sinceSeq: lookbackSeq
       )
@@ -2935,7 +2935,7 @@ public extension MLSConversationManager {
         // Process them - our updated MLSMessageOrderingCoordinator will allow re-processing if missing from DB
         let _ = try await processMessagesInOrder(
           messages: messages,
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           source: "lookback"
         )
       } else {
@@ -2944,7 +2944,7 @@ public extension MLSConversationManager {
 
       // Flush buffer just in case
       let _ = try await messageOrderingCoordinator.flushBufferedMessages(
-           conversationID: convo.groupId,
+           conversationID: convo.conversationId,
            currentUserDID: userDid,
            database: database
       )
@@ -3521,6 +3521,7 @@ public extension MLSConversationManager {
 
     // Update conversation epoch
     let updatedConvo = BlueCatbirdMlsChatDefs.ConvoView(
+      conversationId: convo.conversationId,
       groupId: convo.groupId,
       creator: convo.creator,
       members: convo.members,
@@ -3542,7 +3543,7 @@ public extension MLSConversationManager {
 
     // Persist epoch to GRDB (fire-and-forget since this function is not async)
     if let userDid = userDid {
-      let groupId = convo.groupId
+      let conversationId = convo.conversationId
       let epochValue = Int64(newEpoch)
       let storage = self.storage
       let database = self.database
@@ -3550,7 +3551,7 @@ public extension MLSConversationManager {
       Task {
         do {
           try await storage.updateConversationEpoch(
-            conversationID: groupId,
+            conversationID: conversationId,
             currentUserDID: userDid,
             epoch: epochValue,
             database: database
@@ -4927,7 +4928,7 @@ public extension MLSConversationManager {
       logger.info("🔄 [ensureGroupInitialized] Attempting External Commit for creator rejoin...")
 
       do {
-        let _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convo.groupId)
+        let _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convo.conversationId)
         logger.info("✅ [ensureGroupInitialized] Creator successfully rejoined via External Commit")
       } catch {
         logger.error(
@@ -4938,7 +4939,7 @@ public extension MLSConversationManager {
     } else {
       // Group doesn't exist, initialize from Welcome message
       logger.info("Group not found locally, initializing from Welcome for conversation \(convoId)")
-      
+
       do {
         try await initializeGroupFromWelcome(convo: convo)
       } catch MLSConversationError.keyPackageDesyncRecoveryInitiated {
@@ -4946,7 +4947,7 @@ public extension MLSConversationManager {
         logger.info("   This is expected if our key package was rotated on the server but we don't have the private key anymore.")
         
         do {
-          _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convo.groupId)
+          _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convo.conversationId)
           logger.info("✅ Successfully recovered via External Commit")
         } catch {
           logger.error("❌ External Commit recovery failed: \(error.localizedDescription)")
@@ -4971,7 +4972,7 @@ public extension MLSConversationManager {
     // For same-user device sync (user already member, new device):
     // - Use External Commit instead (see syncWithServer)
     // ═══════════════════════════════════════════════════════════════════
-    logger.debug("Fetching Welcome message for conversation \(convo.groupId)")
+    logger.debug("Fetching Welcome message for conversation \(convo.conversationId)")
 
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
@@ -4982,7 +4983,7 @@ public extension MLSConversationManager {
     // The NSE might have received the first notification and started processing the Welcome
     // before the App finished syncing the conversation list.
     let _ = await MLSWelcomeGate.shared.waitForWelcomeIfPending(
-      for: convo.groupId,
+      for: convo.conversationId,
       userDID: userDid,
       timeout: .seconds(3)
     )
@@ -4990,32 +4991,32 @@ public extension MLSConversationManager {
     // Check if group appeared while we waited (meaning NSE successfully processed it)
     if let groupIdData = Data(hexEncoded: convo.groupId),
        await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
-       logger.info("✅ Group \(convo.groupId.prefix(8))... appeared after waiting for WelcomeGate - skipping processing")
+       logger.info("✅ Group \(convo.conversationId.prefix(8))... appeared after waiting for WelcomeGate - skipping processing")
 
        // Ensure local DB state is up to date (NSE might have created the group but not fully hydrated App-layer models)
        try await updateGroupStateAfterJoin(convo: convo, groupIdHex: convo.groupId, userDid: userDid)
        return
     }
 
-    await MLSWelcomeGate.shared.beginWelcomeProcessing(for: convo.groupId, userDID: userDid)
+    await MLSWelcomeGate.shared.beginWelcomeProcessing(for: convo.conversationId, userDID: userDid)
     defer {
-      Task { await MLSWelcomeGate.shared.completeWelcomeProcessing(for: convo.groupId, userDID: userDid) }
+      Task { await MLSWelcomeGate.shared.completeWelcomeProcessing(for: convo.conversationId, userDID: userDid) }
     }
 
     var groupIdHex: String
 
     let welcomeData: Data
     do {
-      welcomeData = try await apiClient.getWelcome(convoId: convo.groupId)
+      welcomeData = try await apiClient.getWelcome(convoId: convo.conversationId)
       logger.debug("Received Welcome message: \(welcomeData.count) bytes")
     } catch let error as MLSAPIError {
       if case .httpError(let statusCode, _) = error, statusCode == 410 {
         logger.info(
-          "📭 [HTTP 410 GONE] Welcome expired for \(convo.groupId) - KeyPackage consumed/expired")
+          "📭 [HTTP 410 GONE] Welcome expired for \(convo.conversationId) - KeyPackage consumed/expired")
         logger.info("🔄 Skipping Welcome, attempting External Commit directly...")
 
         groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.groupId,
+          convoId: convo.conversationId,
           userDid: userDid,
           reason: "Welcome expired (HTTP 410)"
         )
@@ -5028,11 +5029,11 @@ public extension MLSConversationManager {
       // This happens when the Welcome was never stored (race condition) or was deleted
       if case .httpError(let statusCode, _) = error, statusCode == 404 {
         logger.info(
-          "📭 [HTTP 404 NOT FOUND] Welcome not found for \(convo.groupId) - may be race condition or deleted")
+          "📭 [HTTP 404 NOT FOUND] Welcome not found for \(convo.conversationId) - may be race condition or deleted")
         logger.info("🔄 Skipping Welcome, attempting External Commit directly...")
 
         groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.groupId,
+          convoId: convo.conversationId,
           userDid: userDid,
           reason: "Welcome not found (HTTP 404)"
         )
@@ -5046,11 +5047,11 @@ public extension MLSConversationManager {
       // ⭐ FIX: Handle Petrel NetworkError for 404/410 status codes
       if case .responseError(let statusCode) = error, statusCode == 404 || statusCode == 410 {
         logger.info(
-          "📭 [NetworkError \(statusCode)] Welcome not found/expired for \(convo.groupId)")
+          "📭 [NetworkError \(statusCode)] Welcome not found/expired for \(convo.conversationId)")
         logger.info("🔄 Skipping Welcome, attempting External Commit directly...")
 
         groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.groupId,
+          convoId: convo.conversationId,
           userDid: userDid,
           reason: "Welcome not available (NetworkError \(statusCode))"
         )
@@ -5068,7 +5069,7 @@ public extension MLSConversationManager {
       do {
         _ = try await storage.ensureConversationExistsOrPlaceholder(
           userDID: userDid,
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           groupID: groupIdHex,
           senderDID: convo.members.first(where: { $0.did.description.lowercased() != userDid.lowercased() })?.did.description,
           database: database
@@ -5084,7 +5085,7 @@ public extension MLSConversationManager {
         logger.info("📤 Invalidating stale Welcome on server (NoMatchingKeyPackage)...")
         do {
           _ = try await apiClient.invalidateWelcome(
-            convoId: convo.groupId,
+            convoId: convo.conversationId,
             reason: "NoMatchingKeyPackage: key package hash_ref not found in local storage"
           )
         } catch {
@@ -5109,10 +5110,10 @@ public extension MLSConversationManager {
           }
         }
 
-        logger.info("🔄 Attempting fallback to External Commit for conversation \(convo.groupId)...")
+        logger.info("🔄 Attempting fallback to External Commit for conversation \(convo.conversationId)...")
 
         groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.groupId,
+          convoId: convo.conversationId,
           userDid: userDid,
           reason: "NoMatchingKeyPackage"
         )
@@ -5124,8 +5125,8 @@ public extension MLSConversationManager {
           let recovered = await recoveryManager.attemptRecoveryIfNeeded(
             for: error,
             userDid: userDid,
-            convoIds: [convo.groupId],
-            triggeringConvoId: convo.groupId,
+            convoIds: [convo.conversationId],
+            triggeringConvoId: convo.conversationId,
             isRemoteDataError: true 
           )
           if recovered {
@@ -5143,14 +5144,14 @@ public extension MLSConversationManager {
       }
 
       let ffiEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
-      state.epoch = ffiEpoch 
+      state.epoch = ffiEpoch
       groupStates[convo.groupId] = state
       logger.debug(
-        "Updated group epoch to \(ffiEpoch) (from FFI) for conversation \(convo.groupId)")
+        "Updated group epoch to \(ffiEpoch) (from FFI) for conversation \(convo.conversationId)")
 
       do {
         try await storage.updateConversationJoinInfo(
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           currentUserDID: userDid,
           joinMethod: .welcome,
           joinEpoch: Int64(ffiEpoch),
@@ -5161,13 +5162,13 @@ public extension MLSConversationManager {
       }
     }
 
-    logger.info("Successfully initialized group from Welcome for conversation \(convo.groupId)")
+    logger.info("Successfully initialized group from Welcome for conversation \(convo.conversationId)")
 
     // Insert history boundary marker for Welcome join
     if let groupIdData = Data(hexEncoded: groupIdHex) {
       let ffiEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
       await insertHistoryBoundaryMarker(
-        conversationId: convo.groupId,
+        conversationId: convo.conversationId,
         senderDID: userDid,
         epoch: ffiEpoch,
         contentKey: "history_boundary.new_member"
@@ -5383,12 +5384,12 @@ public extension MLSConversationManager {
       state.epoch = ffiEpoch  // Use FFI epoch, not server epoch
       groupStates[convo.groupId] = state
       logger.debug(
-        "Updated group epoch to \(ffiEpoch) (from FFI) for conversation \(convo.groupId)")
+        "Updated group epoch to \(ffiEpoch) (from FFI) for conversation \(convo.conversationId)")
 
       // Persist join method/epoch for UI. External Commit starts a new cryptographic history.
       do {
         try await storage.updateConversationJoinInfo(
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           currentUserDID: userDid,
           joinMethod: .externalCommit,
           joinEpoch: Int64(ffiEpoch),
@@ -5401,7 +5402,7 @@ public extension MLSConversationManager {
       // Also persist the current epoch to GRDB (joinInfo only updates joinEpoch, not epoch)
       do {
         try await storage.updateConversationEpoch(
-          conversationID: convo.groupId,
+          conversationID: convo.conversationId,
           currentUserDID: userDid,
           epoch: Int64(ffiEpoch),
           database: database
@@ -5420,7 +5421,7 @@ public extension MLSConversationManager {
       ? "history_boundary.device_rejoined"
       : "history_boundary.new_member"
     await insertHistoryBoundaryMarker(
-      conversationId: convo.groupId,
+      conversationId: convo.conversationId,
       senderDID: userDid,
       epoch: ecEpoch,
       contentKey: contentKey
@@ -5542,8 +5543,9 @@ public extension MLSConversationManager {
       var lastDeviceRecordDeniedReason: String?
 
       for candidate in options {
-        guard let decoded = Data(base64Encoded: candidate.keyPackage, options: []) else {
-          logger.error("❌ Failed to decode key package for \(candidate.did)")
+        let decoded = candidate.keyPackage.data
+        guard !decoded.isEmpty else {
+          logger.error("❌ Empty key package for \(candidate.did)")
           skippedCount += 1
           invalidPackages += 1
           continue
