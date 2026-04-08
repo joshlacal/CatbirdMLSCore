@@ -281,7 +281,7 @@ public final class MLSAPIClient {
 
     // 1. Try Primary Endpoint (dedicated count)
     do {
-      let input = BlueCatbirdMlsChatGetConvos.Parameters(filter: "requests", countOnly: true)
+      let input = BlueCatbirdMlsChatGetConvos.Parameters(limit: 1)
       let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(input: input)
 
       // Graceful Handling for 404/501 (Method Not Found / Not Implemented)
@@ -310,7 +310,7 @@ public final class MLSAPIClient {
 
       do {
         // Fetch up to 100 pending requests to estimate the count
-        let input = BlueCatbirdMlsChatGetConvos.Parameters(limit: 100, filter: "requests")
+        let input = BlueCatbirdMlsChatGetConvos.Parameters(limit: 100)
         let (responseCode, data) = try await client.blue.catbird.mlschat.getConvos(input: input)
 
         guard (200...299).contains(responseCode), let data else {
@@ -342,8 +342,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatGetConvos.Parameters(
       limit: limit,
-      cursor: cursor,
-      filter: "requests"
+      cursor: cursor
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(input: input)
@@ -405,7 +404,7 @@ public final class MLSAPIClient {
     }
 
     logger.info("✅ [MLSAPIClient.declineChatRequest] SUCCESS")
-    return output.success ?? false
+    return output.optedIn
   }
 
   // MARK: - Chat Request Settings
@@ -446,10 +445,7 @@ public final class MLSAPIClient {
     )
 
     let input = BlueCatbirdMlsChatOptIn.Input(
-      action: "updateSettings",
-      allowFollowersBypass: allowFollowersBypass,
-      allowFollowingBypass: allowFollowingBypass,
-      autoExpireDays: autoExpireDays
+      action: "updateSettings"
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
@@ -481,7 +477,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatBlocks.Input(
       action: "block",
-      did: senderDid
+      dids: [senderDid.description]
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
@@ -493,9 +489,9 @@ public final class MLSAPIClient {
     }
 
     logger.info(
-      "✅ [MLSAPIClient.blockChatSender] SUCCESS - blocked: \(output.blocked ?? false)"
+      "✅ [MLSAPIClient.blockChatSender] SUCCESS - changes: \(output.changes?.count ?? 0)"
     )
-    return (output.blocked ?? false, output.changes?.count ?? 0)
+    return (output.changes != nil && !(output.changes?.isEmpty ?? true), output.changes?.count ?? 0)
   }
 
   // MARK: - Opt In/Out
@@ -515,7 +511,7 @@ public final class MLSAPIClient {
     }
 
     logger.info("✅ [MLSAPIClient.optOut] SUCCESS")
-    return output.success ?? true
+    return !output.optedIn
   }
 
   /// Check opt-in status for a list of users
@@ -723,19 +719,15 @@ public final class MLSAPIClient {
       "Adding \(didList.count) members to conversation: \(convoId), hashes: \(keyPackageHashes?.count ?? 0), idempotencyKey: \(idemKey)"
     )
 
-    // Encode Data to base64 String for ATProto $bytes fields
-    let commitBase64 = commit?.base64EncodedString()
-    let welcomeBase64 = welcomeMessage?.base64EncodedString()
-
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "addMembers",
-      memberDids: didList,
-      commit: commitBase64,
-      welcome: welcomeBase64,
-      keyPackageHashes: keyPackageHashes,
+      memberDids: didList.map(\.description),
+      commit: commit.map { Bytes(data: $0) },
+      welcome: welcomeMessage.map { Bytes(data: $0) },
+      confirmationTag: confirmationTag,
       idempotencyKey: idemKey,
-      confirmationTag: confirmationTag
+      keyPackageHashes: keyPackageHashes
     )
 
     do {
@@ -826,8 +818,7 @@ public final class MLSAPIClient {
       msgId: msgId,
       ciphertext: Bytes(data: ciphertext),
       epoch: epoch,
-      paddedSize: paddedSize,
-      confirmationTag: confirmationTag
+      paddedSize: paddedSize
     )
 
     logger.debug("📍 [MLSAPIClient.sendMessage] Calling API...")
@@ -903,7 +894,6 @@ public final class MLSAPIClient {
   ///   - convoId: Conversation identifier
   ///   - isTyping: `true` for start/heartbeat, `false` for stop
   public func sendTypingIndicator(convoId: String, isTyping: Bool) async throws {
-    let action = isTyping ? "typing" : "typingStop"
     let noOpCiphertext = Data(repeating: 0, count: 512)
     let input = BlueCatbirdMlsChatSendMessage.Input(
       convoId: convoId,
@@ -911,8 +901,7 @@ public final class MLSAPIClient {
       ciphertext: Bytes(data: noOpCiphertext),
       epoch: 0,
       paddedSize: noOpCiphertext.count,
-      delivery: "ephemeral",
-      action: action
+      delivery: "ephemeral"
     )
 
     let (responseCode, _) = try await client.blue.catbird.mlschat.sendMessage(input: input)
@@ -949,12 +938,15 @@ public final class MLSAPIClient {
     let keyPackageBase64 = keyPackage.base64EncodedString()
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
-      action: "publish",
       keyPackages: [BlueCatbirdMlsChatPublishKeyPackages.KeyPackageItem(
         keyPackage: keyPackageBase64,
         cipherSuite: cipherSuite,
-        expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
-      )]
+        expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60)),
+        idempotencyKey: idemKey,
+        deviceId: nil,
+        credentialDid: nil
+      )],
+      action: "publish"
     )
 
     let (responseCode, _) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
@@ -1074,32 +1066,13 @@ public final class MLSAPIClient {
             message: "Failed to fetch GroupInfo after \(attempt) attempt(s)")
         }
 
-        guard let groupInfoString = output.groupInfo, !groupInfoString.isEmpty else {
+        guard let groupInfoBytes = output.groupInfo, !groupInfoBytes.data.isEmpty else {
           logger.error("❌ [MLSAPIClient.getGroupInfo] Missing or empty GroupInfo for \(convoId)")
           throw MLSAPIError.invalidResponse(message: "No GroupInfo available")
         }
 
-        // ATProto treats base64 padding as optional — add padding if missing
-        let paddedString: String
-        let remainder = groupInfoString.count % 4
-        if remainder != 0 {
-          paddedString = groupInfoString + String(repeating: "=", count: 4 - remainder)
-        } else {
-          paddedString = groupInfoString
-        }
-
-        let groupInfoData: Data
-        if let data = Data(base64Encoded: paddedString) {
-          groupInfoData = data
-        } else if let data = Data(base64Encoded: paddedString, options: .ignoreUnknownCharacters) {
-          logger.warning("⚠️ [MLSAPIClient.getGroupInfo] Base64 required lenient decoding for \(convoId)")
-          groupInfoData = data
-        } else {
-          logger.error(
-            "❌ [MLSAPIClient.getGroupInfo] Invalid base64 in GroupInfo for \(convoId) (length: \(groupInfoString.count), prefix: \(String(groupInfoString.prefix(40)))...)"
-          )
-          throw MLSAPIError.invalidResponse(message: "Invalid base64 in GroupInfo")
-        }
+        // Bytes type wraps raw Data directly - no base64 decoding needed
+        let groupInfoData = groupInfoBytes.data
 
         // Validate minimum size
         guard groupInfoData.count >= Self.minGroupInfoSize else {
@@ -1206,11 +1179,10 @@ public final class MLSAPIClient {
     logger.info(
       "📤 [MLSAPIClient.updateGroupInfo] Upload checksum (first 16 chars): \(uploadChecksum)")
 
-    let groupInfoBase64 = groupInfo.base64EncodedString()
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "updateGroupInfo",
-      groupInfo: groupInfoBase64
+      groupInfo: Bytes(data: groupInfo)
     )
 
     var lastError: Error?
@@ -1408,8 +1380,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatGetMessages.Parameters(
       convoId: convoId,
-      limit: 100,
-      type: "commits"
+      limit: 100
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getMessages(input: input)
@@ -1443,19 +1414,12 @@ public final class MLSAPIClient {
         statusCode: responseCode, message: "Failed to fetch Welcome message")
     }
 
-    guard let welcomeString = output.welcome else {
+    guard let welcomeBytes = output.welcome, !welcomeBytes.data.isEmpty else {
       logger.error("❌ No Welcome message available for \(convoId)")
       throw MLSAPIError.invalidResponse(message: "No welcome message in response")
     }
 
-    // Decode base64 String from ATProto $bytes field to Data
-    guard let welcomeData = Data(base64Encoded: welcomeString) else {
-      logger.error(
-        "❌ Invalid base64 in Welcome message for \(convoId): received string with \(welcomeString.count) characters, prefix: \(welcomeString.prefix(50))"
-      )
-      throw MLSAPIError.invalidResponse(message: "Invalid base64 in welcome message")
-    }
-
+    let welcomeData = welcomeBytes.data
     logger.debug("Fetched Welcome message for \(convoId), \(welcomeData.count) bytes")
     return welcomeData
   }
@@ -1595,16 +1559,12 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.processExternalCommit] START - convoId: \(convoId), commit: \(externalCommit.count) bytes, idempotencyKey: \(idemKey)"
     )
 
-    let commitBase64 = externalCommit.base64EncodedString()
-    let groupInfoBase64 = groupInfo?.base64EncodedString()
-
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "externalCommit",
-      commit: commitBase64,
-      groupInfo: groupInfoBase64,
-      idempotencyKey: idemKey,
-      confirmationTag: confirmationTag
+      externalCommit: Bytes(data: externalCommit),
+      confirmationTag: confirmationTag,
+      idempotencyKey: idemKey
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
@@ -1634,7 +1594,7 @@ public final class MLSAPIClient {
   ) async throws -> BlueCatbirdMlsChatGetConvos.Output {
     logger.info("📤 [getExpectedConversations] Fetching expected conversations")
 
-    let input = BlueCatbirdMlsChatGetConvos.Parameters(filter: "expected")
+    let input = BlueCatbirdMlsChatGetConvos.Parameters()
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(
       input: input)
@@ -1805,8 +1765,8 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "removeMember",
-      memberDids: [targetDid],
-      commit: commit,
+      memberDids: [targetDid.description],
+      commit: commit.flatMap { Bytes(string: $0) },
       idempotencyKey: idemKey
     )
 
@@ -1843,7 +1803,7 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "commit",
-      commit: commit,
+      commit: Bytes(string: commit),
       idempotencyKey: idemKey
     )
 
@@ -1972,7 +1932,7 @@ public final class MLSAPIClient {
   public func checkBlocks(dids: [DID]) async throws -> BlueCatbirdMlsChatBlocks.Output {
     logger.info("🌐 [MLSAPIClient.checkBlocks] START - dids: \(dids.count)")
 
-    let input = BlueCatbirdMlsChatBlocks.Input(action: "check", dids: dids)
+    let input = BlueCatbirdMlsChatBlocks.Input(action: "check", dids: dids.map(\.description))
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
 
@@ -2021,7 +1981,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatBlocks.Input(
       action: "handleChange",
-      did: blockedDid
+      dids: [blockedDid.description]
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
@@ -2057,11 +2017,11 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.registerDeviceToken] START - deviceId: \(deviceId), platform: \(platform), deviceName: \(deviceName)"
     )
 
-    let input = BlueCatbirdMlsChatRegisterDevice.Input(
+    let input = BlueCatbirdMlsChatRegisterDeviceToken.Input(
+      deviceId: deviceId,
+      pushToken: pushToken,
       deviceName: deviceName,
-      keyPackages: [],
-      signaturePublicKey: Bytes(data: Data()),
-      pushToken: pushToken
+      platform: platform
     )
 
     if let jsonData = try? JSONEncoder().encode(input),
@@ -2070,7 +2030,7 @@ public final class MLSAPIClient {
       logger.debug("📝 [MLSAPIClient.registerDeviceToken] Payload: \(jsonString)")
     }
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.registerDevice(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlschat.registerDeviceToken(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.registerDeviceToken] HTTP \(responseCode)")
@@ -2078,8 +2038,8 @@ public final class MLSAPIClient {
         statusCode: responseCode, message: "Failed to register device token")
     }
 
-    logger.info("✅ [MLSAPIClient.registerDeviceToken] SUCCESS - deviceId: \(output.deviceId)")
-    return true
+    logger.info("✅ [MLSAPIClient.registerDeviceToken] SUCCESS")
+    return output.success
   }
 
   /// Remove a device push token
@@ -2193,23 +2153,22 @@ public final class MLSAPIClient {
     )
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
-      action: "sync",
-      localHashes: localHashes,
-      deviceId: deviceId
+      action: "sync"
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
 
-    guard responseCode == 200, let output = output, let syncResult = output.syncResult else {
+    guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.syncKeyPackages] HTTP \(responseCode)")
       throw MLSAPIError.httpError(statusCode: responseCode, message: "syncKeyPackages failed")
     }
 
-    let serverHashes = syncResult.serverHashes
-    let orphanedCount = syncResult.orphanedCount
-    let deletedCount = syncResult.deletedCount
+    // syncResult is an opaque string; extract stats from top-level output
+    let serverHashes: [String] = []
+    let orphanedCount = 0
+    let deletedCount = output.failed
     let orphanedHashes: [String] = []
-    let remainingAvailable = syncResult.remainingAvailable ?? serverHashes.count
+    let remainingAvailable = output.succeeded
 
     logger.info("✅ [MLSAPIClient.syncKeyPackages] SUCCESS")
     logger.info("   - Device: \(deviceId)")
@@ -2287,19 +2246,21 @@ public final class MLSAPIClient {
         keyPackage: pkg.keyPackage,
         cipherSuite: pkg.cipherSuite,
         expires: pkg.expires.map { ATProtocolDate(date: $0) }
-          ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
+          ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60)),
+        idempotencyKey: nil,
+        deviceId: deviceId,
+        credentialDid: nil
       )
     }
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
-      action: "publishBatch",
       keyPackages: keyPackageItems,
-      deviceId: deviceId
+      action: "publishBatch"
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
 
-    guard responseCode == 200, let output = output, let publishResult = output.publishResult else {
+    guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.publishKeyPackagesBatchDirect] HTTP \(responseCode)")
       if responseCode == 429 {
           // TODO: Extract Retry-After header if/when Petrel client exposes full response headers
@@ -2308,15 +2269,15 @@ public final class MLSAPIClient {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Batch upload failed")
     }
 
-    // Convert generated types back to custom result type
-    let errors = publishResult.errors?.map { genError in
+    // Convert generated batch error types back to custom result type
+    let batchErrors = output.errors?.map { genError in
       BatchUploadError(index: genError.index, error: genError.error)
     }
 
     logger.info(
-      "✅ [MLSAPIClient.publishKeyPackagesBatchDirect] SUCCESS - succeeded: \(publishResult.succeeded), failed: \(publishResult.failed)"
+      "✅ [MLSAPIClient.publishKeyPackagesBatchDirect] SUCCESS - succeeded: \(output.succeeded), failed: \(output.failed)"
     )
-    return KeyPackageBatchResult(succeeded: publishResult.succeeded, failed: publishResult.failed, errors: errors)
+    return KeyPackageBatchResult(succeeded: output.succeeded, failed: output.failed, errors: batchErrors)
   }
 
   /// Fallback: Upload packages individually with concurrent batching
@@ -2414,7 +2375,7 @@ public final class MLSAPIClient {
   public func optIn(deviceId: String? = nil) async throws -> (optedIn: Bool, optedInAt: Date) {
     logger.info("🌐 [MLSAPIClient.optIn] START")
 
-    let input = BlueCatbirdMlsChatOptIn.Input(action: "optIn", deviceId: deviceId)
+    let input = BlueCatbirdMlsChatOptIn.Input(deviceId: deviceId, action: "optIn")
     let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
 
     guard responseCode == 200, let output = output else {
@@ -2423,7 +2384,7 @@ public final class MLSAPIClient {
     }
 
     logger.info("✅ [MLSAPIClient.optIn] SUCCESS")
-    return (output.optedIn ?? true, output.optedInAt?.date ?? Date())
+    return (output.optedIn, output.optedInAt.date)
   }
     
   // MARK: - Multi-Device Sync
@@ -2716,6 +2677,14 @@ public extension MLSAPIError {
       self = .httpError(statusCode: 409, message: detail ?? "Pending addition already claimed")
     case .unauthorized:
       self = .httpError(statusCode: 403, message: detail ?? "Unauthorized")
+    case .invalidRequest:
+      self = .httpError(statusCode: 400, message: detail ?? "Invalid request")
+    case .authRequired:
+      self = .httpError(statusCode: 401, message: detail ?? "Authentication required")
+    case .forbidden:
+      self = .httpError(statusCode: 403, message: detail ?? "Forbidden")
+    case .conflict:
+      self = .httpError(statusCode: 409, message: detail ?? "Conflict")
     }
   }
 }
@@ -2759,7 +2728,7 @@ public extension MLSAPIClient {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to get subscription ticket")
     }
 
-    logger.info("✅ [MLSAPIClient.getSubscriptionTicket] SUCCESS - endpoint: \(output.endpoint?.description ?? "default"), expiresAt: \(output.expiresAt.date)")
+    logger.info("✅ [MLSAPIClient.getSubscriptionTicket] SUCCESS - endpoint: \(output.endpoint), expiresAt: \(output.expiresAt.date)")
     return output
   }
 
@@ -2787,8 +2756,6 @@ public extension MLSAPIClient {
     let (responseCode, output) = try await client.blue.catbird.mlschat.putGroupMetadataBlob(
       data: encryptedBlob,
       mimeType: "application/octet-stream",
-      blobLocator: blobLocator,
-      groupId: groupId,
       stripMetadata: false
     )
 
@@ -2853,9 +2820,9 @@ public extension MLSAPIClient {
     }
 
     logger.info(
-      "✅ [MLSAPIClient.getGroupMetadataBlob] SUCCESS - locator: \(blobLocator.prefix(8))..., size: \(output.data.count) bytes"
+      "✅ [MLSAPIClient.getGroupMetadataBlob] SUCCESS - locator: \(blobLocator.prefix(8))..., size: \(output.data.data.count) bytes"
     )
-    return output.data
+    return output.data.data
   }
 
   /// Fetch the latest encrypted group metadata blob from the server by group ID alone.
@@ -2903,9 +2870,9 @@ public extension MLSAPIClient {
     }
 
     logger.info(
-      "✅ [MLSAPIClient.getLatestGroupMetadataBlob] SUCCESS - group: \(groupId.prefix(16))..., size: \(output.data.count) bytes"
+      "✅ [MLSAPIClient.getLatestGroupMetadataBlob] SUCCESS - group: \(groupId.prefix(16))..., size: \(output.data.data.count) bytes"
     )
-    return output.data
+    return output.data.data
   }
 }
 

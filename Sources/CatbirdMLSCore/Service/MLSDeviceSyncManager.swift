@@ -173,7 +173,10 @@ public actor MLSDeviceSyncManager {
             }
 
             let claimed = claimResult.claimedAddition!
-            let deviceDid = claimed.deviceCredentialDid
+            guard let deviceDid = claimed.deviceCredentialDid else {
+                logger.warning("   Claimed addition has no deviceCredentialDid - skipping")
+                return
+            }
 
             // Check if this was a self-claim attempt
             if claimed.claimedBy == nil {

@@ -3529,7 +3529,8 @@ public extension MLSConversationManager {
       createdAt: convo.createdAt,
       lastMessageAt: convo.lastMessageAt,
       metadata: convo.metadata,
-      confirmationTag: convo.confirmationTag
+      confirmationTag: convo.confirmationTag,
+      resetGeneration: convo.resetGeneration
     )
     conversations[convoId] = updatedConvo
 

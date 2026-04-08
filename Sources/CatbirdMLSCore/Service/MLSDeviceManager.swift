@@ -525,12 +525,10 @@ public actor MLSDeviceManager {
     logger.info(
       "🗑️ Deleting device \(deviceInfo.deviceId) for user \(normalizedUserDid.prefix(20))...")
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
-      convoId: "",
-      action: "removeDevice",
+    let input = BlueCatbirdMlsChatDeleteDevice.Input(
       deviceId: deviceInfo.deviceId
     )
-    let (responseCode, output) = try await apiClient.blue.catbird.mlschat.commitGroupChange(input: input)
+    let (responseCode, output) = try await apiClient.blue.catbird.mlschat.deleteDevice(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to delete device: HTTP \(responseCode)")
@@ -538,7 +536,7 @@ public actor MLSDeviceManager {
     }
 
     logger.info("✅ Device deleted successfully")
-    logger.info("   - Success: \(output.success)")
+    logger.info("   - Deleted: \(output.deleted), keyPackagesDeleted: \(output.keyPackagesDeleted)")
 
     return 0
   }

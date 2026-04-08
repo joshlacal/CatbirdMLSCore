@@ -454,6 +454,25 @@ public actor MLSEventStreamManager {
             saveCursor(groupReset.cursor, for: convoId)
             await handler.onGroupReset?(groupReset)
 
+        case .groupInfoRefreshRequestedEvent(let refreshEvent):
+            logger.info("GroupInfo refresh requested: convo=\(refreshEvent.convoId)")
+            saveCursor(refreshEvent.cursor, for: convoId)
+
+        case .readditionRequestedEvent(let readditionEvent):
+            logger.info("Readdition requested: convo=\(readditionEvent.convoId)")
+            saveCursor(readditionEvent.cursor, for: convoId)
+
+        case .membershipChangeEvent(let membershipEvent):
+            logger.info("Membership change: convo=\(membershipEvent.convoId), did=\(membershipEvent.did)")
+            saveCursor(membershipEvent.cursor, for: convoId)
+            if let action = MembershipAction(rawValue: membershipEvent.action) {
+                await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
+            }
+
+        case .readEvent(let readEvent):
+            logger.info("Read event: convo=\(readEvent.convoId)")
+            saveCursor(readEvent.cursor, for: convoId)
+
         }
     }
     

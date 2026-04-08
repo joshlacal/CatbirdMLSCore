@@ -435,9 +435,9 @@ public actor MLSWebSocketManager {
 
     case .memberLeft(let memberLeft):
       logger.info(
-        "🔌 WS: MEMBER LEFT - convo: \(memberLeft.convoId.prefix(16)), did: \(memberLeft.did), action: \(memberLeft.action)")
+        "🔌 WS: MEMBER LEFT - convo: \(memberLeft.convoId.prefix(16)), did: \(memberLeft.did), action: \(memberLeft.action ?? "unknown")")
       saveCursor(memberLeft.cursor, for: convoId)
-      if let action = MembershipAction(rawValue: memberLeft.action) {
+      if let actionStr = memberLeft.action, let action = MembershipAction(rawValue: actionStr) {
         await handler.onMembershipChanged?(memberLeft.convoId, memberLeft.did, action)
       }
       if memberLeft.action == "kicked" {
@@ -462,6 +462,25 @@ public actor MLSWebSocketManager {
         "🔌 WS: GROUP RESET - convo: \(groupReset.convoId.prefix(16)), newGroup: \(groupReset.newGroupId.prefix(16)), gen: \(groupReset.resetGeneration)")
       saveCursor(groupReset.cursor, for: convoId)
       await handler.onGroupReset?(groupReset)
+
+    case .groupInfoRefreshRequestedEvent(let refreshEvent):
+      logger.info("🔌 WS: GROUP INFO REFRESH REQUESTED - convo: \(refreshEvent.convoId.prefix(16))")
+      saveCursor(refreshEvent.cursor, for: convoId)
+
+    case .readditionRequestedEvent(let readditionEvent):
+      logger.info("🔌 WS: READDITION REQUESTED - convo: \(readditionEvent.convoId.prefix(16))")
+      saveCursor(readditionEvent.cursor, for: convoId)
+
+    case .membershipChangeEvent(let membershipEvent):
+      logger.info("🔌 WS: MEMBERSHIP CHANGE - convo: \(membershipEvent.convoId.prefix(16)), did: \(membershipEvent.did)")
+      saveCursor(membershipEvent.cursor, for: convoId)
+      if let action = MembershipAction(rawValue: membershipEvent.action) {
+        await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
+      }
+
+    case .readEvent(let readEvent):
+      logger.info("🔌 WS: READ EVENT - convo: \(readEvent.convoId.prefix(16))")
+      saveCursor(readEvent.cursor, for: convoId)
 
     }
   }

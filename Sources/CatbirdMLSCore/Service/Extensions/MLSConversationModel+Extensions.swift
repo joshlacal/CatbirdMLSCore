@@ -19,7 +19,8 @@ public extension MLSConversationModel {
       createdAt: ATProtocolDate(date: createdAt),
       lastMessageAt: lastMessageAt.map { ATProtocolDate(date: $0) },
       metadata: nil,
-      confirmationTag: nil
+      confirmationTag: nil,
+      resetGeneration: nil
     )
   }
 }

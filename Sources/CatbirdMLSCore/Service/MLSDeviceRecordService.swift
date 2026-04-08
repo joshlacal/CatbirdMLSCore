@@ -298,8 +298,11 @@ internal actor MLSDeviceRecordService {
     let collection = try NSID(nsidString: Self.deviceCollection)
 
     let record = BlueCatbirdMlsChatDevice(
+      deviceId: UUID().uuidString,
+      deviceName: nil,
       mlsSignaturePublicKey: Bytes(data: signaturePublicKey),
       algorithm: algorithm,
+      platform: "ios",
       createdAt: ATProtocolDate(date: Date())
     )
 
