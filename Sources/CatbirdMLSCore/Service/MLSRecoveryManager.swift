@@ -34,6 +34,15 @@ public actor MLSRecoveryManager {
   /// Maximum rejoin attempts per conversation before giving up
   private let maxRejoinAttempts = 3
 
+  // MARK: - GroupInfo 404 Circuit Breaker (Spec §8.3, §10)
+
+  /// Tracks consecutive GroupInfo 404 responses per conversation.
+  /// Spec §10: GROUPINFO_404_CIRCUIT_BREAKER = 3
+  private var groupInfo404Counts: [String: Int] = [:]
+
+  /// Maximum consecutive 404s before tripping the circuit breaker
+  private let groupInfo404MaxStrikes = 3
+
   /// Calculate exponential backoff cooldown based on attempt count
   /// - Parameter attempts: Number of failed attempts so far
   /// - Returns: Cooldown duration in seconds
@@ -68,6 +77,43 @@ public actor MLSRecoveryManager {
   public init(mlsClient: MLSClient, mlsAPIClient: MLSAPIClient) {
     self.mlsClient = mlsClient
     self.mlsAPIClient = mlsAPIClient
+  }
+
+  // MARK: - GroupInfo 404 Circuit Breaker (Spec §8.3)
+
+  /// Check if the GroupInfo 404 circuit breaker is tripped for a conversation.
+  /// Spec §8.3: "IF tripped (>= GROUPINFO_404_CIRCUIT_BREAKER consecutive 404s): return FAILED"
+  /// - Parameter convoId: Conversation identifier
+  /// - Returns: `true` if the circuit breaker is tripped (should skip External Commit attempt)
+  public func isGroupInfo404CircuitBreakerTripped(convoId: String) -> Bool {
+    let count = groupInfo404Counts[convoId] ?? 0
+    let maxStrikes = self.groupInfo404MaxStrikes
+    if count >= maxStrikes {
+      logger.warning(
+        "🚫 [GroupInfo404CB] Circuit breaker TRIPPED for \(convoId.prefix(16)) — \(count) consecutive 404s (max: \(maxStrikes))"
+      )
+      return true
+    }
+    return false
+  }
+
+  /// Record a GroupInfo 404 response for a conversation.
+  /// - Parameter convoId: Conversation identifier
+  public func recordGroupInfo404(convoId: String) {
+    let current = groupInfo404Counts[convoId] ?? 0
+    groupInfo404Counts[convoId] = current + 1
+    let maxStrikes = self.groupInfo404MaxStrikes
+    logger.warning(
+      "📝 [GroupInfo404CB] Recorded 404 for \(convoId.prefix(16)) — now \(current + 1)/\(maxStrikes)"
+    )
+  }
+
+  /// Clear the GroupInfo 404 counter for a conversation (on successful GroupInfo fetch).
+  /// - Parameter convoId: Conversation identifier
+  public func clearGroupInfo404(convoId: String) {
+    if groupInfo404Counts.removeValue(forKey: convoId) != nil {
+      logger.info("✅ [GroupInfo404CB] Cleared 404 counter for \(convoId.prefix(16))")
+    }
   }
 
   // MARK: - Per-Conversation Rejoin Tracking
@@ -122,7 +168,7 @@ public actor MLSRecoveryManager {
         do {
           let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
             convoId: convoId,
-            failureType: "rejoin_exhausted"
+            failureType: "external_commit_exhausted"  // Spec §8.6
           )
           let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
           self.logger.info(

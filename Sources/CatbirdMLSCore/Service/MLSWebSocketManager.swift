@@ -276,10 +276,10 @@ public actor MLSWebSocketManager {
     let logPrefix = convoId != nil ? "convoId: \(convoId!.prefix(12))..." : "GLOBAL"
     logger.info("🔌 WS: runSubscription() started for \(key), cursor: \(cursor ?? "nil")")
     var reconnectAttempts = 0
-    let maxReconnectAttempts = 5
-    let baseReconnectDelay: TimeInterval = 2.0
+    // Spec §7: Exponential backoff (1s, 2s, 4s, 8s, max 30s), no give-up limit
+    let maxReconnectDelay: TimeInterval = 30.0
 
-    while !Task.isCancelled && shouldStop[key] != true && reconnectAttempts < maxReconnectAttempts {
+    while !Task.isCancelled && shouldStop[key] != true {
       let connectionStartTime = Date()
 
       do {
@@ -315,6 +315,9 @@ public actor MLSWebSocketManager {
           }
         }
 
+        // Reset attempts on successful connection
+        reconnectAttempts = 0
+
         // 4. Process messages
         var eventCount = 0
 
@@ -332,17 +335,12 @@ public actor MLSWebSocketManager {
           break
         }
 
-        // Reset retries if connection was stable
-        let duration = Date().timeIntervalSince(connectionStartTime)
-        if duration > 5.0 {
-          reconnectAttempts = 0
-        } else if eventCount == 0 {
+        // Stream ended without error — reconnect with backoff
+        if !Task.isCancelled && shouldStop[key] != true {
           reconnectAttempts += 1
-        }
-
-        if reconnectAttempts < maxReconnectAttempts && shouldStop[key] != true {
           connectionState[key] = .reconnecting
-          let delay = baseReconnectDelay * Double(max(1, reconnectAttempts))
+          let delay = min(pow(2.0, Double(reconnectAttempts - 1)), maxReconnectDelay)
+          logger.info("🔌 WS: Stream ended for \(key), reconnecting in \(String(format: "%.0f", delay))s (attempt \(reconnectAttempts))")
           try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
 
@@ -361,32 +359,22 @@ public actor MLSWebSocketManager {
           await errorHandler(error)
         }
 
-        // Reset if connection was stable
-        if Date().timeIntervalSince(connectionStartTime) > 5.0 {
-          reconnectAttempts = 0
-        }
-
         if !Task.isCancelled && shouldStop[key] != true {
           reconnectAttempts += 1
-
-          if reconnectAttempts < maxReconnectAttempts {
-            logger.info(
-              "Attempting reconnect \(reconnectAttempts)/\(maxReconnectAttempts) for: \(key)")
-            connectionState[key] = .reconnecting
-            let delay = baseReconnectDelay * Double(reconnectAttempts)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-          }
+          connectionState[key] = .reconnecting
+          // Spec §7: Exponential backoff 1s, 2s, 4s, 8s, ... capped at 30s
+          let delay = min(pow(2.0, Double(reconnectAttempts - 1)), maxReconnectDelay)
+          logger.info(
+            "🔌 WS: Reconnecting in \(String(format: "%.0f", delay))s (attempt \(reconnectAttempts)) for: \(key)")
+          try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
       }
     }
 
-    if reconnectAttempts >= maxReconnectAttempts {
-      logger.error("Max reconnect attempts reached for: \(key)")
-      connectionState[key] = .disconnected
-    } else if shouldStop[key] == true {
+    if shouldStop[key] == true {
       logger.info("🔌 WS: Subscription stopped gracefully for: \(key)")
-      connectionState[key] = .disconnected
     }
+    connectionState[key] = .disconnected
   }
 
   private func handleEvent(
@@ -435,9 +423,9 @@ public actor MLSWebSocketManager {
 
     case .memberLeft(let memberLeft):
       logger.info(
-        "🔌 WS: MEMBER LEFT - convo: \(memberLeft.convoId.prefix(16)), did: \(memberLeft.did), action: \(memberLeft.action ?? "unknown")")
+        "🔌 WS: MEMBER LEFT - convo: \(memberLeft.convoId.prefix(16)), did: \(memberLeft.did), action: \(memberLeft.action)")
       saveCursor(memberLeft.cursor, for: convoId)
-      if let actionStr = memberLeft.action, let action = MembershipAction(rawValue: actionStr) {
+      if let action = MembershipAction(rawValue: memberLeft.action) {
         await handler.onMembershipChanged?(memberLeft.convoId, memberLeft.did, action)
       }
       if memberLeft.action == "kicked" {

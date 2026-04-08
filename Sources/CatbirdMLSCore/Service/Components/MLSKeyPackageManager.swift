@@ -190,7 +190,7 @@ public actor MLSKeyPackageManager {
       let didObj = try DID(didString: userDid)
       let keyPackageRef = BlueCatbirdMlsChatDefs.KeyPackageRef(
         did: didObj,
-        keyPackage: keyPackageData.base64EncodedString(),
+        keyPackage: Bytes(data: keyPackageData),
         keyPackageHash: nil,  // Server will compute and return this in getKeyPackages
         cipherSuite: defaultCipherSuite
       )
@@ -239,10 +239,10 @@ public actor MLSKeyPackageManager {
     // In multi-device setups, user totals can look healthy while this device has 0 packages.
     do {
       let perDeviceStatus = try await splitClient.syncKeyPackageHashes(for: userDid)
-      let minimumPerDeviceAvailable = 20
+      let minimumPerDeviceAvailable = 10  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
 
       if perDeviceStatus.remainingAvailable < minimumPerDeviceAvailable {
-        let targetInventory = max(minimumPerDeviceAvailable + 10, 25)
+        let targetInventory = 50  // Spec §10: KEY_PACKAGE_TARGET = 50
         logger.warning(
           "⚠️ Device inventory low (\(perDeviceStatus.remainingAvailable)); replenishing toward \(targetInventory)"
         )
@@ -308,7 +308,7 @@ public actor MLSKeyPackageManager {
       var forceServerRefresh = false
       if let cachedCount = await cache.getCachedCount() {
         logger.debug("Using cached count: \(cachedCount)")
-        let threshold = 20
+        let threshold = 10  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
         if cachedCount >= threshold {
           logger.info("✅ Cached inventory sufficient: \(cachedCount) >= \(threshold)")
           return
@@ -337,14 +337,14 @@ public actor MLSKeyPackageManager {
 
       let enhancedStats = EnhancedKeyPackageStats(
         available: stats.stats.available,
-        threshold: 10,
+        threshold: 10,  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
         total: stats.stats.available,
         consumed: 0,
         consumedLast24h: nil,
         consumedLast7d: nil,
         averageDailyConsumption: nil,
         predictedDepletionDays: nil,
-        needsReplenish: stats.stats.available < 10
+        needsReplenish: stats.stats.available < 10  // KEY_PACKAGE_LOW_THRESHOLD
       )
 
       logger.info(
@@ -382,7 +382,7 @@ public actor MLSKeyPackageManager {
     do {
       let stats = try await apiClient.getKeyPackageStats()
       let available = stats.stats.available
-      let threshold = 10
+      let threshold = 10  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
       logger.info(
         "📊 Key package inventory: available=\(available), threshold=\(threshold)")
 
@@ -390,7 +390,7 @@ public actor MLSKeyPackageManager {
         logger.warning(
           "⚠️ Key package count (\(available)) below threshold (\(threshold)) - replenishing..."
         )
-        let neededCount = max(100 - available, 0)
+        let neededCount = max(50 - available, 0)  // Spec §10: KEY_PACKAGE_TARGET = 50
         try await uploadKeyPackageBatchSmart(
           for: userDid,
           count: neededCount,
@@ -437,7 +437,7 @@ public actor MLSKeyPackageManager {
   /// Smart batch upload using batch API
   public func uploadKeyPackageBatchSmart(
     for userDid: String,
-    count: Int = 25,  // Capped to stay under server body limit (~3.7 KB per package)
+    count: Int = 50,  // Spec §10: KEY_PACKAGE_TARGET = 50
     maxGeneratedPackages: Int? = nil
   ) async throws {
     logger.info("🔄 Starting smart key package replenishment (requested count: \(count))...")
@@ -473,7 +473,7 @@ public actor MLSKeyPackageManager {
     // STEP 2: Query DEVICE-SPECIFIC server inventory via syncKeyPackages
     // This is critical for multi-device support - user-level stats include packages from other devices
     var deviceServerAvailable: Int
-    let serverThreshold = 20 // Minimum packages per device
+    let serverThreshold = 10  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
     
     do {
       // syncKeyPackageHashes returns per-device stats
@@ -494,8 +494,8 @@ public actor MLSKeyPackageManager {
     }
     
     // STEP 3: Calculate server upload need (per-device)
-    // Use the requested count as the target inventory level, but at least the threshold+buffer
-    let targetInventory = max(serverThreshold + 10, count)
+    // Use the requested count as the target inventory level, at least KEY_PACKAGE_TARGET
+    let targetInventory = max(50, count)  // Spec §10: KEY_PACKAGE_TARGET = 50
     let serverUploadNeeded = max(0, targetInventory - deviceServerAvailable)
 
     // STEP 4: Determine total packages to generate
@@ -513,7 +513,7 @@ public actor MLSKeyPackageManager {
     }
 
     // STEP 5: Cap at API batch limit
-    let requestedGenerateCount = min(totalToGenerate, 25)  // Server body limit cap
+    let requestedGenerateCount = min(totalToGenerate, 50)  // Spec §10: KEY_PACKAGE_TARGET = 50
     let generateCount: Int
     if let maxGeneratedPackages {
       generateCount = min(requestedGenerateCount, maxGeneratedPackages)

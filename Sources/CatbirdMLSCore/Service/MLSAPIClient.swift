@@ -404,7 +404,7 @@ public final class MLSAPIClient {
     }
 
     logger.info("✅ [MLSAPIClient.declineChatRequest] SUCCESS")
-    return output.optedIn
+    return output.optedIn == true
   }
 
   // MARK: - Chat Request Settings
@@ -477,7 +477,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatBlocks.Input(
       action: "block",
-      dids: [senderDid.description]
+      dids: [senderDid]
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
@@ -511,7 +511,7 @@ public final class MLSAPIClient {
     }
 
     logger.info("✅ [MLSAPIClient.optOut] SUCCESS")
-    return !output.optedIn
+    return output.optedIn != true
   }
 
   /// Check opt-in status for a list of users
@@ -563,14 +563,11 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.createConversation] START - groupId: \(groupId.prefix(16))..., members: \(initialMembers?.count ?? 0), hashes: \(keyPackageHashes?.count ?? 0), idempotencyKey: \(idemKey)"
     )
 
-    // Encode Data to base64 String for ATProto $bytes field
-    let welcomeBase64 = welcomeMessage?.base64EncodedString()
-
     let input = BlueCatbirdMlsChatCreateConvo.Input(
       groupId: groupId,
       cipherSuite: cipherSuite,
       initialMembers: initialMembers,
-      welcomeMessage: welcomeBase64,
+      welcomeMessage: welcomeMessage.map { Bytes(data: $0) },
       keyPackageHashes: keyPackageHashes,
       metadata: metadata
     )
@@ -579,9 +576,9 @@ public final class MLSAPIClient {
     logger.debug("  - groupId: \(groupId)")
     logger.debug("  - cipherSuite: \(cipherSuite)")
     logger.debug("  - initialMembers: \(initialMembers?.map { $0 } ?? [])")
-    logger.debug("  - welcomeMessage length: \(welcomeBase64?.count ?? 0) chars")
-    if let welcome = welcomeBase64 {
-      logger.debug("  - welcomeMessage prefix: \(String(welcome.prefix(50)))...")
+    logger.debug("  - welcomeMessage length: \(welcomeMessage?.count ?? 0) bytes")
+    if let welcome = welcomeMessage {
+      logger.debug("  - welcomeMessage prefix: \(welcome.prefix(50).base64EncodedString().prefix(50))...")
     }
     logger.debug("  - metadata: \(metadata != nil ? "present" : "nil")")
     logger.debug("  - keyPackageHashes: \(keyPackageHashes?.count ?? 0) items")
@@ -674,7 +671,7 @@ public final class MLSAPIClient {
       convoId: convoId,
       newGroupId: newGroupId,
       cipherSuite: cipherSuite,
-      groupInfo: groupInfo,
+      groupInfo: groupInfo.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } },
       reason: reason
     )
 
@@ -722,12 +719,12 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "addMembers",
-      memberDids: didList.map(\.description),
+      memberDids: didList,
       commit: commit.map { Bytes(data: $0) },
       welcome: welcomeMessage.map { Bytes(data: $0) },
-      confirmationTag: confirmationTag,
+      keyPackageHashes: keyPackageHashes,
       idempotencyKey: idemKey,
-      keyPackageHashes: keyPackageHashes
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } }
     )
 
     do {
@@ -934,19 +931,13 @@ public final class MLSAPIClient {
       "Publishing key package with cipher suite: \(cipherSuite), \(keyPackage.count) bytes, idempotencyKey: \(idemKey)"
     )
 
-    // Encode Data to base64 String for ATProto $bytes field
-    let keyPackageBase64 = keyPackage.base64EncodedString()
-
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
+      action: "publish",
       keyPackages: [BlueCatbirdMlsChatPublishKeyPackages.KeyPackageItem(
-        keyPackage: keyPackageBase64,
+        keyPackage: Bytes(data: keyPackage),
         cipherSuite: cipherSuite,
-        expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60)),
-        idempotencyKey: idemKey,
-        deviceId: nil,
-        credentialDid: nil
-      )],
-      action: "publish"
+        expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
+      )]
     )
 
     let (responseCode, _) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
@@ -1363,24 +1354,28 @@ public final class MLSAPIClient {
     return output.epoch ?? 0
   }
 
-  /// Get commit messages within an epoch range
+  /// Get commit messages only (type: "commit") for pre-send sync and send recovery.
+  /// Spec §5.1: Pre-send sync MUST use type "commit", NOT "all" or "app".
   /// - Parameters:
   ///   - convoId: Conversation identifier
-  ///   - fromEpoch: Starting epoch (inclusive)
-  ///   - toEpoch: Ending epoch (inclusive), defaults to current epoch if nil
+  ///   - fromEpoch: Optional starting epoch (inclusive) for client-side filtering
+  ///   - toEpoch: Optional ending epoch (inclusive) for client-side filtering
+  ///   - limit: Maximum number of commits to return (default: 50, spec SEND_SYNC_BATCH_SIZE)
   /// - Returns: Array of commit messages
   public func getCommits(
     convoId: String,
-    fromEpoch: Int,
-    toEpoch: Int? = nil
+    fromEpoch: Int? = nil,
+    toEpoch: Int? = nil,
+    limit: Int = 50
   ) async throws -> [BlueCatbirdMlsChatDefs.MessageView] {
     logger.debug(
-      "Fetching commits for \(convoId) from epoch \(fromEpoch) to \(toEpoch?.description ?? "current")"
+      "Fetching commits (type=commit) for \(convoId), fromEpoch: \(fromEpoch?.description ?? "nil"), toEpoch: \(toEpoch?.description ?? "nil"), limit: \(limit)"
     )
 
     let input = BlueCatbirdMlsChatGetMessages.Parameters(
       convoId: convoId,
-      limit: 100
+      limit: limit,
+      type: "commit"
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getMessages(input: input)
@@ -1389,12 +1384,17 @@ public final class MLSAPIClient {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch commits")
     }
 
-    // Filter by epoch range client-side (getMessages uses seq-based pagination)
-    let filtered = output.messages.filter { msg in
-      msg.epoch >= fromEpoch && (toEpoch == nil || msg.epoch <= toEpoch!)
+    // Client-side epoch filtering when requested
+    let filtered: [BlueCatbirdMlsChatDefs.MessageView]
+    if let fromEpoch = fromEpoch {
+      filtered = output.messages.filter { msg in
+        msg.epoch >= fromEpoch && (toEpoch == nil || msg.epoch <= toEpoch!)
+      }
+    } else {
+      filtered = output.messages
     }
 
-    logger.debug("Fetched \(filtered.count) commits (from \(output.messages.count) messages)")
+    logger.debug("Fetched \(filtered.count) commits (from \(output.messages.count) total)")
     return filtered
   }
 
@@ -1562,9 +1562,9 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "externalCommit",
-      externalCommit: Bytes(data: externalCommit),
-      confirmationTag: confirmationTag,
-      idempotencyKey: idemKey
+      commit: Bytes(data: externalCommit),
+      idempotencyKey: idemKey,
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } }
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
@@ -1765,8 +1765,8 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "removeMember",
-      memberDids: [targetDid.description],
-      commit: commit.flatMap { Bytes(string: $0) },
+      memberDids: [targetDid],
+      commit: commit.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } },
       idempotencyKey: idemKey
     )
 
@@ -1803,7 +1803,7 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "commit",
-      commit: Bytes(string: commit),
+      commit: Data(base64Encoded: commit).map { Bytes(data: $0) },
       idempotencyKey: idemKey
     )
 
@@ -1932,7 +1932,7 @@ public final class MLSAPIClient {
   public func checkBlocks(dids: [DID]) async throws -> BlueCatbirdMlsChatBlocks.Output {
     logger.info("🌐 [MLSAPIClient.checkBlocks] START - dids: \(dids.count)")
 
-    let input = BlueCatbirdMlsChatBlocks.Input(action: "check", dids: dids.map(\.description))
+    let input = BlueCatbirdMlsChatBlocks.Input(action: "check", dids: dids)
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
 
@@ -1981,7 +1981,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatBlocks.Input(
       action: "handleChange",
-      dids: [blockedDid.description]
+      dids: [blockedDid]
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
@@ -2166,9 +2166,9 @@ public final class MLSAPIClient {
     // syncResult is an opaque string; extract stats from top-level output
     let serverHashes: [String] = []
     let orphanedCount = 0
-    let deletedCount = output.failed
+    let deletedCount = output.publishResult?.failed ?? 0
     let orphanedHashes: [String] = []
-    let remainingAvailable = output.succeeded
+    let remainingAvailable = output.publishResult?.succeeded ?? 0
 
     logger.info("✅ [MLSAPIClient.syncKeyPackages] SUCCESS")
     logger.info("   - Device: \(deviceId)")
@@ -2243,19 +2243,17 @@ public final class MLSAPIClient {
     // Convert custom types to generated types
     let keyPackageItems = packages.map { pkg in
       BlueCatbirdMlsChatPublishKeyPackages.KeyPackageItem(
-        keyPackage: pkg.keyPackage,
+        keyPackage: Bytes(data: Data(base64Encoded: pkg.keyPackage) ?? Data()),
         cipherSuite: pkg.cipherSuite,
         expires: pkg.expires.map { ATProtocolDate(date: $0) }
-          ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60)),
-        idempotencyKey: nil,
-        deviceId: deviceId,
-        credentialDid: nil
+          ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
       )
     }
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
+      action: "publishBatch",
       keyPackages: keyPackageItems,
-      action: "publishBatch"
+      deviceId: deviceId
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
@@ -2270,14 +2268,16 @@ public final class MLSAPIClient {
     }
 
     // Convert generated batch error types back to custom result type
-    let batchErrors = output.errors?.map { genError in
+    let batchErrors = output.publishResult?.errors?.map { genError in
       BatchUploadError(index: genError.index, error: genError.error)
     }
 
+    let succeeded = output.publishResult?.succeeded ?? 0
+    let failed = output.publishResult?.failed ?? 0
     logger.info(
-      "✅ [MLSAPIClient.publishKeyPackagesBatchDirect] SUCCESS - succeeded: \(output.succeeded), failed: \(output.failed)"
+      "✅ [MLSAPIClient.publishKeyPackagesBatchDirect] SUCCESS - succeeded: \(succeeded), failed: \(failed)"
     )
-    return KeyPackageBatchResult(succeeded: output.succeeded, failed: output.failed, errors: batchErrors)
+    return KeyPackageBatchResult(succeeded: succeeded, failed: failed, errors: batchErrors)
   }
 
   /// Fallback: Upload packages individually with concurrent batching
@@ -2375,7 +2375,7 @@ public final class MLSAPIClient {
   public func optIn(deviceId: String? = nil) async throws -> (optedIn: Bool, optedInAt: Date) {
     logger.info("🌐 [MLSAPIClient.optIn] START")
 
-    let input = BlueCatbirdMlsChatOptIn.Input(deviceId: deviceId, action: "optIn")
+    let input = BlueCatbirdMlsChatOptIn.Input(action: "optIn", deviceId: deviceId)
     let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
 
     guard responseCode == 200, let output = output else {
@@ -2384,7 +2384,7 @@ public final class MLSAPIClient {
     }
 
     logger.info("✅ [MLSAPIClient.optIn] SUCCESS")
-    return (output.optedIn, output.optedInAt.date)
+    return (output.optedIn == true, output.optedInAt?.date ?? Date())
   }
     
   // MARK: - Multi-Device Sync
@@ -2728,7 +2728,7 @@ public extension MLSAPIClient {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to get subscription ticket")
     }
 
-    logger.info("✅ [MLSAPIClient.getSubscriptionTicket] SUCCESS - endpoint: \(output.endpoint), expiresAt: \(output.expiresAt.date)")
+    logger.info("✅ [MLSAPIClient.getSubscriptionTicket] SUCCESS - endpoint: \(output.endpoint?.description ?? "nil"), expiresAt: \(output.expiresAt.date)")
     return output
   }
 
@@ -2756,7 +2756,11 @@ public extension MLSAPIClient {
     let (responseCode, output) = try await client.blue.catbird.mlschat.putGroupMetadataBlob(
       data: encryptedBlob,
       mimeType: "application/octet-stream",
-      stripMetadata: false
+      stripMetadata: false,
+      params: BlueCatbirdMlsChatPutGroupMetadataBlob.Parameters(
+        blobLocator: blobLocator,
+        groupId: groupId
+      )
     )
 
     guard responseCode == 200, let output = output else {
@@ -2820,9 +2824,9 @@ public extension MLSAPIClient {
     }
 
     logger.info(
-      "✅ [MLSAPIClient.getGroupMetadataBlob] SUCCESS - locator: \(blobLocator.prefix(8))..., size: \(output.data.data.count) bytes"
+      "✅ [MLSAPIClient.getGroupMetadataBlob] SUCCESS - locator: \(blobLocator.prefix(8))..., size: \(output.data.count) bytes"
     )
-    return output.data.data
+    return output.data
   }
 
   /// Fetch the latest encrypted group metadata blob from the server by group ID alone.
@@ -2870,9 +2874,9 @@ public extension MLSAPIClient {
     }
 
     logger.info(
-      "✅ [MLSAPIClient.getLatestGroupMetadataBlob] SUCCESS - group: \(groupId.prefix(16))..., size: \(output.data.data.count) bytes"
+      "✅ [MLSAPIClient.getLatestGroupMetadataBlob] SUCCESS - group: \(groupId.prefix(16))..., size: \(output.data.count) bytes"
     )
-    return output.data.data
+    return output.data
   }
 }
 

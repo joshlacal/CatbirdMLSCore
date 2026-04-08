@@ -290,29 +290,44 @@ public extension MLSConversationManager {
   ///   - convoId: Conversation identifier
   ///   - groupIdData: Binary group ID for FFI calls
   /// - Returns: Number of commits processed
+  /// Spec §5.1 step 1 constants
+  private static let sendSyncBatchSize = 50
+  private static let sendSyncMaxRounds = 3
+
   private func preSendSync(convoId: String, groupIdData: Data) async throws -> Int {
     guard let userDid = userDid else { return 0 }
 
-    let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
-    let commits = try await apiClient.getCommits(convoId: convoId, fromEpoch: Int(localEpoch))
-
-    if commits.isEmpty {
-      return 0
-    }
-
     var totalProcessed = 0
-    for commit in commits.sorted(by: { $0.seq < $1.seq }) {
-      do {
-        let commitData = commit.ciphertext.data
-        _ = try await mlsClient.processMessage(
-          for: userDid,
-          groupId: groupIdData,
-          messageData: commitData
-        )
-        totalProcessed += 1
-      } catch {
-        // Commit processing failed — likely WrongEpoch or already processed
-        logger.debug("⚠️ [PRE-SEND-SYNC] Failed to process commit: \(error.localizedDescription)")
+
+    // Spec §5.1: up to SEND_SYNC_MAX_ROUNDS rounds of SEND_SYNC_BATCH_SIZE commits
+    for round in 1...Self.sendSyncMaxRounds {
+      let commits = try await apiClient.getCommits(
+        convoId: convoId,
+        limit: Self.sendSyncBatchSize
+      )
+
+      if commits.isEmpty {
+        break
+      }
+
+      for commit in commits.sorted(by: { $0.seq < $1.seq }) {
+        do {
+          let commitData = commit.ciphertext.data
+          _ = try await mlsClient.processMessage(
+            for: userDid,
+            groupId: groupIdData,
+            messageData: commitData
+          )
+          totalProcessed += 1
+        } catch {
+          // Commit processing failed — likely WrongEpoch or already processed
+          logger.debug("⚠️ [PRE-SEND-SYNC] Round \(round): Failed to process commit: \(error.localizedDescription)")
+        }
+      }
+
+      // If fewer than batch size returned, we're caught up
+      if commits.count < Self.sendSyncBatchSize {
+        break
       }
     }
 
