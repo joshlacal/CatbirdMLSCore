@@ -28,11 +28,48 @@ public actor MLSRecoveryManager {
 
   // MARK: - Per-Conversation Recovery Tracking (Prevents Infinite Loops)
 
-  /// Tracks failed rejoins per conversation to prevent infinite recovery loops
+  /// Tracks failed rejoins per conversation to prevent infinite recovery loops.
+  ///
+  /// This is an **internal implementation detail** of the
+  /// `ConversationRecoveryState` machine — callers observing state should go
+  /// through `recoveryState(for:)` and the transition helpers, not read
+  /// `failedRejoins` directly. Kept here (instead of rolled into the enum)
+  /// because the spec §8.2 counter semantics (5 commit failures, 3 decryption
+  /// failures, 3 rejoin attempts) are orthogonal to state identity.
   private var failedRejoins: [String: (attempts: Int, lastAttempt: Date)] = [:]
 
-  /// Maximum rejoin attempts per conversation before giving up
+  /// Transient recovery state for conversations (per spec §8.1). Only holds
+  /// the non-persisted states — `.epochBehind`, `.groupMissing`, `.recovering`.
+  /// The absence of an entry means "defer to the persisted state on the
+  /// conversation model, or `.healthy` if none." Persisted states
+  /// (`.needsRejoin`, `.unrecoverableLocal`, `.resetPending`) live in GRDB
+  /// via `MLSConversationModel` boolean columns and are read via the model's
+  /// `persistedRecoveryState` computed property.
+  ///
+  /// Upholds invariants S1 / S1.1 (`docs/program/01-INVARIANTS.md`) by making
+  /// the recovery state machine the single source of truth for "can this
+  /// conversation attempt recovery right now?"
+  private var transientStates: [String: ConversationRecoveryState] = [:]
+
+  /// Maximum rejoin attempts per conversation before giving up. Spec §8.2:
+  /// "attempts >= MAX_REJOIN_ATTEMPTS → UNRECOVERABLE_LOCAL".
   private let maxRejoinAttempts = 3
+
+  /// Threshold for transitioning `.healthy → .needsRejoin` on repeated commit
+  /// failures. Spec §8.2: "5 consecutive commit failures".
+  private let commitFailureThreshold = 5
+
+  /// Threshold for transitioning `.healthy → .needsRejoin` on repeated
+  /// decryption failures. Spec §8.2: "3 decryption failures".
+  private let decryptionFailureThreshold = 3
+
+  /// Per-conversation commit failure counter (transitions into `.needsRejoin`
+  /// once it hits `commitFailureThreshold`).
+  private var commitFailureCounts: [String: Int] = [:]
+
+  /// Per-conversation decryption failure counter (transitions into
+  /// `.needsRejoin` once it hits `decryptionFailureThreshold`).
+  private var decryptionFailureCounts: [String: Int] = [:]
 
   // MARK: - GroupInfo 404 Circuit Breaker (Spec §8.3, §10)
 
@@ -77,6 +114,171 @@ public actor MLSRecoveryManager {
   public init(mlsClient: MLSClient, mlsAPIClient: MLSAPIClient) {
     self.mlsClient = mlsClient
     self.mlsAPIClient = mlsAPIClient
+  }
+
+  // MARK: - ConversationRecoveryState (Spec §8.1 / Invariants S1, S1.1)
+
+  /// Return the fully-resolved recovery state for a conversation, overlaying
+  /// transient in-memory state on top of whatever persistent state the model
+  /// carries. Transient state takes precedence — e.g. an in-flight
+  /// `.recovering` supersedes a persisted `.needsRejoin`.
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - model: The persisted `MLSConversationModel` if known. Pass `nil` to
+  ///     query transient state only (e.g. during inline recovery before the
+  ///     model row exists).
+  /// - Returns: The current `ConversationRecoveryState` per spec §8.1.
+  public func recoveryState(
+    for convoId: String,
+    model: MLSConversationModel? = nil
+  ) -> ConversationRecoveryState {
+    if let transient = transientStates[convoId] {
+      return transient
+    }
+    return model?.persistedRecoveryState ?? .healthy
+  }
+
+  /// Transition a conversation's transient recovery state.
+  ///
+  /// Only transient states (`.epochBehind`, `.groupMissing`, `.recovering`)
+  /// and `.healthy` may be set via this method — persistent states are owned
+  /// by the GRDB layer (`MLSConversationModel.needsRejoin`/`needsReset`/
+  /// `isUnrecoverable`) and should be written directly via the DB. Attempts
+  /// to set a persistent state here are rejected so the two sources of truth
+  /// don't disagree.
+  ///
+  /// The transition is validated against §8.2 via
+  /// `ConversationRecoveryState.canTransition(to:)`. Illegal transitions are
+  /// logged and dropped.
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - next: Target transient state.
+  ///   - currentPersistedState: The current persisted state from the model, if
+  ///     known. Used as the "from" state when no transient state is set.
+  /// - Returns: `true` if the transition was applied, `false` if rejected.
+  @discardableResult
+  public func setTransientState(
+    convoId: String,
+    to next: ConversationRecoveryState,
+    currentPersistedState: ConversationRecoveryState = .healthy
+  ) -> Bool {
+    guard !next.isPersisted || next == .healthy else {
+      logger.warning(
+        "⚠️ [RecoveryState] Refusing to set persistent state \(next.rawValue) via transient API for \(convoId.prefix(16)) — use DB write instead"
+      )
+      return false
+    }
+
+    let current = transientStates[convoId] ?? currentPersistedState
+    guard current.canTransition(to: next) else {
+      logger.warning(
+        "⚠️ [RecoveryState] Illegal transition \(current.rawValue) → \(next.rawValue) for \(convoId.prefix(16))"
+      )
+      return false
+    }
+
+    if next == .healthy {
+      transientStates.removeValue(forKey: convoId)
+    } else {
+      transientStates[convoId] = next
+    }
+    logger.debug(
+      "🔁 [RecoveryState] \(convoId.prefix(16)): \(current.rawValue) → \(next.rawValue)")
+    return true
+  }
+
+  /// Clear any transient state for a conversation, returning it to the
+  /// persisted baseline (`.healthy` unless the model says otherwise).
+  public func clearTransientState(convoId: String) {
+    if transientStates.removeValue(forKey: convoId) != nil {
+      logger.debug("🧹 [RecoveryState] Cleared transient state for \(convoId.prefix(16))")
+    }
+  }
+
+  /// Record a commit failure. After `commitFailureThreshold` consecutive
+  /// failures (spec §8.2: 5), the conversation is flagged `.needsRejoin`.
+  ///
+  /// - Parameter convoId: Conversation identifier.
+  /// - Returns: `true` if the threshold was reached on this call (caller
+  ///   should persist `needsRejoin = true` to the model).
+  @discardableResult
+  public func recordCommitFailure(convoId: String) -> Bool {
+    let count = (commitFailureCounts[convoId] ?? 0) + 1
+    commitFailureCounts[convoId] = count
+    logger.debug(
+      "📝 [RecoveryState] Commit failure \(count)/\(self.commitFailureThreshold) for \(convoId.prefix(16))"
+    )
+
+    if count >= commitFailureThreshold {
+      logger.warning(
+        "🔄 [RecoveryState] Commit failure threshold reached for \(convoId.prefix(16)) — flagging .needsRejoin"
+      )
+      commitFailureCounts[convoId] = 0  // reset to allow the next cycle
+      // Transient state moves to .epochBehind and the caller is expected to
+      // persist `.needsRejoin` on the model row. Transient state is cleared
+      // so the persistent state can take over without a stale shadow.
+      transientStates.removeValue(forKey: convoId)
+      return true
+    }
+    return false
+  }
+
+  /// Record a decryption failure. After `decryptionFailureThreshold`
+  /// consecutive failures (spec §8.2: 3), the conversation is flagged
+  /// `.needsRejoin`.
+  ///
+  /// - Parameter convoId: Conversation identifier.
+  /// - Returns: `true` if the threshold was reached on this call (caller
+  ///   should persist `needsRejoin = true` to the model).
+  @discardableResult
+  public func recordDecryptionFailure(convoId: String) -> Bool {
+    let count = (decryptionFailureCounts[convoId] ?? 0) + 1
+    decryptionFailureCounts[convoId] = count
+    logger.debug(
+      "📝 [RecoveryState] Decryption failure \(count)/\(self.decryptionFailureThreshold) for \(convoId.prefix(16))"
+    )
+
+    if count >= decryptionFailureThreshold {
+      logger.warning(
+        "🔄 [RecoveryState] Decryption failure threshold reached for \(convoId.prefix(16)) — flagging .needsRejoin"
+      )
+      decryptionFailureCounts[convoId] = 0
+      transientStates.removeValue(forKey: convoId)
+      return true
+    }
+    return false
+  }
+
+  /// Reset per-conversation failure counters after a successful operation.
+  /// Called whenever a commit/decrypt succeeds to prevent aging failures from
+  /// accumulating indefinitely.
+  public func clearFailureCounters(convoId: String) {
+    commitFailureCounts.removeValue(forKey: convoId)
+    decryptionFailureCounts.removeValue(forKey: convoId)
+  }
+
+  /// Current commit failure counter (primarily for diagnostics and tests).
+  public func commitFailureCount(convoId: String) -> Int {
+    commitFailureCounts[convoId] ?? 0
+  }
+
+  /// Current decryption failure counter (primarily for diagnostics and tests).
+  public func decryptionFailureCount(convoId: String) -> Int {
+    decryptionFailureCounts[convoId] ?? 0
+  }
+
+  /// Check whether the given persisted-then-transient state permits a recovery
+  /// attempt right now (ignoring cooldowns, which are checked separately via
+  /// `shouldSkipRejoin`). Used by the deferred recovery hook to filter
+  /// candidates.
+  public func canAttemptRecovery(
+    convoId: String,
+    persistedState: ConversationRecoveryState
+  ) -> Bool {
+    let resolved = transientStates[convoId] ?? persistedState
+    return resolved.allowsRecoveryAttempt
   }
 
   // MARK: - GroupInfo 404 Circuit Breaker (Spec §8.3)
@@ -183,9 +385,17 @@ public actor MLSRecoveryManager {
     }
   }
 
-  /// Clear rejoin tracking for a conversation (on success)
+  /// Clear rejoin tracking for a conversation (on success).
+  ///
+  /// Also clears transient state and failure counters so the conversation
+  /// is fully returned to `.healthy` (spec §8.2: NEEDS_REJOIN → HEALTHY on
+  /// successful External Commit).
   public func clearRejoinTracking(convoId: String) {
-    if failedRejoins.removeValue(forKey: convoId) != nil {
+    let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
+    transientStates.removeValue(forKey: convoId)
+    commitFailureCounts.removeValue(forKey: convoId)
+    decryptionFailureCounts.removeValue(forKey: convoId)
+    if hadTracking {
       logger.info("✅ [MLSRecoveryManager] Cleared rejoin tracking for \(convoId.prefix(16))")
     }
   }

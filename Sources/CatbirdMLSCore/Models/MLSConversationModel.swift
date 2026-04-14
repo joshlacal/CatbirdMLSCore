@@ -59,6 +59,38 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   /// Whether this conversation is currently muted
   public var isMuted: Bool { mutedUntil.map { $0 > Date() } ?? false }
 
+  /// The persisted recovery state derived from the three boolean columns.
+  ///
+  /// Maps the "persisted" subset of `ConversationRecoveryState` onto the
+  /// existing GRDB columns (`needsReset`, `isUnrecoverable`, `needsRejoin`) per
+  /// the Cluster B spec formalization. No schema migration is required —
+  /// this is the single source of truth for the persistent subset of the
+  /// conversation recovery state machine (spec §8.1 / invariant S1.1).
+  ///
+  /// Precedence (highest → lowest) is chosen so a more severe persistent
+  /// state dominates:
+  ///   1. `needsReset == true`  → `.resetPending`
+  ///   2. `isUnrecoverable == true` → `.unrecoverableLocal`
+  ///   3. `needsRejoin == true` → `.needsRejoin`
+  ///   4. otherwise → `.healthy`
+  ///
+  /// Transient states (`.epochBehind`, `.groupMissing`, `.recovering`) are
+  /// tracked in-memory by `MLSRecoveryManager` and overlayed on top of this
+  /// computed value to produce the fully-resolved state.
+  @available(iOS 18.0, macOS 13.0, *)
+  public var persistedRecoveryState: ConversationRecoveryState {
+    if needsReset {
+      return .resetPending
+    }
+    if isUnrecoverable {
+      return .unrecoverableLocal
+    }
+    if needsRejoin {
+      return .needsRejoin
+    }
+    return .healthy
+  }
+
   // MARK: - Initialization
 
   public init(

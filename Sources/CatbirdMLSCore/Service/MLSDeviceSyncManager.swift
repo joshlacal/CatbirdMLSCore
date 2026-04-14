@@ -173,10 +173,7 @@ public actor MLSDeviceSyncManager {
             }
 
             let claimed = claimResult.claimedAddition!
-            guard let deviceDid = claimed.deviceCredentialDid else {
-                logger.warning("   Claimed addition has no deviceCredentialDid - skipping")
-                return
-            }
+            let deviceDid = claimed.deviceCredentialDid
 
             // Check if this was a self-claim attempt
             if claimed.claimedBy == nil {
@@ -217,13 +214,13 @@ public actor MLSDeviceSyncManager {
               dids: [try DID(didString: deviceDid)]
             )
 
-            guard let firstKP = keyPackages.keyPackages.first,
-                  let keyPackageData = Data(base64Encoded: firstKP.keyPackage) else {
+            guard let firstKP = keyPackages.keyPackages.first else {
                 logger.error("❌ [KEY_PACKAGE_EXHAUSTION] No key package available for device: \(deviceDid)")
                 await handleAdditionFailure(pendingId: pendingId, convoId: convoId, deviceDid: deviceDid, error: "Key package exhaustion - device has no available key packages")
                 return
             }
 
+            let keyPackageData = firstKP.keyPackage.data
             logger.info("🔵 Adding device to conversation \(convoId)...")
 
             let addStart = Date()

@@ -355,7 +355,7 @@ public actor MLSDeviceManager {
       }
 
       let keyPackageItem = BlueCatbirdMlsChatRegisterDevice.KeyPackageItem(
-        keyPackage: packageData.base64EncodedString(),
+        keyPackage: Bytes(data: packageData),
         cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
         expires: ATProtocolDate(date: expirationDate)
       )

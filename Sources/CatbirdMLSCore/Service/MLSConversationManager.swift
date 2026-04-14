@@ -952,13 +952,15 @@ public final class MLSConversationManager {
     }
 
     // 5. Notify observers
-    notifyObservers(.groupReset(
-      convoId: convoId,
-      newGroupId: newGroupId,
-      resetGeneration: event.resetGeneration,
-      resetBy: event.resetBy,
-      reason: event.reason
-    ))
+    if let resetBy = event.resetBy {
+      notifyObservers(.groupReset(
+        convoId: convoId,
+        newGroupId: newGroupId,
+        resetGeneration: event.resetGeneration,
+        resetBy: resetBy,
+        reason: event.reason
+      ))
+    }
   }
 
   /// Handle re-addition request from SSE stream

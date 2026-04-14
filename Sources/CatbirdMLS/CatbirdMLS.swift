@@ -399,6 +399,22 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -1296,6 +1312,15 @@ public protocol MlsContextProtocol : AnyObject {
     func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws  -> ProposeResult
     
     /**
+     * Propose self-removal from a group.
+     *
+     * Groups use PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, so SelfRemove proposals
+     * (always PublicMessage) are rejected. Uses leave_group() instead which
+     * creates a Remove proposal as PrivateMessage.
+     */
+    func proposeSelfRemove(groupId: Data) throws  -> Data
+    
+    /**
      * Propose self-update (does not commit)
      *
      * Creates a proposal to update your own leaf node. Can be committed later
@@ -1337,6 +1362,23 @@ public protocol MlsContextProtocol : AnyObject {
      * Remove a proposal from the proposal queue
      */
     func removeProposal(groupId: Data, proposalRef: ProposalRef) throws 
+    
+    /**
+     * Export a secret using the Puncturable PRF tree (forward-secure within epoch).
+     *
+     * Falls back to `export_secret` with a deterministic label when the group
+     * does not have an `application_export_tree` (legacy groups created before
+     * extensions-draft-08).
+     */
+    func safeExportSecret(groupId: Data, componentId: UInt16) throws  -> Data
+    
+    /**
+     * Export a secret from the pending commit's Puncturable PRF tree.
+     *
+     * Falls back to `export_secret` from the pending commit when the group
+     * does not support safe export.
+     */
+    func safeExportSecretFromPending(groupId: Data, componentId: UInt16) throws  -> Data
     
     /**
      * Create a self-update commit to refresh own leaf node
@@ -1403,6 +1445,11 @@ public protocol MlsContextProtocol : AnyObject {
      * The application should inspect the proposal before storing it
      */
     func storeProposal(groupId: Data, proposalRef: ProposalRef) throws 
+    
+    /**
+     * Atomically swap members: remove old + add new in a single commit.
+     */
+    func swapMembers(groupId: Data, removeIdentities: [Data], addKeyPackages: [KeyPackageData]) throws  -> AddMembersResult
     
     /**
      * 🔒 FIX #2: Force database synchronization
@@ -2257,6 +2304,21 @@ open func proposeRemoveMember(groupId: Data, memberIdentity: Data)throws  -> Pro
 }
     
     /**
+     * Propose self-removal from a group.
+     *
+     * Groups use PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, so SelfRemove proposals
+     * (always PublicMessage) are rejected. Uses leave_group() instead which
+     * creates a Remove proposal as PrivateMessage.
+     */
+open func proposeSelfRemove(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_propose_self_remove(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
+    /**
      * Propose self-update (does not commit)
      *
      * Creates a proposal to update your own leaf node. Can be committed later
@@ -2316,6 +2378,37 @@ open func removeProposal(groupId: Data, proposalRef: ProposalRef)throws  {try ru
         FfiConverterTypeProposalRef.lower(proposalRef),$0
     )
 }
+}
+    
+    /**
+     * Export a secret using the Puncturable PRF tree (forward-secure within epoch).
+     *
+     * Falls back to `export_secret` with a deterministic label when the group
+     * does not have an `application_export_tree` (legacy groups created before
+     * extensions-draft-08).
+     */
+open func safeExportSecret(groupId: Data, componentId: UInt16)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_safe_export_secret(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterUInt16.lower(componentId),$0
+    )
+})
+}
+    
+    /**
+     * Export a secret from the pending commit's Puncturable PRF tree.
+     *
+     * Falls back to `export_secret` from the pending commit when the group
+     * does not support safe export.
+     */
+open func safeExportSecretFromPending(groupId: Data, componentId: UInt16)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_safe_export_secret_from_pending(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterUInt16.lower(componentId),$0
+    )
+})
 }
     
     /**
@@ -2426,6 +2519,19 @@ open func storeProposal(groupId: Data, proposalRef: ProposalRef)throws  {try rus
         FfiConverterTypeProposalRef.lower(proposalRef),$0
     )
 }
+}
+    
+    /**
+     * Atomically swap members: remove old + add new in a single commit.
+     */
+open func swapMembers(groupId: Data, removeIdentities: [Data], addKeyPackages: [KeyPackageData])throws  -> AddMembersResult {
+    return try  FfiConverterTypeAddMembersResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_swap_members(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterSequenceData.lower(removeIdentities),
+        FfiConverterSequenceTypeKeyPackageData.lower(addKeyPackages),$0
+    )
+})
 }
     
     /**
@@ -2650,6 +2756,11 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
      * Shut down the orchestrator.
      */
     func shutdown() 
+    
+    /**
+     * Atomically swap members in a single commit.
+     */
+    func swapMembers(groupId: String, removeDids: [String], addDids: [String]) throws 
     
     /**
      * Sync conversations with the server.
@@ -2966,6 +3077,18 @@ open func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv
      */
 open func shutdown() {try! rustCall() {
     uniffi_catbird_mls_fn_method_orchestratorbridge_shutdown(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
+     * Atomically swap members in a single commit.
+     */
+open func swapMembers(groupId: String, removeDids: [String], addDids: [String])throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_swap_members(self.uniffiClonePointer(),
+        FfiConverterString.lower(groupId),
+        FfiConverterSequenceString.lower(removeDids),
+        FfiConverterSequenceString.lower(addDids),$0
     )
 }
 }
@@ -4119,6 +4242,10 @@ public func FfiConverterTypeFFIConversationListPage_lower(_ value: FfiConversati
 
 public struct FfiConversationView {
     public var groupId: String
+    /**
+     * Stable conversation identifier (survives group resets).
+     */
+    public var conversationId: String
     public var epoch: UInt64
     public var members: [FfiMemberView]
     public var name: String?
@@ -4129,8 +4256,12 @@ public struct FfiConversationView {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(groupId: String, epoch: UInt64, members: [FfiMemberView], name: String?, description: String?, avatarUrl: String?, createdAt: String?, updatedAt: String?) {
+    public init(groupId: String, 
+        /**
+         * Stable conversation identifier (survives group resets).
+         */conversationId: String, epoch: UInt64, members: [FfiMemberView], name: String?, description: String?, avatarUrl: String?, createdAt: String?, updatedAt: String?) {
         self.groupId = groupId
+        self.conversationId = conversationId
         self.epoch = epoch
         self.members = members
         self.name = name
@@ -4146,6 +4277,9 @@ public struct FfiConversationView {
 extension FfiConversationView: Equatable, Hashable {
     public static func ==(lhs: FfiConversationView, rhs: FfiConversationView) -> Bool {
         if lhs.groupId != rhs.groupId {
+            return false
+        }
+        if lhs.conversationId != rhs.conversationId {
             return false
         }
         if lhs.epoch != rhs.epoch {
@@ -4174,6 +4308,7 @@ extension FfiConversationView: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(groupId)
+        hasher.combine(conversationId)
         hasher.combine(epoch)
         hasher.combine(members)
         hasher.combine(name)
@@ -4193,6 +4328,7 @@ public struct FfiConverterTypeFFIConversationView: FfiConverterRustBuffer {
         return
             try FfiConversationView(
                 groupId: FfiConverterString.read(from: &buf), 
+                conversationId: FfiConverterString.read(from: &buf), 
                 epoch: FfiConverterUInt64.read(from: &buf), 
                 members: FfiConverterSequenceTypeFFIMemberView.read(from: &buf), 
                 name: FfiConverterOptionString.read(from: &buf), 
@@ -4205,6 +4341,7 @@ public struct FfiConverterTypeFFIConversationView: FfiConverterRustBuffer {
 
     public static func write(_ value: FfiConversationView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.groupId, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
         FfiConverterUInt64.write(value.epoch, into: &buf)
         FfiConverterSequenceTypeFFIMemberView.write(value.members, into: &buf)
         FfiConverterOptionString.write(value.name, into: &buf)
@@ -7230,6 +7367,8 @@ public enum MlsError {
      */
     case Panic(message: String)
     
+    case OperationNotSupported(message: String)
+    
 }
 
 
@@ -7390,6 +7529,10 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
+        case 37: return .OperationNotSupported(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -7473,6 +7616,8 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(35))
         case .Panic(_ /* message is ignored*/):
             writeInt(&buf, Int32(36))
+        case .OperationNotSupported(_ /* message is ignored*/):
+            writeInt(&buf, Int32(37))
 
         
         }
@@ -11662,6 +11807,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_propose_remove_member() != 49065) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_propose_self_remove() != 43383) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_propose_self_update() != 48329) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11669,6 +11817,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_remove_proposal() != 3317) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_safe_export_secret() != 60710) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_safe_export_secret_from_pending() != 40735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_self_update() != 39880) {
@@ -11693,6 +11847,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 33747) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_swap_members() != 32132) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_sync_database() != 29289) {
@@ -11765,6 +11922,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_swap_members() != 36054) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_sync_with_server() != 17558) {
