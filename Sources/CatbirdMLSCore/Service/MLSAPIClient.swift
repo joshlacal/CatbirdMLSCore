@@ -1965,39 +1965,6 @@ public final class MLSAPIClient {
     return output.blocks ?? []
   }
 
-  /// Handle block/unblock change from Bluesky, updating conversations automatically
-  /// - Parameters:
-  ///   - blockedDid: DID that was blocked or unblocked
-  ///   - isBlocked: Whether the user is now blocked (true) or unblocked (false)
-  /// - Returns: Array of affected conversation IDs
-  public func handleBlockChange(
-    blockerDid: DID,
-    blockedDid: DID,
-    action: String
-  ) async throws -> [BlueCatbirdMlsChatBlocks.BlockChangeResult] {
-    logger.info(
-      "🌐 [MLSAPIClient.handleBlockChange] START - blockerDid: \(blockerDid), blockedDid: \(blockedDid), action: \(action)"
-    )
-
-    let input = BlueCatbirdMlsChatBlocks.Input(
-      action: "handleChange",
-      dids: [blockedDid]
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
-
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [MLSAPIClient.handleBlockChange] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(
-        statusCode: responseCode, message: "Failed to handle block change")
-    }
-
-    logger.info(
-      "✅ [MLSAPIClient.handleBlockChange] SUCCESS - \(output.changes?.count ?? 0) conversations affected"
-    )
-    return output.changes ?? []
-  }
-
   // MARK: - Push Notifications
 
   /// Register or update a device push token for APNs
