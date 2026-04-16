@@ -5352,6 +5352,72 @@ public func FfiConverterTypeFFIOrchestratorConfig_lower(_ value: FfiOrchestrator
 }
 
 
+public struct FfiProcessExternalCommitResult {
+    public var epoch: UInt64
+    public var rejoinedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(epoch: UInt64, rejoinedAt: String) {
+        self.epoch = epoch
+        self.rejoinedAt = rejoinedAt
+    }
+}
+
+
+
+extension FfiProcessExternalCommitResult: Equatable, Hashable {
+    public static func ==(lhs: FfiProcessExternalCommitResult, rhs: FfiProcessExternalCommitResult) -> Bool {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.rejoinedAt != rhs.rejoinedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(epoch)
+        hasher.combine(rejoinedAt)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIProcessExternalCommitResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiProcessExternalCommitResult {
+        return
+            try FfiProcessExternalCommitResult(
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                rejoinedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiProcessExternalCommitResult, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterString.write(value.rejoinedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIProcessExternalCommitResult_lift(_ buf: RustBuffer) throws -> FfiProcessExternalCommitResult {
+    return try FfiConverterTypeFFIProcessExternalCommitResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIProcessExternalCommitResult_lower(_ value: FfiProcessExternalCommitResult) -> RustBuffer {
+    return FfiConverterTypeFFIProcessExternalCommitResult.lower(value)
+}
+
+
 public struct FfiSyncCursor {
     public var conversationsCursor: String?
     public var messagesCursor: String?
@@ -7747,6 +7813,13 @@ public enum OrchestratorBridgeError {
     )
     case Voice(message: String
     )
+    /**
+     * Server returned a structured HTTP error. Used by Welcome / GroupInfo
+     * fetch paths so the orchestrator can distinguish 404/410 ("no data
+     * available for this device") from transport-level failures.
+     */
+    case ServerError(status: UInt16, body: String
+    )
 }
 
 
@@ -7793,6 +7866,10 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
             )
         case 12: return .Voice(
             message: try FfiConverterString.read(from: &buf)
+            )
+        case 13: return .ServerError(
+            status: try FfiConverterUInt16.read(from: &buf), 
+            body: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -7862,6 +7939,12 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
         case let .Voice(message):
             writeInt(&buf, Int32(12))
             FfiConverterString.write(message, into: &buf)
+            
+        
+        case let .ServerError(status,body):
+            writeInt(&buf, Int32(13))
+            FfiConverterUInt16.write(status, into: &buf)
+            FfiConverterString.write(body, into: &buf)
             
         }
     }
@@ -8953,6 +9036,36 @@ public protocol OrchestratorApiCallback : AnyObject {
     
     func getGroupInfo(convoId: String) throws  -> Data
     
+    /**
+     * Fetch a pending Welcome message for a conversation.
+     *
+     * Platform impls should call the `blue.catbird.mlsChat.getGroupState`
+     * lexicon with `include: "welcome"` and return the raw Welcome bytes.
+     *
+     * If no Welcome is available for this device (consumed, expired, or
+     * never issued), return `OrchestratorBridgeError::ServerError` with
+     * status 404 (or 410 for an explicitly expired Welcome). The
+     * orchestrator uses the status code to distinguish "Welcome gone,
+     * fall back to External Commit" from "transport error".
+     */
+    func getWelcome(convoId: String) throws  -> Data
+    
+    /**
+     * Submit an External Commit to join/rejoin a conversation.
+     *
+     * Platform impls should POST to `blue.catbird.mlsChat.commitGroupChange`
+     * with `action = "externalCommit"`, the commit bytes, optional
+     * post-commit GroupInfo, and the base64-encoded MLS confirmation tag
+     * from the new local group state. Return the server's new epoch and
+     * `rejoinedAt` timestamp.
+     *
+     * On 409 (epoch race), return `ServerError { status: 409 }` — the
+     * orchestrator treats this as a retryable failure without burning a
+     * recovery attempt slot. On 429, return `ServerError { status: 429 }`
+     * so the orchestrator can treat it as rate-limited (not a real failure).
+     */
+    func processExternalCommit(convoId: String, commitData: Data, groupInfo: Data?, confirmationTag: String?) throws  -> FfiProcessExternalCommitResult
+    
 }
 
 
@@ -9444,6 +9557,62 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorAPICallback {
 
             
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getWelcome: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getWelcome(
+                     convoId: try FfiConverterString.lift(convoId)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        processExternalCommit: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            commitData: RustBuffer,
+            groupInfo: RustBuffer,
+            confirmationTag: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiProcessExternalCommitResult in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.processExternalCommit(
+                     convoId: try FfiConverterString.lift(convoId),
+                     commitData: try FfiConverterData.lift(commitData),
+                     groupInfo: try FfiConverterOptionData.lift(groupInfo),
+                     confirmationTag: try FfiConverterOptionString.lift(confirmationTag)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIProcessExternalCommitResult.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -12021,6 +12190,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_info() != 7268) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 7253) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 51004) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272) {

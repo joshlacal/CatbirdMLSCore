@@ -475,12 +475,13 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.blockChatSender] START - senderDid: \(senderDid), requestId: \(requestId ?? "nil"), reason: \(reason ?? "nil")"
     )
 
-    let input = BlueCatbirdMlsChatBlocks.Input(
-      action: "block",
-      dids: [senderDid]
+    let input = BlueCatbirdMlsChatBlockChatSender.Input(
+      senderDid: senderDid.didString(),
+      requestId: requestId,
+      reason: reason
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlschat.blockChatSender(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.blockChatSender] HTTP \(responseCode)")
@@ -489,9 +490,9 @@ public final class MLSAPIClient {
     }
 
     logger.info(
-      "✅ [MLSAPIClient.blockChatSender] SUCCESS - changes: \(output.changes?.count ?? 0)"
+      "✅ [MLSAPIClient.blockChatSender] SUCCESS - blockedCount: \(output.blockedCount)"
     )
-    return (output.changes != nil && !(output.changes?.isEmpty ?? true), output.changes?.count ?? 0)
+    return (output.success, output.blockedCount)
   }
 
   // MARK: - Opt In/Out
@@ -1928,41 +1929,40 @@ public final class MLSAPIClient {
 
   /// Check block relationships between users before creating conversations
   /// - Parameter dids: Array of DIDs to check for blocks
-  /// - Returns: Block relationship information
-  public func checkBlocks(dids: [DID]) async throws -> BlueCatbirdMlsChatBlocks.Output {
+  /// - Returns: HTTP response code and decoded output (nil on non-2xx)
+  public func checkBlocks(
+    dids: [DID]
+  ) async throws -> (responseCode: Int, data: BlueCatbirdMlsChatCheckBlocks.Output?) {
     logger.info("🌐 [MLSAPIClient.checkBlocks] START - dids: \(dids.count)")
 
-    let input = BlueCatbirdMlsChatBlocks.Input(action: "check", dids: dids)
+    let input = BlueCatbirdMlsChatCheckBlocks.Input(dids: dids)
+    let (responseCode, output) = try await client.blue.catbird.mlschat.checkBlocks(input: input)
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
-
-    guard responseCode == 200, let output = output else {
+    if let output {
+      logger.info("✅ [MLSAPIClient.checkBlocks] SUCCESS - \(output.blocks.count) blocks found")
+    } else {
       logger.error("❌ [MLSAPIClient.checkBlocks] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to check blocks")
     }
-
-    logger.info("✅ [MLSAPIClient.checkBlocks] SUCCESS - \(output.blocks?.count ?? 0) blocks found")
-    return output
+    return (responseCode, output)
   }
 
   /// Get block status for members in a conversation
   /// - Parameter convoId: Conversation identifier
-  /// - Returns: Array of block statuses
-  public func getBlockStatus(convoId: String) async throws -> [BlueCatbirdMlsChatBlocks.BlockRelationship]
-  {
+  /// - Returns: HTTP response code and decoded output (nil on non-2xx)
+  public func getBlockStatus(
+    convoId: String
+  ) async throws -> (responseCode: Int, data: BlueCatbirdMlsChatGetBlockStatus.Output?) {
     logger.info("🌐 [MLSAPIClient.getBlockStatus] START - convoId: \(convoId)")
 
-    let input = BlueCatbirdMlsChatBlocks.Input(action: "getStatus", convoId: convoId)
+    let input = BlueCatbirdMlsChatGetBlockStatus.Input(convoId: convoId)
+    let (responseCode, output) = try await client.blue.catbird.mlschat.getBlockStatus(input: input)
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.blocks(input: input)
-
-    guard responseCode == 200, let output = output else {
+    if let output {
+      logger.info("✅ [MLSAPIClient.getBlockStatus] SUCCESS - \(output.blocks.count) blocks")
+    } else {
       logger.error("❌ [MLSAPIClient.getBlockStatus] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to get block status")
     }
-
-    logger.info("✅ [MLSAPIClient.getBlockStatus] SUCCESS - \(output.blocks?.count ?? 0) blocks")
-    return output.blocks ?? []
+    return (responseCode, output)
   }
 
   // MARK: - Push Notifications
