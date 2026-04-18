@@ -424,10 +424,45 @@ public actor MLSRecoveryManager {
   /// Load persisted unrecoverable state from database on startup.
   /// This prevents retry loops after app restart for conversations that
   /// already exhausted all rejoin attempts.
+  ///
+  /// ADR-002 A7 escalation retry: because hydrate sets attempts past
+  /// maxRejoinAttempts, `recordFailedRejoin` will never fire again for these
+  /// convos, which means the initial `reportRecoveryFailure` dispatch (also
+  /// fire-and-forget) is the ONLY shot at getting the server a vote. If that
+  /// first attempt failed (network blip, server down at the moment), the
+  /// escalation is lost forever — until quorum can't form and the convo is
+  /// permanently dead client-side.
+  ///
+  /// Mitigation: re-fire the escalation on each hydrate (once per app launch
+  /// per convo). Server-side is idempotent via 24h per-DID rate limit +
+  /// ON CONFLICT DO NOTHING, so duplicates are cheap. Still fire-and-forget
+  /// here; a durable pending-escalation queue remains backlog task.
   public func hydrateFromDatabase(unrecoverableConvoIds: [String]) {
     for convoId in unrecoverableConvoIds {
       failedRejoins[convoId] = (attempts: maxRejoinAttempts + 1, lastAttempt: Date.distantPast)
       logger.info("📥 [MLSRecoveryManager] Hydrated unrecoverable state for \(convoId.prefix(16))")
+
+      // Re-fire escalation on every hydrate. Cheap server-side (rate-limited)
+      // and ensures a missed first dispatch eventually reaches the server.
+      logger.warning(
+        "📡 [MLSRecoveryManager] Re-firing recovery escalation on hydrate for \(convoId.prefix(16))"
+      )
+      Task {
+        do {
+          let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
+            convoId: convoId,
+            failureType: "external_commit_exhausted"  // Spec §8.6
+          )
+          let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
+          self.logger.info(
+            "📡 [MLSRecoveryManager] Re-fired recovery escalation for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false)"
+          )
+        } catch {
+          self.logger.error(
+            "❌ [MLSRecoveryManager] Failed to re-fire recovery escalation for \(convoId.prefix(16)): \(error.localizedDescription)"
+          )
+        }
+      }
     }
   }
 
