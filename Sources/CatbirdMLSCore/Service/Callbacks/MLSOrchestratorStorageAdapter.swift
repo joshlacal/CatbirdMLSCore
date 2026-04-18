@@ -284,6 +284,68 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  // MARK: - Reset Pending Operations (§8.5 Phase 1)
+
+  /// Persist the `RESET_PENDING` payload so recovery survives app restart.
+  /// Called by the Rust orchestrator on every `GroupResetEvent` before it
+  /// mutates local MLS state. Writes go to the `pendingNewGroupId` +
+  /// `pendingResetGeneration` columns on `MLSConversationModel` (schema v28).
+  ///
+  /// A stale-generation guard rejects writes where the stored generation is
+  /// ≥ the incoming one. This defends against duplicate SSE/poll deliveries.
+  public func markResetPending(
+    conversationId: String,
+    newGroupIdHex: String,
+    resetGeneration: Int32,
+    notifiedAtMs: Int64
+  ) throws {
+    let incomingGen = Int64(resetGeneration)
+    try dbPool.write { db in
+      let stored = try Int64.fetchOne(
+        db,
+        sql: """
+          SELECT pendingResetGeneration FROM MLSConversationModel
+          WHERE conversationID = ?
+          """,
+        arguments: [conversationId]
+      )
+      if let stored, stored >= incomingGen {
+        return
+      }
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsReset = 1,
+              needsRejoin = 0,
+              isUnrecoverable = 0,
+              pendingNewGroupId = ?,
+              pendingResetGeneration = ?,
+              updatedAt = ?
+          WHERE conversationID = ?
+          """,
+        arguments: [newGroupIdHex, incomingGen, Date(), conversationId]
+      )
+    }
+  }
+
+  /// Clear the staged pending-reset pointer after the conversation has
+  /// adopted the new group. Leaves `needsReset` untouched — callers handle
+  /// that via the usual clear path.
+  public func clearResetPending(conversationId: String) throws {
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET pendingNewGroupId = NULL,
+              pendingResetGeneration = NULL,
+              updatedAt = ?
+          WHERE conversationID = ?
+          """,
+        arguments: [Date(), conversationId]
+      )
+    }
+  }
+
   public func markNeedsRejoin(conversationId: String) throws {
     try dbPool.write { db in
       if let conversation = try MLSConversationModel

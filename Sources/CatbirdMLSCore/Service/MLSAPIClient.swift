@@ -721,11 +721,11 @@ public final class MLSAPIClient {
       convoId: convoId,
       action: "addMembers",
       memberDids: didList,
-      commit: commit.map { Bytes(data: $0) },
-      welcome: welcomeMessage.map { Bytes(data: $0) },
+      commit: commit?.base64EncodedString(),
+      welcome: welcomeMessage?.base64EncodedString(),
       keyPackageHashes: keyPackageHashes,
       idempotencyKey: idemKey,
-      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } }
+      confirmationTag: confirmationTag
     )
 
     do {
@@ -1174,7 +1174,7 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "updateGroupInfo",
-      groupInfo: Bytes(data: groupInfo)
+      groupInfo: groupInfo.base64EncodedString()
     )
 
     var lastError: Error?
@@ -1563,9 +1563,9 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "externalCommit",
-      commit: Bytes(data: externalCommit),
+      commit: externalCommit.base64EncodedString(),
       idempotencyKey: idemKey,
-      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } }
+      confirmationTag: confirmationTag
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
@@ -1767,7 +1767,7 @@ public final class MLSAPIClient {
       convoId: convoId,
       action: "removeMember",
       memberDids: [targetDid],
-      commit: commit.flatMap { Data(base64Encoded: $0).map { Bytes(data: $0) } },
+      commit: commit,
       idempotencyKey: idemKey
     )
 
@@ -1804,7 +1804,7 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "commit",
-      commit: Data(base64Encoded: commit).map { Bytes(data: $0) },
+      commit: commit,
       idempotencyKey: idemKey
     )
 
@@ -2644,14 +2644,6 @@ public extension MLSAPIError {
       self = .httpError(statusCode: 409, message: detail ?? "Pending addition already claimed")
     case .unauthorized:
       self = .httpError(statusCode: 403, message: detail ?? "Unauthorized")
-    case .invalidRequest:
-      self = .httpError(statusCode: 400, message: detail ?? "Invalid request")
-    case .authRequired:
-      self = .httpError(statusCode: 401, message: detail ?? "Authentication required")
-    case .forbidden:
-      self = .httpError(statusCode: 403, message: detail ?? "Forbidden")
-    case .conflict:
-      self = .httpError(statusCode: 409, message: detail ?? "Conflict")
     }
   }
 }

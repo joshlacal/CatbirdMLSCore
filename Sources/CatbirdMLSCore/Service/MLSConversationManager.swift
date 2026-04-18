@@ -936,10 +936,17 @@ public final class MLSConversationManager {
     // 3. Flag RESET_PENDING — deferred recovery (§8.5) will handle the External Commit.
     //    DO NOT call joinByExternalCommit inline from SSE handler.
     //    This prevents epoch inflation from concurrent/racing SSE events.
+    //    Thread `newGroupId` + `resetGeneration` so Phase 1 takes the recipient
+    //    branch (external-commit into the incoming group) rather than the
+    //    admin-initiator branch (create fresh group + POST resetGroup).
     do {
-      try await markConversationNeedsReset(convoId)
+      try await markConversationNeedsReset(
+        convoId,
+        pendingNewGroupId: newGroupId,
+        pendingResetGeneration: Int64(event.resetGeneration)
+      )
       logger.info(
-        "🏴 [handleGroupReset] Flagged \(convoId.prefix(16)) as RESET_PENDING — deferred recovery will rejoin"
+        "🏴 [handleGroupReset] Flagged \(convoId.prefix(16)) as RESET_PENDING — deferred recovery will rejoin into \(newGroupId.prefix(16))"
       )
     } catch {
       logger.error(

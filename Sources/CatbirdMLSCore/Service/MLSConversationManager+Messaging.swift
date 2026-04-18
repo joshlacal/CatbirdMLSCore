@@ -3255,15 +3255,62 @@ public extension MLSConversationManager {
   // MARK: - Recovery & Rejoin
 
   internal func markConversationNeedsReset(_ convoId: String) async throws {
+    try await markConversationNeedsReset(convoId, pendingNewGroupId: nil, pendingResetGeneration: nil)
+  }
+
+  /// Flag a conversation as RESET_PENDING (spec §8.5 Phase 1).
+  ///
+  /// When called in response to a GroupResetEvent from the SSE/WebSocket stream,
+  /// `pendingNewGroupId` and `pendingResetGeneration` MUST be set so
+  /// `runDeferredEpochRecovery` can take the recipient branch (externalCommit into
+  /// the new group rather than calling the admin `resetGroup` endpoint).
+  ///
+  /// Generation stale-guard: if the stored generation is already >= the incoming
+  /// one, the write is skipped. Protects against the global (AppState) + per-convo
+  /// (MLSConversationDetailView) SSE subscriptions racing on the same event.
+  internal func markConversationNeedsReset(
+    _ convoId: String,
+    pendingNewGroupId: String?,
+    pendingResetGeneration: Int64?
+  ) async throws {
     guard let userDID = userDid else { return }
 
-    try await database.write { db in
+    let wrote = try await database.write { db -> Bool in
+      if let incoming = pendingResetGeneration {
+        let stored = try Int64.fetchOne(
+          db,
+          sql: """
+                SELECT pendingResetGeneration FROM MLSConversationModel
+                WHERE conversationID = ? AND currentUserDID = ?;
+            """,
+          arguments: [convoId, userDID]
+        )
+        if let stored = stored, stored >= incoming {
+          return false
+        }
+      }
+
       try db.execute(
         sql: """
               UPDATE MLSConversationModel
-              SET needsReset = 1, needsRejoin = 0, isUnrecoverable = 0, updatedAt = ?
+              SET needsReset = 1,
+                  needsRejoin = 0,
+                  isUnrecoverable = 0,
+                  pendingNewGroupId = ?,
+                  pendingResetGeneration = ?,
+                  updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
-          """, arguments: [Date(), convoId, userDID])
+          """,
+        arguments: [pendingNewGroupId, pendingResetGeneration, Date(), convoId, userDID]
+      )
+      return true
+    }
+
+    guard wrote else {
+      logger.info(
+        "⏭️ [EPOCH-RESET] Skipping \(convoId.prefix(16)) — stored reset generation already ≥ incoming"
+      )
+      return
     }
 
     // Clear any existing recovery backoff so the reset handler isn't blocked
@@ -3272,7 +3319,13 @@ public extension MLSConversationManager {
       await recoveryManager.clearRejoinTracking(convoId: convoId)
     }
 
-    logger.warning("🔄 [EPOCH-RESET] Marked \(convoId.prefix(16)) for automatic group reset")
+    if let newGroup = pendingNewGroupId {
+      logger.warning(
+        "🔄 [EPOCH-RESET] Marked \(convoId.prefix(16)) for recipient rejoin — newGroupId=\(newGroup.prefix(16)), gen=\(pendingResetGeneration.map(String.init) ?? "nil")"
+      )
+    } else {
+      logger.warning("🔄 [EPOCH-RESET] Marked \(convoId.prefix(16)) for automatic group reset")
+    }
   }
 
   internal func clearConversationResetFlag(_ convoId: String) async {
@@ -3282,7 +3335,10 @@ public extension MLSConversationManager {
       try db.execute(
         sql: """
               UPDATE MLSConversationModel
-              SET needsReset = 0, updatedAt = ?
+              SET needsReset = 0,
+                  pendingNewGroupId = NULL,
+                  pendingResetGeneration = NULL,
+                  updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
           """, arguments: [Date(), convoId, userDID])
     }
