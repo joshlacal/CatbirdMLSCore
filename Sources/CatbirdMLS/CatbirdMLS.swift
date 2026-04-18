@@ -463,6 +463,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
     typealias FfiType = Float
     typealias SwiftType = Float
@@ -1065,6 +1081,13 @@ public protocol MlsContextProtocol : AnyObject {
      * Async variant of encrypt_message - offloads crypto work to avoid blocking
      */
     func encryptMessageAsync(groupId: Data, plaintext: Data) async throws  -> EncryptResult
+    
+    /**
+     * Return the RFC 9420 §8.7 `epoch_authenticator` for the group's current
+     * epoch. Used to bind quorum-reset reports (spec §8.6 / ADR-002) so that a
+     * stale client can't forge a vote for an epoch it never observed.
+     */
+    func epochAuthenticator(groupId: Data) throws  -> Data
     
     /**
      * Manually export epoch secret for a group
@@ -1862,6 +1885,19 @@ open func encryptMessageAsync(groupId: Data, plaintext: Data)async throws  -> En
             liftFunc: FfiConverterTypeEncryptResult.lift,
             errorHandler: FfiConverterTypeMLSError.lift
         )
+}
+    
+    /**
+     * Return the RFC 9420 §8.7 `epoch_authenticator` for the group's current
+     * epoch. Used to bind quorum-reset reports (spec §8.6 / ADR-002) so that a
+     * stale client can't forge a vote for an epoch it never observed.
+     */
+open func epochAuthenticator(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_epoch_authenticator(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
 }
     
     /**
@@ -2670,6 +2706,17 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func ensureDeviceRegistered() throws  -> String
     
     /**
+     * Return the RFC 9420 §8.7 `epoch_authenticator` for a group's current
+     * epoch.
+     *
+     * Platforms hex-encode this value when calling
+     * `OrchestratorAPICallback::report_recovery_failure` so that quorum-reset
+     * reports (spec §8.6 / ADR-002) are bound to a specific epoch. Returns
+     * the raw authenticator bytes.
+     */
+    func epochAuthenticator(groupId: Data) throws  -> Data
+    
+    /**
      * Fetch and process new messages from server.
      */
     func fetchMessages(conversationId: String, cursor: String?, limit: UInt32) throws  -> FfiFetchMessagesResult
@@ -2683,6 +2730,24 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
      * Get key package stats.
      */
     func getKeyPackageStats() throws  -> FfiKeyPackageStats
+    
+    /**
+     * Handle a server-initiated group reset (`GroupResetEvent` delivered via
+     * SSE/WS from the DS).
+     *
+     * The orchestrator transitions the conversation to `RESET_PENDING`,
+     * persists the payload via `mark_reset_pending`, deletes the old local
+     * MLS group, clears per-conversation recovery trackers, rebinds the group
+     * id, then attempts `join_or_rejoin` (Welcome → ExternalCommit).
+     *
+     * - `convo_id`: stable conversation id.
+     * - `new_group_id_hex`: hex-encoded new MLS group id advertised by the DS.
+     * - `reset_generation`: monotonic reset counter from the DS.
+     *
+     * Spec §8.5 Phase 1 / ADR-001 levels 1–3. Platforms should call this on
+     * every incoming `GroupResetEvent`.
+     */
+    func handleGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws 
     
     /**
      * Initialize the orchestrator for a user DID.
@@ -2893,6 +2958,23 @@ open func ensureDeviceRegistered()throws  -> String {
 }
     
     /**
+     * Return the RFC 9420 §8.7 `epoch_authenticator` for a group's current
+     * epoch.
+     *
+     * Platforms hex-encode this value when calling
+     * `OrchestratorAPICallback::report_recovery_failure` so that quorum-reset
+     * reports (spec §8.6 / ADR-002) are bound to a specific epoch. Returns
+     * the raw authenticator bytes.
+     */
+open func epochAuthenticator(groupId: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_epoch_authenticator(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),$0
+    )
+})
+}
+    
+    /**
      * Fetch and process new messages from server.
      */
 open func fetchMessages(conversationId: String, cursor: String?, limit: UInt32)throws  -> FfiFetchMessagesResult {
@@ -2923,6 +3005,31 @@ open func getKeyPackageStats()throws  -> FfiKeyPackageStats {
     uniffi_catbird_mls_fn_method_orchestratorbridge_get_key_package_stats(self.uniffiClonePointer(),$0
     )
 })
+}
+    
+    /**
+     * Handle a server-initiated group reset (`GroupResetEvent` delivered via
+     * SSE/WS from the DS).
+     *
+     * The orchestrator transitions the conversation to `RESET_PENDING`,
+     * persists the payload via `mark_reset_pending`, deletes the old local
+     * MLS group, clears per-conversation recovery trackers, rebinds the group
+     * id, then attempts `join_or_rejoin` (Welcome → ExternalCommit).
+     *
+     * - `convo_id`: stable conversation id.
+     * - `new_group_id_hex`: hex-encoded new MLS group id advertised by the DS.
+     * - `reset_generation`: monotonic reset counter from the DS.
+     *
+     * Spec §8.5 Phase 1 / ADR-001 levels 1–3. Platforms should call this on
+     * every incoming `GroupResetEvent`.
+     */
+open func handleGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_handle_group_reset(self.uniffiClonePointer(),
+        FfiConverterString.lower(convoId),
+        FfiConverterString.lower(newGroupIdHex),
+        FfiConverterInt32.lower(resetGeneration),$0
+    )
+}
 }
     
     /**
@@ -9066,6 +9173,29 @@ public protocol OrchestratorApiCallback : AnyObject {
      */
     func processExternalCommit(convoId: String, commitData: Data, groupInfo: Data?, confirmationTag: String?) throws  -> FfiProcessExternalCommitResult
     
+    /**
+     * Report that recovery has been exhausted for a conversation.
+     *
+     * Called by the orchestrator's `RecoveryTracker` when a conversation has
+     * hit `MAX_REJOIN_ATTEMPTS` external-commit failures (S1.1 of the §8
+     * recovery pyramid). The platform impl should POST to
+     * `blue.catbird.mlsChat.reportRecoveryFailure` so the server can
+     * accumulate quorum reports and trigger an automatic group reset (S2)
+     * per ADR-002 §6.
+     *
+     * `failure_type` is one of `"external_commit_exhausted"`,
+     * `"remote_data_error"`, or future variants.
+     *
+     * `epoch_authenticator` is the hex-encoded local epoch authenticator
+     * (RFC 9420 §8.7) when present — binds the report to a specific epoch
+     * so stale clients can't forge quorum votes. `None` is accepted by
+     * pre-A7 servers; once A7 ships, servers MAY require it.
+     *
+     * Errors should be returned (not swallowed); the orchestrator logs but
+     * does not retry, since the local state is already terminal.
+     */
+    func reportRecoveryFailure(convoId: String, failureType: String, epochAuthenticator: String?) throws 
+    
 }
 
 
@@ -9620,6 +9750,35 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorAPICallback {
                 lowerError: FfiConverterTypeOrchestratorBridgeError.lower
             )
         },
+        reportRecoveryFailure: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            failureType: RustBuffer,
+            epochAuthenticator: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.reportRecoveryFailure(
+                     convoId: try FfiConverterString.lift(convoId),
+                     failureType: try FfiConverterString.lift(failureType),
+                     epochAuthenticator: try FfiConverterOptionString.lift(epochAuthenticator)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             let result = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.remove(handle: uniffiHandle)
             if result == nil {
@@ -10026,6 +10185,30 @@ public protocol OrchestratorStorageCallback : AnyObject {
     
     func setConversationState(conversationId: String, state: String) throws 
     
+    /**
+     * Persist the `RESET_PENDING` payload for a server-initiated group reset.
+     *
+     * Called from `MLSOrchestrator::handle_group_reset` before any local MLS
+     * state mutation, so the platform can recover the pending-reset target on
+     * restart (spec §8.5 Phase 1 / ADR-001 level 3).
+     *
+     * - `conversation_id`: stable conversation id.
+     * - `new_group_id_hex`: hex-encoded new MLS group id advertised by the DS.
+     * - `reset_generation`: monotonic reset counter from the DS.
+     * - `notified_at_ms`: Unix millis when the notification was observed.
+     *
+     * The Rust trait (`MLSStorageBackend::mark_reset_pending`) provides a
+     * no-op default; platforms that haven't adopted the payload may keep the
+     * generated callback stub empty and the behavior is unchanged.
+     */
+    func markResetPending(conversationId: String, newGroupIdHex: String, resetGeneration: Int32, notifiedAtMs: Int64) throws 
+    
+    /**
+     * Clear any persisted `RESET_PENDING` payload after the conversation has
+     * successfully adopted the new group.
+     */
+    func clearResetPending(conversationId: String) throws 
+    
     func markNeedsRejoin(conversationId: String) throws 
     
     func needsRejoin(conversationId: String) throws  -> Bool
@@ -10212,6 +10395,62 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorStorageCallback {
                 return try uniffiObj.setConversationState(
                      conversationId: try FfiConverterString.lift(conversationId),
                      state: try FfiConverterString.lift(state)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        markResetPending: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            newGroupIdHex: RustBuffer,
+            resetGeneration: Int32,
+            notifiedAtMs: Int64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.markResetPending(
+                     conversationId: try FfiConverterString.lift(conversationId),
+                     newGroupIdHex: try FfiConverterString.lift(newGroupIdHex),
+                     resetGeneration: try FfiConverterInt32.lift(resetGeneration),
+                     notifiedAtMs: try FfiConverterInt64.lift(notifiedAtMs)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        clearResetPending: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.clearResetPending(
+                     conversationId: try FfiConverterString.lift(conversationId)
                 )
             }
 
@@ -11883,6 +12122,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_encrypt_message_async() != 27448) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_epoch_authenticator() != 21054) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_export_epoch_secret() != 1660) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12042,6 +12284,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_device_registered() != 54125) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_epoch_authenticator() != 52890) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_fetch_messages() != 30152) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12049,6 +12294,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_handle_group_reset() != 8924) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_initialize() != 22546) {
@@ -12198,6 +12446,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 51004) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 31186) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12243,37 +12494,43 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 59265) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 29062) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 5441) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 41953) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending() != 43217) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 59458) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 39469) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 24639) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 11158) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 15701) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 37902) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 26741) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 766) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 11409) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 44068) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 46674) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 57134) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 60129) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 3215) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 19839) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 25140) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 20379) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 28722) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 6074) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 19736) {
         return InitializationResult.apiChecksumMismatch
     }
 
