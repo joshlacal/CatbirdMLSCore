@@ -5215,6 +5215,24 @@ public actor MLSGRDBManager {
       }
     }
 
+    // MARK: v28 - pending group reset fields (spec §8.5 Phase 1 recipient path)
+    // When a group is reset, recipients receive a GroupResetEvent with the new
+    // groupId. We persist it so the deferred recovery loop can tell a recipient
+    // RESET_PENDING (pendingNewGroupId IS NOT NULL) from an admin-initiated one.
+    migrator.registerMigration("v28_pending_group_reset") { db in
+      let existing = try db.columns(in: "MLSConversationModel").map { $0.name }
+      if !existing.contains("pendingNewGroupId") {
+        try db.alter(table: "MLSConversationModel") { t in
+          t.add(column: "pendingNewGroupId", .text)
+        }
+      }
+      if !existing.contains("pendingResetGeneration") {
+        try db.alter(table: "MLSConversationModel") { t in
+          t.add(column: "pendingResetGeneration", .integer)
+        }
+      }
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }

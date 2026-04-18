@@ -604,6 +604,20 @@ public extension MLSConversationManager {
         }
       }
 
+      // Branch: recipient path (SSE GroupResetEvent staged newGroupId) vs
+      // admin-initiator path (this device is the reset originator). Recipients
+      // MUST NOT call the admin resetGroup endpoint or createGroup — that's
+      // what caused the "non-admin orphans a fresh local group" bug in the
+      // pre-§8.5 implementation (MLS_CLIENT_PROTOCOL.md §8.5 Phase 1).
+      if let pendingNewGroupIdHex = convo.pendingNewGroupId {
+        await runDeferredEpochRecoveryRecipient(
+          convo: convo,
+          userDid: userDid,
+          pendingNewGroupIdHex: pendingNewGroupIdHex
+        )
+        continue
+      }
+
       logger.warning(
         "🔄 [EPOCH-RESET] Starting automatic group reset for \(convo.conversationID.prefix(16))...")
 
@@ -630,7 +644,12 @@ public extension MLSConversationManager {
           try db.execute(
             sql: """
                 UPDATE MLSConversationModel
-                SET needsReset = 0, needsRejoin = 0, epoch = 0, updatedAt = ?
+                SET needsReset = 0,
+                    needsRejoin = 0,
+                    epoch = 0,
+                    pendingNewGroupId = NULL,
+                    pendingResetGeneration = NULL,
+                    updatedAt = ?
                 WHERE conversationID = ? AND currentUserDID = ?;
             """, arguments: [Date(), convo.conversationID, userDid])
         }
@@ -776,6 +795,141 @@ public extension MLSConversationManager {
         } else {
           await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
         }
+      }
+    }
+  }
+
+  /// §8.5 Phase 1 recipient path: this device received a `GroupResetEvent`
+  /// from the server naming `pendingNewGroupIdHex` as the replacement group.
+  /// We fetch GroupInfo for the new group, run an External Commit to join it,
+  /// and swap the local `MLSConversationModel.groupID` over to the new bytes.
+  ///
+  /// Safety:
+  /// - Guarded by `beginRejoinAttempt` to prevent concurrent retries and
+  ///   interleaving with Phase 2's External Commits.
+  /// - Verifies the joined group's hex matches `pendingNewGroupIdHex` before
+  ///   clearing the RESET_PENDING flag; on mismatch we leave the flag set so
+  ///   we retry on the next sync tick.
+  /// - Re-reads `pendingResetGeneration` after the External Commit lands; if a
+  ///   newer `GroupResetEvent` advanced the generation mid-flight, we clear
+  ///   only the old pointer (via `clearPendingReset`) and leave `needsReset`
+  ///   set so the newer generation gets processed on the next pass.
+  private func runDeferredEpochRecoveryRecipient(
+    convo: MLSConversationModel,
+    userDid: String,
+    pendingNewGroupIdHex: String
+  ) async {
+    let observedGeneration = convo.pendingResetGeneration
+    let convoId = convo.conversationID
+
+    guard beginRejoinAttempt(
+      conversationID: convoId,
+      source: "group-reset-recipient"
+    ) else {
+      return
+    }
+    defer { endRejoinAttempt(conversationID: convoId) }
+
+    logger.warning(
+      "🔄 [EPOCH-RESET] Starting recipient rejoin for \(convoId.prefix(16)) — pendingNewGroupId=\(pendingNewGroupIdHex.prefix(16)), gen=\(observedGeneration.map(String.init) ?? "nil")"
+    )
+
+    // Drop stale local MLS state for the old groupID before external-commiting
+    // into the new one. The old group is being abandoned by server fiat; no
+    // further commits will ever land against it.
+    if await mlsClient.groupExists(for: userDid, groupId: convo.groupID) {
+      do {
+        try await mlsClient.deleteGroup(for: userDid, groupId: convo.groupID)
+      } catch {
+        logger.warning(
+          "⚠️ [EPOCH-RESET] Failed to delete stale local group for \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+      groupStates.removeValue(forKey: convoId)
+    }
+
+    do {
+      // Uses convoId to fetch GroupInfo for the *new* group the server has
+      // pinned this convo to. Returns the groupId bytes that actually landed.
+      let newGroupIdData = try await mlsClient.joinByExternalCommit(
+        for: userDid, convoId: convoId
+      )
+      let landedHex = newGroupIdData.hexEncodedString()
+
+      guard landedHex.lowercased() == pendingNewGroupIdHex.lowercased() else {
+        logger.error(
+          "❌ [EPOCH-RESET] Recipient rejoin landed on \(landedHex.prefix(16)) but staged was \(pendingNewGroupIdHex.prefix(16)) — leaving RESET_PENDING set for retry"
+        )
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.recordFailedRejoin(convoId: convoId)
+        }
+        return
+      }
+
+      let landedEpoch: Int64
+      do {
+        landedEpoch = Int64(try await mlsClient.getEpoch(for: userDid, groupId: newGroupIdData))
+      } catch {
+        logger.warning(
+          "⚠️ [EPOCH-RESET] Could not read epoch for \(convoId.prefix(16)) after rejoin: \(error.localizedDescription)"
+        )
+        landedEpoch = 0
+      }
+
+      // Concurrency guard: if a newer GroupResetEvent advanced the generation
+      // between the DB read at top-of-loop and now, we must NOT fully clear
+      // RESET_PENDING — the newer generation points at a different group and
+      // still needs to be processed.
+      let now = Date()
+      try await database.write { db in
+        let currentGeneration = try MLSConversationResetSQL.loadPendingResetGeneration(
+          db: db, conversationID: convoId, currentUserDID: userDid
+        )
+        let generationAdvanced: Bool = {
+          switch (currentGeneration, observedGeneration) {
+          case let (.some(current), .some(observed)):
+            return current > observed
+          case (.some, .none):
+            return true
+          default:
+            return false
+          }
+        }()
+
+        if generationAdvanced {
+          // Newer event arrived; clear only the stale pointer and leave
+          // needsReset=1 so the next sync tick handles the fresh generation.
+          try MLSConversationResetSQL.clearPendingReset(
+            db: db, conversationID: convoId, currentUserDID: userDid, now: now
+          )
+        } else {
+          try MLSConversationResetSQL.applyRecipientResetSuccess(
+            db: db,
+            conversationID: convoId,
+            currentUserDID: userDid,
+            newGroupID: newGroupIdData,
+            newEpoch: landedEpoch,
+            now: now
+          )
+        }
+      }
+
+      groupStates.removeValue(forKey: convoId)
+
+      logger.warning(
+        "✅ [EPOCH-RESET] Recipient rejoin succeeded for \(convoId.prefix(16)) → newGroupId=\(landedHex.prefix(16)), epoch=\(landedEpoch)"
+      )
+
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.clearRejoinTracking(convoId: convoId)
+      }
+
+    } catch {
+      logger.error(
+        "❌ [EPOCH-RESET] Recipient rejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.recordFailedRejoin(convoId: convoId)
       }
     }
   }

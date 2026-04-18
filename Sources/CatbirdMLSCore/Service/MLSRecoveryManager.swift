@@ -366,6 +366,14 @@ public actor MLSRecoveryManager {
       logger.error(
         "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — reporting to server"
       )
+      // TODO(§8.1 escalation hardening): this dispatch is fire-and-forget; if
+      // the server is unreachable at the exact moment the 3rd attempt
+      // exhausts, the escalation is lost with no retry queue. Persist a
+      // pending-escalation intent to DB and drain on next sync tick.
+      // TODO(ADR-002 A7): once the lexicon adds `epochAuthenticator` to
+      // reportRecoveryFailure (see backlog task A7.3), populate it from
+      // `MLSContext.epochAuthenticator(for: groupId)` at this call site so
+      // the server can validate the reporter's view of the epoch.
       Task {
         do {
           let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
@@ -377,8 +385,13 @@ public actor MLSRecoveryManager {
             "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false)"
           )
         } catch {
-          self.logger.warning(
-            "⚠️ [MLSRecoveryManager] Failed to report recovery failure for \(convoId.prefix(16)): \(error.localizedDescription)"
+          // Swallowing this was masking §8.6 escalation failures. Keep the
+          // conversation locked out client-side (caller already treats it as
+          // UNRECOVERABLE_LOCAL), but surface the root cause at .error so ops
+          // can see the reason. Persistent retry-intent (new column + backoff
+          // drained on next sync) is tracked separately as task #21.
+          self.logger.error(
+            "❌ [MLSRecoveryManager] Failed to report recovery failure for \(convoId.prefix(16)): \(error.localizedDescription) — errorType=\(String(describing: type(of: error)))"
           )
         }
       }

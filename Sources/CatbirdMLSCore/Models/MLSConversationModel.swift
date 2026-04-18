@@ -50,6 +50,15 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let isPlaceholder: Bool  // True if created by NSE as a placeholder (needs metadata sync)
   public let requestState: MLSRequestState  // Local-only: pending inbound request or accepted
   public let mutedUntil: Date?
+  /// New groupId announced by a GroupResetEvent that this client still has
+  /// to join. `nil` on admin-initiated resets and when no reset is pending.
+  /// Spec §8.5 Phase 1 (recipient path).
+  public let pendingNewGroupId: String?
+  /// `resetGeneration` from the most recent GroupResetEvent observed for this
+  /// conversation. Used as a stale-guard so an older reset event can't clobber
+  /// a newer one when events race between the global SSE and per-convo
+  /// subscriptions (AppState.swift:2298 and MLSConversationDetailView:3408).
+  public let pendingResetGeneration: Int64?
 
   public var id: String { conversationID }
 
@@ -117,7 +126,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     consecutiveFailures: Int = 0,
     isPlaceholder: Bool = false,
     requestState: MLSRequestState = .none,
-    mutedUntil: Date? = nil
+    mutedUntil: Date? = nil,
+    pendingNewGroupId: String? = nil,
+    pendingResetGeneration: Int64? = nil
   ) {
     self.conversationID = conversationID
     self.currentUserDID = currentUserDID
@@ -143,6 +154,8 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.isPlaceholder = isPlaceholder
     self.requestState = requestState
     self.mutedUntil = mutedUntil
+    self.pendingNewGroupId = pendingNewGroupId
+    self.pendingResetGeneration = pendingResetGeneration
   }
 
   // MARK: - Update Methods
@@ -173,7 +186,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -202,7 +217,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -232,7 +249,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -262,7 +281,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -293,7 +314,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: false,  // Clear placeholder flag when metadata is set
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -323,7 +346,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -355,7 +380,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -385,7 +412,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: 0,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -415,7 +444,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -445,7 +476,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -475,7 +508,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: state,
-      mutedUntil: mutedUntil
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 
@@ -505,7 +540,9 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       consecutiveFailures: consecutiveFailures,
       isPlaceholder: isPlaceholder,
       requestState: requestState,
-      mutedUntil: date
+      mutedUntil: date,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration
     )
   }
 }
@@ -539,6 +576,8 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let isPlaceholder = Column("isPlaceholder")
     public static let requestState = Column("requestState")
     public static let mutedUntil = Column("mutedUntil")
+    public static let pendingNewGroupId = Column("pendingNewGroupId")
+    public static let pendingResetGeneration = Column("pendingResetGeneration")
   }
 
   enum CodingKeys: String, CodingKey {
@@ -566,5 +605,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case isPlaceholder
     case requestState
     case mutedUntil
+    case pendingNewGroupId
+    case pendingResetGeneration
   }
 }
