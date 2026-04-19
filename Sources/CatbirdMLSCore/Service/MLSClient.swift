@@ -1999,6 +1999,43 @@ public actor MLSClient {
     }
   }
 
+  /// Get the RFC 9420 §8.7 epoch authenticator for a group, hex-encoded.
+  ///
+  /// Used by the server's A7 reset-vote pyramid
+  /// (`mls-ds/server/src/handlers/mls_chat/report_recovery_failure.rs`) to tie
+  /// a recovery-failure vote to a specific cryptographic view of the group;
+  /// without it, the server records the report but short-circuits with
+  /// `reason: "missing_authenticator"` and the vote does **not** count toward
+  /// quorum.
+  ///
+  /// Returns nil (never throws) when the group isn't present locally (e.g.
+  /// already deleted before this call, context closed, or group-not-found).
+  /// Callers who need a real vote must invoke this **before** tearing down
+  /// local group state (`deleteGroup`) and stash the result in a local.
+  public func epochAuthenticatorHex(for userDID: String, groupId: Data) async -> String? {
+    do {
+      let authenticator = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.epochAuthenticator(groupId: groupId)
+      }
+      return authenticator.hexEncodedString()
+    } catch let error as MlsError {
+      switch error {
+      case .GroupNotFound, .ContextNotInitialized, .ContextClosed:
+        logger.debug(
+          "[MLSClient.epochAuthenticatorHex] Group not available: \(error.localizedDescription)")
+        return nil
+      default:
+        logger.warning(
+          "⚠️ [MLSClient.epochAuthenticatorHex] Failed: \(error.localizedDescription)")
+        return nil
+      }
+    } catch {
+      logger.warning(
+        "⚠️ [MLSClient.epochAuthenticatorHex] Unexpected error: \(error.localizedDescription)")
+      return nil
+    }
+  }
+
   /// Get the confirmation tag for the current epoch of a group.
   /// The confirmation tag is a cryptographic value unique to each MLS tree state,
   /// used by the server to detect tree divergence between clients.

@@ -353,8 +353,22 @@ public actor MLSRecoveryManager {
     return false
   }
 
-  /// Record a failed rejoin attempt for a conversation
-  public func recordFailedRejoin(convoId: String) {
+  /// Record a failed rejoin attempt for a conversation.
+  ///
+  /// - Parameters:
+  ///   - convoId: The conversation identifier whose rejoin attempt failed.
+  ///   - epochAuthenticatorHex: Optional hex-encoded RFC 9420 §8.7
+  ///     `epoch_authenticator` for the reporter's current view of the group.
+  ///     Required for the server-side A7 reset-vote pyramid to count this
+  ///     client's vote toward quorum — per
+  ///     `mls-ds/server/src/handlers/mls_chat/report_recovery_failure.rs:141-159`,
+  ///     calls without this field succeed (HTTP 200) but are short-circuited
+  ///     as `reason: "missing_authenticator"` and do not contribute to
+  ///     quorum. Callers should compute it via
+  ///     `MLSContext.epochAuthenticator(groupId:)` and hex-encode when the
+  ///     group is still present locally; pass `nil` only when the group
+  ///     state is unavailable (warning log will fire).
+  public func recordFailedRejoin(convoId: String, epochAuthenticatorHex: String? = nil) {
     let existing = failedRejoins[convoId] ?? (attempts: 0, lastAttempt: Date.distantPast)
     failedRejoins[convoId] = (attempts: existing.attempts + 1, lastAttempt: Date())
     logger.warning(
@@ -370,19 +384,22 @@ public actor MLSRecoveryManager {
       // the server is unreachable at the exact moment the 3rd attempt
       // exhausts, the escalation is lost with no retry queue. Persist a
       // pending-escalation intent to DB and drain on next sync tick.
-      // TODO(ADR-002 A7): once the lexicon adds `epochAuthenticator` to
-      // reportRecoveryFailure (see backlog task A7.3), populate it from
-      // `MLSContext.epochAuthenticator(for: groupId)` at this call site so
-      // the server can validate the reporter's view of the epoch.
+      if epochAuthenticatorHex == nil {
+        logger.warning(
+          "⚠️ [MLSRecoveryManager] reportRecoveryFailure missing epochAuthenticator for \(convoId.prefix(16)) — server will short-circuit vote (reason: missing_authenticator). Caller should pass MLSContext.epochAuthenticator(groupId:) hex."
+        )
+      }
+      let authenticator = epochAuthenticatorHex
       Task {
         do {
           let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
             convoId: convoId,
-            failureType: "external_commit_exhausted"  // Spec §8.6
+            failureType: "external_commit_exhausted",  // Spec §8.6
+            epochAuthenticator: authenticator
           )
           let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
           self.logger.info(
-            "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false)"
+            "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil")"
           )
         } catch {
           // Swallowing this was masking §8.6 escalation failures. Keep the
@@ -437,7 +454,21 @@ public actor MLSRecoveryManager {
   /// per convo). Server-side is idempotent via 24h per-DID rate limit +
   /// ON CONFLICT DO NOTHING, so duplicates are cheap. Still fire-and-forget
   /// here; a durable pending-escalation queue remains backlog task.
-  public func hydrateFromDatabase(unrecoverableConvoIds: [String]) {
+  ///
+  /// - Parameters:
+  ///   - unrecoverableConvoIds: Convo IDs that crossed MAX_REJOIN_ATTEMPTS in
+  ///     a prior session and are persisted as UNRECOVERABLE_LOCAL.
+  ///   - epochAuthenticatorsByConvoId: Optional per-convo hex-encoded RFC
+  ///     9420 §8.7 `epoch_authenticator`. When non-nil for a convo, the
+  ///     server's A7 reset-vote pyramid will count this client's vote toward
+  ///     quorum; when nil (or not provided), the call succeeds but the
+  ///     server short-circuits as `reason: "missing_authenticator"`. Callers
+  ///     should compute via `MLSContext.epochAuthenticator(groupId:)` +
+  ///     hex-encode when the group is still present locally.
+  public func hydrateFromDatabase(
+    unrecoverableConvoIds: [String],
+    epochAuthenticatorsByConvoId: [String: String]? = nil
+  ) {
     for convoId in unrecoverableConvoIds {
       failedRejoins[convoId] = (attempts: maxRejoinAttempts + 1, lastAttempt: Date.distantPast)
       logger.info("📥 [MLSRecoveryManager] Hydrated unrecoverable state for \(convoId.prefix(16))")
@@ -447,15 +478,22 @@ public actor MLSRecoveryManager {
       logger.warning(
         "📡 [MLSRecoveryManager] Re-firing recovery escalation on hydrate for \(convoId.prefix(16))"
       )
+      let authenticator = epochAuthenticatorsByConvoId?[convoId]
+      if authenticator == nil {
+        logger.warning(
+          "⚠️ [MLSRecoveryManager] hydrate re-fire missing epochAuthenticator for \(convoId.prefix(16)) — server will short-circuit vote (reason: missing_authenticator). Caller should pass MLSContext.epochAuthenticator(groupId:) hex in epochAuthenticatorsByConvoId."
+        )
+      }
       Task {
         do {
           let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
             convoId: convoId,
-            failureType: "external_commit_exhausted"  // Spec §8.6
+            failureType: "external_commit_exhausted",  // Spec §8.6
+            epochAuthenticator: authenticator
           )
           let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
           self.logger.info(
-            "📡 [MLSRecoveryManager] Re-fired recovery escalation for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false)"
+            "📡 [MLSRecoveryManager] Re-fired recovery escalation for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil")"
           )
         } catch {
           self.logger.error(

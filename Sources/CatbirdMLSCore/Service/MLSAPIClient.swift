@@ -721,11 +721,14 @@ public final class MLSAPIClient {
       convoId: convoId,
       action: "addMembers",
       memberDids: didList,
-      commit: commit?.base64EncodedString(),
-      welcome: welcomeMessage?.base64EncodedString(),
+      commit: commit.map { Bytes(data: $0) },
+      welcome: welcomeMessage.map { Bytes(data: $0) },
       keyPackageHashes: keyPackageHashes,
       idempotencyKey: idemKey,
-      confirmationTag: confirmationTag
+      // confirmationTag is still a pre-encoded base64 String at the public API;
+      // decode at this boundary so the Bytes-typed lexicon field gets raw bytes.
+      // Callers can migrate to passing Data directly later.
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
     )
 
     do {
@@ -1174,7 +1177,7 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "updateGroupInfo",
-      groupInfo: groupInfo.base64EncodedString()
+      groupInfo: Bytes(data: groupInfo)
     )
 
     var lastError: Error?
@@ -1373,10 +1376,16 @@ public final class MLSAPIClient {
       "Fetching commits (type=commit) for \(convoId), fromEpoch: \(fromEpoch?.description ?? "nil"), toEpoch: \(toEpoch?.description ?? "nil"), limit: \(limit)"
     )
 
+    // Server honors fromEpoch/toEpoch (lexicon params, added 2026-04-19). Without them,
+    // the server falls back to WHERE epoch >= 0 AND epoch <= current_epoch ORDER BY epoch ASC
+    // LIMIT 50, which returns the OLDEST 50 commits. For any convo with >50 lifetime commits,
+    // lagging clients would never reach the commits they need and stay permanently stuck.
     let input = BlueCatbirdMlsChatGetMessages.Parameters(
       convoId: convoId,
       limit: limit,
-      type: "commit"
+      type: "commit",
+      fromEpoch: fromEpoch,
+      toEpoch: toEpoch
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getMessages(input: input)
@@ -1385,18 +1394,8 @@ public final class MLSAPIClient {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch commits")
     }
 
-    // Client-side epoch filtering when requested
-    let filtered: [BlueCatbirdMlsChatDefs.MessageView]
-    if let fromEpoch = fromEpoch {
-      filtered = output.messages.filter { msg in
-        msg.epoch >= fromEpoch && (toEpoch == nil || msg.epoch <= toEpoch!)
-      }
-    } else {
-      filtered = output.messages
-    }
-
-    logger.debug("Fetched \(filtered.count) commits (from \(output.messages.count) total)")
-    return filtered
+    logger.debug("Fetched \(output.messages.count) commits")
+    return output.messages
   }
 
   /// Get Welcome message for joining a conversation
@@ -1563,9 +1562,9 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "externalCommit",
-      commit: externalCommit.base64EncodedString(),
+      commit: Bytes(data: externalCommit),
       idempotencyKey: idemKey,
-      confirmationTag: confirmationTag
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
@@ -1767,7 +1766,7 @@ public final class MLSAPIClient {
       convoId: convoId,
       action: "removeMember",
       memberDids: [targetDid],
-      commit: commit,
+      commit: commit.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) },
       idempotencyKey: idemKey
     )
 
@@ -1804,7 +1803,7 @@ public final class MLSAPIClient {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
       action: "commit",
-      commit: commit,
+      commit: Data(base64Encoded: commit).map { Bytes(data: $0) },
       idempotencyKey: idemKey
     )
 

@@ -956,7 +956,7 @@ extension MLSConversationManager {
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: conversationId,
       action: "updateMetadata",
-      commit: commitData.base64EncodedString()
+      commit: Bytes(data: commitData)
     )
 
     let (responseCode, output) = try await apiClient.client.blue.catbird.mlschat.commitGroupChange(

@@ -681,9 +681,15 @@ public extension MLSConversationManager {
           logger.error(
             "❌ [EPOCH-RESET] Failed for \(convo.conversationID.prefix(16)): \(error.localizedDescription)"
           )
-          // Record failure for backoff
+          // Record failure for backoff. Fetch the old-group authenticator so
+          // the server's A7 pyramid gets a real vote — the old group state
+          // is still present locally on this admin-initiator failure path
+          // (nothing has been deleted yet).
           if let recoveryManager = await mlsClient.recovery(for: userDid) {
-            await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
+            let authHex = await mlsClient.epochAuthenticatorHex(
+              for: userDid, groupId: convo.groupID)
+            await recoveryManager.recordFailedRejoin(
+              convoId: convo.conversationID, epochAuthenticatorHex: authHex)
           }
         }
       }
@@ -764,6 +770,15 @@ public extension MLSConversationManager {
 
       if caughtUp { continue }
 
+      // Capture epoch authenticator BEFORE deleting local state so the A7
+      // reset-vote pyramid gets a real (non-`missing_authenticator`) vote if
+      // the subsequent rejoin fails. Once `deleteGroup` runs, the FFI can no
+      // longer produce one for this group.
+      let preDeleteAuthHex: String? =
+        await mlsClient.groupExists(for: userDid, groupId: groupIdData)
+        ? await mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
+        : nil
+
       // Delete stale local group state BEFORE attempting rejoin.
       // Without this, `attemptExternalCommitFallback` sees `groupExists == true`
       // and returns immediately without repairing the desynchronized ratchet state.
@@ -793,7 +808,10 @@ public extension MLSConversationManager {
         if succeeded {
           await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
         } else {
-          await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
+          await recoveryManager.recordFailedRejoin(
+            convoId: convo.conversationID,
+            epochAuthenticatorHex: preDeleteAuthHex
+          )
         }
       }
     }
@@ -834,6 +852,14 @@ public extension MLSConversationManager {
       "🔄 [EPOCH-RESET] Starting recipient rejoin for \(convoId.prefix(16)) — pendingNewGroupId=\(pendingNewGroupIdHex.prefix(16)), gen=\(observedGeneration.map(String.init) ?? "nil")"
     )
 
+    // Capture the old-group authenticator BEFORE deleting so we can feed the
+    // A7 reset-vote pyramid a real vote on failure paths below. After
+    // `deleteGroup`, the FFI can no longer compute one for this groupID.
+    let preDeleteAuthHex: String? =
+      await mlsClient.groupExists(for: userDid, groupId: convo.groupID)
+      ? await mlsClient.epochAuthenticatorHex(for: userDid, groupId: convo.groupID)
+      : nil
+
     // Drop stale local MLS state for the old groupID before external-commiting
     // into the new one. The old group is being abandoned by server fiat; no
     // further commits will ever land against it.
@@ -861,7 +887,8 @@ public extension MLSConversationManager {
           "❌ [EPOCH-RESET] Recipient rejoin landed on \(landedHex.prefix(16)) but staged was \(pendingNewGroupIdHex.prefix(16)) — leaving RESET_PENDING set for retry"
         )
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
-          await recoveryManager.recordFailedRejoin(convoId: convoId)
+          await recoveryManager.recordFailedRejoin(
+            convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
         }
         return
       }
@@ -929,7 +956,8 @@ public extension MLSConversationManager {
         "❌ [EPOCH-RESET] Recipient rejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
       )
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
-        await recoveryManager.recordFailedRejoin(convoId: convoId)
+        await recoveryManager.recordFailedRejoin(
+          convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
       }
     }
   }

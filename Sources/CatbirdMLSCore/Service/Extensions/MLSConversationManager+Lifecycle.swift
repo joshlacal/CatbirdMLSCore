@@ -973,6 +973,13 @@ extension MLSConversationManager {
           // Without this, `attemptExternalCommitFallback` sees `groupExists == true`
           // and returns immediately without repairing the desynchronized ratchet state.
           let groupIdData = convo.groupID
+          // Capture authenticator BEFORE deletion so the A7 reset-vote pyramid
+          // receives a real vote on failure (post-delete, FFI returns
+          // GroupNotFound and server short-circuits as missing_authenticator).
+          let preDeleteAuthHex: String? =
+            await mlsClient.groupExists(for: userDid, groupId: groupIdData)
+            ? await mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
+            : nil
           if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
             logger.info(
               "🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))...")
@@ -997,7 +1004,10 @@ extension MLSConversationManager {
             if succeeded {
               await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
             } else {
-              await recoveryManager.recordFailedRejoin(convoId: convo.conversationID)
+              await recoveryManager.recordFailedRejoin(
+                convoId: convo.conversationID,
+                epochAuthenticatorHex: preDeleteAuthHex
+              )
             }
           }
         }

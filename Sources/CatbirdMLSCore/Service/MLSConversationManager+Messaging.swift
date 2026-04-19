@@ -5354,7 +5354,12 @@ public extension MLSConversationManager {
         await readdition(convoId: convoId)
 
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
-          await recoveryManager.recordFailedRejoin(convoId: convoId)
+          // No authenticator here: the early-return at L5281-5288 guarantees
+          // the group does NOT exist locally when we reach this failure path
+          // (External Commit is being attempted precisely because local state
+          // is absent). FFI would return GroupNotFound. Server accepts nil
+          // but short-circuits the A7 vote as `missing_authenticator`.
+          await recoveryManager.recordFailedRejoin(convoId: convoId, epochAuthenticatorHex: nil)
         }
 
         throw MLSConversationError.operationFailed("External Commit forbidden (HTTP 403)")
@@ -5380,7 +5385,10 @@ public extension MLSConversationManager {
           || errorMessage.contains("server data corrupted")
 
         if isServerDataCorruption {
-          await recoveryManager.recordFailedRejoin(convoId: convoId)
+          // No authenticator: early-return at L5281-5288 guarantees the group
+          // is absent locally when this failure path runs. Server records the
+          // vote but short-circuits as `missing_authenticator`.
+          await recoveryManager.recordFailedRejoin(convoId: convoId, epochAuthenticatorHex: nil)
           let remaining = await recoveryManager.remainingRejoinAttempts(convoId: convoId)
           if remaining == 0 {
             // Mark as server-corrupted after repeated failures to avoid premature lockout
@@ -5400,7 +5408,10 @@ public extension MLSConversationManager {
             )
           }
         } else {
-          await recoveryManager.recordFailedRejoin(convoId: convoId)
+          // No authenticator: early-return at L5281-5288 guarantees the group
+          // is absent locally on this failure path. Server records the vote
+          // but short-circuits as `missing_authenticator`.
+          await recoveryManager.recordFailedRejoin(convoId: convoId, epochAuthenticatorHex: nil)
           let remaining = await recoveryManager.remainingRejoinAttempts(convoId: convoId)
           logger.info(
             "📊 [External Commit Fallback] \(remaining) rejoin attempts remaining for \(convoId.prefix(16))..."
