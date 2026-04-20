@@ -450,7 +450,7 @@ public actor MLSEventStreamManager {
             }
 
         case .circuitBreakerTrippedEvent(let cbEvent):
-            logger.warning("Circuit breaker tripped: convo=\(cbEvent.convoId), resetCount=\(cbEvent.resetCount), at=\(cbEvent.trippedAt)")
+            logger.warning("Circuit breaker tripped: convo=\(cbEvent.convoId), resetCount=\(cbEvent.resetCount), at=\(cbEvent.trippedAt.iso8601String)")
             saveCursor(cbEvent.cursor, for: convoId)
 
         }
