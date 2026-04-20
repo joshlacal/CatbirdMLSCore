@@ -2805,6 +2805,13 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func addMembers(groupId: String, memberDids: [String]) throws 
     
     /**
+     * Confirm a previously staged commit: merges it locally, advances the
+     * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
+     * the fence (for API paths that don't echo an epoch).
+     */
+    func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws  -> FfiConfirmedCommit
+    
+    /**
      * Create a new MLS group/conversation.
      */
     func createGroup(name: String, initialMembers: [String]?, description: String?) throws  -> FfiConversationView
@@ -2814,6 +2821,12 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
      * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
      */
     func decodeOpusToPcm(opusData: Data) throws  -> Data
+    
+    /**
+     * Discard a staged commit without advancing the epoch. Clears the
+     * pending commit in the MLS crypto context.
+     */
+    func discardPending(handle: FfiStagedCommitHandle) throws 
     
     /**
      * Ensure device is registered with MLS service.
@@ -2944,6 +2957,13 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func shutdown() 
     
     /**
+     * Stage a commit without sending or merging it. Returns a plan; call
+     * [`confirm_commit`](Self::confirm_commit) on DS success or
+     * [`discard_pending`](Self::discard_pending) on failure.
+     */
+    func stageCommit(conversationId: String, kind: FfiCommitKind) throws  -> FfiCommitPlan
+    
+    /**
      * Atomically swap members in a single commit.
      */
     func swapMembers(groupId: String, removeDids: [String], addDids: [String]) throws 
@@ -3044,6 +3064,20 @@ open func addMembers(groupId: String, memberDids: [String])throws  {try rustCall
 }
     
     /**
+     * Confirm a previously staged commit: merges it locally, advances the
+     * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
+     * the fence (for API paths that don't echo an epoch).
+     */
+open func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64)throws  -> FfiConfirmedCommit {
+    return try  FfiConverterTypeFFIConfirmedCommit.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_confirm_commit(self.uniffiClonePointer(),
+        FfiConverterTypeFFIStagedCommitHandle.lower(handle),
+        FfiConverterUInt64.lower(serverEpoch),$0
+    )
+})
+}
+    
+    /**
      * Create a new MLS group/conversation.
      */
 open func createGroup(name: String, initialMembers: [String]?, description: String?)throws  -> FfiConversationView {
@@ -3066,6 +3100,17 @@ open func decodeOpusToPcm(opusData: Data)throws  -> Data {
         FfiConverterData.lower(opusData),$0
     )
 })
+}
+    
+    /**
+     * Discard a staged commit without advancing the epoch. Clears the
+     * pending commit in the MLS crypto context.
+     */
+open func discardPending(handle: FfiStagedCommitHandle)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_discard_pending(self.uniffiClonePointer(),
+        FfiConverterTypeFFIStagedCommitHandle.lower(handle),$0
+    )
+}
 }
     
     /**
@@ -3314,6 +3359,20 @@ open func shutdown() {try! rustCall() {
     uniffi_catbird_mls_fn_method_orchestratorbridge_shutdown(self.uniffiClonePointer(),$0
     )
 }
+}
+    
+    /**
+     * Stage a commit without sending or merging it. Returns a plan; call
+     * [`confirm_commit`](Self::confirm_commit) on DS success or
+     * [`discard_pending`](Self::discard_pending) on failure.
+     */
+open func stageCommit(conversationId: String, kind: FfiCommitKind)throws  -> FfiCommitPlan {
+    return try  FfiConverterTypeFFICommitPlan.lift(try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_stage_commit(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterTypeFFICommitKind.lower(kind),$0
+    )
+})
 }
     
     /**
@@ -4406,6 +4465,184 @@ public func FfiConverterTypeFFIAddMembersResult_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeFFIAddMembersResult_lower(_ value: FfiAddMembersResult) -> RustBuffer {
     return FfiConverterTypeFFIAddMembersResult.lower(value)
+}
+
+
+/**
+ * Plan returned from `stage_commit` — ship this to the DS, then confirm.
+ */
+public struct FfiCommitPlan {
+    public var handle: FfiStagedCommitHandle
+    public var commitBytes: Data
+    public var welcomeBytes: Data?
+    public var groupInfo: Data
+    public var sourceEpoch: UInt64
+    public var targetEpoch: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(handle: FfiStagedCommitHandle, commitBytes: Data, welcomeBytes: Data?, groupInfo: Data, sourceEpoch: UInt64, targetEpoch: UInt64) {
+        self.handle = handle
+        self.commitBytes = commitBytes
+        self.welcomeBytes = welcomeBytes
+        self.groupInfo = groupInfo
+        self.sourceEpoch = sourceEpoch
+        self.targetEpoch = targetEpoch
+    }
+}
+
+
+
+extension FfiCommitPlan: Equatable, Hashable {
+    public static func ==(lhs: FfiCommitPlan, rhs: FfiCommitPlan) -> Bool {
+        if lhs.handle != rhs.handle {
+            return false
+        }
+        if lhs.commitBytes != rhs.commitBytes {
+            return false
+        }
+        if lhs.welcomeBytes != rhs.welcomeBytes {
+            return false
+        }
+        if lhs.groupInfo != rhs.groupInfo {
+            return false
+        }
+        if lhs.sourceEpoch != rhs.sourceEpoch {
+            return false
+        }
+        if lhs.targetEpoch != rhs.targetEpoch {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(handle)
+        hasher.combine(commitBytes)
+        hasher.combine(welcomeBytes)
+        hasher.combine(groupInfo)
+        hasher.combine(sourceEpoch)
+        hasher.combine(targetEpoch)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFICommitPlan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCommitPlan {
+        return
+            try FfiCommitPlan(
+                handle: FfiConverterTypeFFIStagedCommitHandle.read(from: &buf), 
+                commitBytes: FfiConverterData.read(from: &buf), 
+                welcomeBytes: FfiConverterOptionData.read(from: &buf), 
+                groupInfo: FfiConverterData.read(from: &buf), 
+                sourceEpoch: FfiConverterUInt64.read(from: &buf), 
+                targetEpoch: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiCommitPlan, into buf: inout [UInt8]) {
+        FfiConverterTypeFFIStagedCommitHandle.write(value.handle, into: &buf)
+        FfiConverterData.write(value.commitBytes, into: &buf)
+        FfiConverterOptionData.write(value.welcomeBytes, into: &buf)
+        FfiConverterData.write(value.groupInfo, into: &buf)
+        FfiConverterUInt64.write(value.sourceEpoch, into: &buf)
+        FfiConverterUInt64.write(value.targetEpoch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFICommitPlan_lift(_ buf: RustBuffer) throws -> FfiCommitPlan {
+    return try FfiConverterTypeFFICommitPlan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFICommitPlan_lower(_ value: FfiCommitPlan) -> RustBuffer {
+    return FfiConverterTypeFFICommitPlan.lower(value)
+}
+
+
+/**
+ * Summary returned from `confirm_commit`.
+ */
+public struct FfiConfirmedCommit {
+    public var newEpoch: UInt64
+    public var metadataKey: Data?
+    public var metadataReference: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(newEpoch: UInt64, metadataKey: Data?, metadataReference: String?) {
+        self.newEpoch = newEpoch
+        self.metadataKey = metadataKey
+        self.metadataReference = metadataReference
+    }
+}
+
+
+
+extension FfiConfirmedCommit: Equatable, Hashable {
+    public static func ==(lhs: FfiConfirmedCommit, rhs: FfiConfirmedCommit) -> Bool {
+        if lhs.newEpoch != rhs.newEpoch {
+            return false
+        }
+        if lhs.metadataKey != rhs.metadataKey {
+            return false
+        }
+        if lhs.metadataReference != rhs.metadataReference {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(newEpoch)
+        hasher.combine(metadataKey)
+        hasher.combine(metadataReference)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIConfirmedCommit: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConfirmedCommit {
+        return
+            try FfiConfirmedCommit(
+                newEpoch: FfiConverterUInt64.read(from: &buf), 
+                metadataKey: FfiConverterOptionData.read(from: &buf), 
+                metadataReference: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiConfirmedCommit, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.newEpoch, into: &buf)
+        FfiConverterOptionData.write(value.metadataKey, into: &buf)
+        FfiConverterOptionString.write(value.metadataReference, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConfirmedCommit_lift(_ buf: RustBuffer) throws -> FfiConfirmedCommit {
+    return try FfiConverterTypeFFIConfirmedCommit.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConfirmedCommit_lower(_ value: FfiConfirmedCommit) -> RustBuffer {
+    return FfiConverterTypeFFIConfirmedCommit.lower(value)
 }
 
 
@@ -5650,6 +5887,76 @@ public func FfiConverterTypeFFIProcessExternalCommitResult_lift(_ buf: RustBuffe
 #endif
 public func FfiConverterTypeFFIProcessExternalCommitResult_lower(_ value: FfiProcessExternalCommitResult) -> RustBuffer {
     return FfiConverterTypeFFIProcessExternalCommitResult.lower(value)
+}
+
+
+/**
+ * Opaque handle returned by `stage_commit`. Carries the group id and a
+ * per-orchestrator monotonic nonce so stale handles are rejected cleanly.
+ */
+public struct FfiStagedCommitHandle {
+    public var groupId: String
+    public var nonce: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(groupId: String, nonce: UInt64) {
+        self.groupId = groupId
+        self.nonce = nonce
+    }
+}
+
+
+
+extension FfiStagedCommitHandle: Equatable, Hashable {
+    public static func ==(lhs: FfiStagedCommitHandle, rhs: FfiStagedCommitHandle) -> Bool {
+        if lhs.groupId != rhs.groupId {
+            return false
+        }
+        if lhs.nonce != rhs.nonce {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(groupId)
+        hasher.combine(nonce)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIStagedCommitHandle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStagedCommitHandle {
+        return
+            try FfiStagedCommitHandle(
+                groupId: FfiConverterString.read(from: &buf), 
+                nonce: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiStagedCommitHandle, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.groupId, into: &buf)
+        FfiConverterUInt64.write(value.nonce, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIStagedCommitHandle_lift(_ buf: RustBuffer) throws -> FfiStagedCommitHandle {
+    return try FfiConverterTypeFFIStagedCommitHandle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIStagedCommitHandle_lower(_ value: FfiStagedCommitHandle) -> RustBuffer {
+    return FfiConverterTypeFFIStagedCommitHandle.lower(value)
 }
 
 
@@ -7478,6 +7785,118 @@ public func FfiConverterTypeWelcomeResult_lift(_ buf: RustBuffer) throws -> Welc
 public func FfiConverterTypeWelcomeResult_lower(_ value: WelcomeResult) -> RustBuffer {
     return FfiConverterTypeWelcomeResult.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The kind of commit to stage. Each variant corresponds to an existing
+ * atomic method on `OrchestratorBridge`.
+ */
+
+public enum FfiCommitKind {
+    
+    /**
+     * Add new members. `key_packages` are the serialized key-package bytes
+     * the platform has already fetched from the DS for the given DIDs.
+     */
+    case addMembers(memberDids: [String], keyPackages: [Data]
+    )
+    /**
+     * Remove members by DID (converted to identity bytes internally).
+     */
+    case removeMembers(memberDids: [String]
+    )
+    /**
+     * Atomically swap membership: remove the listed DIDs and add new
+     * members from key packages, in a single commit.
+     */
+    case swapMembers(removeDids: [String], addDids: [String], addKeyPackages: [Data]
+    )
+    /**
+     * GroupContextExtensions commit that updates the encrypted metadata
+     * blob. `group_info_extension` is the serialized `GroupMetadata` JSON.
+     */
+    case updateMetadata(groupInfoExtension: Data
+    )
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFICommitKind: FfiConverterRustBuffer {
+    typealias SwiftType = FfiCommitKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCommitKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .addMembers(memberDids: try FfiConverterSequenceString.read(from: &buf), keyPackages: try FfiConverterSequenceData.read(from: &buf)
+        )
+        
+        case 2: return .removeMembers(memberDids: try FfiConverterSequenceString.read(from: &buf)
+        )
+        
+        case 3: return .swapMembers(removeDids: try FfiConverterSequenceString.read(from: &buf), addDids: try FfiConverterSequenceString.read(from: &buf), addKeyPackages: try FfiConverterSequenceData.read(from: &buf)
+        )
+        
+        case 4: return .updateMetadata(groupInfoExtension: try FfiConverterData.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiCommitKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .addMembers(memberDids,keyPackages):
+            writeInt(&buf, Int32(1))
+            FfiConverterSequenceString.write(memberDids, into: &buf)
+            FfiConverterSequenceData.write(keyPackages, into: &buf)
+            
+        
+        case let .removeMembers(memberDids):
+            writeInt(&buf, Int32(2))
+            FfiConverterSequenceString.write(memberDids, into: &buf)
+            
+        
+        case let .swapMembers(removeDids,addDids,addKeyPackages):
+            writeInt(&buf, Int32(3))
+            FfiConverterSequenceString.write(removeDids, into: &buf)
+            FfiConverterSequenceString.write(addDids, into: &buf)
+            FfiConverterSequenceData.write(addKeyPackages, into: &buf)
+            
+        
+        case let .updateMetadata(groupInfoExtension):
+            writeInt(&buf, Int32(4))
+            FfiConverterData.write(groupInfoExtension, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFICommitKind_lift(_ buf: RustBuffer) throws -> FfiCommitKind {
+    return try FfiConverterTypeFFICommitKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFICommitKind_lower(_ value: FfiCommitKind) -> RustBuffer {
+    return FfiConverterTypeFFICommitKind.lower(value)
+}
+
+
+
+extension FfiCommitKind: Equatable, Hashable {}
+
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -12425,10 +12844,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members() != 30814) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_confirm_commit() != 2386) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_create_group() != 46751) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_decode_opus_to_pcm() != 46696) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_discard_pending() != 1943) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_device_registered() != 54125) {
@@ -12489,6 +12914,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_stage_commit() != 32523) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_swap_members() != 36054) {
