@@ -301,8 +301,18 @@ public extension MLSConversationManager {
 
     // Spec §5.1: up to SEND_SYNC_MAX_ROUNDS rounds of SEND_SYNC_BATCH_SIZE commits
     for round in 1...Self.sendSyncMaxRounds {
+      // Bound the query to epochs we actually need. Without `fromEpoch` the
+      // server returns the OLDEST 50 commits in [0, current_epoch], which on
+      // a mature conversation are all from epochs we've long since passed —
+      // every processMessage call then fails WrongEpoch and we never reach
+      // the commits we're actually behind on. Walking forward from
+      // `localEpoch + 1` pulls the commits this client genuinely missed.
+      let localEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
+      let fromEpoch = Int(min(localEpoch &+ 1, UInt64(Int.max)))
+
       let commits = try await apiClient.getCommits(
         convoId: convoId,
+        fromEpoch: fromEpoch,
         limit: Self.sendSyncBatchSize
       )
 

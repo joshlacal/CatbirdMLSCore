@@ -1035,6 +1035,28 @@ public actor MLSClient {
 
     let maxRetries = 3
     var lastError: Error?
+    // Tracks the group_id from a successful `createExternalCommit` whose
+    // server ACK is still pending. OpenMLS's external-commit builder writes
+    // the new group to storage and overwrites any prior state immediately, so
+    // every failure exit after `createExternalCommit` must call
+    // `discardPendingExternalJoin` to restore "not joined" state. Cleared to
+    // nil on server success (line ~return) and on retry after a successful
+    // discard.
+    var pendingGroupId: Data? = nil
+
+    // Local helper: swallow discard errors (cleanup is best-effort — don't
+    // mask the original failure reason with cleanup noise).
+    func discardPendingIfNeeded() async {
+      guard let gid = pendingGroupId else { return }
+      do {
+        try await self.discardPendingExternalJoin(for: userDID, groupId: gid)
+      } catch {
+        logger.warning(
+          "⚠️ [MLSClient.joinByExternalCommit] discardPendingExternalJoin failed (non-fatal): \(error.localizedDescription)"
+        )
+      }
+      pendingGroupId = nil
+    }
 
     for attempt in 1...maxRetries {
       logger.info("🔄 [MLSClient.joinByExternalCommit] Attempt \(attempt)/\(maxRetries)")
@@ -1146,6 +1168,11 @@ public actor MLSClient {
           try ctx.createExternalCommit(
             groupInfoBytes: groupInfo, identityBytes: identityBytes)
         }
+        // `createExternalCommit` has already written the new group to storage
+        // and overwritten any prior state under `result.groupId`. From here
+        // until server ACK, that local state is unconfirmed — every non-return
+        // exit must discard it.
+        pendingGroupId = Data(result.groupId)
 
         // 6. Send Commit to Server — capture the returned server epoch
         // Get confirmation tag from the new local group state after external commit
@@ -1169,6 +1196,7 @@ public actor MLSClient {
               logger.warning(
                 "⚠️ [MLSClient.joinByExternalCommit] 409 epoch conflict on attempt \(attempt) — retrying with fresh GroupInfo"
               )
+              await discardPendingIfNeeded()
               if attempt < maxRetries {
                 let waitSeconds = 1 * attempt
                 let jitterMs = UInt64.random(in: 0...500)
@@ -1180,6 +1208,7 @@ public actor MLSClient {
               logger.warning(
                 "⚠️ [MLSClient.joinByExternalCommit] External Commit rejected (HTTP 403) - requesting GroupInfo refresh"
               )
+              await discardPendingIfNeeded()
               do {
                 let (requested, activeMembers) = try await apiClient.groupInfoRefresh(convoId: convoId)
                 if requested {
@@ -1206,12 +1235,19 @@ public actor MLSClient {
               }
             }
           }
+          // Any other HTTP status (429 rate limit, 500 server error, etc.) or
+          // non-HTTP api error — discard before propagating so we don't leave
+          // stale post-commit state in `self.groups`.
+          await discardPendingIfNeeded()
           throw apiError
         }
 
         logger.info(
           "✅ [MLSClient.joinByExternalCommit] Success - Joined group \(convoId) on attempt \(attempt)"
         )
+        // Server accepted the commit — the local post-commit state is now
+        // authoritative; clear the pending-discard guard so we don't undo it.
+        pendingGroupId = nil
 
         // Compare local epoch vs server epoch to detect race conditions
         let groupIdData = Data(result.groupId)
@@ -1269,6 +1305,12 @@ public actor MLSClient {
             "⚠️ [MLSClient.joinByExternalCommit] Deserialization error on attempt \(attempt): \(error.localizedDescription)"
           )
           logger.info("   🔄 Retrying in \(totalDelayMs)ms with fresh GroupInfo...")
+          // Discard any half-joined state before retrying so the next
+          // attempt starts from a clean slate. (Usually `pendingGroupId`
+          // is nil here — the retriable errors above typically fire inside
+          // `ctx.createExternalCommit` itself, before we set it — but be
+          // defensive in case a later-stage error path routes here.)
+          await discardPendingIfNeeded()
           try await Task.sleep(for: .milliseconds(totalDelayMs))
           continue
         }
@@ -1313,6 +1355,9 @@ public actor MLSClient {
           }
         }
 
+        // Terminal failure — discard any half-joined state so the next
+        // caller sees "not joined" and can rejoin cleanly.
+        await discardPendingIfNeeded()
         throw MLSError.operationFailed
 
       } catch {
@@ -1320,12 +1365,14 @@ public actor MLSClient {
         lastError = error
         logger.error(
           "❌ [MLSClient.joinByExternalCommit] Non-MLS error: \(error.localizedDescription)")
+        await discardPendingIfNeeded()
         throw error
       }
     }
 
     // Should never reach here, but handle gracefully
     logger.error("❌ [MLSClient.joinByExternalCommit] Exhausted all \(maxRetries) retries")
+    await discardPendingIfNeeded()
     if let error = lastError {
       throw error
     }
@@ -2155,6 +2202,31 @@ public actor MLSClient {
       logger.info("✅ [MLSClient.clearPendingCommit] Success")
     } catch let error as MlsError {
       logger.error("❌ [MLSClient.clearPendingCommit] FAILED: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
+  /// Discard a rejected external join.
+  ///
+  /// The OpenMLS `external_commit_builder().finalize()` API writes the new
+  /// group to storage and overwrites any prior state for `groupId` — there is
+  /// no "pending" stage to clear via `clearPendingCommit`. When the server
+  /// rejects our external commit (409/403/429/etc.), we must call this to
+  /// remove the half-joined group from `self.groups`, OpenMLS storage, and
+  /// the manifest. Without this, the client carries a post-commit epoch that
+  /// the server never accepted — every subsequent message send fails with
+  /// TreeStateDiverged until next recovery.
+  public func discardPendingExternalJoin(for userDID: String, groupId: Data) async throws {
+    logger.info(
+      "📍 [MLSClient.discardPendingExternalJoin] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
+    )
+    do {
+      try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.discardPendingExternalJoin(groupId: groupId)
+      }
+      logger.info("✅ [MLSClient.discardPendingExternalJoin] Success")
+    } catch let error as MlsError {
+      logger.error("❌ [MLSClient.discardPendingExternalJoin] FAILED: \(error.localizedDescription)")
       throw MLSError.operationFailed
     }
   }
