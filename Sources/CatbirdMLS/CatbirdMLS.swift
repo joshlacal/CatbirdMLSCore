@@ -618,11 +618,6 @@ public protocol CatbirdClientBridgeProtocol : AnyObject {
     func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64?) throws  -> [ChatMessage]
     
     /**
-     * Force rejoin a conversation (recovery from epoch desync).
-     */
-    func rejoinConversation(conversationId: String) throws 
-    
-    /**
      * Remove participants from a conversation.
      */
     func removeParticipants(conversationId: String, participantDids: [String]) throws 
@@ -801,16 +796,6 @@ open func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64
         FfiConverterOptionUInt64.lower(beforeSequence),$0
     )
 })
-}
-    
-    /**
-     * Force rejoin a conversation (recovery from epoch desync).
-     */
-open func rejoinConversation(conversationId: String)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-    uniffi_catbird_mls_fn_method_catbirdclientbridge_rejoin_conversation(self.uniffiClonePointer(),
-        FfiConverterString.lower(conversationId),$0
-    )
-}
 }
     
     /**
@@ -1062,6 +1047,23 @@ public protocol MlsContextProtocol : AnyObject {
     func deleteKeyPackageBundles(hashRefs: [Data]) throws  -> UInt64
     
     /**
+     * Task #33: discard an incoming `StagedCommit` that was previously staged,
+     * without advancing the local epoch.
+     *
+     * Use this when the platform decides (e.g. via recovery policy) that the
+     * staged commit should not be applied — for instance if a fork/reset has
+     * been observed and the platform is about to initiate a rejoin.
+     *
+     * OpenMLS's own storage is **not** modified by this call. Only the
+     * in-memory staging handle is dropped. Any OpenMLS-side bookkeeping for
+     * the staged commit (proposal queue, etc.) is unaffected; the staged
+     * commit will be garbage collected via the normal epoch-advance path.
+     *
+     * Idempotent: no-op if no entry exists for `(group_id, target_epoch)`.
+     */
+    func discardIncomingCommit(groupId: Data, targetEpoch: UInt64) throws 
+    
+    /**
      * Discard a pending external join after server rejection
      *
      * CRITICAL: Call this when the delivery service rejects an external commit.
@@ -1280,6 +1282,29 @@ public protocol MlsContextProtocol : AnyObject {
     func listPendingProposals(groupId: Data) throws  -> [ProposalRef]
     
     /**
+     * Task #33: merge an incoming `StagedCommit` that was previously staged by
+     * `process_message` / `process_message_async` / `decrypt_message` /
+     * `decrypt_message_async` / `process_commit`.
+     *
+     * This is the caller-driven confirmation step that replaces the previous
+     * auto-merge behavior. The platform must call this once it has:
+     * - Validated the incoming commit against its recovery/sync policy
+     * - Persisted any pre-merge state it needs (ordering, ack state, etc.)
+     *
+     * Returns the new (post-merge) epoch.
+     *
+     * Errors:
+     * - `MLSError::invalid_input` if no staged commit exists for
+     * `(group_id, target_epoch)` — the entry was never staged, or
+     * `discard_incoming_commit` already cleared it.
+     * - `MLSError::MergeFailed` if OpenMLS `merge_staged_commit` fails; the
+     * StagedCommit is dropped (caller must re-fetch from the DS if recovery
+     * is needed). This matches the pre-refactor behavior where a failed
+     * merge left no resumable state.
+     */
+    func mergeIncomingCommit(groupId: Data, targetEpoch: UInt64) throws  -> UInt64
+    
+    /**
      * Merge a pending commit after validation
      * This should be called after the commit has been accepted by the delivery service
      */
@@ -1299,6 +1324,21 @@ public protocol MlsContextProtocol : AnyObject {
      * Async variant of process_message - offloads crypto work to avoid blocking
      */
     func processMessageAsync(groupId: Data, messageData: Data) async throws  -> ProcessedContent
+    
+    /**
+     * Task #33 (transitional): wrapper that runs `process_message` and
+     * immediately merges any incoming staged commit, preserving the
+     * pre-refactor auto-merge behavior.
+     *
+     * **DEPRECATED.** This exists only for platforms (iOS, Android, catmos)
+     * that have not yet migrated to the explicit stage/merge contract.
+     * New code should call `process_message` + (`merge_incoming_commit` or
+     * `discard_incoming_commit`).
+     *
+     * Logs a warning on every invocation — see server logs for migration
+     * progress.
+     */
+    func processMessageLegacyAutomerge(groupId: Data, messageData: Data) throws  -> ProcessedContent
     
     func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws  -> WelcomeResult
     
@@ -1840,6 +1880,29 @@ open func deleteKeyPackageBundles(hashRefs: [Data])throws  -> UInt64 {
 }
     
     /**
+     * Task #33: discard an incoming `StagedCommit` that was previously staged,
+     * without advancing the local epoch.
+     *
+     * Use this when the platform decides (e.g. via recovery policy) that the
+     * staged commit should not be applied — for instance if a fork/reset has
+     * been observed and the platform is about to initiate a rejoin.
+     *
+     * OpenMLS's own storage is **not** modified by this call. Only the
+     * in-memory staging handle is dropped. Any OpenMLS-side bookkeeping for
+     * the staged commit (proposal queue, etc.) is unaffected; the staged
+     * commit will be garbage collected via the normal epoch-advance path.
+     *
+     * Idempotent: no-op if no entry exists for `(group_id, target_epoch)`.
+     */
+open func discardIncomingCommit(groupId: Data, targetEpoch: UInt64)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_discard_incoming_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterUInt64.lower(targetEpoch),$0
+    )
+}
+}
+    
+    /**
      * Discard a pending external join after server rejection
      *
      * CRITICAL: Call this when the delivery service rejects an external commit.
@@ -2222,6 +2285,36 @@ open func listPendingProposals(groupId: Data)throws  -> [ProposalRef] {
 }
     
     /**
+     * Task #33: merge an incoming `StagedCommit` that was previously staged by
+     * `process_message` / `process_message_async` / `decrypt_message` /
+     * `decrypt_message_async` / `process_commit`.
+     *
+     * This is the caller-driven confirmation step that replaces the previous
+     * auto-merge behavior. The platform must call this once it has:
+     * - Validated the incoming commit against its recovery/sync policy
+     * - Persisted any pre-merge state it needs (ordering, ack state, etc.)
+     *
+     * Returns the new (post-merge) epoch.
+     *
+     * Errors:
+     * - `MLSError::invalid_input` if no staged commit exists for
+     * `(group_id, target_epoch)` — the entry was never staged, or
+     * `discard_incoming_commit` already cleared it.
+     * - `MLSError::MergeFailed` if OpenMLS `merge_staged_commit` fails; the
+     * StagedCommit is dropped (caller must re-fetch from the DS if recovery
+     * is needed). This matches the pre-refactor behavior where a failed
+     * merge left no resumable state.
+     */
+open func mergeIncomingCommit(groupId: Data, targetEpoch: UInt64)throws  -> UInt64 {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_merge_incoming_commit(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterUInt64.lower(targetEpoch),$0
+    )
+})
+}
+    
+    /**
      * Merge a pending commit after validation
      * This should be called after the commit has been accepted by the delivery service
      */
@@ -2281,6 +2374,28 @@ open func processMessageAsync(groupId: Data, messageData: Data)async throws  -> 
             liftFunc: FfiConverterTypeProcessedContent.lift,
             errorHandler: FfiConverterTypeMLSError.lift
         )
+}
+    
+    /**
+     * Task #33 (transitional): wrapper that runs `process_message` and
+     * immediately merges any incoming staged commit, preserving the
+     * pre-refactor auto-merge behavior.
+     *
+     * **DEPRECATED.** This exists only for platforms (iOS, Android, catmos)
+     * that have not yet migrated to the explicit stage/merge contract.
+     * New code should call `process_message` + (`merge_incoming_commit` or
+     * `discard_incoming_commit`).
+     *
+     * Logs a warning on every invocation — see server logs for migration
+     * progress.
+     */
+open func processMessageLegacyAutomerge(groupId: Data, messageData: Data)throws  -> ProcessedContent {
+    return try  FfiConverterTypeProcessedContent.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_process_message_legacy_automerge(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterData.lower(messageData),$0
+    )
+})
 }
     
 open func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?)throws  -> WelcomeResult {
@@ -2722,11 +2837,6 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func fetchMessages(conversationId: String, cursor: String?, limit: UInt32) throws  -> FfiFetchMessagesResult
     
     /**
-     * Force rejoin a conversation via External Commit.
-     */
-    func forceRejoin(convoId: String) throws 
-    
-    /**
      * Get key package stats.
      */
     func getKeyPackageStats() throws  -> FfiKeyPackageStats
@@ -2804,6 +2914,17 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
      * Check and replenish key packages if needed.
      */
     func replenishKeyPackagesIfNeeded() throws 
+    
+    /**
+     * Task #43: report unrecoverable local state to the server so the A7 reset
+     * pyramid can take over (the server will eventually issue a GroupResetEvent
+     * to move all members to a new group).
+     *
+     * This does **not** touch local MLS state or create External Commits. It's
+     * a pure notification. Callback errors on the `report_recovery_failure`
+     * path are logged and swallowed internally.
+     */
+    func reportUnrecoverableLocal(convoId: String, reason: String) throws 
     
     /**
      * Send a text message.
@@ -2988,16 +3109,6 @@ open func fetchMessages(conversationId: String, cursor: String?, limit: UInt32)t
 }
     
     /**
-     * Force rejoin a conversation via External Commit.
-     */
-open func forceRejoin(convoId: String)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-    uniffi_catbird_mls_fn_method_orchestratorbridge_force_rejoin(self.uniffiClonePointer(),
-        FfiConverterString.lower(convoId),$0
-    )
-}
-}
-    
-    /**
      * Get key package stats.
      */
 open func getKeyPackageStats()throws  -> FfiKeyPackageStats {
@@ -3142,6 +3253,23 @@ open func removeMembers(groupId: String, memberDids: [String])throws  {try rustC
      */
 open func replenishKeyPackagesIfNeeded()throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
     uniffi_catbird_mls_fn_method_orchestratorbridge_replenish_key_packages_if_needed(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
+     * Task #43: report unrecoverable local state to the server so the A7 reset
+     * pyramid can take over (the server will eventually issue a GroupResetEvent
+     * to move all members to a new group).
+     *
+     * This does **not** touch local MLS state or create External Commits. It's
+     * a pure notification. Callback errors on the `report_recovery_failure`
+     * path are logged and swallowed internally.
+     */
+open func reportUnrecoverableLocal(convoId: String, reason: String)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_report_unrecoverable_local(self.uniffiClonePointer(),
+        FfiConverterString.lower(convoId),
+        FfiConverterString.lower(reason),$0
     )
 }
 }
@@ -9123,7 +9251,17 @@ public protocol OrchestratorApiCallback : AnyObject {
     
     func sendMessage(convoId: String, ciphertext: Data, epoch: UInt64) throws 
     
-    func getMessages(convoId: String, cursor: String?, limit: UInt32) throws  -> FfiMessagesPage
+    /**
+     * Fetch encrypted envelopes for a conversation.
+     *
+     * `message_type` / `from_epoch` / `to_epoch` mirror the
+     * `blue.catbird.mlsChat.getMessages` lexicon params. Pass-through to the
+     * server URL — platform implementations should forward them untouched.
+     * `from_epoch` and `to_epoch` are inclusive epoch bounds; supplying them
+     * (especially with `message_type = Some("commit")`) keeps epoch catch-up
+     * from being stranded on groups with more than 50 lifetime commits.
+     */
+    func getMessages(convoId: String, cursor: String?, limit: UInt32, messageType: String?, fromEpoch: UInt32?, toEpoch: UInt32?) throws  -> FfiMessagesPage
     
     func publishKeyPackage(keyPackage: Data, cipherSuite: String, expiresAt: String) throws 
     
@@ -9433,6 +9571,9 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorAPICallback {
             convoId: RustBuffer,
             cursor: RustBuffer,
             limit: UInt32,
+            messageType: RustBuffer,
+            fromEpoch: RustBuffer,
+            toEpoch: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -9444,7 +9585,10 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorAPICallback {
                 return try uniffiObj.getMessages(
                      convoId: try FfiConverterString.lift(convoId),
                      cursor: try FfiConverterOptionString.lift(cursor),
-                     limit: try FfiConverterUInt32.lift(limit)
+                     limit: try FfiConverterUInt32.lift(limit),
+                     messageType: try FfiConverterOptionString.lift(messageType),
+                     fromEpoch: try FfiConverterOptionUInt32.lift(fromEpoch),
+                     toEpoch: try FfiConverterOptionUInt32.lift(toEpoch)
                 )
             }
 
@@ -12038,9 +12182,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_messages() != 46800) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_rejoin_conversation() != 9906) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_remove_participants() != 39550) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12111,6 +12252,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_delete_key_package_bundles() != 40433) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_discard_incoming_commit() != 9518) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_discard_pending_external_join() != 45091) {
@@ -12194,6 +12338,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_list_pending_proposals() != 22913) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_merge_incoming_commit() != 47130) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 9121) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12207,6 +12354,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_process_message_async() != 53249) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_process_message_legacy_automerge() != 44615) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_process_welcome() != 6393) {
@@ -12290,9 +12440,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_fetch_messages() != 30152) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_force_rejoin() != 8315) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12330,6 +12477,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_replenish_key_packages_if_needed() != 14347) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_report_unrecoverable_local() != 63696) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_send_message() != 21757) {
@@ -12410,7 +12560,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_send_message() != 44462) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 7087) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 49094) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_package() != 61915) {
