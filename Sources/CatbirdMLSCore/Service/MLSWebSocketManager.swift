@@ -413,33 +413,6 @@ public actor MLSWebSocketManager {
       saveCursor(newDeviceEvent.cursor, for: convoId)
       await handler.onNewDevice?(newDeviceEvent)
 
-    case .memberJoined(let memberJoined):
-      logger.info(
-        "🔌 WS: MEMBER JOINED - convo: \(memberJoined.convoId.prefix(16)), did: \(memberJoined.did)")
-      saveCursor(memberJoined.cursor, for: convoId)
-      if let action = MembershipAction(rawValue: "joined") {
-        await handler.onMembershipChanged?(memberJoined.convoId, memberJoined.did, action)
-      }
-
-    case .memberLeft(let memberLeft):
-      logger.info(
-        "🔌 WS: MEMBER LEFT - convo: \(memberLeft.convoId.prefix(16)), did: \(memberLeft.did), action: \(memberLeft.action)")
-      saveCursor(memberLeft.cursor, for: convoId)
-      if let action = MembershipAction(rawValue: memberLeft.action) {
-        await handler.onMembershipChanged?(memberLeft.convoId, memberLeft.did, action)
-      }
-      if memberLeft.action == "kicked" {
-        await handler.onKickedFromConversation?(memberLeft.convoId, memberLeft.did, nil)
-      }
-
-    case .epochAdvanced(let epochAdvanced):
-      logger.info("🔌 WS: EPOCH ADVANCED - convo: \(epochAdvanced.convoId.prefix(16))")
-      saveCursor(epochAdvanced.cursor, for: convoId)
-
-    case .conversationUpdated(let conversationUpdated):
-      logger.info("🔌 WS: CONVERSATION UPDATED - convo: \(conversationUpdated.convoId.prefix(16))")
-      saveCursor(conversationUpdated.cursor, for: convoId)
-
     case .treeChanged(let treeChanged):
       logger.info("🔌 WS: TREE CHANGED - convo: \(treeChanged.convoId.prefix(16)), epoch: \(treeChanged.epoch)")
       saveCursor(treeChanged.cursor, for: convoId)
@@ -466,9 +439,9 @@ public actor MLSWebSocketManager {
         await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
       }
 
-    case .readEvent(let readEvent):
-      logger.info("🔌 WS: READ EVENT - convo: \(readEvent.convoId.prefix(16))")
-      saveCursor(readEvent.cursor, for: convoId)
+    case .circuitBreakerTrippedEvent(let cbEvent):
+      logger.warning("🔌 WS: CIRCUIT BREAKER TRIPPED - convo: \(cbEvent.convoId.prefix(16)), resetCount: \(cbEvent.resetCount)")
+      saveCursor(cbEvent.cursor, for: convoId)
 
     }
   }

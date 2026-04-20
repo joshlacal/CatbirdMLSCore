@@ -423,26 +423,6 @@ public actor MLSEventStreamManager {
             saveCursor(newDeviceEvent.cursor, for: convoId)
             await handler.onNewDevice?(newDeviceEvent)
 
-        case .memberJoined(let memberEvent):
-            logger.info("Member joined: convo=\(memberEvent.convoId), did=\(memberEvent.did)")
-            saveCursor(memberEvent.cursor, for: convoId)
-            await handler.onMembershipChanged?(memberEvent.convoId, memberEvent.did, .joined)
-
-        case .memberLeft(let memberEvent):
-            logger.info("Member left: convo=\(memberEvent.convoId), did=\(memberEvent.did)")
-            saveCursor(memberEvent.cursor, for: convoId)
-            if let action = MembershipAction(rawValue: memberEvent.action ?? "left") {
-                await handler.onMembershipChanged?(memberEvent.convoId, memberEvent.did, action)
-            }
-
-        case .epochAdvanced(let epochEvent):
-            logger.info("Epoch advanced: convo=\(epochEvent.convoId), epoch=\(epochEvent.epoch)")
-            saveCursor(epochEvent.cursor, for: convoId)
-
-        case .conversationUpdated(let updateEvent):
-            logger.info("Conversation updated: convo=\(updateEvent.convoId)")
-            saveCursor(updateEvent.cursor, for: convoId)
-
         case .treeChanged(let treeChanged):
             logger.info("Tree changed: convo=\(treeChanged.convoId), epoch=\(treeChanged.epoch)")
             saveCursor(treeChanged.cursor, for: convoId)
@@ -469,9 +449,9 @@ public actor MLSEventStreamManager {
                 await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
             }
 
-        case .readEvent(let readEvent):
-            logger.info("Read event: convo=\(readEvent.convoId)")
-            saveCursor(readEvent.cursor, for: convoId)
+        case .circuitBreakerTrippedEvent(let cbEvent):
+            logger.warning("Circuit breaker tripped: convo=\(cbEvent.convoId), resetCount=\(cbEvent.resetCount), at=\(cbEvent.trippedAt)")
+            saveCursor(cbEvent.cursor, for: convoId)
 
         }
     }
