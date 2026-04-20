@@ -2309,6 +2309,56 @@ public actor MLSClient {
     }
   }
 
+  // MARK: - Task #46 — Explicit receive-path stage/merge/discard
+
+  /// Confirm and merge an incoming staged commit keyed by (groupId, targetEpoch).
+  ///
+  /// After `processMessage` returns `.stagedCommit(newEpoch, _)` the commit is
+  /// staged but the local epoch has NOT advanced. Callers must invoke this to
+  /// actually advance the epoch. Failure here means OpenMLS dropped the staged
+  /// commit — the caller should surface the error and let the sync loop refetch.
+  public func mergeIncomingCommit(
+    for userDID: String, groupId: Data, targetEpoch: UInt64
+  ) async throws -> UInt64 {
+    do {
+      let mergedEpoch = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.mergeIncomingCommit(groupId: groupId, targetEpoch: targetEpoch)
+      }
+      logger.info(
+        "[RECV] Merged staged commit for group \(groupId.hexEncodedString().prefix(16)) → epoch \(mergedEpoch)"
+      )
+      return mergedEpoch
+    } catch let error as MlsError {
+      logger.error(
+        "[RECV] mergeIncomingCommit failed for group \(groupId.hexEncodedString().prefix(16)) epoch=\(targetEpoch): \(error.localizedDescription)"
+      )
+      throw MLSError.operationFailed
+    }
+  }
+
+  /// Drop a previously staged incoming commit without advancing the epoch.
+  ///
+  /// Best-effort cleanup: never throws. Use after a merge failure or when a
+  /// policy decision (fork detected, rejoin planned) means we should not apply
+  /// the staged commit. Idempotent on the Rust side.
+  public func discardIncomingCommit(
+    for userDID: String, groupId: Data, targetEpoch: UInt64
+  ) async {
+    do {
+      try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.discardIncomingCommit(groupId: groupId, targetEpoch: targetEpoch)
+      }
+      logger.debug(
+        "[RECV] Discarded staged commit for group \(groupId.hexEncodedString().prefix(16)) epoch=\(targetEpoch)"
+      )
+    } catch {
+      // Best-effort: log and swallow. Rust-side is idempotent for missing entries.
+      logger.warning(
+        "[RECV] discardIncomingCommit failed (swallowed) for group \(groupId.hexEncodedString().prefix(16)) epoch=\(targetEpoch): \(error.localizedDescription)"
+      )
+    }
+  }
+
   // MARK: - Proposal Inspection and Management
 
   /// Process a message and return detailed information about its content

@@ -37,9 +37,25 @@ public extension MLSConversationManager {
       logger.info("Decrypted application message (\(plaintext.count) bytes) from \(senderDID)")
       return (plaintext, senderDID)
 
-    case .proposal, .stagedCommit:
-      // Proposals and commits don't have plaintext content
-      // Return empty data with unknown sender
+    case .proposal:
+      // Proposals don't have plaintext content
+      return (Data(), "unknown")
+
+    case .stagedCommit(let newEpoch, _):
+      // Task #46: processMessage only stages the commit; confirm the merge to
+      // actually advance the local epoch. Best-effort discard on failure.
+      do {
+        _ = try await mlsClient.mergeIncomingCommit(
+          for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+        )
+      } catch {
+        logger.warning(
+          "⚠️ [decryptMessageWithSender] mergeIncomingCommit failed for epoch \(newEpoch): \(error.localizedDescription) — discarding stage"
+        )
+        await mlsClient.discardIncomingCommit(
+          for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+        )
+      }
       return (Data(), "unknown")
     }
   }

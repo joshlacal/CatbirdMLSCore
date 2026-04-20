@@ -323,11 +323,28 @@ public extension MLSConversationManager {
       for commit in commits.sorted(by: { $0.seq < $1.seq }) {
         do {
           let commitData = commit.ciphertext.data
-          _ = try await mlsClient.processMessage(
+          // Task #46: explicit stage + merge. processMessage stages an incoming
+          // commit; we must call mergeIncomingCommit to advance the epoch.
+          let processed = try await mlsClient.processMessage(
             for: userDid,
             groupId: groupIdData,
             messageData: commitData
           )
+          if case .stagedCommit(let newEpoch, _) = processed {
+            do {
+              _ = try await mlsClient.mergeIncomingCommit(
+                for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+              )
+            } catch {
+              logger.debug(
+                "⚠️ [PRE-SEND-SYNC] Round \(round): merge failed for epoch \(newEpoch): \(error.localizedDescription)"
+              )
+              await mlsClient.discardIncomingCommit(
+                for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+              )
+              continue
+            }
+          }
           totalProcessed += 1
         } catch {
           // Commit processing failed — likely WrongEpoch or already processed
@@ -548,11 +565,27 @@ public extension MLSConversationManager {
               for commit in commits.sorted(by: { $0.seq < $1.seq }) {
                 do {
                   let commitData = commit.ciphertext.data
-                  _ = try await mlsClient.processMessage(
+                  // Task #46: explicit stage + merge after processMessage.
+                  let processed = try await mlsClient.processMessage(
                     for: userDid,
                     groupId: groupIdData,
                     messageData: commitData
                   )
+                  if case .stagedCommit(let newEpoch, _) = processed {
+                    do {
+                      _ = try await mlsClient.mergeIncomingCommit(
+                        for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+                      )
+                    } catch {
+                      logger.debug(
+                        "⚠️ [SEND-409] Round \(round): merge failed for epoch \(newEpoch): \(error.localizedDescription)"
+                      )
+                      await mlsClient.discardIncomingCommit(
+                        for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+                      )
+                      continue
+                    }
+                  }
                   totalProcessed += 1
                 } catch {
                   logger.debug("⚠️ [SEND-409] Failed to process commit in round \(round): \(error.localizedDescription)")
@@ -4792,9 +4825,10 @@ public extension MLSConversationManager {
         return Data()
 
       case .stagedCommit(let newEpoch, let commitMetadata):
-        // Staged commit was already auto-merged by processMessage in Rust
-        // Just verify the epoch advancement succeeded
-        logger.info("Received commit for epoch \(newEpoch), verifying...")
+        // Task #46: `processMessage` stages the commit; `validateAndMergeStagedCommit`
+        // calls `mergeIncomingCommit(groupId, targetEpoch)` to actually advance
+        // the local epoch (or `discardIncomingCommit` on merge failure).
+        logger.info("Received commit for epoch \(newEpoch), merging staged commit...")
         try await validateAndMergeStagedCommit(groupId: groupId, newEpoch: newEpoch)
 
         // METADATA: Process metadata from the staged commit if key material is available
@@ -4905,42 +4939,50 @@ public extension MLSConversationManager {
 
   /// Internal implementation of staged commit validation and merge (called within exclusive lock)
   internal func validateAndMergeStagedCommitImpl(groupId: String, newEpoch: UInt64) async throws {
-    // NOTE: As of the epoch advancement fix, staged commits from other members are now
-    // auto-merged during processMessage() in the Rust FFI layer. This function now just
-    // validates the epoch state is correct and logs the transition.
-    //
-    // Previously, this function would call mergeStagedCommit() which would look for a
-    // pending commit (wrong!), causing the group to stay at the old epoch while other
-    // members advanced.
-
-    logger.info(
-      "✅ Staged commit already merged in processMessage, verifying epoch \(newEpoch) for group \(groupId.prefix(8))..."
-    )
+    // Task #46: `processMessage` now STAGES an incoming commit but does NOT advance
+    // the epoch. We must call `mergeIncomingCommit(groupId, targetEpoch)` to
+    // confirm the stage. On merge failure we best-effort discard the staged
+    // handle so we don't leak state. This mirrors catmos-cli's pattern
+    // (catmos-core/src/chat/messages.rs) and catbird-mls task #33 wiring.
 
     // Convert hex-encoded groupId to Data
     guard let groupIdData = Data(hexEncoded: groupId) else {
       throw MLSConversationError.invalidGroupId
     }
 
-    // Verify the current epoch matches what we expect
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
 
+    // Capture previous epoch BEFORE merging so the membership observer sees the
+    // real transition (post-merge `currentEpoch - 1` would be wrong if the
+    // caller later reads a different epoch).
     var previousEpoch: UInt64 = 0
+    if let epochBeforeMerge = try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData) {
+      previousEpoch = epochBeforeMerge
+    }
+
+    // Confirm the stage. If merge fails, best-effort discard so OpenMLS's staged
+    // handle doesn't linger. Sync loop will refetch if a rejoin is needed.
     do {
-      let currentEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
-      previousEpoch = currentEpoch > 0 ? currentEpoch - 1 : 0
-      if currentEpoch != newEpoch {
+      let mergedEpoch = try await mlsClient.mergeIncomingCommit(
+        for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+      )
+      if mergedEpoch != newEpoch {
         logger.warning(
-          "⚠️ Epoch mismatch after staged commit merge: current=\(currentEpoch), expected=\(newEpoch)"
+          "⚠️ Post-merge epoch mismatch: FFI returned \(mergedEpoch), expected \(newEpoch) for group \(groupId.prefix(8))..."
         )
       } else {
-        logger.info("✅ Epoch verified: \(currentEpoch)")
+        logger.info("✅ Merged staged commit for group \(groupId.prefix(8))... → epoch \(mergedEpoch)")
       }
     } catch {
-      logger.warning(
-        "⚠️ Unable to verify epoch after staged commit merge: \(error.localizedDescription)")
+      logger.error(
+        "❌ mergeIncomingCommit failed for group \(groupId.prefix(8))... epoch=\(newEpoch): \(error.localizedDescription) — discarding stage"
+      )
+      await mlsClient.discardIncomingCommit(
+        for: userDid, groupId: groupIdData, targetEpoch: newEpoch
+      )
+      throw error
     }
     
     // Process membership changes for transparency
