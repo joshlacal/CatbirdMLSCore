@@ -965,6 +965,24 @@ public protocol MlsContextProtocol : AnyObject {
      */
     func computeKeyPackageHash(keyPackageBytes: Data) throws  -> Data
     
+    /**
+     * Confirm a previously staged commit: merge it locally, advance the
+     * epoch, and remove the handle from the pending map.
+     *
+     * `server_epoch` is used to fence against confirm calls that reference
+     * a different epoch than the one the DS actually accepted. Pass the
+     * value returned by [`mls_skip_server_epoch_fence`] for API paths that
+     * don't echo an epoch; non-sentinel values must equal the plan's
+     * `target_epoch`, otherwise the staged commit is left in place and
+     * `MLSError::EpochMismatch` is returned so the caller can choose to
+     * `discard_pending` and re-sync.
+     *
+     * Post-merge bookkeeping (storage writes, GroupInfo publish,
+     * group-state cache update, epoch-secret cleanup) is the caller's
+     * responsibility — see the module-level comment for rationale.
+     */
+    func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws  -> FfiConfirmedCommit
+    
     func createExternalCommit(groupInfoBytes: Data, identityBytes: Data) throws  -> ExternalCommitResult
     
     func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data) throws  -> ExternalCommitResult
@@ -1062,6 +1080,16 @@ public protocol MlsContextProtocol : AnyObject {
      * Idempotent: no-op if no entry exists for `(group_id, target_epoch)`.
      */
     func discardIncomingCommit(groupId: Data, targetEpoch: UInt64) throws 
+    
+    /**
+     * Discard a previously staged commit without advancing the epoch.
+     * Clears the OpenMLS pending commit (so future sends can construct a
+     * new one) and removes the handle from the pending map.
+     *
+     * Calling `discard_pending` on an unknown or already-consumed handle
+     * returns `MLSError::InvalidInput`.
+     */
+    func discardPending(handle: FfiStagedCommitHandle) throws 
     
     /**
      * Discard a pending external join after server rejection
@@ -1504,6 +1532,23 @@ public protocol MlsContextProtocol : AnyObject {
     func signWithIdentityKey(identity: String, payload: Data) throws  -> Data
     
     /**
+     * Stage a commit without sending it to the delivery service or merging
+     * it locally. Returns a [`crate::orchestrator_bridge::FFICommitPlan`]
+     * the caller ships to the DS; the caller then passes the embedded
+     * handle back to [`confirm_commit`](Self::confirm_commit) on success or
+     * [`discard_pending`](Self::discard_pending) on failure.
+     *
+     * `signer_identity_bytes` is the UTF-8 DID of the caller — used to
+     * export GroupInfo for the pre-merge group state (identical shape to
+     * [`MLSContext::export_group_info`]).
+     *
+     * Only one pending commit may exist per group at a time (OpenMLS
+     * constraint). Staging a second commit while one is already pending
+     * returns `MLSError::InvalidInput`.
+     */
+    func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data) throws  -> FfiCommitPlan
+    
+    /**
      * Store a proposal in the proposal queue after validation
      * The application should inspect the proposal before storing it
      */
@@ -1705,6 +1750,31 @@ open func computeKeyPackageHash(keyPackageBytes: Data)throws  -> Data {
 })
 }
     
+    /**
+     * Confirm a previously staged commit: merge it locally, advance the
+     * epoch, and remove the handle from the pending map.
+     *
+     * `server_epoch` is used to fence against confirm calls that reference
+     * a different epoch than the one the DS actually accepted. Pass the
+     * value returned by [`mls_skip_server_epoch_fence`] for API paths that
+     * don't echo an epoch; non-sentinel values must equal the plan's
+     * `target_epoch`, otherwise the staged commit is left in place and
+     * `MLSError::EpochMismatch` is returned so the caller can choose to
+     * `discard_pending` and re-sync.
+     *
+     * Post-merge bookkeeping (storage writes, GroupInfo publish,
+     * group-state cache update, epoch-secret cleanup) is the caller's
+     * responsibility — see the module-level comment for rationale.
+     */
+open func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64)throws  -> FfiConfirmedCommit {
+    return try  FfiConverterTypeFFIConfirmedCommit.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_confirm_commit(self.uniffiClonePointer(),
+        FfiConverterTypeFFIStagedCommitHandle.lower(handle),
+        FfiConverterUInt64.lower(serverEpoch),$0
+    )
+})
+}
+    
 open func createExternalCommit(groupInfoBytes: Data, identityBytes: Data)throws  -> ExternalCommitResult {
     return try  FfiConverterTypeExternalCommitResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_create_external_commit(self.uniffiClonePointer(),
@@ -1898,6 +1968,21 @@ open func discardIncomingCommit(groupId: Data, targetEpoch: UInt64)throws  {try 
     uniffi_catbird_mls_fn_method_mlscontext_discard_incoming_commit(self.uniffiClonePointer(),
         FfiConverterData.lower(groupId),
         FfiConverterUInt64.lower(targetEpoch),$0
+    )
+}
+}
+    
+    /**
+     * Discard a previously staged commit without advancing the epoch.
+     * Clears the OpenMLS pending commit (so future sends can construct a
+     * new one) and removes the handle from the pending map.
+     *
+     * Calling `discard_pending` on an unknown or already-consumed handle
+     * returns `MLSError::InvalidInput`.
+     */
+open func discardPending(handle: FfiStagedCommitHandle)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_discard_pending(self.uniffiClonePointer(),
+        FfiConverterTypeFFIStagedCommitHandle.lower(handle),$0
     )
 }
 }
@@ -2656,6 +2741,31 @@ open func signWithIdentityKey(identity: String, payload: Data)throws  -> Data {
     uniffi_catbird_mls_fn_method_mlscontext_sign_with_identity_key(self.uniffiClonePointer(),
         FfiConverterString.lower(identity),
         FfiConverterData.lower(payload),$0
+    )
+})
+}
+    
+    /**
+     * Stage a commit without sending it to the delivery service or merging
+     * it locally. Returns a [`crate::orchestrator_bridge::FFICommitPlan`]
+     * the caller ships to the DS; the caller then passes the embedded
+     * handle back to [`confirm_commit`](Self::confirm_commit) on success or
+     * [`discard_pending`](Self::discard_pending) on failure.
+     *
+     * `signer_identity_bytes` is the UTF-8 DID of the caller — used to
+     * export GroupInfo for the pre-merge group state (identical shape to
+     * [`MLSContext::export_group_info`]).
+     *
+     * Only one pending commit may exist per group at a time (OpenMLS
+     * constraint). Staging a second commit while one is already pending
+     * returns `MLSError::InvalidInput`.
+     */
+open func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data)throws  -> FfiCommitPlan {
+    return try  FfiConverterTypeFFICommitPlan.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_stage_commit(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterTypeFFICommitKind.lower(kind),
+        FfiConverterData.lower(signerIdentityBytes),$0
     )
 })
 }
@@ -8089,6 +8199,15 @@ public enum MlsError {
     
     case OperationNotSupported(message: String)
     
+    /**
+     * Fencing mismatch between the epoch the server advanced to and the
+     * epoch the locally-staged commit would produce. Returned by
+     * `confirm_commit` when `server_epoch` does not equal the plan's
+     * `target_epoch` (and is not [`crate::SKIP_SERVER_EPOCH_FENCE`]). The
+     * caller must discard the staged commit and re-sync before retrying.
+     */
+    case EpochMismatch(message: String)
+    
 }
 
 
@@ -8253,6 +8372,10 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
+        case 38: return .EpochMismatch(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -8338,6 +8461,8 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(36))
         case .OperationNotSupported(_ /* message is ignored*/):
             writeInt(&buf, Int32(37))
+        case .EpochMismatch(_ /* message is ignored*/):
+            writeInt(&buf, Int32(38))
 
         
         }
@@ -12522,6 +12647,18 @@ public func mlsSetLogger(logger: MlsLogger) {try! rustCall() {
     )
 }
 }
+/**
+ * Sentinel the caller passes when it has no meaningful server epoch to
+ * fence against (mirror of `SKIP_SERVER_EPOCH_FENCE` on the orchestrator
+ * side). When `server_epoch == SKIP_SERVER_EPOCH_FENCE`, `confirm_commit`
+ * skips the fence check.
+ */
+public func mlsSkipServerEpochFence() -> UInt64 {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_catbird_mls_fn_func_mls_skip_server_epoch_fence($0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -12583,6 +12720,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_func_mls_set_logger() != 46705) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_func_mls_skip_server_epoch_fence() != 10918) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_catbirdclientbridge_add_participants() != 9190) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12637,6 +12777,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_compute_key_package_hash() != 45775) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_confirm_commit() != 4581) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_create_external_commit() != 33296) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12674,6 +12817,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_discard_incoming_commit() != 9518) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_discard_pending() != 5562) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_discard_pending_external_join() != 45091) {
@@ -12824,6 +12970,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_sign_with_identity_key() != 63625) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 6351) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 33747) {
