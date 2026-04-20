@@ -652,13 +652,17 @@ public final class MLSConversationManager {
 
     // Use GroupOperationCoordinator to serialize operations on this group
     return try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
-      // 1. Create commit locally using the provided key package
+      // Three-phase sender lifecycle (task #44/#62):
+      // 1. Stage commit locally using the provided key package.
       logger.info(
         "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 1/3: Creating staged commit...")
-      let addResult = try await mlsClient.addMembers(
+      // `FfiCommitKind.addMembers.memberDids` is informational on the Rust
+      // side (destructured with `_`); we pass the deviceCredentialDid purely
+      // for logging clarity.
+      let plan = try await mlsClient.stageCommit(
         for: userDid,
-        groupId: groupIdData,
-        keyPackages: [keyPackageData]
+        conversationId: convo.groupId,
+        kind: .addMembers(memberDids: [deviceCredentialDid], keyPackages: [keyPackageData])
       )
       logger.info("✅ [MLSConversationManager.addDeviceWithKeyPackage] Staged commit created")
 
@@ -667,30 +671,54 @@ public final class MLSConversationManager {
         "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 2/3: Sending to server...")
 
       // Track this commit as our own
-      trackOwnCommit(addResult.commitData)
+      trackOwnCommit(plan.commitBytes)
+
+      let welcomeData = plan.welcomeBytes ?? Data()
 
       // For device additions, we use the device credential DID (not user DID) in the server call
       // The server will validate this is a device belonging to an existing member
-      let addMembersResult = try await apiClient.addMembers(
-        convoId: convoId,
-        didList: [],  // Empty - we're adding a device, not a new user
-        commit: addResult.commitData,
-        welcomeMessage: addResult.welcomeData,
-        keyPackageHashes: nil  // Server already knows the key package from claim
-      )
+      let addMembersResult: (success: Bool, newEpoch: Int)
+      do {
+        addMembersResult = try await apiClient.addMembers(
+          convoId: convoId,
+          didList: [],  // Empty - we're adding a device, not a new user
+          commit: plan.commitBytes,
+          welcomeMessage: welcomeData,
+          keyPackageHashes: nil  // Server already knows the key package from claim
+        )
+      } catch {
+        await mlsClient.discardPending(for: userDid, handle: plan.handle)
+        throw error
+      }
 
       guard addMembersResult.success else {
         logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Server rejected commit")
-        try await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
+        await mlsClient.discardPending(for: userDid, handle: plan.handle)
         throw MLSConversationError.operationFailed("Server rejected device addition")
       }
 
       let serverEpoch = addMembersResult.newEpoch
 
-      // 3. Merge commit locally
+      // 3. Confirm commit locally. Server echoes newEpoch for addMembers.
+      //    Idempotency-hit: server may nil-default newEpoch to 0 when the
+      //    commit was already applied in a prior attempt; fall back to the
+      //    skip-fence sentinel so confirmCommit trusts the staged target.
+      //    If confirm throws (e.g. EpochMismatch — #63 flat error), explicitly
+      //    discard the staged commit since the Rust side leaves it in place
+      //    when the server-epoch fence trips.
       logger.info(
         "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 3/3: Merging commit locally...")
-      let localEpoch = try await mlsClient.mergePendingCommit(for: userDid, groupId: groupIdData)
+      let serverEpochForConfirm: UInt64 =
+        serverEpoch > 0 ? UInt64(serverEpoch) : mlsSkipServerEpochFence()
+      let confirmed: FfiConfirmedCommit
+      do {
+        confirmed = try await mlsClient.confirmCommit(
+          for: userDid, handle: plan.handle, serverEpoch: serverEpochForConfirm)
+      } catch {
+        await mlsClient.discardPending(for: userDid, handle: plan.handle)
+        throw error
+      }
+      let localEpoch = confirmed.newEpoch
 
       if localEpoch != UInt64(serverEpoch) {
         logger.warning(

@@ -338,13 +338,41 @@ extension MLSConversationManager {
     // CRITICAL FIX: If members were added, sync with server BEFORE allowing messages
     if let members = filteredMembers, !members.isEmpty, let commitData = commitData {
       // Check if createConvo already processed the members (serverEpoch >= 1)
-      // If so, we should NOT call addMembers again - just merge our pending commit locally
+      // If so, we should NOT call addMembers again - just confirm our staged
+      // commit locally.
       if serverEpoch >= 1 {
         logger.info("✅ Server already processed members during createConvo (epoch: \(serverEpoch))")
-        logger.info("   Merging pending commit locally to sync epochs...")
-        
-        let (mergedEpoch, metadataKey, metadataEpoch) = try await mlsClient.mergePendingCommitV2(
-          for: userDid, groupId: groupId)
+        logger.info("   Confirming staged commit locally to sync epochs...")
+
+        // Task #44/#62: confirm via the handle returned from
+        // prepareInitialMembers. Fall back to legacy mergePendingCommitV2 only
+        // if the handle is missing (e.g. an intermediate refactor path) —
+        // this keeps the code resilient during rollout.
+        let mergedEpoch: UInt64
+        let metadataKey: Data?
+        let metadataEpoch: UInt64?
+        if let handle = creationResult.stagedCommitHandle {
+          let confirmed: FfiConfirmedCommit
+          do {
+            confirmed = try await mlsClient.confirmCommit(
+              for: userDid, handle: handle, serverEpoch: serverEpoch)
+          } catch {
+            await mlsClient.discardPending(for: userDid, handle: handle)
+            throw error
+          }
+          mergedEpoch = confirmed.newEpoch
+          metadataKey = confirmed.metadataKey
+          metadataEpoch = confirmed.newEpoch
+        } else {
+          logger.warning(
+            "⚠️ [createGroup] Missing staged commit handle; falling back to mergePendingCommitV2"
+          )
+          let (e, k, me) = try await mlsClient.mergePendingCommitV2(
+            for: userDid, groupId: groupId)
+          mergedEpoch = e
+          metadataKey = k
+          metadataEpoch = me
+        }
         logger.info("✅ [createGroup] Commit merged - local epoch now: \(mergedEpoch)")
 
         // Verify merged epoch matches server's epoch
@@ -410,8 +438,13 @@ extension MLSConversationManager {
               logger.info(
                 "ℹ️ [createGroup] Members already exist (added during createConvo) - treating as success"
               )
-              // Members were already added, so we don't need to merge the pending commit
-              // Clear the pending commit to avoid stale state
+              // Members were already added, so we don't need to merge the pending commit.
+              // Task #44/#62: discard via handle if we have one; fall back to
+              // clearPendingCommit defensively.
+              if let handle = creationResult.stagedCommitHandle {
+                await mlsClient.discardPending(for: userDid, handle: handle)
+                logger.debug("🧹 Discarded staged commit after AlreadyMember response")
+              }
               do {
                 try await mlsClient.clearPendingCommit(for: userDid, groupId: groupId)
                 logger.debug("🧹 Cleared pending commit after AlreadyMember response")
@@ -437,14 +470,39 @@ extension MLSConversationManager {
           }
 
           logger.debug("📍 Server returned epoch: \(addResult.newEpoch)")
-          logger.info("🔄 [createGroup] Merging pending commit after successful addMembers...")
+          logger.info("🔄 [createGroup] Confirming staged commit after successful addMembers...")
 
-          // Always merge after a successful addMembers. The server may return newEpoch=0 when
-          // it nil-defaults the epoch field (idempotency hit), but that does NOT mean the commit
-          // was a no-op locally — the OpenMLS group still has a pending staged commit that must
-          // be merged. Skipping the merge breaks all subsequent message encryption.
-          let (mergedEpoch, metadataKey2, metadataEpoch2) = try await mlsClient.mergePendingCommitV2(
-            for: userDid, groupId: groupId)
+          // Always confirm after a successful addMembers. The server may return
+          // newEpoch=0 when it nil-defaults the epoch field (idempotency hit),
+          // but that does NOT mean the commit was a no-op locally — the
+          // OpenMLS group still has a pending staged commit that must be
+          // merged. Skipping confirm breaks all subsequent message encryption.
+          // Task #44/#62: confirm via handle; when server returns newEpoch=0
+          // (idempotency hit) we pass the skip-fence sentinel so we don't
+          // trip the server-epoch check against the staged target.
+          let serverEpochForConfirm: UInt64 =
+            addResult.newEpoch > 0
+            ? UInt64(addResult.newEpoch)
+            : mlsSkipServerEpochFence()
+          let mergedEpoch: UInt64
+          let metadataKey2: Data?
+          let metadataEpoch2: UInt64?
+          if let handle = creationResult.stagedCommitHandle {
+            let confirmed = try await mlsClient.confirmCommit(
+              for: userDid, handle: handle, serverEpoch: serverEpochForConfirm)
+            mergedEpoch = confirmed.newEpoch
+            metadataKey2 = confirmed.metadataKey
+            metadataEpoch2 = confirmed.newEpoch
+          } else {
+            logger.warning(
+              "⚠️ [createGroup] Missing staged commit handle; falling back to mergePendingCommitV2"
+            )
+            let (e, k, me) = try await mlsClient.mergePendingCommitV2(
+              for: userDid, groupId: groupId)
+            mergedEpoch = e
+            metadataKey2 = k
+            metadataEpoch2 = me
+          }
           logger.info("✅ [createGroup] Commit merged - local epoch now: \(mergedEpoch)")
           groupStates[groupIdHex]?.epoch = mergedEpoch
           logger.debug("📊 Updated local group state: epoch=\(mergedEpoch)")
@@ -467,6 +525,11 @@ extension MLSConversationManager {
         }
       } catch {
         logger.error("❌ Server member sync failed: \(error.localizedDescription)")
+        // Task #44/#62: if we staged a commit but the sync/confirm threw,
+        // discard via handle so we don't carry stale pending sender state.
+        if let handle = creationResult.stagedCommitHandle {
+          await mlsClient.discardPending(for: userDid, handle: handle)
+        }
         // SAFETY: Create safe copy of error description before storing in state
         let safeErrorDesc = String(describing: error.localizedDescription)
         conversationStates[groupIdHex] = .failed(safeErrorDesc)
@@ -944,58 +1007,89 @@ extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
-    // 1. Create the MLS commit with updated metadata
-    let commitData = try await mlsClient.updateGroupMetadata(
+    // Three-phase sender lifecycle (task #44/#62): stage → POST → confirm.
+    // commitGroupChange does NOT echo newEpoch, so we pass the skip-fence
+    // sentinel on confirm.
+
+    // 1. Build the GroupMetadataPayload JSON blob (matches what the legacy
+    //    `ctx.updateGroupMetadata(groupId:metadataJson:)` was producing
+    //    internally via the MLSClient wrapper).
+    let payload = GroupMetadataPayload(v: 1, name: name, description: description)
+    let metadataJson: Data
+    do {
+      metadataJson = try JSONEncoder().encode(payload)
+    } catch {
+      logger.error("❌ [updateGroupMetadata] Failed to encode metadata JSON: \(error.localizedDescription)")
+      throw MLSConversationError.operationFailed("Failed to encode metadata JSON")
+    }
+
+    // 2. Stage the updateMetadata commit
+    let plan = try await mlsClient.stageCommit(
       for: userDid,
-      groupId: groupIdData,
-      name: name,
-      description: description
+      conversationId: conversationId,
+      kind: .updateMetadata(groupInfoExtension: metadataJson)
     )
 
-    // 2. Send commit to server via commitGroupChange
+    // 3. Send commit to server via commitGroupChange
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: conversationId,
       action: "updateMetadata",
-      commit: Bytes(data: commitData)
+      commit: Bytes(data: plan.commitBytes)
     )
 
-    let (responseCode, output) = try await apiClient.client.blue.catbird.mlschat.commitGroupChange(
-      input: input
-    )
+    let responseCode: Int
+    let output: BlueCatbirdMlsChatCommitGroupChange.Output?
+    do {
+      (responseCode, output) = try await apiClient.client.blue.catbird.mlschat.commitGroupChange(
+        input: input
+      )
+    } catch {
+      await mlsClient.discardPending(for: userDid, handle: plan.handle)
+      throw error
+    }
 
-    guard responseCode == 200, let output = output else {
+    guard responseCode == 200, output != nil else {
       logger.error("❌ [updateGroupMetadata] Server rejected commit: HTTP \(responseCode)")
-      // Clear pending commit on failure
-      do {
-        try await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
-      } catch {
-        logger.warning("⚠️ [updateGroupMetadata] Failed to clear pending commit: \(error.localizedDescription)")
-      }
+      await mlsClient.discardPending(for: userDid, handle: plan.handle)
       throw MLSConversationError.operationFailed(
         "Server rejected metadata update commit (HTTP \(responseCode))"
       )
     }
 
-    // 3. Merge pending commit locally to advance epoch (v2: also get metadata key)
-    let (mergedEpoch, metadataKey, metadataEpoch) = try await mlsClient.mergePendingCommitV2(
-      for: userDid, groupId: groupIdData)
+    // 4. Confirm commit locally. commitGroupChange does not echo newEpoch,
+    //    so fence with the skip sentinel and trust the staged target epoch.
+    //    If confirm throws (e.g. EpochMismatch — #63 flat error), the Rust
+    //    side leaves the staged commit in place; explicitly discard so we
+    //    don't carry stale pending state.
+    let confirmed: FfiConfirmedCommit
+    do {
+      confirmed = try await mlsClient.confirmCommit(
+        for: userDid,
+        handle: plan.handle,
+        serverEpoch: mlsSkipServerEpochFence()
+      )
+    } catch {
+      await mlsClient.discardPending(for: userDid, handle: plan.handle)
+      throw error
+    }
+    let mergedEpoch = confirmed.newEpoch
     logger.info("✅ [updateGroupMetadata] Commit merged - epoch now: \(mergedEpoch)")
 
-    // 4. Update local group state
+    // 5. Update local group state
     groupStates[conversationId]?.epoch = mergedEpoch
 
-    // 5. METADATA: Re-wrap metadata for the new epoch.
+    // 6. METADATA: Re-wrap metadata for the new epoch.
     // After a metadata update commit, the metadata must be re-encrypted
     // with the new epoch's key and uploaded to the server.
-    if let key = metadataKey, let epoch = metadataEpoch {
+    if let key = confirmed.metadataKey {
       await reWrapMetadataAfterMerge(
         groupIdHex: conversationId,
         metadataKey: key,
-        epoch: epoch
+        epoch: mergedEpoch
       )
     }
 
-    // 6. Publish updated GroupInfo for external joins
+    // 7. Publish updated GroupInfo for external joins
     try await publishLatestGroupInfo(
       userDid: userDid,
       convoId: conversationId,

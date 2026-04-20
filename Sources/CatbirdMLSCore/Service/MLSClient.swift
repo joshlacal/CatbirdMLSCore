@@ -2359,6 +2359,153 @@ public actor MLSClient {
     }
   }
 
+  // MARK: - Task #44/#62 — Explicit sender-path stage/confirm/discard
+  //
+  // Three-phase API for sender-side commit operations (addMembers,
+  // removeMembers, swapMembers, updateMetadata). Mirrors the receive-path
+  // pattern above: stage locally, ship bytes to the DS, then confirm (on
+  // success) or discard (on failure). Callers own the post-merge bookkeeping
+  // (publishing GroupInfo, updating groupStates, metadata re-wrap, etc.) —
+  // the Rust MlsContext path intentionally does NOT perform those side
+  // effects (see catbird-mls task #62 commit body).
+  //
+  // These wrappers are ADDITIVE — the legacy `addMembers` / `removeMembers`
+  // / `mergePendingCommit` / `clearPendingCommit` wrappers above still exist
+  // and still work for any direct callers at lower layers.
+
+  /// Stage a commit for a sender-side group operation.
+  ///
+  /// Returns an `FfiCommitPlan` containing the commit bytes (to POST to DS),
+  /// optional welcome bytes (for `addMembers`/`swapMembers`), a fresh
+  /// `groupInfo` export, and a `FfiStagedCommitHandle` the caller holds onto
+  /// for the subsequent `confirmCommit` or `discardPending`.
+  ///
+  /// - Parameters:
+  ///   - userDID: User DID (normalized internally).
+  ///   - conversationId: Hex-encoded conversation/group id (NOT raw bytes —
+  ///     the Rust `stage_commit` signature takes a `String`).
+  ///   - kind: Which kind of commit to build. See `FfiCommitKind`.
+  /// - Returns: The plan, including the handle to pass to
+  ///   `confirmCommit`/`discardPending`.
+  /// - Throws: `MLSError.operationFailed` (wrapping the underlying `MlsError`).
+  ///
+  /// - Note: Only one pending sender commit may exist per group at a time
+  ///   (OpenMLS constraint). Staging twice without confirm/discard between
+  ///   returns `MlsError.InvalidInput`. The caller should typically call
+  ///   `clearPendingCommit` first to flush any stale state from a prior
+  ///   failed run.
+  public func stageCommit(
+    for userDID: String,
+    conversationId: String,
+    kind: FfiCommitKind
+  ) async throws -> FfiCommitPlan {
+    logger.info(
+      "📍 [MLSClient.stageCommit] START - user: \(userDID.prefix(20)), convo: \(conversationId.prefix(16)), kind: \(String(describing: kind).prefix(32))"
+    )
+    guard let clientIdentity = await getClientIdentity(for: userDID) else {
+      logger.error("❌ [MLSClient.stageCommit] Device not registered - cannot determine client identity")
+      throw MLSError.configurationError
+    }
+    let signerIdentityBytes = Data(clientIdentity.utf8)
+    do {
+      let plan = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.stageCommit(
+          conversationId: conversationId,
+          kind: kind,
+          signerIdentityBytes: signerIdentityBytes
+        )
+      }
+      logger.info(
+        "✅ [MLSClient.stageCommit] Staged - nonce: \(plan.handle.nonce), source→target: \(plan.sourceEpoch)→\(plan.targetEpoch), commit: \(plan.commitBytes.count) bytes, welcome: \(plan.welcomeBytes?.count ?? 0) bytes"
+      )
+      return plan
+    } catch let error as MlsError {
+      logger.error("❌ [MLSClient.stageCommit] FAILED: \(error.localizedDescription)")
+      // Preserve the "member already in group" signal that addMembersImpl
+      // downstream uses for key-package unreservation / user-facing error.
+      let message: String
+      switch error {
+      case .InvalidInput(let m): message = m
+      case .OpenMlsError(let m): message = m
+      default: message = error.localizedDescription
+      }
+      if case .addMembers = kind,
+         message.lowercased().contains("already in group") ||
+         message.lowercased().contains("member already in group")
+      {
+        throw MLSError.memberAlreadyInGroup(member: "unknown")
+      }
+      throw MLSError.operationFailed
+    }
+  }
+
+  /// Confirm a previously staged commit after the DS has accepted it.
+  ///
+  /// - Parameters:
+  ///   - userDID: User DID.
+  ///   - handle: The handle returned from `stageCommit`.
+  ///   - serverEpoch: The epoch the DS reported after accepting the commit.
+  ///     For API paths that don't echo an epoch (`removeMembers`,
+  ///     `commitGroupChange`), pass the sentinel returned from
+  ///     `mlsSkipServerEpochFence()`.
+  /// - Returns: `FfiConfirmedCommit` with the post-merge epoch and optional
+  ///   metadata key material (equivalent to what `mergePendingCommitV2`
+  ///   returned).
+  /// - Throws: `MLSError.operationFailed`. If the server-epoch fence
+  ///   trips (i.e. server accepted a different epoch than staged), the Rust
+  ///   side emits `MlsError.EpochMismatch` and leaves the staged commit in
+  ///   place; the caller should catch, call `discardPending`, and resync.
+  public func confirmCommit(
+    for userDID: String,
+    handle: FfiStagedCommitHandle,
+    serverEpoch: UInt64
+  ) async throws -> FfiConfirmedCommit {
+    logger.info(
+      "📍 [MLSClient.confirmCommit] START - user: \(userDID.prefix(20)), group: \(handle.groupId.prefix(16)), nonce: \(handle.nonce), serverEpoch: \(serverEpoch)"
+    )
+    do {
+      let confirmed = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.confirmCommit(handle: handle, serverEpoch: serverEpoch)
+      }
+      logger.info(
+        "✅ [MLSClient.confirmCommit] Confirmed - newEpoch: \(confirmed.newEpoch), metadataKey: \(confirmed.metadataKey != nil ? "yes" : "no")"
+      )
+      return confirmed
+    } catch let error as MlsError {
+      // TODO(#63): MlsError.EpochMismatch is currently flat (message-only).
+      // When task #63 re-adds structured local/remote fields, callers that
+      // need to log the gap can pattern-match here without parsing strings.
+      logger.error("❌ [MLSClient.confirmCommit] FAILED: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
+  /// Discard a previously staged sender-side commit without merging it.
+  ///
+  /// Best-effort cleanup: never throws. Use when the DS rejected the commit,
+  /// an HTTP error occurred, or the higher layer decided not to merge.
+  /// Idempotent on the Rust side.
+  public func discardPending(
+    for userDID: String,
+    handle: FfiStagedCommitHandle
+  ) async {
+    do {
+      try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.discardPending(handle: handle)
+      }
+      logger.debug(
+        "✅ [MLSClient.discardPending] Dropped staged commit for group \(handle.groupId.prefix(16)) nonce \(handle.nonce)"
+      )
+    } catch {
+      // Best-effort: log and swallow. Rust-side is idempotent for missing
+      // entries — callers in error-paths should not have their original
+      // failure masked by cleanup noise.
+      logger.warning(
+        "⚠️ [MLSClient.discardPending] discardPending failed (swallowed) for group \(handle.groupId.prefix(16)) nonce \(handle.nonce): \(error.localizedDescription)"
+      )
+    }
+  }
+
   // MARK: - Proposal Inspection and Management
 
   /// Process a message and return detailed information about its content

@@ -200,6 +200,11 @@ public extension MLSConversationManager {
     keyPackagesArray: [Data],
     keyPackagesWithHashes: [KeyPackageWithHash]
   ) async throws {
+    // Three-phase sender lifecycle (task #44/#62): stageCommit → POST →
+    // confirmCommit(serverEpoch) on success, discardPending on failure.
+    // Handle is declared up here so the outer `catch` can discard if the
+    // stage succeeded but a later step threw before we confirmed.
+    var stagedHandleForCleanup: FfiStagedCommitHandle?
     do {
       // 0. Clear any stale pending commit from a previous failed operation
       do {
@@ -208,12 +213,14 @@ public extension MLSConversationManager {
         // Ignore errors
       }
 
-      // 1. Create commit locally (staged, not merged)
-      let addResult = try await mlsClient.addMembers(
+      // 1. Stage commit locally (creates pending outgoing commit — NOT merged)
+      let plan = try await mlsClient.stageCommit(
         for: userDid,
-        groupId: groupIdData,
-        keyPackages: keyPackagesArray
+        conversationId: convo.groupId,
+        kind: .addMembers(memberDids: memberDids, keyPackages: keyPackagesArray)
       )
+      stagedHandleForCleanup = plan.handle
+      let welcomeData = plan.welcomeBytes ?? Data()
 
       // 2. Send commit and welcome to server
       // Build key package hash entries for server lifecycle tracking
@@ -223,17 +230,17 @@ public extension MLSConversationManager {
         }
 
       // PHASE 3 FIX: Protect server send + commit merge + state update from cancellation
-      let (newEpoch, mergedEpoch) = try await withTaskCancellationHandler {
+      let (newEpoch, confirmed) = try await withTaskCancellationHandler {
         // Track this commit as our own to prevent re-processing via SSE
-        trackOwnCommit(addResult.commitData)
+        trackOwnCommit(plan.commitBytes)
 
         let addMembersResult: (success: Bool, newEpoch: Int)
         do {
           addMembersResult = try await apiClient.addMembers(
             convoId: convoId,
             didList: dids,
-            commit: addResult.commitData,
-            welcomeMessage: addResult.welcomeData,
+            commit: plan.commitBytes,
+            welcomeMessage: welcomeData,
             keyPackageHashes: keyPackageHashEntries
           )
         } catch let apiError as MLSAPIError {
@@ -272,19 +279,30 @@ public extension MLSConversationManager {
         }
 
         guard addMembersResult.success else {
-          try await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
           throw MLSConversationError.operationFailed("Server rejected member addition")
         }
         let newEpoch = addMembersResult.newEpoch
 
-        // ✅ RATCHET DESYNC FIX: Merge commit ONLY after server confirmation
-        let mergedEpoch = try await mlsClient.mergePendingCommit(for: userDid, groupId: groupIdData)
-        return (newEpoch, mergedEpoch)
+        // ✅ RATCHET DESYNC FIX: Confirm commit ONLY after server confirmation.
+        // Server echoes newEpoch for addMembers — use it to fence against a
+        // stale confirm against a different target epoch.
+        // Idempotency-hit: server may nil-default newEpoch to 0 when the
+        // commit was already applied in a prior attempt (see createGroup
+        // fallback at Groups.swift). In that case we cannot fence against
+        // the echoed epoch; pass the skip sentinel and trust the staged
+        // target_epoch.
+        let serverEpochForConfirm: UInt64 =
+          newEpoch > 0 ? UInt64(newEpoch) : mlsSkipServerEpochFence()
+        let confirmed = try await mlsClient.confirmCommit(
+          for: userDid, handle: plan.handle, serverEpoch: serverEpochForConfirm)
+        stagedHandleForCleanup = nil  // confirmed — no cleanup needed
+        return (newEpoch, confirmed)
       } onCancel: {
         logger.warning(
           "⚠️ [addMembers] Commit operation was cancelled - allowing completion to prevent epoch desync"
         )
       }
+      _ = confirmed
 
       // 3. Update local state
       var updatedState = groupStates[convo.groupId] ?? groupState
@@ -348,6 +366,12 @@ public extension MLSConversationManager {
       logger.error(
         "❌ [MLSConversationManager.addMembers] Error, cleaning up: \(error.localizedDescription)")
 
+      // Task #44/#62: discard the staged commit via its handle if we have
+      // one; fall back to clearPendingCommit (OpenMLS-level) defensively to
+      // cover pre-stage failures and any stale state.
+      if let handle = stagedHandleForCleanup {
+        await mlsClient.discardPending(for: userDid, handle: handle)
+      }
       do {
         try await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
       } catch {
@@ -411,10 +435,6 @@ public extension MLSConversationManager {
       throw MLSConversationError.operationFailed("Failed to decode groupId hex string")
     }
 
-    guard let memberIdentity = memberDid.data(using: .utf8) else {
-      throw MLSConversationError.operationFailed("Failed to encode member DID")
-    }
-
     do {
       try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
         do {
@@ -423,23 +443,36 @@ public extension MLSConversationManager {
           // Ignore errors
         }
 
-        let commitData = try await mlsClient.removeMembers(
-          for: userDid, groupId: groupIdData, memberIdentities: [memberIdentity])
+        // Three-phase sender lifecycle (task #44/#62): stage → POST → confirm.
+        // The removeMember HTTP endpoint returns only an optional epochHint
+        // (no authoritative newEpoch echo), so we fence with the skip sentinel
+        // and rely on the staged target_epoch.
+        let plan = try await mlsClient.stageCommit(
+          for: userDid,
+          conversationId: convo.groupId,
+          kind: .removeMembers(memberDids: [memberDid])
+        )
 
         let idempotencyKey = UUID().uuidString.lowercased()
         let targetDid = try DID(didString: memberDid)
-        let commitBase64 = commitData.base64EncodedString()
+        let commitBase64 = plan.commitBytes.base64EncodedString()
 
-        let (ok, epochHint) = try await apiClient.removeMember(
-          convoId: convoId,
-          targetDid: targetDid,
-          reason: reason,
-          commit: commitBase64,
-          idempotencyKey: idempotencyKey
-        )
+        let (ok, epochHint): (Bool, Int?)
+        do {
+          (ok, epochHint) = try await apiClient.removeMember(
+            convoId: convoId,
+            targetDid: targetDid,
+            reason: reason,
+            commit: commitBase64,
+            idempotencyKey: idempotencyKey
+          )
+        } catch {
+          await mlsClient.discardPending(for: userDid, handle: plan.handle)
+          throw error
+        }
 
         guard ok else {
-          try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
+          await mlsClient.discardPending(for: userDid, handle: plan.handle)
           throw MLSConversationError.operationFailed("Server rejected member removal")
         }
 
@@ -447,14 +480,25 @@ public extension MLSConversationManager {
           "🔵 [MLSConversationManager.removeMember] Server authorized removal - epochHint: \(epochHint.map { String($0) } ?? "nil")"
         )
 
-        // Server accepted the removal — merge locally. If merge fails, the removal
-        // still succeeded server-side; the local state will catch up on next sync.
+        // Server accepted the removal — confirm the staged commit locally.
+        // The removeMember endpoint does not echo a newEpoch, so we pass the
+        // skip-fence sentinel and trust the staged target_epoch.
+        // If confirm fails, the server-side removal still succeeded; local
+        // state will catch up on next sync.
         do {
-          try await mlsClient.mergePendingCommit(for: userDid, groupId: groupIdData, convoId: convoId)
+          _ = try await mlsClient.confirmCommit(
+            for: userDid,
+            handle: plan.handle,
+            serverEpoch: mlsSkipServerEpochFence()
+          )
+          // Publish fresh GroupInfo so external-join peers see the new epoch.
+          try? await mlsClient.publishGroupInfo(
+            for: userDid, convoId: convoId, groupId: groupIdData)
         } catch {
           logger.warning(
-            "⚠️ [MLSConversationManager.removeMember] Local merge failed (server removal succeeded, will sync): \(error.localizedDescription)"
+            "⚠️ [MLSConversationManager.removeMember] Local confirm failed (server removal succeeded, will sync): \(error.localizedDescription)"
           )
+          await mlsClient.discardPending(for: userDid, handle: plan.handle)
         }
 
         let newEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? UInt64(epochHint ?? 0)

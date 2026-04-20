@@ -5912,34 +5912,43 @@ public extension MLSConversationManager {
         "   Key Package (last 100 bytes hex): \(package.data.suffix(100).hexEncodedString())")
     }
 
-    logger.debug("📍 [MLSConversationManager.createGroup] Adding members via MLS...")
-    let addResult = try await mlsClient.addMembers(
+    logger.debug("📍 [MLSConversationManager.createGroup] Adding members via MLS (stageCommit)...")
+    // Three-phase sender lifecycle (task #44/#62): stage the commit here and
+    // thread the handle back to `createGroup` (via `PreparedInitialMembers`
+    // → `ServerConversationCreationResult`) so it can confirm on success or
+    // discard on failure. The commit is NOT merged yet.
+    let groupIdHex = groupId.hexEncodedString()
+    let memberDidStrings = members.map { $0.description }
+    let plan = try await mlsClient.stageCommit(
       for: userDid,
-      groupId: groupId,
-      keyPackages: keyPackageData
+      conversationId: groupIdHex,
+      kind: .addMembers(memberDids: memberDidStrings, keyPackages: keyPackageData)
     )
+    let welcomeData = plan.welcomeBytes ?? Data()
 
     logger.info(
-      "✅ [MLSConversationManager.createGroup] Members added locally - commit: \(addResult.commitData.count) bytes, welcome: \(addResult.welcomeData.count) bytes"
+      "✅ [MLSConversationManager.createGroup] Members added locally - commit: \(plan.commitBytes.count) bytes, welcome: \(welcomeData.count) bytes, target_epoch: \(plan.targetEpoch)"
     )
     logger.info("🔄 Commit staged (NOT merged yet) - will merge after server confirmation")
 
     // 🔬 CRITICAL DIAGNOSTIC: Log Welcome message structure
     logger.info("📨 [WELCOME MESSAGE FORENSICS - Creator Side]")
-    logger.info("   Welcome Size: \(addResult.welcomeData.count) bytes")
+    logger.info("   Welcome Size: \(welcomeData.count) bytes")
     logger.info(
-      "   Welcome (first 200 bytes hex): \(addResult.welcomeData.prefix(200).hexEncodedString())")
+      "   Welcome (first 200 bytes hex): \(welcomeData.prefix(200).hexEncodedString())")
     logger.info(
-      "   Welcome (last 200 bytes hex): \(addResult.welcomeData.suffix(200).hexEncodedString())")
-    logger.info("   Commit Size: \(addResult.commitData.count) bytes")
+      "   Welcome (last 200 bytes hex): \(welcomeData.suffix(200).hexEncodedString())")
+    logger.info("   Commit Size: \(plan.commitBytes.count) bytes")
     logger.info(
-      "   Commit (first 200 bytes hex): \(addResult.commitData.prefix(200).hexEncodedString())")
+      "   Commit (first 200 bytes hex): \(plan.commitBytes.prefix(200).hexEncodedString())")
 
     return PreparedInitialMembers(
-      commitData: addResult.commitData,
-      welcomeData: addResult.welcomeData,
+      commitData: plan.commitBytes,
+      welcomeData: welcomeData,
       hashEntries: hashEntries,
-      selectedPackages: selectedPackages  // Track for rollback on failure
+      selectedPackages: selectedPackages,  // Track for rollback on failure
+      stagedCommitHandle: plan.handle,
+      stagedTargetEpoch: plan.targetEpoch
     )
   }
 
@@ -6009,7 +6018,8 @@ public extension MLSConversationManager {
         return ServerConversationCreationResult(
           convo: convo,
           commitData: prepared?.commitData,
-          welcomeData: prepared?.welcomeData
+          welcomeData: prepared?.welcomeData,
+          stagedCommitHandle: prepared?.stagedCommitHandle
         )
       } catch let error as MLSAPIError {
         let normalizedError = normalizeKeyPackageError(error)
@@ -6035,6 +6045,11 @@ public extension MLSConversationManager {
           logger.warning(
             "⚠️ [MLSConversationManager.createGroup] Server reported missing key packages (\(detail ?? "no details")). Retrying with fresh bundles..."
           )
+          // Task #44/#62: discard the staged commit we prepared for this
+          // attempt — the next attempt will re-stage with fresh packages.
+          if let handle = prepared?.stagedCommitHandle {
+            await mlsClient.discardPending(for: userDid, handle: handle)
+          }
           do {
             try await mlsClient.clearPendingCommit(for: userDid, groupId: groupId)
           } catch {
@@ -6068,6 +6083,11 @@ public extension MLSConversationManager {
           await keyPackageManager.unreserveKeyPackages(packages)
           logger.info("♻️ Unreserved \(packages.count) key packages after final server error")
         }
+        // Task #44/#62: discard the staged commit so we don't leave pending
+        // sender state for a group the DS never accepted.
+        if let handle = prepared?.stagedCommitHandle {
+          await mlsClient.discardPending(for: userDid, handle: handle)
+        }
 
         if hasInitialMembers,
           case .keyPackageNotFound = normalizedError,
@@ -6095,7 +6115,11 @@ public extension MLSConversationManager {
           await keyPackageManager.unreserveKeyPackages(packages)
           logger.info("♻️ Unreserved \(packages.count) key packages after unexpected error")
         }
-        
+        // Task #44/#62: discard the staged commit on any non-API failure too.
+        if let handle = prepared?.stagedCommitHandle {
+          await mlsClient.discardPending(for: userDid, handle: handle)
+        }
+
         lastError = error
         break
       }

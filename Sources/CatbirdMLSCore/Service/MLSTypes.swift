@@ -121,6 +121,15 @@ public struct PreparedInitialMembers {
   public let welcomeData: Data
   public let hashEntries: [BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry]
   public let selectedPackages: [KeyPackageWithHash]  // Track for rollback on failure
+  /// Task #44/#62: handle to the staged sender-side commit. Set when the
+  /// commit was created via the new three-phase API (`stageCommit`). The
+  /// creator retains it through `createConversationOnServer` so it can be
+  /// `confirmCommit`/`discardPending`'d after the DS response.
+  public let stagedCommitHandle: FfiStagedCommitHandle?
+  /// Expected post-merge epoch from the staged commit plan. Informational
+  /// only — `confirmCommit` fences against the DS's echoed epoch (or the
+  /// skip sentinel for endpoints that don't echo one).
+  public let stagedTargetEpoch: UInt64?
 }
 
 /// Result returned after successfully creating a conversation on the server
@@ -128,6 +137,9 @@ public struct ServerConversationCreationResult {
   public let convo: BlueCatbirdMlsChatDefs.ConvoView
   public let commitData: Data?
   public let welcomeData: Data?
+  /// Task #44/#62: forwarded from `PreparedInitialMembers` so the outer
+  /// `createGroup` flow can confirm or discard the staged commit.
+  public let stagedCommitHandle: FfiStagedCommitHandle?
 }
 
 /// Pending operation
