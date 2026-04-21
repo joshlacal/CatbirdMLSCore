@@ -1767,7 +1767,7 @@ open func computeKeyPackageHash(keyPackageBytes: Data)throws  -> Data {
      * responsibility — see the module-level comment for rationale.
      */
 open func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64)throws  -> FfiConfirmedCommit {
-    return try  FfiConverterTypeFFIConfirmedCommit.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    return try  FfiConverterTypeFFIConfirmedCommit.lift(try rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_confirm_commit(self.uniffiClonePointer(),
         FfiConverterTypeFFIStagedCommitHandle.lower(handle),
         FfiConverterUInt64.lower(serverEpoch),$0
@@ -1980,7 +1980,7 @@ open func discardIncomingCommit(groupId: Data, targetEpoch: UInt64)throws  {try 
      * Calling `discard_pending` on an unknown or already-consumed handle
      * returns `MLSError::InvalidInput`.
      */
-open func discardPending(handle: FfiStagedCommitHandle)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+open func discardPending(handle: FfiStagedCommitHandle)throws  {try rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_discard_pending(self.uniffiClonePointer(),
         FfiConverterTypeFFIStagedCommitHandle.lower(handle),$0
     )
@@ -2761,7 +2761,7 @@ open func signWithIdentityKey(identity: String, payload: Data)throws  -> Data {
      * returns `MLSError::InvalidInput`.
      */
 open func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data)throws  -> FfiCommitPlan {
-    return try  FfiConverterTypeFFICommitPlan.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    return try  FfiConverterTypeFFICommitPlan.lift(try rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_stage_commit(self.uniffiClonePointer(),
         FfiConverterString.lower(conversationId),
         FfiConverterTypeFFICommitKind.lower(kind),
@@ -8092,6 +8092,104 @@ extension FfiDeliveryStatus: Equatable, Hashable {}
 
 
 /**
+ * Dedicated error type for the sender-side three-phase commit surface on
+ * [`crate::api::MLSContext`] (`stage_commit`, `confirm_commit`,
+ * `discard_pending`).
+ *
+ * [`MLSError`] itself is annotated with `#[uniffi(flat_error)]`, which
+ * collapses every variant to `{ message: String }` across the UniFFI
+ * boundary. That made `EpochMismatch { local, remote }` — the one
+ * `MLSError` variant whose structured fields callers actually need to
+ * branch on — unreachable from Swift/Kotlin without string parsing.
+ *
+ * Rather than unflatten `MLSError` (which has variants carrying
+ * `Utf8Error`, `serde_json::Error`, and `&'static str` that aren't
+ * UniFFI-representable), this narrower type is used only by the
+ * three-phase commit methods so iOS and catmos-cli can pattern-match on
+ * the structured [`MLSCommitError::EpochMismatch`] variant. See
+ * `docs/TODO.md` task #63.
+ */
+public enum MlsCommitError {
+
+    
+    
+    /**
+     * Fencing mismatch between the epoch the server advanced to and the
+     * epoch the locally-staged commit would produce. Returned by
+     * `MLSContext::confirm_commit` when `server_epoch` does not equal
+     * the plan's `target_epoch` (and is not
+     * `crate::api::SKIP_SERVER_EPOCH_FENCE`). The caller must discard
+     * the staged commit and re-sync before retrying.
+     */
+    case EpochMismatch(local: UInt64, remote: UInt64
+    )
+    /**
+     * Catch-all wrapping any other [`MLSError`] the underlying OpenMLS
+     * call can surface. The `message` field is the `Display` form of
+     * the original error.
+     */
+    case Generic(message: String
+    )
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMLSCommitError: FfiConverterRustBuffer {
+    typealias SwiftType = MlsCommitError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsCommitError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .EpochMismatch(
+            local: try FfiConverterUInt64.read(from: &buf), 
+            remote: try FfiConverterUInt64.read(from: &buf)
+            )
+        case 2: return .Generic(
+            message: try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MlsCommitError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .EpochMismatch(local,remote):
+            writeInt(&buf, Int32(1))
+            FfiConverterUInt64.write(local, into: &buf)
+            FfiConverterUInt64.write(remote, into: &buf)
+            
+        
+        case let .Generic(message):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(message, into: &buf)
+            
+        }
+    }
+}
+
+
+extension MlsCommitError: Equatable, Hashable {}
+
+extension MlsCommitError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
+
+/**
  * P2: Comprehensive error enum with detailed variants for better debugging
  */
 public enum MlsError {
@@ -12777,7 +12875,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_compute_key_package_hash() != 45775) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_confirm_commit() != 4581) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_confirm_commit() != 55382) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_create_external_commit() != 33296) {
@@ -12819,7 +12917,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_discard_incoming_commit() != 9518) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_discard_pending() != 5562) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_discard_pending() != 7539) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_discard_pending_external_join() != 45091) {
@@ -12972,7 +13070,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_sign_with_identity_key() != 63625) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 6351) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 12530) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 33747) {
