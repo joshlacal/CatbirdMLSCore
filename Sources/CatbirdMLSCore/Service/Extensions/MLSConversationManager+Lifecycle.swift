@@ -653,6 +653,16 @@ extension MLSConversationManager {
       await MLSClient.shared.configure(
         for: userDid, apiClient: apiClient, atProtoClient: atProtoClient)
 
+      if let recoveryManager = await MLSClient.shared.recovery(for: userDid) {
+        await recoveryManager.setDeferredRejoinHandler { [weak self] handlerUserDid, conversationIds in
+          guard let self, self.userDid == handlerUserDid else { return }
+          await self.persistDeferredRejoinRequests(
+            conversationIds,
+            reason: "silent recovery after device re-registration"
+          )
+        }
+      }
+
       // CRITICAL FIX: Ensure device is registered with MLS server before proceeding
       // This prevents "Missing key packages" errors if device registration was skipped/removed
       do {

@@ -494,6 +494,14 @@ public actor MLSCoreContext {
     let authorizer = MLSExternalJoinAuthorizerBridge()
     try newContext.setExternalJoinAuthorizer(authorizer: authorizer)
 
+    let epochStorage = MLSEpochSecretStorageBridge(userDID: userDid, databaseManager: .shared)
+    do {
+      try newContext.setEpochSecretStorage(storage: epochStorage)
+      logger.info("✅ Configured epoch secret storage for historical message decryption")
+    } catch {
+      logger.error("❌ Failed to configure epoch secret storage: \(error.localizedDescription)")
+    }
+
     // Track the current disk version at context creation time
     let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
     contexts[userDid] = newContext
@@ -548,6 +556,14 @@ public actor MLSCoreContext {
       .replacingOccurrences(of: "=", with: "")
       .prefix(64) ?? "default"
 
+    let migrationPerformed = MLSPlaintextHeaderMigration.ensurePlaintextHeaderMigration(
+      for: userDid,
+      databaseType: .rustFFI
+    )
+    if migrationPerformed {
+      logger.warning("🔧 [0xdead10cc] Rust FFI database was recreated for plaintext header migration")
+    }
+
     // Return database path (matching MLSClient: {didHash}.db)
     return storageDirectory.appendingPathComponent("\(didHash).db").path
   }
@@ -562,13 +578,43 @@ public actor MLSCoreContext {
 
   /// Remove context for a user (e.g., on logout)
   /// - Parameter userDid: User's decentralized identifier
-  public func removeContext(for userDid: String) {
+  /// - Returns: true if a cached context was removed
+  @discardableResult
+  public func removeContext(for userDid: String) -> Bool {
     if let context = contexts.removeValue(forKey: userDid) {
       try? context.flushAndPrepareClose()
       Self.unregisterFromEmergencyClose(for: userDid)
+      contextVersions.removeValue(forKey: userDid)
+      logger.info("Removed MLS context for user: \(userDid, privacy: .private)")
+      return true
     }
     contextVersions.removeValue(forKey: userDid)
-    logger.info("Removed MLS context for user: \(userDid, privacy: .private)")
+    logger.debug("No MLS context cached for user: \(userDid, privacy: .private)")
+    return false
+  }
+
+  /// Clear all contexts except the active user.
+  /// - Parameter keepUserDid: User DID to keep cached
+  /// - Returns: number of cached contexts removed
+  @discardableResult
+  public func removeAllContextsExcept(keepUserDid: String) -> Int {
+    let normalizedKeep = keepUserDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let usersToRemove = contexts.keys.filter {
+      $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != normalizedKeep
+    }
+
+    for userDid in usersToRemove {
+      if let context = contexts.removeValue(forKey: userDid) {
+        try? context.flushAndPrepareClose()
+        Self.unregisterFromEmergencyClose(for: userDid)
+      }
+      contextVersions.removeValue(forKey: userDid)
+    }
+
+    if !usersToRemove.isEmpty {
+      logger.info("Removed \(usersToRemove.count) MLS context(s), kept \(keepUserDid.prefix(20), privacy: .private)...")
+    }
+    return usersToRemove.count
   }
 
   /// Clear all contexts

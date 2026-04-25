@@ -43,6 +43,12 @@ public enum MLSError: LocalizedError {
     /// Context creation blocked because app is transitioning to background (0xdead10cc prevention)
     /// This is a protective measure - MLS operations should not start during suspension
     case contextCreationBlocked(reason: String)
+    /// OpenMLS rejected a commit we tried to apply. `message` carries the
+    /// underlying OpenMLS `ProcessMessageError` variant (e.g. `ValidationError(WrongEpoch)`,
+    /// `InvalidCommit`, `UnknownSender`) so epoch-recovery and fork-detection
+    /// logs can reason about the exact failure mode instead of a flat
+    /// "operation failed".
+    case commitProcessingFailed(message: String)
 
     public var errorDescription: String? {
         switch self {
@@ -100,6 +106,9 @@ public enum MLSError: LocalizedError {
             return "Cannot decrypt own message - MLS encrypts for recipients only. Use cached payload from send operation."
         case .contextCreationBlocked(let reason):
             return "MLS context creation blocked: \(reason)"
+        case .commitProcessingFailed(let message):
+            let safeMessage = String(describing: message)
+            return "Commit processing failed: \(safeMessage)"
         }
     }
 }

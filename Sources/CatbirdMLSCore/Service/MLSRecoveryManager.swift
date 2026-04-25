@@ -9,10 +9,14 @@ import Petrel
 /// 1. Deletes device from server
 /// 2. Clears local MLS storage
 /// 3. Re-registers device with fresh key packages
-/// 4. Marks conversations for rejoin via External Commit
-/// 5. Processes rejoins in background without user interaction
+/// 4. Persists affected conversations for deferred rejoin recovery
+/// 5. Leaves External Commit attempts to the conversation recovery queue
 @available(iOS 18.0, macOS 13.0, *)
 public actor MLSRecoveryManager {
+  public typealias DeferredRejoinHandler = @Sendable (
+    _ userDid: String,
+    _ conversationIds: [String]
+  ) async -> Void
 
   // MARK: - Properties
 
@@ -23,8 +27,13 @@ public actor MLSRecoveryManager {
   /// Tracks users currently undergoing recovery to prevent concurrent operations
   private var recoveryInProgress: Set<String> = []
 
-  /// Conversations pending rejoin after recovery
-  private var pendingRejoins: [String: [String]] = [:]  // userDid: [convoIds]
+  /// Persists rejoin intent in the app-owned conversation database.
+  ///
+  /// MLSRecoveryManager intentionally does not own GRDB access or launch
+  /// External Commits directly. The app layer wires this handler so automatic
+  /// recovery flows through the same persisted `needsRejoin` queue as sync-time
+  /// epoch recovery.
+  private var deferredRejoinHandler: DeferredRejoinHandler?
 
   // MARK: - Per-Conversation Recovery Tracking (Prevents Infinite Loops)
 
@@ -80,6 +89,28 @@ public actor MLSRecoveryManager {
   /// Maximum consecutive 404s before tripping the circuit breaker
   private let groupInfo404MaxStrikes = 3
 
+  // MARK: - Global Rejoin Floor (Spec §8.4 / §10)
+
+  /// GLOBAL minimum interval between External Commit rejoin attempts across
+  /// ALL conversations. Mirrors the Rust `RecoveryTracker.last_global_rejoin_at`
+  /// invariant from spec §8.4 / §10 (`MIN_REJOIN_INTERVAL_SEC = 30`). Without
+  /// this floor, multiple conversations going `.needsRejoin` simultaneously
+  /// can each fire External Commits within milliseconds, inflating epoch
+  /// counters and burning server quota.
+  ///
+  /// Per-conversation cooldown (`failedRejoins` + `cooldownForAttempts`) and
+  /// the one-at-a-time gating still apply on top of this floor — this is an
+  /// additional cross-conversation guard, not a replacement.
+  static let minGlobalRejoinIntervalSec: TimeInterval = 30
+
+  /// In-memory timestamp of the most recent External Commit rejoin attempt
+  /// (success or failure) across all conversations. Set inside
+  /// `shouldSkipRejoin` at the moment the gate decides to proceed, so both
+  /// success and failure paths share the same cooldown. In-memory only —
+  /// matches the Rust core; on app restart the natural cooldown applies
+  /// from the next attempt.
+  private var lastGlobalRejoinAttemptAt: Date?
+
   /// Calculate exponential backoff cooldown based on attempt count
   /// - Parameter attempts: Number of failed attempts so far
   /// - Returns: Cooldown duration in seconds
@@ -114,6 +145,10 @@ public actor MLSRecoveryManager {
   public init(mlsClient: MLSClient, mlsAPIClient: MLSAPIClient) {
     self.mlsClient = mlsClient
     self.mlsAPIClient = mlsAPIClient
+  }
+
+  public func setDeferredRejoinHandler(_ handler: DeferredRejoinHandler?) {
+    deferredRejoinHandler = handler
   }
 
   // MARK: - ConversationRecoveryState (Spec §8.1 / Invariants S1, S1.1)
@@ -321,35 +356,63 @@ public actor MLSRecoveryManager {
   // MARK: - Per-Conversation Rejoin Tracking
 
   /// Check if a conversation should be skipped during rejoin (max attempts exceeded or on cooldown)
+  ///
+  /// Layered gates (each can short-circuit to skip):
+  /// 1. Per-conversation max attempts (spec §8.2 — MAX_REJOIN_ATTEMPTS = 3)
+  /// 2. Per-conversation exponential backoff (30s/2m/10m/1h)
+  /// 3. **Global** rejoin floor (spec §8.4 / §10 — MIN_REJOIN_INTERVAL_SEC = 30,
+  ///    applies across all conversations, mirrors Rust
+  ///    `RecoveryTracker.last_global_rejoin_at`)
+  ///
+  /// When the gate decides to proceed (returns `false`), the global timestamp
+  /// is stamped immediately so both success and failure paths share the same
+  /// cooldown — failure does not allow immediate retry.
   public func shouldSkipRejoin(convoId: String) -> Bool {
-    guard let record = failedRejoins[convoId] else {
-      return false
+    if let record = failedRejoins[convoId] {
+      // Skip if max attempts exceeded
+      if record.attempts >= maxRejoinAttempts {
+        logger.info(
+          "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - max attempts (\(self.maxRejoinAttempts)) exceeded"
+        )
+        return true
+      }
+
+      // Skip if on cooldown (exponential backoff based on attempts)
+      let now = Date()
+      if Self.isInBackoffCooldown(
+        attempts: record.attempts,
+        lastAttempt: record.lastAttempt,
+        now: now
+      ) {
+        let cooldown = Self.cooldownForAttempts(record.attempts)
+        let elapsed = now.timeIntervalSince(record.lastAttempt)
+        let remaining = Int(cooldown - elapsed)
+        logger.info(
+          "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - on cooldown (\(remaining)s remaining, attempt \(record.attempts))"
+        )
+        return true
+      }
     }
 
-    // Skip if max attempts exceeded
-    if record.attempts >= maxRejoinAttempts {
-      logger.info(
-        "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - max attempts (\(self.maxRejoinAttempts)) exceeded"
-      )
-      return true
-    }
-
-    // Skip if on cooldown (exponential backoff based on attempts)
+    // Global rejoin floor (spec §8.4 / §10) — applies across ALL conversations.
+    // Prevents two convos going NEEDS_REJOIN simultaneously from both firing
+    // External Commits within milliseconds.
     let now = Date()
-    if Self.isInBackoffCooldown(
-      attempts: record.attempts,
-      lastAttempt: record.lastAttempt,
-      now: now
-    ) {
-      let cooldown = Self.cooldownForAttempts(record.attempts)
-      let elapsed = now.timeIntervalSince(record.lastAttempt)
-      let remaining = Int(cooldown - elapsed)
-      logger.info(
-        "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - on cooldown (\(remaining)s remaining, attempt \(record.attempts))"
-      )
-      return true
+    if let lastGlobal = lastGlobalRejoinAttemptAt {
+      let elapsed = now.timeIntervalSince(lastGlobal)
+      if elapsed < Self.minGlobalRejoinIntervalSec {
+        let remaining = Int(Self.minGlobalRejoinIntervalSec - elapsed)
+        logger.info(
+          "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - global rejoin floor active (\(remaining)s remaining)"
+        )
+        return true
+      }
     }
 
+    // Gate decided to proceed: stamp the global timestamp BEFORE the External
+    // Commit is issued. Both success and failure paths now share the cooldown,
+    // so a failed attempt cannot immediately retry across other conversations.
+    lastGlobalRejoinAttemptAt = now
     return false
   }
 
@@ -368,17 +431,26 @@ public actor MLSRecoveryManager {
   ///     `MLSContext.epochAuthenticator(groupId:)` and hex-encode when the
   ///     group is still present locally; pass `nil` only when the group
   ///     state is unavailable (warning log will fire).
-  public func recordFailedRejoin(convoId: String, epochAuthenticatorHex: String? = nil) {
+  ///   - failureType: Spec §8.6 / ADR-008 D1 failure-type discriminator.
+  ///     Defaults to `"external_commit_exhausted"` (Mode A — local rejoin
+  ///     attempts gave up). Pass `"remote_data_error"` from call sites that
+  ///     observed a corrupt/inconsistent server-fetched payload (Mode B —
+  ///     group state is unrecoverable at the network layer).
+  public func recordFailedRejoin(
+    convoId: String,
+    epochAuthenticatorHex: String? = nil,
+    failureType: String = "external_commit_exhausted"
+  ) {
     let existing = failedRejoins[convoId] ?? (attempts: 0, lastAttempt: Date.distantPast)
     failedRejoins[convoId] = (attempts: existing.attempts + 1, lastAttempt: Date())
     logger.warning(
-      "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(existing.attempts + 1)/\(self.maxRejoinAttempts)"
+      "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(existing.attempts + 1)/\(self.maxRejoinAttempts) failureType=\(failureType)"
     )
 
     // Spec §8.6: Report to server when transitioning to UNRECOVERABLE_LOCAL
     if existing.attempts + 1 >= maxRejoinAttempts {
       logger.error(
-        "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — reporting to server"
+        "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — reporting to server (failureType=\(failureType))"
       )
       // TODO(§8.1 escalation hardening): this dispatch is fire-and-forget; if
       // the server is unreachable at the exact moment the 3rd attempt
@@ -390,16 +462,33 @@ public actor MLSRecoveryManager {
         )
       }
       let authenticator = epochAuthenticatorHex
+      // ADR-008 D1 (spec §8.6.1): mirror the Rust orchestrator's
+      // `report_unrecoverable_local` classifier
+      // (`catbird-mls/src/orchestrator/recovery.rs:855-865`).
+      //   - "remote_data_error"           → Mode B  (group_state_unrecoverable)
+      //   - "external_commit_exhausted"   → Mode A  (local_state_loss)
+      //   - anything else                 → omit (server treats as Mode A)
+      let failureMode: String?
+      switch failureType {
+      case "remote_data_error":
+        failureMode = "group_state_unrecoverable"
+      case "external_commit_exhausted":
+        failureMode = "local_state_loss"
+      default:
+        failureMode = nil
+      }
+      let resolvedFailureType = failureType
       Task {
         do {
           let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
             convoId: convoId,
-            failureType: "external_commit_exhausted",  // Spec §8.6
+            failureType: resolvedFailureType,  // Spec §8.6
+            failureMode: failureMode,  // ADR-008 D1
             epochAuthenticator: authenticator
           )
           let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
           self.logger.info(
-            "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil")"
+            "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil") failureType=\(resolvedFailureType) failureMode=\(failureMode ?? "nil")"
           )
         } catch {
           // Swallowing this was masking §8.6 escalation failures. Keep the
@@ -601,15 +690,17 @@ public actor MLSRecoveryManager {
       _ = try await mlsClient.reregisterDevice(for: userDid)
       logger.info("✅ [MLSRecoveryManager] Device re-registered successfully")
 
-      // Step 2: Mark conversations for rejoin via External Commit
+      // Step 2: Persist conversations for deferred rejoin recovery.
       logger.info(
-        "🔄 [MLSRecoveryManager] Step 2/2: Marking \(conversationIds.count) conversations for rejoin..."
+        "🔄 [MLSRecoveryManager] Step 2/2: Marking \(conversationIds.count) conversations for deferred rejoin..."
       )
       if !conversationIds.isEmpty {
-        pendingRejoins[userDid] = conversationIds
-        // Trigger background rejoin process
-        Task {
-          await processBackgroundRejoins(for: userDid)
+        if let deferredRejoinHandler {
+          await deferredRejoinHandler(userDid, conversationIds)
+        } else {
+          logger.warning(
+            "⚠️ [MLSRecoveryManager] No deferred rejoin handler configured; caller must persist needsRejoin for \(conversationIds.count) conversation(s)"
+          )
         }
       }
 
@@ -618,55 +709,6 @@ public actor MLSRecoveryManager {
       logger.error("❌ [MLSRecoveryManager] Recovery failed: \(error.localizedDescription)")
       throw MLSRecoveryError.recoveryFailed(underlying: error)
     }
-  }
-
-  // MARK: - Background Rejoin Processing
-
-  /// Process pending conversation rejoins in background
-  private func processBackgroundRejoins(for userDid: String) async {
-    guard let convoIds = pendingRejoins[userDid], !convoIds.isEmpty else {
-      logger.debug("📭 [MLSRecoveryManager] No pending rejoins for \(userDid.prefix(20))")
-      return
-    }
-
-    logger.info("🔄 [MLSRecoveryManager] Processing \(convoIds.count) pending rejoins...")
-
-    var successCount = 0
-    var failureCount = 0
-    var skippedCount = 0
-
-    for convoId in convoIds {
-      // Check if we should skip this conversation (max attempts or cooldown)
-      if shouldSkipRejoin(convoId: convoId) {
-        skippedCount += 1
-        continue
-      }
-
-      do {
-        logger.debug("🔄 [MLSRecoveryManager] Rejoining conversation: \(convoId.prefix(20))...")
-        _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convoId)
-        successCount += 1
-        clearRejoinTracking(convoId: convoId)
-        logger.info("✅ [MLSRecoveryManager] Rejoined: \(convoId.prefix(20))")
-      } catch {
-        failureCount += 1
-        recordFailedRejoin(convoId: convoId)
-        logger.error(
-          "❌ [MLSRecoveryManager] Failed to rejoin \(convoId.prefix(20)): \(error.localizedDescription)"
-        )
-        // Continue with other conversations, don't fail the whole process
-      }
-
-      // Add small delay between rejoins to avoid overwhelming the server
-      try? await Task.sleep(nanoseconds: 200_000_000)  // 200ms
-    }
-
-    // Clear pending rejoins
-    pendingRejoins.removeValue(forKey: userDid)
-
-    logger.info(
-      "📊 [MLSRecoveryManager] Background rejoin complete: \(successCount) succeeded, \(failureCount) failed, \(skippedCount) skipped"
-    )
   }
 
   // MARK: - Device Management
@@ -730,9 +772,13 @@ public actor MLSRecoveryManager {
           logger.error(
             "   🔧 Server team needs to investigate GroupInfo storage for this conversation")
 
-          // Record this as a failed rejoin to prevent retry loops
+          // Record this as a failed rejoin to prevent retry loops.
+          // ADR-008 D1: server-side data corruption is Mode B — pass
+          // `remote_data_error` so the eventual recoveryFailure report sets
+          // `failureMode = "group_state_unrecoverable"` (counts toward
+          // server-side quorum auto-reset rather than self-heal).
           if let convoId = convoId {
-            recordFailedRejoin(convoId: convoId)
+            recordFailedRejoin(convoId: convoId, failureType: "remote_data_error")
           }
 
           return false

@@ -9971,10 +9971,16 @@ public protocol OrchestratorApiCallback : AnyObject {
      * so stale clients can't forge quorum votes. `None` is accepted by
      * pre-A7 servers; once A7 ships, servers MAY require it.
      *
+     * `failure_mode` (ADR-008 D1, spec §8.6.1): one of `"local_state_loss"`
+     * or `"group_state_unrecoverable"`. Mode A reports SHOULD NOT count
+     * toward server-side quorum auto-reset (clients should self-heal
+     * instead); Mode B reports indicate the group itself is unrecoverable
+     * and SHOULD count. Optional during interim deployment.
+     *
      * Errors should be returned (not swallowed); the orchestrator logs but
      * does not retry, since the local state is already terminal.
      */
-    func reportRecoveryFailure(convoId: String, failureType: String, epochAuthenticator: String?) throws 
+    func reportRecoveryFailure(convoId: String, failureType: String, epochAuthenticator: String?, failureMode: String?) throws 
     
 }
 
@@ -10541,6 +10547,7 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorAPICallback {
             convoId: RustBuffer,
             failureType: RustBuffer,
             epochAuthenticator: RustBuffer,
+            failureMode: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -10552,7 +10559,8 @@ fileprivate struct UniffiCallbackInterfaceOrchestratorAPICallback {
                 return try uniffiObj.reportRecoveryFailure(
                      convoId: try FfiConverterString.lift(convoId),
                      failureType: try FfiConverterString.lift(failureType),
-                     epochAuthenticator: try FfiConverterOptionString.lift(epochAuthenticator)
+                     epochAuthenticator: try FfiConverterOptionString.lift(epochAuthenticator),
+                     failureMode: try FfiConverterOptionString.lift(failureMode)
                 )
             }
 
@@ -13271,7 +13279,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 51004) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 31186) {
+    if (uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 29211) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272) {

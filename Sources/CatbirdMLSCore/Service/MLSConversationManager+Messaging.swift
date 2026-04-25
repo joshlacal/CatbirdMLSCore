@@ -549,6 +549,9 @@ public extension MLSConversationManager {
           return (localMsgId, sendResult)
         } catch let apiError as MLSAPIError {
           if case .httpError(let code, _) = apiError, code == 409 {
+            // Spec §5.3: DO NOT perform External Commit here. Send recovery is lightweight
+            // sync only — on catch-up failure, flag NEEDS_REJOIN and let deferred recovery
+            // (§8.5) handle rejoin. External Commit in the send path inflates epochs.
             // 409 = epoch mismatch — Approach B: fetch pending commits, process, retry once
             logger.warning("⚠️ [SEND] 409 epoch mismatch at epoch \(localEpoch) — fetching pending commits")
 
@@ -3532,14 +3535,66 @@ public extension MLSConversationManager {
   }
 
   internal func requestRejoinIfPossible(convoId: String, reason: String) async {
-    guard let userDID = userDid else { return }
+    guard userDid != nil else { return }
 
     if await conversationHasPendingRejoinRequest(convoId) { return }
 
     do {
-      _ = try await mlsClient.joinByExternalCommit(for: userDID, convoId: convoId)
+      logger.warning(
+        "🔄 [REJOIN-REQUEST] Flagging \(convoId.prefix(16)) for deferred recovery instead of immediate External Commit. Reason: \(reason)"
+      )
+      try await markConversationNeedsRejoin(convoId)
       await recordRejoinRequestTimestamp(convoId)
-    } catch {}
+      scheduleDeferredEpochRecoveryIfNeeded(source: "rejoin request")
+    } catch {
+      logger.warning(
+        "⚠️ [REJOIN-REQUEST] Failed to persist deferred rejoin for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+    }
+  }
+
+  internal func persistDeferredRejoinRequests(_ convoIds: [String], reason: String) async {
+    guard userDid != nil else { return }
+
+    var seen = Set<String>()
+    var persisted = 0
+
+    for convoId in convoIds where seen.insert(convoId).inserted {
+      if await conversationHasPendingRejoinRequest(convoId) { continue }
+
+      do {
+        logger.warning(
+          "🔄 [DEFERRED-REJOIN] Persisting \(convoId.prefix(16)) for deferred recovery. Reason: \(reason)"
+        )
+        try await markConversationNeedsRejoin(convoId)
+        await recordRejoinRequestTimestamp(convoId)
+        persisted += 1
+      } catch {
+        logger.warning(
+          "⚠️ [DEFERRED-REJOIN] Failed to persist \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+    }
+
+    if persisted > 0 {
+      scheduleDeferredEpochRecoveryIfNeeded(source: "persisted deferred rejoin")
+    }
+  }
+
+  internal func scheduleDeferredEpochRecoveryIfNeeded(source: String) {
+    guard deferredEpochRecoveryTask == nil else { return }
+
+    deferredEpochRecoveryTask = Task(priority: .utility) { [weak self] in
+      guard let self else { return }
+      defer { self.deferredEpochRecoveryTask = nil }
+      do {
+        try await self.runDeferredEpochRecovery()
+      } catch {
+        self.logger.warning(
+          "⚠️ [DEFERRED-REJOIN] Deferred epoch recovery failed after \(source): \(error.localizedDescription)"
+        )
+      }
+    }
   }
 
 
@@ -5440,7 +5495,14 @@ public extension MLSConversationManager {
           // No authenticator: early-return at L5281-5288 guarantees the group
           // is absent locally when this failure path runs. Server records the
           // vote but short-circuits as `missing_authenticator`.
-          await recoveryManager.recordFailedRejoin(convoId: convoId, epochAuthenticatorHex: nil)
+          // ADR-008 D1: server-data corruption is Mode B — `remote_data_error`
+          // maps to `failureMode = "group_state_unrecoverable"` inside
+          // `recordFailedRejoin`.
+          await recoveryManager.recordFailedRejoin(
+            convoId: convoId,
+            epochAuthenticatorHex: nil,
+            failureType: "remote_data_error"
+          )
           let remaining = await recoveryManager.remainingRejoinAttempts(convoId: convoId)
           if remaining == 0 {
             // Mark as server-corrupted after repeated failures to avoid premature lockout

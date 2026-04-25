@@ -1,14 +1,9 @@
 import Combine
 import CatbirdMLS
 import Foundation
-import GRDB
 import OSLog
 import Petrel
 import Synchronization
-
-#if os(iOS)
-  import UIKit
-#endif
 
 /// Modern MLS wrapper using UniFFI bindings
 /// This replaces the legacy C FFI approach with type-safe Swift APIs
@@ -17,17 +12,11 @@ public actor MLSClient {
   /// to maintain group state in memory and keychain persistence
   public static let shared = MLSClient()
 
-  /// Per-user MLS contexts to prevent state contamination
-  /// With SQLite storage, persistence is automatic - no manual hydration needed
-    private var contexts: [String: MlsContext] = [:]
-
   // MARK: - Emergency Suspension Close (0xdead10cc Prevention)
 
-  /// MLSClient maintains its own cache of UniFFI `MlsContext` objects (separate from `MLSCoreContext`).
-  /// If we don't close *these* contexts before iOS suspension, their rusqlite/SQLCipher handles can
-  /// remain open and trigger RUNNINGBOARD `0xdead10cc` termination.
+  /// MLSClient delegates UniFFI `MlsContext` ownership to `MLSCoreContext`.
+  /// Keep only suspension flags here so existing lifecycle callers still block sender-side FFI work.
   private struct EmergencyState: @unchecked Sendable {
-    var contexts: [String: MlsContext] = [:]
     var cacheInvalidated = false
     var suspensionInProgress = false
   }
@@ -41,6 +30,7 @@ public actor MLSClient {
   /// Set suspension flag (idempotent). Call synchronously when scenePhase becomes inactive/background.
   public nonisolated static func markSuspensionInProgress(reason: String = "unknown") {
     emergencyState.withLock { $0.suspensionInProgress = true }
+    MLSCoreContext.markSuspensionInProgress()
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
       details: "MLSClient markSuspensionInProgress: \(reason)",
@@ -48,21 +38,19 @@ public actor MLSClient {
     )
   }
 
-  /// Fire sqlite3_interrupt() on all cached contexts WITHOUT closing them.
+  /// Fire sqlite3_interrupt() on all shared MLS contexts WITHOUT closing them.
   /// Safe to call from any thread — InterruptHandle is Send+Sync and doesn't require the Rust Mutex.
   /// Call this SYNCHRONOUSLY in handleScenePhaseChange before the async emergency close Task,
   /// so in-flight sqlite3_step calls abort immediately even if iOS suspends before the Task runs.
   public nonisolated static func interruptAllContexts() {
-    let contexts = emergencyState.withLock { Array($0.contexts.values) }
-    for context in contexts {
-      context.interrupt()
-    }
+    MLSCoreContext.interruptAllContexts()
   }
 
   /// Clear suspension flag (idempotent). Call when the app returns to foreground, or when BGTasks
   /// need to run MLS work while the app is backgrounded.
   public nonisolated static func clearSuspensionFlag(reason: String = "unknown") {
     emergencyState.withLock { $0.suspensionInProgress = false }
+    MLSCoreContext.clearSuspensionFlag()
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
       details: "MLSClient clearSuspensionFlag: \(reason)",
@@ -73,55 +61,24 @@ public actor MLSClient {
   /// Emergency synchronous close of all Rust MLS contexts.
   /// Safe to call from any thread and without actor isolation.
   public nonisolated static func emergencyCloseAllContexts(reason: String = "unknown") {
-    let contextsToClose: [String: MlsContext] = emergencyState.withLock { state in
+    emergencyState.withLock { state in
       state.suspensionInProgress = true
-      let snapshot = state.contexts
-      state.contexts.removeAll()
       state.cacheInvalidated = true
-      return snapshot
     }
 
     MLSSuspensionFlightRecorder.shared.record(
       .flushStarted,
-      details: "MLSClient emergencyCloseAllContexts(\(reason)): closing \(contextsToClose.count)",
+      details: "MLSClient emergencyCloseAllContexts(\(reason)): delegating to MLSCoreContext",
       process: "app"
     )
 
-    // CRITICAL FIX: Set suspension flag + interrupt all in-flight SQLCipher operations FIRST.
-    // setSuspended causes long-running Rust operations to bail out at their next check point.
-    // interrupt() causes in-flight sqlite3_step to return SQLITE_INTERRUPT immediately,
-    // releasing the Rust Mutex so flushAndPrepareClose can acquire it promptly.
-    for (_, context) in contextsToClose {
-      context.setSuspended(value: true)
-      context.interrupt()
-    }
-
-    for (userDID, context) in contextsToClose {
-      do {
-        try context.flushAndPrepareClose()
-      } catch {
-        MLSSuspensionFlightRecorder.shared.record(
-          .flushFailed,
-          details:
-            "MLSClient flushAndPrepareClose failed for \(userDID.prefix(20)): \(error.localizedDescription)",
-          process: "app"
-        )
-      }
-    }
+    MLSCoreContext.emergencyCloseAllContexts()
 
     MLSSuspensionFlightRecorder.shared.record(
       .flushCompleted,
-      details: "MLSClient emergencyCloseAllContexts: closed \(contextsToClose.count)",
+      details: "MLSClient emergencyCloseAllContexts: delegated close complete",
       process: "app"
     )
-  }
-
-  private nonisolated static func registerForEmergencyClose(_ context: MlsContext, for normalizedDID: String) {
-    emergencyState.withLock { $0.contexts[normalizedDID] = context }
-  }
-
-  private nonisolated static func unregisterFromEmergencyClose(for normalizedDID: String) {
-    emergencyState.withLock { $0.contexts.removeValue(forKey: normalizedDID) }
   }
 
   /// Per-user generation token.
@@ -193,12 +150,12 @@ public actor MLSClient {
 
   /// Invalidate cached API client for a user (called after E2E re-login)
   /// This ensures subsequent MLS operations use the fresh client with new tokens
-  public func invalidateCachedClient(for userDID: String) {
+  public func invalidateCachedClient(for userDID: String) async {
     let normalizedDID = normalizeUserDID(userDID)
     apiClients.removeValue(forKey: normalizedDID)
     deviceManagers.removeValue(forKey: normalizedDID)
     recoveryManagers.removeValue(forKey: normalizedDID)
-    contexts.removeValue(forKey: normalizedDID)
+    await MLSCoreContext.shared.removeContext(for: normalizedDID)
     logger.info("[E2E] Invalidated cached MLS clients and context for \(normalizedDID.prefix(20))...")
   }
 
@@ -307,7 +264,7 @@ public actor MLSClient {
           logger.warning(
             "⚠️ [MLSClient] Context poisoned for user \(userDID.prefix(20))..., clearing and retrying (attempt \(attempt))"
           )
-          clearPoisonedContext(for: userDID)
+          await clearPoisonedContext(for: userDID)
           context = try await getContext(for: userDID)
           continue
         }
@@ -377,14 +334,12 @@ public actor MLSClient {
 
   /// Clear a poisoned context from the cache to allow recovery on next attempt
   /// Call this when FFI operations fail with ContextNotInitialized
-  private func clearPoisonedContext(for userDID: String) {
+  private func clearPoisonedContext(for userDID: String) async {
     let normalizedDID = normalizeUserDID(userDID)
-    if contexts.removeValue(forKey: normalizedDID) != nil {
-      Self.unregisterFromEmergencyClose(for: normalizedDID)
-      logger.warning(
-        "🔄 [MLSClient] Cleared poisoned context for user: \(normalizedDID.prefix(20))... (will recreate on next operation)"
-      )
-    }
+    await MLSCoreContext.shared.removeContext(for: normalizedDID)
+    logger.warning(
+      "🔄 [MLSClient] Cleared poisoned shared context for user: \(normalizedDID.prefix(20))... (will recreate on next operation)"
+    )
   }
 
   /// Get or create a context for a specific user.
@@ -399,7 +354,7 @@ public actor MLSClient {
       )
     }
 
-    // If contexts were closed out-of-band (nonisolated emergency close), clear the actor cache.
+    // If contexts were closed out-of-band (nonisolated emergency close), clear the shared cache.
     let needsCacheClear = Self.emergencyState.withLock { state in
       if state.cacheInvalidated {
         state.cacheInvalidated = false
@@ -408,24 +363,15 @@ public actor MLSClient {
       return false
     }
     if needsCacheClear {
-      contexts.removeAll()
+      await MLSCoreContext.shared.clearAllContexts()
     }
 
-    if let existingContext = contexts[normalizedDID] {
-      Self.registerForEmergencyClose(existingContext, for: normalizedDID)
-      return existingContext
+    guard apiClients[normalizedDID] != nil else {
+      logger.error("❌ MLS API client not configured for user \(normalizedDID.prefix(20))...")
+      throw MLSError.configurationError
     }
 
-    // CRITICAL: Log full DID when creating new context for debugging
-    logger.info("🆕 Created new MlsContext for user: \(normalizedDID.prefix(20))...")
-    logger.debug("[MLSClient] Full normalized DID: \(normalizedDID)")
-    logger.debug(
-      "[MLSClient] Existing context keys in cache: \(self.contexts.keys.map { $0.prefix(20) })")
-
-    let newContext = try createContext(for: normalizedDID)
-    contexts[normalizedDID] = newContext
-    Self.registerForEmergencyClose(newContext, for: normalizedDID)
-    return newContext
+    return try await MLSCoreContext.shared.getContext(for: normalizedDID)
   }
 
   /// Reload MLS context from storage for non-destructive recovery
@@ -437,16 +383,8 @@ public actor MLSClient {
       "🔄 [Recovery] Attempting non-destructive context reload for user: \(normalizedDID.prefix(20))..."
     )
 
-    // Remove existing context from cache
-    if contexts.removeValue(forKey: normalizedDID) != nil {
-      Self.unregisterFromEmergencyClose(for: normalizedDID)
-    }
-    logger.debug("   ♻️ Cleared in-memory context from cache")
-
-    // Create fresh context - this will load from SQLite
-    let newContext = try createContext(for: normalizedDID)
-    contexts[normalizedDID] = newContext
-    Self.registerForEmergencyClose(newContext, for: normalizedDID)
+    try await MLSCoreContext.shared.reloadContext(for: normalizedDID)
+    let newContext = try await getContext(for: normalizedDID)
     logger.debug("   ✅ Created fresh context from SQLite storage")
 
     // Check if bundles were recovered
@@ -461,189 +399,6 @@ public actor MLSClient {
     }
 
     return bundleCount
-  }
-
-  private func getDatabasePoolBlocking(for userDID: String) throws -> DatabasePool {
-    let semaphore = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) var result: Result<DatabasePool, Error>?
-
-    Task {
-      do {
-        result = .success(try await MLSGRDBManager.shared.getDatabasePool(for: userDID))
-      } catch {
-        result = .failure(error)
-      }
-      semaphore.signal()
-    }
-
-    semaphore.wait()
-    guard let result else {
-      throw MLSError.operationFailed
-    }
-    return try result.get()
-  }
-
-  /// Create a new MLS context with per-DID SQLite storage
-  /// Storage path: {appSupport}/mls-state/{did_hash}.db
-  ///
-  /// IMPORTANT: This method opens SQLCipher databases which acquire POSIX file locks
-  /// during WAL recovery (walIndexRecover). If iOS suspends the app while these locks
-  /// are held, it terminates with 0xdead10cc. We protect the operation with a background
-  /// task assertion to prevent suspension during context creation.
-  private func createContext(for userDID: String) throws -> MlsContext {
-    #if os(iOS)
-    // Acquire a background task assertion to prevent iOS from suspending the app
-    // while SQLCipher is opening the database and performing WAL recovery.
-    // This specifically addresses the launch-and-immediately-suspend crash path
-    // (Crash 1: app suspended 2.3s after launch during walIndexRecover).
-    var bgTaskId: UIBackgroundTaskIdentifier = .invalid
-    bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "MLSContextCreation") {
-      UIApplication.shared.endBackgroundTask(bgTaskId)
-      bgTaskId = .invalid
-    }
-    defer {
-      if bgTaskId != .invalid {
-        UIApplication.shared.endBackgroundTask(bgTaskId)
-      }
-    }
-    #endif
-    // Use the MLSStoragePaths override if set (e.g. BIRDaemon CLI), otherwise app group or AppSupport.
-    let appSupport = MLSStoragePaths.baseContainerURL()
-    let mlsStateDir = appSupport.appendingPathComponent("mls-state", isDirectory: true)
-
-    do {
-      try FileManager.default.createDirectory(at: mlsStateDir, withIntermediateDirectories: true)
-    } catch {
-      logger.error("❌ Failed to create MLS state directory: \(error.localizedDescription)")
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // CRITICAL: 0xdead10cc Migration - Check if database needs recreation
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Databases created before cipher_plaintext_header_size=32 was added have
-    // encrypted headers, causing iOS to fail to identify them as SQLite WAL
-    // databases. This prevents automatic checkpointing during suspension,
-    // leading to 0xdead10cc termination.
-    //
-    // This migration deletes old databases so they can be recreated with the
-    // plaintext header. MLS conversation history will be lost, but this is
-    // necessary to prevent 0xdead10cc crashes.
-    // ═══════════════════════════════════════════════════════════════════════════
-    let migrationPerformed = MLSPlaintextHeaderMigration.ensurePlaintextHeaderMigration(
-      for: userDID,
-      databaseType: .rustFFI
-    )
-    if migrationPerformed {
-      logger.warning("🔧 [0xdead10cc] Rust FFI database was recreated for plaintext header migration")
-    }
-
-    // Hash the DID to create a valid filename
-    let didHash =
-      userDID.data(using: .utf8)?.base64EncodedString()
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "=", with: "")
-      .prefix(64) ?? "default"
-
-    let storagePath = mlsStateDir.appendingPathComponent("\(didHash).db").path
-    logger.info("📁 Using SQLite storage at: \(storagePath)")
-
-    // Get encryption key from Keychain
-    let encryptionKey: String
-    do {
-      let keyData = try MLSKeychainManager.shared.getOrCreateEncryptionKey(forUserDID: userDID)
-      encryptionKey = keyData.hexEncodedString()
-    } catch {
-      logger.error("❌ Failed to get encryption key from Keychain: \(error.localizedDescription)")
-      // Fallback to a derived key from DID if Keychain fails (better than crashing, but logs error)
-      encryptionKey = String(didHash)
-    }
-
-    // Create context with per-DID SQLite storage
-    // Retry logic: Attempt up to 3 times with exponential backoff
-    var newContext: MlsContext?
-    var lastError: Error?
-
-    // Create keychain adapter for hybrid storage
-    let keychainAdapter = MLSKeychainAdapter()
-
-    for attempt in 1...3 {
-      do {
-        newContext = try MlsContext(
-          storagePath: storagePath, encryptionKey: encryptionKey, keychain: keychainAdapter)
-        logger.info(
-          "✅ Created MlsContext with Encrypted SQLite storage (automatic persistence enabled)")
-        break
-      } catch {
-        lastError = error
-        let errorMessage = error.localizedDescription.lowercased()
-
-        // CRITICAL FIX: Detect SQLCipher encryption key mismatch errors
-        // SQLCipher returns misleading "out of memory" when the encryption key is wrong
-        // BUT we need to distinguish between true key mismatch and account switching race conditions
-        let isHMACFailure = errorMessage.contains("hmac check failed") ||
-          errorMessage.contains("hmac verification") ||
-          (errorMessage.contains("hmac") && errorMessage.contains("pgno"))
-
-        if isHMACFailure {
-          // HMAC failure during account switching = wrong key due to race condition
-          // Do NOT delete the database - it's valid, just accessed with wrong key
-          logger.error("🔐 [MLSClient] HMAC CHECK FAILED - possible account switching race condition!")
-          logger.error("   Database is valid but accessed with wrong encryption key")
-          logger.error("   This typically happens when old account's context is accessed during switch")
-          logger.error("   ⚠️  NOT deleting database - will retry with correct key")
-
-          // For HMAC failures, don't delete - just fail and let the account switch complete
-          // The next attempt with correct user context will succeed
-          continue
-        }
-
-        let isKeyMismatch =
-          errorMessage.contains("encryption key mismatch")
-          || errorMessage.contains("cannot be decrypted")
-          || (errorMessage.contains("out of memory") && !isHMACFailure)
-
-        if isKeyMismatch {
-          logger.error("🔑 [MLSClient] DATABASE ENCRYPTION KEY MISMATCH DETECTED!")
-          logger.error("   Database exists but cannot be decrypted with current Keychain key")
-          logger.error("   This typically happens after:")
-          logger.error("   1. Device restore that didn't include Keychain")
-          logger.error("   2. App reinstall without Keychain backup")
-          logger.error("   3. Keychain item was deleted/corrupted")
-          logger.error("   ⚠️  Deleting database and re-registering device...")
-        } else {
-          logger.error(
-            "❌ Attempt \(attempt)/3 failed to create MlsContext: \(error.localizedDescription)")
-        }
-
-        if attempt < 3 {
-          // Fail-closed: never delete or rewrite storage automatically.
-          // Brief sleep for exponential backoff (100ms, 200ms).
-          Thread.sleep(forTimeInterval: TimeInterval(attempt) * 0.1)
-        }
-      }
-    }
-
-    guard let context = newContext else {
-      throw lastError ?? MLSError.operationFailed
-    }
-
-    // Set up epoch secret storage for forward secrecy with message history
-    let epochStorage = MLSEpochSecretStorageBridge(userDID: userDID, databaseManager: .shared)
-    do {
-      try context.setEpochSecretStorage(storage: epochStorage)
-      logger.info("✅ Configured epoch secret storage for historical message decryption")
-    } catch {
-      logger.error("❌ Failed to configure epoch secret storage: \(error.localizedDescription)")
-      // Non-fatal - context can still function without epoch storage
-    }
-
-    let normalizedForLookup = normalizeUserDID(userDID)
-    guard apiClients[normalizedForLookup] != nil else {
-      logger.error("❌ MLS API client not configured for user \(normalizedForLookup.prefix(20))...")
-      throw MLSError.configurationError
-    }
-    return context
   }
 
   // MARK: - Device Status
@@ -2179,8 +1934,18 @@ public actor MLSClient {
       )
       return result
     } catch let error as MlsError {
-      logger.error("❌ [MLSClient.processCommit] FAILED: \(error.localizedDescription)")
-      throw MLSError.operationFailed
+      let detail: String
+      switch error {
+      case .CommitProcessingFailed(let message),
+           .OpenMlsError(let message),
+           .SerializationError(let message),
+           .InvalidCommit(let message):
+        detail = message
+      default:
+        detail = error.localizedDescription
+      }
+      logger.error("❌ [MLSClient.processCommit] FAILED: \(detail)")
+      throw MLSError.commitProcessingFailed(message: detail)
     }
   }
 
@@ -3107,20 +2872,7 @@ public actor MLSClient {
   private func closeContextLocked(normalizedDID: String) async -> Bool {
     logger.info("🛑 [MLSClient] Closing context for user: \(normalizedDID.prefix(20))...")
 
-    // Try to flush before closing (but don't fail if flush fails)
-    if contexts[normalizedDID] != nil {
-      do {
-        try await runFFIWithRecoveryLocked(for: normalizedDID) { ctx in
-          try ctx.flushAndPrepareClose()
-        }
-        logger.debug("   ✅ Context flushed before close")
-      } catch {
-        logger.warning("   ⚠️ Flush before close failed: \(error.localizedDescription)")
-      }
-    }
-
-    let hadContext = contexts.removeValue(forKey: normalizedDID) != nil
-    Self.unregisterFromEmergencyClose(for: normalizedDID)
+    let hadContext = await MLSCoreContext.shared.removeContext(for: normalizedDID)
 
     apiClients.removeValue(forKey: normalizedDID)
     deviceManagers.removeValue(forKey: normalizedDID)
@@ -3147,16 +2899,19 @@ public actor MLSClient {
   public func closeAllContextsExcept(keepUserDID: String) async -> Int {
     let normalizedKeepDID = normalizeUserDID(keepUserDID)
     logger.info("🧹 [MLSClient] Closing all contexts except: \(normalizedKeepDID.prefix(20))...")
-    
-    let usersToClose = contexts.keys.filter { $0 != normalizedKeepDID }
-    var closedCount = 0
-    
-    for userDID in usersToClose {
-      if await closeContext(for: userDID) {
-        closedCount += 1
-      }
+
+    let usersToForget = Set(apiClients.keys)
+      .union(deviceManagers.keys)
+      .union(recoveryManagers.keys)
+      .filter { $0 != normalizedKeepDID }
+
+    for userDID in usersToForget {
+      apiClients.removeValue(forKey: userDID)
+      deviceManagers.removeValue(forKey: userDID)
+      recoveryManagers.removeValue(forKey: userDID)
     }
-    
+
+    let closedCount = await MLSCoreContext.shared.removeAllContextsExcept(keepUserDid: normalizedKeepDID)
     logger.info("   ✅ Closed \(closedCount) context(s), kept context for \(normalizedKeepDID.prefix(20))")
     return closedCount
   }
@@ -3219,9 +2974,7 @@ public actor MLSClient {
     // ═══════════════════════════════════════════════════════════════════════════
 
     // Drop in-memory Rust context so it will reload from disk on next operation.
-    if contexts.removeValue(forKey: normalizedDID) != nil {
-      Self.unregisterFromEmergencyClose(for: normalizedDID)
-    }
+    await MLSCoreContext.shared.removeContext(for: normalizedDID)
 
     // Quarantine + reset the Swift SQLCipher database.
     try await MLSGRDBManager.shared.quarantineAndResetDatabase(for: normalizedDID)
