@@ -698,6 +698,78 @@ public final class MLSAPIClient {
     }
   }
 
+  /// Report that recovery has been exhausted for a conversation (spec §8.6 / ADR-008 D1).
+  ///
+  /// Wraps `blue.catbird.mlsChat.reportRecoveryFailure`. The server collects votes
+  /// from members with valid `epochAuthenticator`s and auto-resets the group when
+  /// the configured quorum is met. For 1:1 (DM) conversations, a single Mode B
+  /// (`group_state_unrecoverable`) report from one client is sufficient to trigger
+  /// reset (see `mls-ds/server/src/handlers/mls_chat/report_recovery_failure.rs`).
+  ///
+  /// This thin wrapper exists so trifecta-detection callers in
+  /// `MLSConversationManager` can dispatch Mode B reports directly without
+  /// duplicating Petrel input/output type juggling. The existing
+  /// `MLSRecoveryManager.recordFailedRejoin` path also fires this endpoint
+  /// (Mode A by default; Mode B only when `failureType == "remote_data_error"`)
+  /// after the per-conversation attempt counter exhausts. Both paths are
+  /// intentional and coexist — server dedupes by `(did, convoId, failureMode)`.
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier (preserved across resets).
+  ///   - failureMode: ADR-008 D1 discriminator. Pass `"group_state_unrecoverable"`
+  ///     (Mode B) when the trifecta is observed; `"local_state_loss"` (Mode A)
+  ///     for plain attempt-exhaustion. Pass `nil` to leave the field absent
+  ///     (server treats as Mode A).
+  ///   - failureType: Free-form classifier kept stable across releases for
+  ///     server-side analytics (e.g. `"trifecta_external_commit_409"`,
+  ///     `"external_commit_exhausted"`, `"remote_data_error"`). Server does not
+  ///     enforce a specific set; pick a stable string per call site.
+  ///   - epochAuthenticator: RFC 9420 §8.7 epoch_authenticator (hex). When
+  ///     non-nil this client's vote counts toward quorum; when nil the server
+  ///     records the call but short-circuits as `reason: "missing_authenticator"`.
+  ///     Caller should compute via `MLSContext.epochAuthenticator(groupId:)`
+  ///     and hex-encode when local group state is still present.
+  /// - Returns: Server output (`recorded`, `autoResetTriggered`, `failureCount`,
+  ///   `memberCount`, `reason`, optional `newGroupId`/`resetGeneration` when
+  ///   the report itself triggered the reset).
+  /// - Throws: `MLSAPIError.httpError` on non-200 responses; rethrows
+  ///   transport-layer errors from Petrel.
+  @discardableResult
+  public func reportRecoveryFailure(
+    convoId: String,
+    failureMode: String? = nil,
+    failureType: String? = nil,
+    epochAuthenticator: String? = nil
+  ) async throws -> BlueCatbirdMlsChatReportRecoveryFailure.Output {
+    logger.info(
+      "🌐 [MLSAPIClient.reportRecoveryFailure] START - convoId: \(convoId.prefix(16))..., failureMode: \(failureMode ?? "nil"), failureType: \(failureType ?? "nil"), authenticator: \(epochAuthenticator != nil ? "present" : "nil")"
+    )
+
+    let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
+      convoId: convoId,
+      failureType: failureType,
+      failureMode: failureMode,
+      epochAuthenticator: epochAuthenticator
+    )
+
+    let (responseCode, output) = try await client.blue.catbird.mlschat.reportRecoveryFailure(
+      input: input)
+
+    guard responseCode == 200, let output = output else {
+      logger.error(
+        "❌ [MLSAPIClient.reportRecoveryFailure] HTTP \(responseCode) - no structured output")
+      throw MLSAPIError.httpError(
+        statusCode: responseCode,
+        message: "Failed to report recovery failure for conversation \(convoId)"
+      )
+    }
+
+    logger.info(
+      "✅ [MLSAPIClient.reportRecoveryFailure] SUCCESS - recorded=\(output.recorded), autoReset=\(output.autoResetTriggered), failureCount=\(output.failureCount), memberCount=\(output.memberCount), reason=\(output.reason ?? "nil")"
+    )
+    return output
+  }
+
   /// Leave an MLS conversation using Petrel client
   /// - Parameter convoId: Conversation identifier
   /// - Returns: Success status and new epoch number
