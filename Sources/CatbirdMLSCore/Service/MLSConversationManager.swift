@@ -196,6 +196,42 @@ public final class MLSConversationManager {
   public let ownCommitsLock = NSLock()
   private let ownCommitTimeout: TimeInterval = 600  // 10 minutes
 
+  /// Sliding-window tracker for the operationally-unrecoverable rejoin
+  /// trifecta (spec §8.6 / ADR-008 D1, Phase 2 Stage 3 — see
+  /// `docs/superpowers/specs/2026-04-26-mls-auto-reset-phase2-design.md`).
+  ///
+  /// A trifecta is recorded by `recordTrifectaFailure(convoId:)` when ALL
+  /// THREE of these conditions hold within a single rejoin attempt:
+  ///   1. Local FFI state is absent (`groupExists == false`) — true at the
+  ///      EC convergence point because both deferred-recovery callers
+  ///      (`MLSConversationManager+Sync.swift` runDeferredEpochRecovery and
+  ///      `MLSConversationManager+Lifecycle.swift`
+  ///      detectAndRejoinMissingConversations) delete stale local state
+  ///      before invoking the rejoin path, AND
+  ///      `attemptExternalCommitFallback` early-returns on
+  ///      `groupExists == true` (Messaging.swift:5388-5395).
+  ///   2. Welcome fetch returned a 200 with no `welcome` blob (sentinel
+  ///      `MLSAPIError.invalidResponse(message: "No welcome message in
+  ///      response")` — distinct from 404/410, which are device-sync
+  ///      signals, not a missing-Welcome bug).
+  ///   3. External Commit failed with HTTP 409 (epoch race) OR a stale
+  ///      GroupInfo error.
+  ///
+  /// When ≥ `Self.trifectaThreshold` events accumulate within
+  /// `Self.trifectaWindow` seconds for the same convoId, a Mode B
+  /// (`group_state_unrecoverable`) report is dispatched via
+  /// `MLSAPIClient.reportRecoveryFailure` and the window is cleared. Server
+  /// dedupes by `(did, convoId, failureMode)`, so a second dispatch from
+  /// the same client is harmless.
+  ///
+  /// Concurrency: writes to this dict happen across rejoin attempts on
+  /// different convos (cross-convo rejoins are not gated by the per-convo
+  /// `beginRejoinAttempt` lock); guarded by `recoveryFailureWindowLock`.
+  internal var recoveryFailureWindow: [String: [Date]] = [:]
+  internal let recoveryFailureWindowLock = NSLock()
+  internal static let trifectaThreshold = 3
+  internal static let trifectaWindow: TimeInterval = 600  // 10 min
+
   /// Track initialization state for conversations to prevent race conditions
   public var conversationStates: [String: ConversationInitState] = [:]
 

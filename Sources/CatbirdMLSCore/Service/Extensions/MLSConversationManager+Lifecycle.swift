@@ -1005,7 +1005,8 @@ extension MLSConversationManager {
           let succeeded = await attemptRejoinWithWelcomeFallback(
             convoId: convo.conversationID,
             displayName: convo.conversationID,
-            reason: "deferred epoch recovery (sync catch-up failed)"
+            reason: "deferred epoch recovery (sync catch-up failed)",
+            preDeleteAuthHex: preDeleteAuthHex
           )
           endRejoinAttempt(conversationID: convo.conversationID)
 
@@ -1106,10 +1107,24 @@ extension MLSConversationManager {
           continue
         }
 
+        // Capture epoch authenticator while local state is still present.
+        // Used by the Phase 2 trifecta D1 dispatch path so the server's
+        // reset-vote pyramid (`report_recovery_failure.rs:167-190`) accepts
+        // the vote — otherwise it short-circuits as `missing_authenticator`
+        // and the vote does NOT count toward DM quorum. When `groupExists`
+        // is false (true device-sync scenario), no authenticator is
+        // available; the dispatch will land but the server's reset-vote
+        // contract requires another peer to supply one for quorum.
+        let preDeleteAuthHex: String? =
+          groupExists
+          ? await mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
+          : nil
+
         let joined = await attemptRejoinWithWelcomeFallback(
           convoId: convo.conversationId,
           displayName: convo.metadata?.name,
-          reason: "server reported missing"
+          reason: "server reported missing",
+          preDeleteAuthHex: preDeleteAuthHex
         )
         endRejoinAttempt(conversationID: convo.conversationId)
 
@@ -1144,7 +1159,10 @@ extension MLSConversationManager {
 
   @discardableResult
   internal func attemptRejoinWithWelcomeFallback(
-    convoId: String, displayName: String?, reason: String
+    convoId: String,
+    displayName: String?,
+    reason: String,
+    preDeleteAuthHex: String? = nil
   ) async -> Bool {
     let label = displayName ?? convoId
     logger.info("📞 Requesting recovery for \(label) (\(reason))")
@@ -1180,6 +1198,17 @@ extension MLSConversationManager {
       logger.info(
         "🔄 [attemptRejoin] \(fallbackReason) for \(label), attempting External Commit...")
 
+      // Phase 2 Stage 3 (spec §8.6 / ADR-008 D1): if the Welcome failure was
+      // specifically the "200 with no welcome blob" sentinel, this attempt is
+      // a candidate for the operationally-unrecoverable trifecta. The third
+      // condition (FFI GroupNotFound) is implicit at this point — callers
+      // (`runDeferredEpochRecovery`, `detectAndRejoinMissingConversations`)
+      // delete stale local state before invoking us, and
+      // `attemptExternalCommitFallback` early-returns on `groupExists == true`
+      // (Messaging.swift:5388-5395). Reaching the EC catch implies the
+      // local FFI state is absent.
+      let isTrifectaCandidate = Self.isTrifectaWelcomeReason(fallbackReason)
+
       do {
         _ = try await attemptExternalCommitFallback(
           convoId: convoId,
@@ -1194,6 +1223,10 @@ extension MLSConversationManager {
         return false
       } catch {
         logger.error("❌ Failed to rejoin \(label) via External Commit: \(error.localizedDescription)")
+        if isTrifectaCandidate, Self.isTrifectaExternalCommitError(error) {
+          await recordTrifectaFailure(
+            convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+        }
         return false
       }
     }

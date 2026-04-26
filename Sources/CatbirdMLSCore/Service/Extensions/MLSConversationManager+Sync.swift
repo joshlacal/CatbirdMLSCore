@@ -799,7 +799,8 @@ public extension MLSConversationManager {
       let succeeded = await attemptRejoinWithWelcomeFallback(
         convoId: convo.conversationID,
         displayName: convo.conversationID,
-        reason: "deferred epoch recovery (sync catch-up failed)"
+        reason: "deferred epoch recovery (sync catch-up failed)",
+        preDeleteAuthHex: preDeleteAuthHex
       )
       endRejoinAttempt(conversationID: convo.conversationID)
 
