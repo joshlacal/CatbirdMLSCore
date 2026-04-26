@@ -994,6 +994,18 @@ public protocol MlsContextProtocol : AnyObject {
      */
     func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws  -> GroupCreationResult
     
+    func createGroupDispatch(identityBytes: Data, predeterminedGroupId: Data?, config: GroupConfig?) throws  -> GroupCreationResult
+    
+    /**
+     * FFI/native entry point for creating a group at a predetermined `group_id`
+     * (spec §8.5 first-responder bootstrap). `group_id` is the raw bytes of
+     * the target MLS group identifier (NOT hex-encoded). All bootstrap
+     * candidates targeting the same `groupResetEvent.newGroupId` MUST land on
+     * the same MLS GroupId so the race winner's Welcome can deserialize for
+     * every recipient.
+     */
+    func createGroupWithId(identityBytes: Data, groupId: Data, config: GroupConfig?) throws  -> GroupCreationResult
+    
     func createKeyPackage(identityBytes: Data) throws  -> KeyPackageResult
     
     /**
@@ -1821,6 +1833,34 @@ open func createGroupAsync(identityBytes: Data, config: GroupConfig?)async throw
             liftFunc: FfiConverterTypeGroupCreationResult.lift,
             errorHandler: FfiConverterTypeMLSError.lift
         )
+}
+    
+open func createGroupDispatch(identityBytes: Data, predeterminedGroupId: Data?, config: GroupConfig?)throws  -> GroupCreationResult {
+    return try  FfiConverterTypeGroupCreationResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_create_group_dispatch(self.uniffiClonePointer(),
+        FfiConverterData.lower(identityBytes),
+        FfiConverterOptionData.lower(predeterminedGroupId),
+        FfiConverterOptionTypeGroupConfig.lower(config),$0
+    )
+})
+}
+    
+    /**
+     * FFI/native entry point for creating a group at a predetermined `group_id`
+     * (spec §8.5 first-responder bootstrap). `group_id` is the raw bytes of
+     * the target MLS group identifier (NOT hex-encoded). All bootstrap
+     * candidates targeting the same `groupResetEvent.newGroupId` MUST land on
+     * the same MLS GroupId so the race winner's Welcome can deserialize for
+     * every recipient.
+     */
+open func createGroupWithId(identityBytes: Data, groupId: Data, config: GroupConfig?)throws  -> GroupCreationResult {
+    return try  FfiConverterTypeGroupCreationResult.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_create_group_with_id(self.uniffiClonePointer(),
+        FfiConverterData.lower(identityBytes),
+        FfiConverterData.lower(groupId),
+        FfiConverterOptionTypeGroupConfig.lower(config),$0
+    )
+})
 }
     
 open func createKeyPackage(identityBytes: Data)throws  -> KeyPackageResult {
@@ -3024,6 +3064,27 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func publishKeyPackage() throws 
     
     /**
+     * Persist a `groupResetEvent` WITHOUT performing inline recovery
+     * (spec §8.5 Phase 1, ADR-008 D2 deferred-recovery invariant).
+     *
+     * Platforms whose event/SSE/WS handler must not run External Commits
+     * inline (catmos, BIRDaemon, and Phase 3 iOS/Android event paths)
+     * should call this from the event handler. The deferred-recovery
+     * loop driven by `MLSOrchestrator::sync_with_server` will pick the
+     * conversation up via the `needs_rejoin` flag set here, then route
+     * it through `join_or_rejoin` — which now includes a first-responder
+     * bootstrap step gated on `ConversationState::ResetPending`.
+     *
+     * New code should prefer this over `handle_group_reset`. The legacy
+     * composite `handle_group_reset` is retained as a deprecated alias
+     * for backward compatibility (it now calls `record_group_reset`
+     * followed by an inline `join_or_rejoin` — same observable behavior
+     * as before, but the inline `join_or_rejoin` is the part that
+     * violates the "no External Commits in event handlers" invariant).
+     */
+    func recordGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws 
+    
+    /**
      * Remove a device.
      */
     func removeDevice(deviceId: String) throws 
@@ -3378,6 +3439,34 @@ open func processIncoming(envelope: FfiIncomingEnvelope)throws  -> FfiMessage? {
      */
 open func publishKeyPackage()throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
     uniffi_catbird_mls_fn_method_orchestratorbridge_publish_key_package(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
+     * Persist a `groupResetEvent` WITHOUT performing inline recovery
+     * (spec §8.5 Phase 1, ADR-008 D2 deferred-recovery invariant).
+     *
+     * Platforms whose event/SSE/WS handler must not run External Commits
+     * inline (catmos, BIRDaemon, and Phase 3 iOS/Android event paths)
+     * should call this from the event handler. The deferred-recovery
+     * loop driven by `MLSOrchestrator::sync_with_server` will pick the
+     * conversation up via the `needs_rejoin` flag set here, then route
+     * it through `join_or_rejoin` — which now includes a first-responder
+     * bootstrap step gated on `ConversationState::ResetPending`.
+     *
+     * New code should prefer this over `handle_group_reset`. The legacy
+     * composite `handle_group_reset` is retained as a deprecated alias
+     * for backward compatibility (it now calls `record_group_reset`
+     * followed by an inline `join_or_rejoin` — same observable behavior
+     * as before, but the inline `join_or_rejoin` is the part that
+     * violates the "no External Commits in event handlers" invariant).
+     */
+open func recordGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_record_group_reset(self.uniffiClonePointer(),
+        FfiConverterString.lower(convoId),
+        FfiConverterString.lower(newGroupIdHex),
+        FfiConverterInt32.lower(resetGeneration),$0
     )
 }
 }
@@ -12898,6 +12987,12 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_create_group_async() != 52754) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_create_group_dispatch() != 36893) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_create_group_with_id() != 58182) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_create_key_package() != 32143) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13148,6 +13243,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_publish_key_package() != 29237) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset() != 51559) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_device() != 60366) {
