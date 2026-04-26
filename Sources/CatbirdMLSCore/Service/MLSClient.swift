@@ -535,6 +535,62 @@ public actor MLSClient {
     }
   }
 
+  /// Create a new MLS group with a predetermined `groupId`.
+  ///
+  /// First-responder bootstrap path (spec §8.5): the auto-reset transaction
+  /// stages a `pendingNewGroupId` and emits `GroupResetEvent`. Recipients
+  /// race to bootstrap that empty group. To make the race converge, every
+  /// candidate must build their local MLS state at the SAME `groupId`
+  /// (the staged `pendingNewGroupId`) so the winner's Welcome can deserialize
+  /// for every recipient. Use `createGroup` (not this overload) for normal
+  /// admin-initiated creation, where the `groupId` should be FFI-generated.
+  ///
+  /// - Parameters:
+  ///   - userDID: The user's DID
+  ///   - groupId: Predetermined raw MLS group identifier bytes (NOT hex)
+  ///   - configuration: Group configuration (security parameters + optional metadata)
+  /// - Returns: The full GroupCreationResult (groupId echoes input)
+  public func createGroupWithId(
+    for userDID: String,
+    groupId: Data,
+    configuration: MLSGroupConfiguration = .default
+  ) async throws -> GroupCreationResult {
+    logger.info(
+      "📍 [MLSClient.createGroupWithId] START - user: \(userDID.prefix(20), privacy: .private), groupId: \(groupId.hexEncodedString().prefix(16))"
+    )
+
+    guard let clientIdentity = await getClientIdentity(for: userDID) else {
+      logger.error("❌ [MLSClient.createGroupWithId] Device not registered")
+      throw MLSError.configurationError
+    }
+
+    let identityBytes = Data(clientIdentity.utf8)
+
+    do {
+      let result = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.createGroupWithId(identityBytes: identityBytes, groupId: groupId, config: configuration)
+      }
+      logger.info(
+        "✅ [MLSClient.createGroupWithId] Group created - ID: \(result.groupId.hexEncodedString().prefix(16))"
+      )
+
+      do {
+        try await runFFIWithRecovery(for: userDID) { ctx in
+          try ctx.syncDatabase()
+        }
+        logger.info("✅ [MLSClient.createGroupWithId] Database synced after group creation")
+      } catch {
+        logger.error(
+          "⚠️ [MLSClient.createGroupWithId] Database sync failed: \(error.localizedDescription)")
+      }
+
+      return result
+    } catch let error as MlsError {
+      logger.error("❌ [MLSClient.createGroupWithId] FAILED: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
   /// Create a new MLS group and return the full GroupCreationResult including metadata v2 artifacts.
   /// This is the v2 variant that exposes encrypted_metadata_blob, metadata_reference_json,
   /// and metadata_blob_locator fields for the metadata v2 flow.

@@ -628,6 +628,76 @@ public final class MLSAPIClient {
     }
   }
 
+  /// Complete a post-auto-reset conversation by populating its emptied MLS state.
+  ///
+  /// Spec §8.5 first-responder bootstrap. The post-reset row exists with
+  /// `id=originalConvoId`, `group_id=newGroupId`, `group_info=NULL`. This call
+  /// UPDATEs that row in place rather than INSERTing a new conversation. First
+  /// caller (in the existing member roster) for a given (originalConvoId,
+  /// newGroupId) wins; later callers receive `AlreadyBootstrapped` (409) and
+  /// must fall back to receiving the Welcome from the winner.
+  ///
+  /// - Parameters:
+  ///   - originalConvoId: Existing convo identifier (preserved across reset).
+  ///   - newGroupId: Hex-encoded MLS group ID assigned by the auto-reset.
+  ///   - cipherSuite: MLS cipher suite for the bootstrapped group.
+  ///   - groupInfo: Raw MLS GroupInfo bytes for the freshly-created group.
+  ///   - members: Member DIDs (post-reset roster, fetched via getConversation).
+  ///   - welcomeMessage: Optional Welcome bytes to be relayed to other members.
+  ///   - keyPackageHashes: Optional key package hashes consumed for member adds.
+  ///   - currentEpoch: Optional FFI-actual epoch (defaults to server-assigned 1).
+  /// - Returns: ConvoView for the bootstrapped conversation.
+  public func bootstrapResetGroup(
+    originalConvoId: String,
+    newGroupId: String,
+    cipherSuite: String,
+    groupInfo: Data,
+    members: [DID],
+    welcomeMessage: Data? = nil,
+    keyPackageHashes: [BlueCatbirdMlsChatBootstrapResetGroup.KeyPackageHashEntry]? = nil,
+    currentEpoch: Int? = nil
+  ) async throws -> BlueCatbirdMlsChatDefs.ConvoView {
+    logger.info(
+      "🌐 [MLSAPIClient.bootstrapResetGroup] START - originalConvoId: \(originalConvoId.prefix(16))..., newGroupId: \(newGroupId.prefix(16))..., members: \(members.count)"
+    )
+
+    let input = BlueCatbirdMlsChatBootstrapResetGroup.Input(
+      originalConvoId: originalConvoId,
+      newGroupId: newGroupId,
+      cipherSuite: cipherSuite,
+      groupInfo: Bytes(data: groupInfo),
+      members: members,
+      welcomeMessage: welcomeMessage.map { Bytes(data: $0) },
+      keyPackageHashes: keyPackageHashes,
+      currentEpoch: currentEpoch
+    )
+
+    do {
+      let (responseCode, output) = try await client.blue.catbird.mlschat.bootstrapResetGroup(
+        input: input)
+
+      guard responseCode == 200, let output = output else {
+        logger.error(
+          "❌ [MLSAPIClient.bootstrapResetGroup] HTTP \(responseCode) - no structured error caught")
+        throw MLSAPIError.httpError(
+          statusCode: responseCode, message: "Failed to bootstrap reset group")
+      }
+
+      logger.info(
+        "✅ [MLSAPIClient.bootstrapResetGroup] SUCCESS - convoId: \(output.convo.conversationId), groupId: \(output.convo.groupId), epoch: \(output.convo.epoch)"
+      )
+      return output.convo
+    } catch let error as ATProtoError<BlueCatbirdMlsChatBootstrapResetGroup.Error> {
+      logger.error(
+        "❌ [MLSAPIClient.bootstrapResetGroup] Structured error: \(error.error.errorName) (status \(error.statusCode))"
+      )
+      throw MLSAPIError(from: error)
+    } catch {
+      logger.error("❌ [MLSAPIClient.bootstrapResetGroup] Unexpected error: \(error)")
+      throw error
+    }
+  }
+
   /// Leave an MLS conversation using Petrel client
   /// - Parameter convoId: Conversation identifier
   /// - Returns: Success status and new epoch number
@@ -2539,6 +2609,10 @@ public enum MLSAPIError: Error, LocalizedError {
   case memberAlreadyExists(detail: String?)
   case memberBlocked(detail: String?)
   case rateLimited(retryAfter: TimeInterval?)
+  case convoAlreadyExists(detail: String?)
+  case bootstrapTargetNotFound(detail: String?)
+  case alreadyBootstrapped(detail: String?)
+  case notMember(detail: String?)
 
   public var errorDescription: String? {
     switch self {
@@ -2584,6 +2658,14 @@ public enum MLSAPIError: Error, LocalizedError {
       } else {
         return "Rate limited. Please try again later."
       }
+    case .convoAlreadyExists(let detail):
+      return detail ?? "Conversation already exists at this groupId, created by a different DID"
+    case .bootstrapTargetNotFound(let detail):
+      return detail ?? "No conversation row matches (originalConvoId, newGroupId)"
+    case .alreadyBootstrapped(let detail):
+      return detail ?? "Post-reset conversation has already been bootstrapped by another caller"
+    case .notMember(let detail):
+      return detail ?? "Caller is not a member of this conversation"
     }
   }
 
@@ -2613,6 +2695,22 @@ public extension MLSAPIError {
       self = .tooManyMembers(detail: detail)
     case .mutualBlockDetected:
       self = .mutualBlockDetected(detail: detail)
+    case .convoAlreadyExists:
+      self = .convoAlreadyExists(detail: detail)
+    }
+  }
+
+  init(from error: ATProtoError<BlueCatbirdMlsChatBootstrapResetGroup.Error>) {
+    let detail = error.message
+    switch error.error {
+    case .bootstrapTargetNotFound:
+      self = .bootstrapTargetNotFound(detail: detail)
+    case .alreadyBootstrapped:
+      self = .alreadyBootstrapped(detail: detail)
+    case .notMember:
+      self = .notMember(detail: detail)
+    case .invalidCipherSuite:
+      self = .invalidCipherSuite(detail: detail)
     }
   }
 
