@@ -955,6 +955,347 @@ public extension MLSConversationManager {
       logger.error(
         "❌ [EPOCH-RESET] Recipient rejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
       )
+
+      // First-responder bootstrap (spec §8.5):
+      // After auto-reset, the server clears `group_info` to NULL. External
+      // Commit needs GroupInfo to land — so EC will keep failing until
+      // SOMEONE bootstraps the empty group. If a fresh probe confirms
+      // GroupInfo is absent, race to be the bootstrap winner. The server
+      // returns 409 `AlreadyBootstrapped` to losers, who then fall back to
+      // the winner's Welcome on the next deferred-recovery loop.
+      let groupInfoMissing = await isGroupInfoMissing(convoId: convoId)
+      if groupInfoMissing {
+        await attemptFirstResponderBootstrap(
+          convoId: convoId,
+          userDid: userDid,
+          pendingNewGroupIdHex: pendingNewGroupIdHex,
+          observedGeneration: observedGeneration,
+          preDeleteAuthHex: preDeleteAuthHex
+        )
+        return
+      }
+
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.recordFailedRejoin(
+          convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+      }
+    }
+  }
+
+  /// Probe whether GroupInfo is absent on the server for `convoId`.
+  ///
+  /// Used after an External Commit failure to decide whether to attempt
+  /// first-responder bootstrap (GroupInfo absent → empty post-reset group →
+  /// bootstrap) vs. record the EC failure for the next backoff cycle
+  /// (GroupInfo present → transient DS error). Returns `true` only when the
+  /// server explicitly signals "no GroupInfo for this convo"; transient
+  /// network failures return `false` so we don't bootstrap on top of a
+  /// healthy group whose GroupInfo we just couldn't fetch.
+  private func isGroupInfoMissing(convoId: String) async -> Bool {
+    do {
+      _ = try await apiClient.getGroupInfo(convoId: convoId)
+      return false
+    } catch let error as MLSAPIError {
+      switch error {
+      case .invalidResponse:
+        // `MLSAPIClient.getGroupInfo` throws `.invalidResponse(message: "No GroupInfo available")`
+        // when the server returns 200 with null/empty payload, which is the
+        // post-auto-reset signal.
+        return true
+      case .httpError(let statusCode, _) where statusCode == 404:
+        return true
+      default:
+        return false
+      }
+    } catch {
+      return false
+    }
+  }
+
+  /// First-responder bootstrap branch (spec §8.5).
+  ///
+  /// Build a local MLS group at the staged `pendingNewGroupId` and POST
+  /// `bootstrapResetGroup` to populate the empty post-reset row in place.
+  /// On 200 the row gains GroupInfo and a Welcome message; on 409
+  /// `AlreadyBootstrapped` the race is lost and the local pre-bootstrap
+  /// state is discarded so the next loop joins via the winner's Welcome.
+  private func attemptFirstResponderBootstrap(
+    convoId: String,
+    userDid: String,
+    pendingNewGroupIdHex: String,
+    observedGeneration: Int64?,
+    preDeleteAuthHex: String?
+  ) async {
+    logger.warning(
+      "🚀 [BOOTSTRAP] First-responder bootstrap for \(convoId.prefix(16)) → \(pendingNewGroupIdHex.prefix(16))"
+    )
+
+    guard let pendingGroupIdData = Data(hexEncoded: pendingNewGroupIdHex) else {
+      logger.error("❌ [BOOTSTRAP] Invalid pendingNewGroupId hex for \(convoId.prefix(16))")
+      return
+    }
+
+    // Phase 0 Q3: groupResetEvent carries no roster, fetch fresh from server.
+    let convoView: BlueCatbirdMlsChatDefs.ConvoView
+    do {
+      guard let fetched = try await apiClient.getConversation(convoId: convoId) else {
+        logger.error(
+          "❌ [BOOTSTRAP] getConversation returned nil for \(convoId.prefix(16)) — leaving RESET_PENDING set"
+        )
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.recordFailedRejoin(
+            convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+        }
+        return
+      }
+      convoView = fetched
+    } catch {
+      logger.error(
+        "❌ [BOOTSTRAP] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.recordFailedRejoin(
+          convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+      }
+      return
+    }
+
+    let selfDidLower = userDid.lowercased()
+    let memberDids: [DID] = convoView.members.map { $0.did }
+    let otherMemberDids: [DID] = memberDids.filter {
+      $0.description.lowercased() != selfDidLower
+    }
+    let bootstrapCipherSuite = convoView.cipherSuite
+
+    // Build the local MLS group at the predetermined groupId so all
+    // bootstrap candidates converge on the same MLS GroupId.
+    do {
+      let groupConfig = configuration.toFFI(groupName: nil, groupDescription: nil)
+      _ = try await mlsClient.createGroupWithId(
+        for: userDid, groupId: pendingGroupIdData, configuration: groupConfig)
+    } catch {
+      logger.error(
+        "❌ [BOOTSTRAP] createGroupWithId failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.recordFailedRejoin(
+          convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+      }
+      return
+    }
+
+    // Stage the add-members commit + Welcome in one shot.
+    var welcomeData: Data?
+    var hashEntries: [BlueCatbirdMlsChatBootstrapResetGroup.KeyPackageHashEntry] = []
+    var stagedHandle: FfiStagedCommitHandle?
+    var bootstrapTargetEpoch: UInt64 = 0
+    if !otherMemberDids.isEmpty {
+      do {
+        let (keyPackages, missing) = try await apiClient.getKeyPackages(
+          dids: otherMemberDids, forceRefresh: false)
+        if let missing, !missing.isEmpty {
+          logger.error(
+            "❌ [BOOTSTRAP] Missing key packages for \(missing.count) member(s) in \(convoId.prefix(16))"
+          )
+          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            await recoveryManager.recordFailedRejoin(
+              convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+          }
+          return
+        }
+
+        let selectedPackages = try await selectKeyPackages(
+          for: otherMemberDids, from: keyPackages, userDid: userDid)
+        hashEntries = selectedPackages.map {
+          BlueCatbirdMlsChatBootstrapResetGroup.KeyPackageHashEntry(
+            did: $0.did, hash: $0.hash)
+        }
+        let keyPackageData = selectedPackages.map { $0.data }
+        let memberStrings = otherMemberDids.map { $0.description }
+        let plan = try await mlsClient.stageCommit(
+          for: userDid,
+          conversationId: pendingNewGroupIdHex,
+          kind: .addMembers(memberDids: memberStrings, keyPackages: keyPackageData)
+        )
+        welcomeData = plan.welcomeBytes
+        stagedHandle = plan.handle
+        bootstrapTargetEpoch = plan.targetEpoch
+      } catch {
+        logger.error(
+          "❌ [BOOTSTRAP] Member staging failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.recordFailedRejoin(
+            convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+        }
+        return
+      }
+    }
+
+    // Export the GroupInfo to attach to the bootstrap request.
+    let groupInfoBytes: Data
+    do {
+      groupInfoBytes = try await mlsClient.exportLocalGroupInfo(
+        for: userDid, groupId: pendingGroupIdData)
+    } catch {
+      logger.error(
+        "❌ [BOOTSTRAP] exportLocalGroupInfo failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      if let handle = stagedHandle {
+        await mlsClient.discardPending(for: userDid, handle: handle)
+      }
+      try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.recordFailedRejoin(
+          convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+      }
+      return
+    }
+
+    // POST bootstrapResetGroup. On 200 the server populates the post-reset
+    // row in place; on 409 the race is lost.
+    do {
+      let bootstrapped = try await apiClient.bootstrapResetGroup(
+        originalConvoId: convoId,
+        newGroupId: pendingNewGroupIdHex,
+        cipherSuite: bootstrapCipherSuite,
+        groupInfo: groupInfoBytes,
+        members: memberDids,
+        welcomeMessage: welcomeData,
+        keyPackageHashes: hashEntries.isEmpty ? nil : hashEntries,
+        currentEpoch: bootstrapTargetEpoch > 0 ? Int(bootstrapTargetEpoch) : nil
+      )
+
+      // Confirm any staged add-members commit so local epoch matches server.
+      if let handle = stagedHandle {
+        let serverEpoch = UInt64(bootstrapped.epoch)
+        do {
+          _ = try await mlsClient.confirmCommit(
+            for: userDid, handle: handle, serverEpoch: serverEpoch)
+        } catch {
+          logger.error(
+            "❌ [BOOTSTRAP] confirmCommit failed after server 200 for \(convoId.prefix(16)): \(error.localizedDescription)"
+          )
+          await mlsClient.discardPending(for: userDid, handle: handle)
+          // Server already accepted; surface to recovery tracker but do NOT
+          // delete the local group — server state is now bound to it.
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            await recoveryManager.recordFailedRejoin(
+              convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+          }
+          return
+        }
+      }
+
+      // Read FFI-actual epoch (post-confirm) for the persistence write.
+      let landedEpoch: Int64
+      do {
+        landedEpoch = Int64(
+          try await mlsClient.getEpoch(for: userDid, groupId: pendingGroupIdData))
+      } catch {
+        landedEpoch = Int64(bootstrapped.epoch)
+      }
+
+      let now = Date()
+      do {
+        try await database.write { db in
+          let currentGeneration = try MLSConversationResetSQL.loadPendingResetGeneration(
+            db: db, conversationID: convoId, currentUserDID: userDid)
+          let generationAdvanced: Bool = {
+            switch (currentGeneration, observedGeneration) {
+            case let (.some(current), .some(observed)):
+              return current > observed
+            case (.some, .none):
+              return true
+            default:
+              return false
+            }
+          }()
+
+          if generationAdvanced {
+            try MLSConversationResetSQL.clearPendingReset(
+              db: db, conversationID: convoId, currentUserDID: userDid, now: now)
+          } else {
+            try MLSConversationResetSQL.applyRecipientResetSuccess(
+              db: db,
+              conversationID: convoId,
+              currentUserDID: userDid,
+              newGroupID: pendingGroupIdData,
+              newEpoch: landedEpoch,
+              now: now
+            )
+          }
+        }
+
+        groupStates.removeValue(forKey: convoId)
+        conversations[convoId] = bootstrapped
+
+        logger.warning(
+          "✅ [BOOTSTRAP] Won race for \(convoId.prefix(16)) → newGroupId=\(pendingNewGroupIdHex.prefix(16)), epoch=\(landedEpoch)"
+        )
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.clearRejoinTracking(convoId: convoId)
+        }
+      } catch {
+        logger.error(
+          "❌ [BOOTSTRAP] DB write failed after server 200 for \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+
+    } catch let error as MLSAPIError {
+      switch error {
+      case .alreadyBootstrapped:
+        // Race lost. The winner's Welcome will arrive on the next sync;
+        // discard the local pre-bootstrap MLS state so it doesn't conflict
+        // with the winner's group state. Leave RESET_PENDING set so the
+        // next deferred-recovery loop processes the Welcome.
+        logger.warning(
+          "🥈 [BOOTSTRAP] Race lost for \(convoId.prefix(16)) (AlreadyBootstrapped 409) — clearing local pre-bootstrap state, awaiting Welcome"
+        )
+        if let handle = stagedHandle {
+          await mlsClient.discardPending(for: userDid, handle: handle)
+        }
+        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+
+      case .bootstrapTargetNotFound, .notMember:
+        // Irrecoverable from this end — either the post-reset row no longer
+        // matches (subsequent reset overwrote it) or we're not in the
+        // member roster. Drop the staging pointer so we don't loop.
+        logger.error(
+          "❌ [BOOTSTRAP] Irrecoverable for \(convoId.prefix(16)): \(error.errorDescription ?? "?") — clearing RESET_PENDING staging"
+        )
+        if let handle = stagedHandle {
+          await mlsClient.discardPending(for: userDid, handle: handle)
+        }
+        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        try? await database.write { db in
+          try MLSConversationResetSQL.clearPendingReset(
+            db: db, conversationID: convoId, currentUserDID: userDid, now: Date())
+        }
+
+      default:
+        logger.error(
+          "❌ [BOOTSTRAP] bootstrapResetGroup failed for \(convoId.prefix(16)): \(error.errorDescription ?? "?")"
+        )
+        if let handle = stagedHandle {
+          await mlsClient.discardPending(for: userDid, handle: handle)
+        }
+        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.recordFailedRejoin(
+            convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+        }
+      }
+    } catch {
+      logger.error(
+        "❌ [BOOTSTRAP] Unexpected error for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      if let handle = stagedHandle {
+        await mlsClient.discardPending(for: userDid, handle: handle)
+      }
+      try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
         await recoveryManager.recordFailedRejoin(
           convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)

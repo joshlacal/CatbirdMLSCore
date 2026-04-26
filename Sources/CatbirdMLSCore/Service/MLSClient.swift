@@ -1974,6 +1974,52 @@ public actor MLSClient {
     throw MLSError.operationFailed
   }
 
+  /// Export raw GroupInfo bytes from the local MLS context (no server upload).
+  ///
+  /// Mirrors the export step inside `publishGroupInfo` but returns the bytes
+  /// instead of POSTing them. Used by the first-responder bootstrap path
+  /// (spec §8.5) to attach freshly-built GroupInfo to the
+  /// `bootstrapResetGroup` request body so the server can populate the
+  /// post-reset row in a single round-trip.
+  ///
+  /// Validates the export against the FFI's GroupInfo formatter before
+  /// returning so callers don't have to repeat the check.
+  public func exportLocalGroupInfo(for userDID: String, groupId: Data) async throws -> Data {
+    logger.info(
+      "📤 [MLSClient.exportLocalGroupInfo] START - groupId: \(groupId.hexEncodedString().prefix(16))"
+    )
+
+    guard let clientIdentity = await getClientIdentity(for: userDID) else {
+      logger.error(
+        "❌ [MLSClient.exportLocalGroupInfo] Device not registered - cannot determine client identity"
+      )
+      throw MLSError.configurationError
+    }
+    let identityBytes = Data(clientIdentity.utf8)
+    let groupInfoBytes = try await runFFIWithRecovery(for: userDID) { ctx in
+      try ctx.exportGroupInfo(groupId: groupId, signerIdentityBytes: identityBytes)
+    }
+
+    guard groupInfoBytes.count >= Self.minGroupInfoSize else {
+      logger.error(
+        "❌ [MLSClient.exportLocalGroupInfo] Exported GroupInfo too small: \(groupInfoBytes.count) bytes"
+      )
+      throw MLSError.operationFailed
+    }
+
+    let isValid = try await runFFIWithRecovery(for: userDID) { ctx in
+      ctx.validateGroupInfoFormat(groupInfoBytes: groupInfoBytes)
+    }
+    guard isValid else {
+      logger.error("❌ [MLSClient.exportLocalGroupInfo] GroupInfo format validation failed")
+      throw MLSError.operationFailed
+    }
+
+    logger.info(
+      "✅ [MLSClient.exportLocalGroupInfo] Exported \(groupInfoBytes.count) bytes")
+    return groupInfoBytes
+  }
+
   /// Process a commit message
   public func processCommit(for userDID: String, groupId: Data, commitData: Data) async throws
     -> ProcessCommitResult
