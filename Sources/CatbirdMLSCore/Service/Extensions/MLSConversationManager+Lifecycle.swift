@@ -1223,12 +1223,88 @@ extension MLSConversationManager {
         return false
       } catch {
         logger.error("❌ Failed to rejoin \(label) via External Commit: \(error.localizedDescription)")
+
+        // B11: First-responder bootstrap fallback for the needsRejoin path.
+        // Mirrors `runDeferredEpochRecoveryRecipient`'s bootstrap fallback
+        // (Sync.swift:966-988) but covers convos that never carried
+        // `needsReset = true` to the deferred-recovery loop — typically
+        // ones that previously succeeded a recipient rejoin and got
+        // re-flagged as `needsRejoin` later when startup validation noticed
+        // the FFI lacks the group. Without this, every such convo enters a
+        // permanent "EC → 404 GroupInfo → backoff" loop because no member
+        // ever races to populate the empty post-reset row.
+        //
+        // Idempotency: server's `bootstrapResetGroup` only writes when
+        // `group_info IS NULL`; concurrent racers get 409 AlreadyBootstrapped
+        // and fall through to the winner's GroupInfo on the next loop.
+        let groupInfoMissing = await isGroupInfoMissing(convoId: convoId)
+        if groupInfoMissing {
+          guard let localConvo = await loadLocalConvoForBootstrap(
+            convoId: convoId, userDid: userDid
+          ) else {
+            logger.warning(
+              "⚠️ [attemptRejoin] GroupInfo absent for \(label) but local convo not loadable — skipping bootstrap fallback"
+            )
+            if isTrifectaCandidate, Self.isTrifectaExternalCommitError(error) {
+              await recordTrifectaFailure(
+                convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+            }
+            return false
+          }
+
+          logger.warning(
+            "🚀 [attemptRejoin] GroupInfo absent for \(label) — racing for first-responder bootstrap (post-reset path)"
+          )
+          await attemptFirstResponderBootstrap(
+            convoId: convoId,
+            userDid: userDid,
+            pendingNewGroupIdHex: localConvo.groupID.hexEncodedString(),
+            observedGeneration: localConvo.pendingResetGeneration,
+            preDeleteAuthHex: preDeleteAuthHex
+          )
+
+          let groupIdData = localConvo.groupID
+          if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
+            logger.info(
+              "✅ [attemptRejoin] First-responder bootstrap succeeded for \(label)")
+            await clearConversationRejoinFlag(convoId)
+            return true
+          }
+          logger.info(
+            "⏳ [attemptRejoin] Bootstrap dispatched for \(label) but group not yet present locally — next sync will retry"
+          )
+          return false
+        }
+
         if isTrifectaCandidate, Self.isTrifectaExternalCommitError(error) {
           await recordTrifectaFailure(
             convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
         }
         return false
       }
+    }
+  }
+
+  /// B11: Load the local `MLSConversationModel` for `convoId` so the
+  /// rejoin path can extract the staged `groupID` to feed
+  /// `attemptFirstResponderBootstrap`. Doesn't trust the in-memory
+  /// `conversations` dictionary alone — falls through to the persistent
+  /// store so a stale cache (post-restart, post-account-switch) can't
+  /// cause us to bootstrap with the wrong groupId.
+  private func loadLocalConvoForBootstrap(
+    convoId: String, userDid: String
+  ) async -> MLSConversationModel? {
+    do {
+      return try await storage.fetchConversation(
+        conversationID: convoId,
+        currentUserDID: userDid,
+        database: database
+      )
+    } catch {
+      logger.warning(
+        "⚠️ [loadLocalConvoForBootstrap] DB lookup failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      return nil
     }
   }
 
