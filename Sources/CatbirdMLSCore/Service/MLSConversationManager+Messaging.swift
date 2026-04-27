@@ -5793,11 +5793,28 @@ public extension MLSConversationManager {
           continue
         }
 
-        let decision = try await deviceRecordService.verifyKeyPackageAuthorization(
-          localAccountDid: userDid,
-          targetDid: didKey,
-          keyPackageData: decoded
+        // 🔬 [KP-DIAG] B14a: Capture KP wire-format header before FFI extract.
+        // The Rust extractor (mls_extract_key_package_signature_public_key) has been
+        // observed to fail with SerializationError on specific production KPs. Logging
+        // size + first/last bytes lets us identify the wire format from iPhone logs
+        // without needing to dump and decode the full KP. Diagnostic-only — preserves
+        // existing error semantics by rethrowing.
+        logger.info(
+          "🔬 [KP-DIAG] Verifying KP for \(didKey.prefix(30))…: size=\(decoded.count), prefix=\(decoded.prefix(32).map { String(format: "%02x", $0) }.joined()), suffix=\(decoded.suffix(16).map { String(format: "%02x", $0) }.joined())"
         )
+        let decision: MLSDeviceVerificationDecision
+        do {
+          decision = try await deviceRecordService.verifyKeyPackageAuthorization(
+            localAccountDid: userDid,
+            targetDid: didKey,
+            keyPackageData: decoded
+          )
+        } catch {
+          logger.error(
+            "🔬 [KP-DIAG] Verify FAILED for \(didKey.prefix(30))…: \(error.localizedDescription) | size=\(decoded.count), prefix=\(decoded.prefix(32).map { String(format: "%02x", $0) }.joined()), suffix=\(decoded.suffix(16).map { String(format: "%02x", $0) }.joined())"
+          )
+          throw error
+        }
         if let warning = decision.warning {
           logger.info("⚠️ [DeviceRecord] \(warning)")
         }
