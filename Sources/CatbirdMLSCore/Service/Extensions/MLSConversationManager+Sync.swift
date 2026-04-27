@@ -1009,7 +1009,11 @@ public extension MLSConversationManager {
   /// share the same probe as the async deferred-recovery loop.
   internal func isGroupInfoMissing(convoId: String) async -> Bool {
     do {
-      _ = try await apiClient.getGroupInfo(convoId: convoId)
+      // B12: single-shot probe (maxRetries=1). The default 3-attempt
+      // exponential-backoff retry adds ~7s of latency hammering the server
+      // with the same 404 each call site has already gotten. We just need
+      // a single yes/no answer to decide whether to bootstrap.
+      _ = try await apiClient.getGroupInfo(convoId: convoId, maxRetries: 1)
       return false
     } catch let error as MLSAPIError {
       switch error {
@@ -1020,6 +1024,23 @@ public extension MLSConversationManager {
         return true
       case .httpError(let statusCode, _) where statusCode == 404:
         return true
+      default:
+        return false
+      }
+    } catch let networkError as NetworkError {
+      // B12: `MLSAPIClient.getGroupInfo` rethrows `MLSAPIError` directly but
+      // catches every other error (incl. `Petrel.NetworkError.responseError`)
+      // and retries until exhaustion, then throws the underlying NetworkError
+      // — NOT wrapped as `MLSAPIError.httpError`. Without this catch arm,
+      // server 404s on GroupInfo fall through to the generic catch below
+      // returning `false`, which means `attemptFirstResponderBootstrap` never
+      // fires from B9 (creator branch) or B11 (rejoin path) and reset convos
+      // stay stuck forever.
+      switch networkError {
+      case .responseError(let code):
+        return code == 404
+      case .serverError(let code, _):
+        return code == 404
       default:
         return false
       }
