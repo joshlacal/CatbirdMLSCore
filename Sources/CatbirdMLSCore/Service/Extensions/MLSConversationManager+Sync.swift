@@ -502,8 +502,19 @@ public extension MLSConversationManager {
       // Persist conversation members to local database
       try await persistMembersToDatabase(allConvos)
 
-      // Reconcile database: delete conversations that exist locally but not on server
-      let serverConvoIDs = Set(allConvos.map { $0.groupId })
+      // Reconcile database: delete conversations that exist locally but not on server.
+      //
+      // B7 (CRITICAL): build the set from `conversationId`, NOT `groupId`. The
+      // two are equal at convo creation but DIVERGE after any server-side reset
+      // (Phase 2 sweep, admin reset, quorum reset). Using `groupId` causes the
+      // reconciler downstream — which compares against local convos by their
+      // stable `conversationID` — to classify every reset convo as "removed from
+      // server", verify FFI no longer has the (new) group, mark it zombie, and
+      // force-delete it from the encrypted DB. User-visible effect: reset convos
+      // vanish from the conversation list entirely. Spec ref:
+      // `catbird-mls/CLAUDE.md` — "GroupId changes on reset; ConversationId
+      // does not. Never confuse them."
+      let serverConvoIDs = Set(allConvos.map { $0.conversationId })
       try await reconcileDatabase(with: serverConvoIDs)
 
       // Notify sync complete
