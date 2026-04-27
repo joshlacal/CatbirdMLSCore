@@ -29,4 +29,34 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
 
     XCTAssertEqual(disposition, .retryStaleRead(serverEpoch: 11))
   }
+
+  func testConversationIdentityMatchesStableConversationIdAfterReset() {
+    XCTAssertTrue(
+      MLSConversationIdentity.matches(
+        requestedId: "legacy-convo-id",
+        conversationId: "legacy-convo-id",
+        groupId: "post-reset-group-id"
+      )
+    )
+  }
+
+  func testConversationIdentityStillMatchesLegacyGroupId() {
+    XCTAssertTrue(
+      MLSConversationIdentity.matches(
+        requestedId: "group-id",
+        conversationId: "conversation-id",
+        groupId: "group-id"
+      )
+    )
+  }
+
+  func testConversationIdentityRejectsUnrelatedIds() {
+    XCTAssertFalse(
+      MLSConversationIdentity.matches(
+        requestedId: "other-id",
+        conversationId: "conversation-id",
+        groupId: "group-id"
+      )
+    )
+  }
 }

@@ -67,8 +67,16 @@ public struct BatchUploadError: Codable, Sendable {
 /// Data structure for individual key package in batch upload
 /// Note: Renamed from KeyPackageData to avoid conflict with uniffi-generated type in CatbirdMLS
 public struct MLSKeyPackageUploadData: Codable, Sendable {
-  /// Base64-encoded key package bytes (TLS serialized)
-  public let keyPackage: String
+  /// Raw TLS-serialized MLS key package bytes.
+  ///
+  /// **B14 normalization (2026-04-27):** previously a base64 String. The
+  /// upload pipeline base64-encoded raw KP bytes here only to base64-decode
+  /// them again at the wire boundary (`Bytes(data: ...)`). The round-trip is
+  /// idempotent for valid base64 but creates an extra failure surface
+  /// (`Data(base64Encoded:)` returns nil for any malformed input → empty
+  /// upload silently). Holding raw `Data` collapses the transformation chain
+  /// to a single ATProto `Bytes` boundary.
+  public let keyPackage: Data
 
   /// Cipher suite identifier
   public let cipherSuite: String
@@ -86,7 +94,7 @@ public struct MLSKeyPackageUploadData: Codable, Sendable {
   public let credentialDid: String?
 
   public init(
-    keyPackage: String,
+    keyPackage: Data,
     cipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
     expires: Date? = nil,
     idempotencyKey: String = UUID().uuidString,

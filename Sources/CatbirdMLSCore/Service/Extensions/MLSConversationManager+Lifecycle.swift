@@ -1466,7 +1466,13 @@ extension MLSConversationManager {
         "📡 [fetchConversationForRejoin] Fetching from server for \(convoId.prefix(16))...")
       let conversations = try await apiClient.getConversations(limit: 100)
 
-      if let match = conversations.convos.first(where: { $0.groupId == convoId }) {
+      if let match = conversations.convos.first(where: {
+        MLSConversationIdentity.matches(
+          requestedId: convoId,
+          conversationId: $0.conversationId,
+          groupId: $0.groupId
+        )
+      }) {
         // Cache it so we don't fetch again immediately
         self.conversations[convoId] = match
         logger.info("✅ [fetchConversationForRejoin] Found conversation on server, cached locally")

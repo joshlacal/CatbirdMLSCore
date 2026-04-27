@@ -2761,12 +2761,13 @@ public actor MLSClient {
       for i in 0..<batchCount {
         do {
           let keyPackageBytes = try await createKeyPackage(for: userDID, identity: clientIdentity)
-          let base64Package = keyPackageBytes.base64EncodedString()
           let idempotencyKey = UUID().uuidString.lowercased()
 
+          // B14 normalization: store raw TLS bytes; ATProto Bytes wrapping
+          // happens at the wire boundary in publishKeyPackagesBatchDirect.
           batchPackages.append(
             MLSKeyPackageUploadData(
-              keyPackage: base64Package,
+              keyPackage: keyPackageBytes,
               cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
               expires: Date().addingTimeInterval(90 * 24 * 60 * 60),  // 90 days
               idempotencyKey: idempotencyKey,

@@ -545,10 +545,11 @@ public actor MLSKeyPackageManager {
         for: normalizedUserDid,
         identity: clientIdentity  // Fixed: was normalizedUserDid (bare DID)
       )
-      let keyPackageBase64 = keyPackageBytes.base64EncodedString()
 
+      // B14 normalization: store raw TLS bytes; ATProto Bytes wrapping
+      // happens at the wire boundary in publishKeyPackagesBatchDirect.
       let packageData = MLSKeyPackageUploadData(
-        keyPackage: keyPackageBase64,
+        keyPackage: keyPackageBytes,
         cipherSuite: defaultCipherSuite,
         expires: expiry,
         idempotencyKey: UUID().uuidString.lowercased(),
@@ -564,11 +565,7 @@ public actor MLSKeyPackageManager {
     // STEP 7: Validate credential identity matches current user DID
     // This prevents DID contamination when switching accounts on the same device
     let validatedPackages = packages.filter { pkg in
-      guard let keyPackageData = Data(base64Encoded: pkg.keyPackage) else {
-        logger.warning("⚠️ Skipping key package with invalid base64 encoding")
-        return false
-      }
-      return validateKeyPackageDID(keyPackageData, expectedUserDid: normalizedUserDid)
+      validateKeyPackageDID(pkg.keyPackage, expectedUserDid: normalizedUserDid)
     }
     let discardedCount = packages.count - validatedPackages.count
     if discardedCount > 0 {

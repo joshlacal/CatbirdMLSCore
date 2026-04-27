@@ -243,9 +243,9 @@ public final class MLSAPIClient {
     return (output.conversations, output.cursor)
   }
   
-  /// Fetch a single conversation by ID
-  /// Searches through paginated results to find the specific conversation
-  /// - Parameter convoId: The conversation group ID to fetch
+  /// Fetch a single conversation by ID.
+  /// Searches through paginated results to find the specific conversation.
+  /// - Parameter convoId: The stable conversation ID to fetch; legacy group IDs are also accepted.
   /// - Returns: The conversation view if found, nil if not found
   public func getConversation(convoId: String) async throws -> BlueCatbirdMlsChatDefs.ConvoView? {
     logger.info("🌐 [MLSAPIClient.getConversation] Fetching convo: \(convoId.prefix(16))...")
@@ -257,8 +257,15 @@ public final class MLSAPIClient {
       pageCount += 1
       let result = try await getConversations(limit: 100, cursor: cursor)
       
-      // Check if target conversation is in this page
-      if let convo = result.convos.first(where: { $0.groupId == convoId }) {
+      // Check if target conversation is in this page. After a group reset,
+      // conversationId stays stable while groupId points at the new MLS group.
+      if let convo = result.convos.first(where: {
+        MLSConversationIdentity.matches(
+          requestedId: convoId,
+          conversationId: $0.conversationId,
+          groupId: $0.groupId
+        )
+      }) {
         logger.info("✅ [MLSAPIClient.getConversation] Found convo \(convoId.prefix(16))... on page \(pageCount)")
         return convo
       }
@@ -2261,7 +2268,9 @@ public final class MLSAPIClient {
     )
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
-      action: "sync"
+      action: "sync",
+      localHashes: localHashes,
+      deviceId: deviceId
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
@@ -2271,20 +2280,23 @@ public final class MLSAPIClient {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "syncKeyPackages failed")
     }
 
-    // syncResult is an opaque string; extract stats from top-level output
-    let serverHashes: [String] = []
-    let orphanedCount = 0
-    let deletedCount = output.publishResult?.failed ?? 0
-    let orphanedHashes: [String] = []
-    let remainingAvailable = output.publishResult?.succeeded ?? 0
+    guard let syncResult = output.syncResult else {
+      throw MLSAPIError.invalidResponse(message: "Missing syncResult in key package sync response")
+    }
 
     logger.info("✅ [MLSAPIClient.syncKeyPackages] SUCCESS")
     logger.info("   - Device: \(deviceId)")
-    logger.info("   - Orphaned: \(orphanedCount)")
-    logger.info("   - Deleted: \(deletedCount)")
-    logger.info("   - Remaining: \(remainingAvailable)")
+    logger.info("   - Orphaned: \(syncResult.orphanedCount)")
+    logger.info("   - Deleted: \(syncResult.deletedCount)")
+    logger.info("   - Remaining: \(syncResult.remainingAvailable ?? output.stats.available)")
 
-    return (serverHashes, orphanedCount, deletedCount, orphanedHashes, remainingAvailable)
+    return (
+      syncResult.serverHashes,
+      syncResult.orphanedCount,
+      syncResult.deletedCount,
+      syncResult.orphanedHashes ?? [],
+      syncResult.remainingAvailable ?? output.stats.available
+    )
   }
 
   /// Query current key package inventory from server (simplified wrapper for upload logic)
@@ -2348,10 +2360,13 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.publishKeyPackagesBatchDirect] Using real batch endpoint - count: \(packages.count)"
     )
 
-    // Convert custom types to generated types
+    // Convert custom types to generated types.
+    // B14 normalization: pkg.keyPackage is already raw TLS bytes; wrap once
+    // for the ATProto wire. (Previously a base64 round-trip lived here that
+    // silently produced empty payloads when Data(base64Encoded:) returned nil.)
     let keyPackageItems = packages.map { pkg in
       BlueCatbirdMlsChatPublishKeyPackages.KeyPackageItem(
-        keyPackage: Bytes(data: Data(base64Encoded: pkg.keyPackage) ?? Data()),
+        keyPackage: Bytes(data: pkg.keyPackage),
         cipherSuite: pkg.cipherSuite,
         expires: pkg.expires.map { ATProtocolDate(date: $0) }
           ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
@@ -2408,13 +2423,10 @@ public final class MLSAPIClient {
           let globalIndex = batchIndex + offset
           group.addTask {
             do {
-              // Decode base64 back to Data for existing publishKeyPackage method
-              guard let keyPackageData = Data(base64Encoded: package.keyPackage) else {
-                return (globalIndex, false, "Invalid base64 encoding")
-              }
-
+              // B14 normalization: package.keyPackage is already raw TLS
+              // bytes — pass straight through to publishKeyPackage.
               try await self.publishKeyPackage(
-                keyPackage: keyPackageData,
+                keyPackage: package.keyPackage,
                 cipherSuite: package.cipherSuite,
                 expiresAt: package.expires.map { ATProtocolDate(date: $0) },
                 idempotencyKey: package.idempotencyKey
