@@ -1072,6 +1072,26 @@ public extension MLSConversationManager {
     observedGeneration: Int64?,
     preDeleteAuthHex: String?
   ) async {
+    // B15 (Half 1): per-convo dedup. Two trigger sources (deferred-epoch
+    // recovery loop + missing-convo reconciler) can both fire for the same
+    // convo. The losing race-mate would otherwise stage a parallel
+    // create+commit and, on its inevitable failure, delete the SAME group
+    // the winner just bootstrapped. Skip if a sibling is already in flight.
+    let claimed: Bool = bootstrappingConvos.withLock { set in
+      if set.contains(convoId) { return false }
+      set.insert(convoId)
+      return true
+    }
+    guard claimed else {
+      logger.info(
+        "⏳ [BOOTSTRAP] Skipping - another attempt in flight for \(convoId.prefix(16))"
+      )
+      return
+    }
+    defer {
+      bootstrappingConvos.withLock { _ = $0.remove(convoId) }
+    }
+
     logger.warning(
       "🚀 [BOOTSTRAP] First-responder bootstrap for \(convoId.prefix(16)) → \(pendingNewGroupIdHex.prefix(16))"
     )
@@ -1115,19 +1135,47 @@ public extension MLSConversationManager {
 
     // Build the local MLS group at the predetermined groupId so all
     // bootstrap candidates converge on the same MLS GroupId.
-    do {
-      let groupConfig = configuration.toFFI(groupName: nil, groupDescription: nil)
-      _ = try await mlsClient.createGroupWithId(
-        for: userDid, groupId: pendingGroupIdData, configuration: groupConfig)
-    } catch {
-      logger.error(
-        "❌ [BOOTSTRAP] createGroupWithId failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+    //
+    // B15 (Half 2): track whether THIS attempt actually created the group.
+    // If a sibling External Commit / bootstrap already populated local state
+    // for `pendingGroupIdData`, we must NOT delete the group on a later
+    // staging failure — that group now belongs to the sibling and the
+    // server has bound state to it. `wasGroupCreatedByUs` gates every
+    // `deleteGroup` cleanup below; `discardPending(handle:)` remains safe
+    // (local-only) and is called regardless.
+    var wasGroupCreatedByUs = false
+    if await mlsClient.groupExists(for: userDid, groupId: pendingGroupIdData) {
+      logger.info(
+        "ℹ️ [BOOTSTRAP] Group \(pendingNewGroupIdHex.prefix(16)) already exists locally for \(convoId.prefix(16)) — sibling won the create race; reusing without delete-on-failure"
       )
-      if let recoveryManager = await mlsClient.recovery(for: userDid) {
-        await recoveryManager.recordFailedRejoin(
-          convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+    } else {
+      do {
+        let groupConfig = configuration.toFFI(groupName: nil, groupDescription: nil)
+        _ = try await mlsClient.createGroupWithId(
+          for: userDid, groupId: pendingGroupIdData, configuration: groupConfig)
+        wasGroupCreatedByUs = true
+      } catch {
+        // `MLSClient.createGroupWithId` swallows the underlying `MlsError`
+        // variant and re-throws as bare `MLSError.operationFailed`, so we
+        // can't discriminate "already exists" from a genuine create
+        // failure off the catch alone. Re-probe: if the group is now
+        // present, a sibling raced ahead between our existence check and
+        // our create call — treat as if we found it on entry.
+        if await mlsClient.groupExists(for: userDid, groupId: pendingGroupIdData) {
+          logger.warning(
+            "⚠️ [BOOTSTRAP] createGroupWithId failed for \(convoId.prefix(16)) but group now exists — sibling won the race; continuing without delete-on-failure"
+          )
+        } else {
+          logger.error(
+            "❌ [BOOTSTRAP] createGroupWithId failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+          )
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            await recoveryManager.recordFailedRejoin(
+              convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+          }
+          return
+        }
       }
-      return
     }
 
     // Stage the add-members commit + Welcome in one shot.
@@ -1143,7 +1191,16 @@ public extension MLSConversationManager {
           logger.error(
             "❌ [BOOTSTRAP] Missing key packages for \(missing.count) member(s) in \(convoId.prefix(16))"
           )
-          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+          // B15 (Half 2): only delete if WE created this group. If a
+          // sibling External Commit / bootstrap got here first, the group
+          // is theirs — destroying it would undo their successful join.
+          if wasGroupCreatedByUs {
+            try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+          } else {
+            logger.info(
+              "🛡️ [BOOTSTRAP] Skipping deleteGroup for \(convoId.prefix(16)) — group not owned by this attempt"
+            )
+          }
           if let recoveryManager = await mlsClient.recovery(for: userDid) {
             await recoveryManager.recordFailedRejoin(
               convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
@@ -1171,7 +1228,14 @@ public extension MLSConversationManager {
         logger.error(
           "❌ [BOOTSTRAP] Member staging failed for \(convoId.prefix(16)): \(error.localizedDescription)"
         )
-        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        // B15 (Half 2): only delete if WE created this group.
+        if wasGroupCreatedByUs {
+          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        } else {
+          logger.info(
+            "🛡️ [BOOTSTRAP] Skipping deleteGroup for \(convoId.prefix(16)) after staging failure — group not owned by this attempt"
+          )
+        }
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
           await recoveryManager.recordFailedRejoin(
             convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
@@ -1192,7 +1256,14 @@ public extension MLSConversationManager {
       if let handle = stagedHandle {
         await mlsClient.discardPending(for: userDid, handle: handle)
       }
-      try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+      // B15 (Half 2): only delete if WE created this group.
+      if wasGroupCreatedByUs {
+        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+      } else {
+        logger.info(
+          "🛡️ [BOOTSTRAP] Skipping deleteGroup for \(convoId.prefix(16)) after export failure — group not owned by this attempt"
+        )
+      }
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
         await recoveryManager.recordFailedRejoin(
           convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
@@ -1303,7 +1374,17 @@ public extension MLSConversationManager {
         if let handle = stagedHandle {
           await mlsClient.discardPending(for: userDid, handle: handle)
         }
-        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        // B15 (Half 2): only delete if WE created this group. The 409 means
+        // the SERVER already has bootstrap state for this convo — but the
+        // local group at `pendingGroupIdData` may belong to a sibling
+        // External Commit / bootstrap that beat us locally.
+        if wasGroupCreatedByUs {
+          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        } else {
+          logger.info(
+            "🛡️ [BOOTSTRAP] Skipping deleteGroup on 409 for \(convoId.prefix(16)) — group not owned by this attempt"
+          )
+        }
 
       case .bootstrapTargetNotFound, .notMember:
         // Irrecoverable from this end — either the post-reset row no longer
@@ -1315,7 +1396,14 @@ public extension MLSConversationManager {
         if let handle = stagedHandle {
           await mlsClient.discardPending(for: userDid, handle: handle)
         }
-        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        // B15 (Half 2): only delete if WE created this group.
+        if wasGroupCreatedByUs {
+          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        } else {
+          logger.info(
+            "🛡️ [BOOTSTRAP] Skipping deleteGroup on irrecoverable for \(convoId.prefix(16)) — group not owned by this attempt"
+          )
+        }
         try? await database.write { db in
           try MLSConversationResetSQL.clearPendingReset(
             db: db, conversationID: convoId, currentUserDID: userDid, now: Date())
@@ -1328,7 +1416,14 @@ public extension MLSConversationManager {
         if let handle = stagedHandle {
           await mlsClient.discardPending(for: userDid, handle: handle)
         }
-        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        // B15 (Half 2): only delete if WE created this group.
+        if wasGroupCreatedByUs {
+          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+        } else {
+          logger.info(
+            "🛡️ [BOOTSTRAP] Skipping deleteGroup on API error for \(convoId.prefix(16)) — group not owned by this attempt"
+          )
+        }
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
           await recoveryManager.recordFailedRejoin(
             convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
@@ -1341,7 +1436,14 @@ public extension MLSConversationManager {
       if let handle = stagedHandle {
         await mlsClient.discardPending(for: userDid, handle: handle)
       }
-      try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+      // B15 (Half 2): only delete if WE created this group.
+      if wasGroupCreatedByUs {
+        try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+      } else {
+        logger.info(
+          "🛡️ [BOOTSTRAP] Skipping deleteGroup on unexpected error for \(convoId.prefix(16)) — group not owned by this attempt"
+        )
+      }
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
         await recoveryManager.recordFailedRejoin(
           convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)

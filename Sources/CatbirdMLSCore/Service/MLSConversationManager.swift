@@ -240,6 +240,23 @@ public final class MLSConversationManager {
   /// after creation completes, protecting against stale sync responses deleting new conversations.
   public let groupsBeingCreated = Mutex<[String: Date]>([:])
 
+  /// B15: Per-convo dedup gate for `attemptFirstResponderBootstrap`.
+  ///
+  /// Both the deferred-epoch-recovery loop (after every sync) and the
+  /// missing-convo reconciler (after `getExpectedConversations`) can call
+  /// `attemptFirstResponderBootstrap` for the same `convoId` in parallel.
+  /// Without dedup, two callers race: one creates the group + claims success,
+  /// the other races behind, fails on missing key packages or stale state,
+  /// and calls `deleteGroup` on the SAME group — destroying the winner's
+  /// work. The user sees the convo briefly heal (External Commit lands) and
+  /// then break again seconds later.
+  ///
+  /// Mirrors the in-flight pattern around `joinByExternalCommit`
+  /// (`MLSClient.inFlightExternalCommits` →
+  /// `⏳ [MLSClient.joinByExternalCommit] Reusing in-flight External Commit`),
+  /// but bootstrap returns `Void` so a simple set + early-return suffices.
+  public let bootstrappingConvos = Mutex<Set<String>>([])
+
   /// Flag indicating the manager is preparing for shutdown/storage reset
   public var isShuttingDown = false
 
