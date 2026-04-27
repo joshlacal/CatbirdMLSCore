@@ -5112,6 +5112,52 @@ public extension MLSConversationManager {
         logger.error(
           "❌ [ensureGroupInitialized] Creator rejoin via External Commit failed: \(error.localizedDescription)"
         )
+
+        // B9: post-reset bootstrap fallback (spec §8.5).
+        //
+        // EC failure on the synchronous open-conversation path used to dead-end
+        // here, even when the failure mode was specifically "GroupInfo is
+        // missing because the server auto-reset this convo and no client has
+        // bootstrapped the new group yet". The async deferred-recovery loop
+        // (`runDeferredEpochRecoveryRecipient`) DID handle this case via
+        // `attemptFirstResponderBootstrap`, but it couldn't take over because
+        // we hold the per-convo rejoin lock at this point. Net effect: the user
+        // would tap a stuck-and-reset convo, see "can't load", and the convo
+        // would never get bootstrapped until app restart.
+        //
+        // Fix: probe the GroupInfo state. If the server explicitly says
+        // "no GroupInfo for this convo", race for first-responder bootstrap
+        // — same path as the recipient deferred-recovery branch. The
+        // bootstrap function handles 409 AlreadyBootstrapped (race-loss)
+        // gracefully by discarding local pre-bootstrap state and letting the
+        // next sync tick join via the winner's Welcome.
+        let groupInfoMissing = await isGroupInfoMissing(convoId: convo.conversationId)
+        if groupInfoMissing {
+          logger.warning(
+            "🚀 [ensureGroupInitialized] GroupInfo absent for \(convoId.prefix(16)) — racing for first-responder bootstrap (post-reset path)"
+          )
+          await attemptFirstResponderBootstrap(
+            convoId: convo.conversationId,
+            userDid: userDid,
+            pendingNewGroupIdHex: convo.groupId,
+            observedGeneration: nil,
+            preDeleteAuthHex: nil
+          )
+          // Re-check whether the bootstrap (or a concurrent winner's Welcome)
+          // populated the local group state. If yes, the open-conversation
+          // path can proceed — caller's downstream init will use the live
+          // group. If still missing, surface the error so the UI can show a
+          // recovering state instead of a successful-but-empty load.
+          if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
+            logger.info(
+              "✅ [ensureGroupInitialized] First-responder bootstrap succeeded — group now initialized for \(convoId.prefix(16))"
+            )
+            return
+          }
+          logger.warning(
+            "⏳ [ensureGroupInitialized] Bootstrap dispatched but group not yet present locally for \(convoId.prefix(16)) — UI will retry on next pipeline run"
+          )
+        }
         throw MLSConversationError.groupNotInitialized
       }
     } else {

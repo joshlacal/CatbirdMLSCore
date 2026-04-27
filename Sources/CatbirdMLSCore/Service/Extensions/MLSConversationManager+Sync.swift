@@ -1003,7 +1003,11 @@ public extension MLSConversationManager {
   /// server explicitly signals "no GroupInfo for this convo"; transient
   /// network failures return `false` so we don't bootstrap on top of a
   /// healthy group whose GroupInfo we just couldn't fetch.
-  private func isGroupInfoMissing(convoId: String) async -> Bool {
+  ///
+  /// **Visibility note (B9):** promoted from `private` to `internal` so
+  /// `ensureGroupInitialized` (the synchronous open-conversation path) can
+  /// share the same probe as the async deferred-recovery loop.
+  internal func isGroupInfoMissing(convoId: String) async -> Bool {
     do {
       _ = try await apiClient.getGroupInfo(convoId: convoId)
       return false
@@ -1031,7 +1035,16 @@ public extension MLSConversationManager {
   /// On 200 the row gains GroupInfo and a Welcome message; on 409
   /// `AlreadyBootstrapped` the race is lost and the local pre-bootstrap
   /// state is discarded so the next loop joins via the winner's Welcome.
-  private func attemptFirstResponderBootstrap(
+  ///
+  /// **Visibility note (B9):** promoted from `private` to `internal` so the
+  /// synchronous open-conversation path (`ensureGroupInitialized` in
+  /// MLSConversationManager+Messaging.swift) can also fire the bootstrap
+  /// when the user opens a stuck-and-reset convo. Previously only the
+  /// async deferred-recovery loop could trigger it, but it was blocked by
+  /// the per-convo rejoin lock that `ensureGroupInitialized` had already
+  /// claimed — so reset convos never got bootstrapped until the user
+  /// quit and relaunched, and even then only via the deferred path.
+  internal func attemptFirstResponderBootstrap(
     convoId: String,
     userDid: String,
     pendingNewGroupIdHex: String,
