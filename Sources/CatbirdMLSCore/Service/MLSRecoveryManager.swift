@@ -103,12 +103,20 @@ public actor MLSRecoveryManager {
   /// additional cross-conversation guard, not a replacement.
   static let minGlobalRejoinIntervalSec: TimeInterval = 30
 
-  /// In-memory timestamp of the most recent External Commit rejoin attempt
-  /// (success or failure) across all conversations. Set inside
-  /// `shouldSkipRejoin` at the moment the gate decides to proceed, so both
-  /// success and failure paths share the same cooldown. In-memory only —
-  /// matches the Rust core; on app restart the natural cooldown applies
-  /// from the next attempt.
+  /// In-memory timestamp of the most recent External Commit rejoin OUTCOME
+  /// (success or failure) across all conversations. Stamped only on outcome
+  /// paths — `recordFailedRejoin` (failure) and `clearRejoinTracking`
+  /// (success) — so `shouldSkipRejoin` remains a pure read. This mirrors the
+  /// Rust orchestrator (`catbird-mls/src/orchestrator/recovery.rs` —
+  /// `record_failure` / `clear` set `last_global_rejoin_at`, while
+  /// `should_skip` only reads it). In-memory only — on app restart the
+  /// natural cooldown applies from the next attempt.
+  ///
+  /// Critical invariant: this MUST NOT be written from `shouldSkipRejoin`.
+  /// Writing it inside the gate makes the gate non-idempotent — a second
+  /// call within the same logical rejoin attempt (e.g. nested EC fallback
+  /// re-entering the gate) would observe the floor it just set and skip,
+  /// which would be misclassified as a failed attempt by the caller.
   private var lastGlobalRejoinAttemptAt: Date?
 
   /// Calculate exponential backoff cooldown based on attempt count
@@ -355,7 +363,16 @@ public actor MLSRecoveryManager {
 
   // MARK: - Per-Conversation Rejoin Tracking
 
-  /// Check if a conversation should be skipped during rejoin (max attempts exceeded or on cooldown)
+  /// Check if a conversation should be skipped during rejoin (max attempts exceeded or on cooldown).
+  ///
+  /// **Pure read — no side effects.** This must be safe to call multiple
+  /// times for the same logical rejoin attempt (e.g. nested External Commit
+  /// fallback re-entering the gate) without flipping its own answer.
+  /// Outcome stamping (`lastGlobalRejoinAttemptAt`) lives in
+  /// `recordFailedRejoin` / `clearRejoinTracking` — matches the Rust
+  /// orchestrator contract in `catbird-mls/src/orchestrator/recovery.rs`
+  /// (`should_skip` is a pure read; `record_failure` / `clear` stamp the
+  /// global timestamp).
   ///
   /// Layered gates (each can short-circuit to skip):
   /// 1. Per-conversation max attempts (spec §8.2 — MAX_REJOIN_ATTEMPTS = 3)
@@ -363,10 +380,6 @@ public actor MLSRecoveryManager {
   /// 3. **Global** rejoin floor (spec §8.4 / §10 — MIN_REJOIN_INTERVAL_SEC = 30,
   ///    applies across all conversations, mirrors Rust
   ///    `RecoveryTracker.last_global_rejoin_at`)
-  ///
-  /// When the gate decides to proceed (returns `false`), the global timestamp
-  /// is stamped immediately so both success and failure paths share the same
-  /// cooldown — failure does not allow immediate retry.
   public func shouldSkipRejoin(convoId: String) -> Bool {
     if let record = failedRejoins[convoId] {
       // Skip if max attempts exceeded
@@ -409,10 +422,11 @@ public actor MLSRecoveryManager {
       }
     }
 
-    // Gate decided to proceed: stamp the global timestamp BEFORE the External
-    // Commit is issued. Both success and failure paths now share the cooldown,
-    // so a failed attempt cannot immediately retry across other conversations.
-    lastGlobalRejoinAttemptAt = now
+    // Gate decided to proceed. Do NOT stamp `lastGlobalRejoinAttemptAt` here —
+    // that's the caller's outcome path's responsibility (`recordFailedRejoin`
+    // on failure, `clearRejoinTracking` on success). Stamping inside the gate
+    // would make this method non-idempotent and self-skip nested re-entries
+    // within the same logical rejoin attempt.
     return false
   }
 
@@ -443,6 +457,11 @@ public actor MLSRecoveryManager {
   ) {
     let existing = failedRejoins[convoId] ?? (attempts: 0, lastAttempt: Date.distantPast)
     failedRejoins[convoId] = (attempts: existing.attempts + 1, lastAttempt: Date())
+    // Stamp the global rejoin floor on the failure outcome (spec §8.4 / §10,
+    // mirrors Rust `RecoveryTracker::record_failure`). Any completed attempt
+    // — success or failure — counts as the most recent global attempt for
+    // cross-conversation cooldown.
+    lastGlobalRejoinAttemptAt = Date()
     logger.warning(
       "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(existing.attempts + 1)/\(self.maxRejoinAttempts) failureType=\(failureType)"
     )
@@ -514,6 +533,14 @@ public actor MLSRecoveryManager {
     transientStates.removeValue(forKey: convoId)
     commitFailureCounts.removeValue(forKey: convoId)
     decryptionFailureCounts.removeValue(forKey: convoId)
+    // Stamp the global rejoin floor on the success outcome (spec §8.4 / §10,
+    // mirrors Rust `RecoveryTracker::clear` which stamps unconditionally —
+    // see comment at `catbird-mls/src/orchestrator/recovery.rs` near line 108:
+    // "the minimum interval still applies to prevent rapid successive
+    // rejoins even when they succeed"). Stamped regardless of whether prior
+    // failure tracking existed, so a clean rejoin success still enforces the
+    // 30s floor against subsequent EC bursts on other conversations.
+    lastGlobalRejoinAttemptAt = Date()
     if hadTracking {
       logger.info("✅ [MLSRecoveryManager] Cleared rejoin tracking for \(convoId.prefix(16))")
     }
