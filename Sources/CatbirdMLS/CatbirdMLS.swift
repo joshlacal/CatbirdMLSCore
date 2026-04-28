@@ -3085,6 +3085,46 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func recordGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws 
     
     /**
+     * Persist a Phase 2.5 `resetRequestedEvent` from the DS — the indirect-
+     * trigger SSE event where the server has NOT minted a new MLS group id
+     * and is asking subscribed clients to elect a first responder
+     * (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1).
+     *
+     * Same deferred-recovery contract as `record_group_reset`: this writes
+     * `RESET_PENDING` state + payload, deletes the old local MLS group,
+     * clears recovery counters, and flips `needs_rejoin` so the next
+     * `MLSOrchestrator::sync_with_server` cycle drives `join_or_rejoin`,
+     * which already includes the first-responder bootstrap branch
+     * (`recovery.rs:1173-1215`). NO inline External Commit — preserves the
+     * "no External Commits in event handlers" invariant that orchestrator-
+     * using clients (catmos, BIRDaemon, WASM) rely on to avoid the
+     * epoch-inflation class of bug observed in March 2026.
+     *
+     * - `convo_id`: stable conversation id.
+     * - `crypto_session_id`: prior session id, now in `reset_requested`
+     * server-side (lexicon `cryptoSessionId`).
+     * - `reset_generation`: monotonic per conversation (lexicon `generation`,
+     * `i32` here to match the existing `reset_generation` field).
+     * - `trigger`: `quorumVote | systemSweep | inlineCommit409 |
+     * inlineGroupInfo404 | adminRequest` (lexicon-owned set; logged here).
+     * - `request_event_id`: deterministic dedup key from the server (plan
+     * §3 idempotency scheme).
+     * - `expected_new_mls_group_id_hex`: usually `None` (indirect triggers
+     * never mint client-visible material per Phase 2.5 §1 locked decision);
+     * admin path may pass `Some(hex_id)`. When `None`, this function mints
+     * a fresh local UUIDv4-style 32-hex-char id for the client's race-
+     * bootstrap candidate; the server's `crypto_sessions UNIQUE
+     * (conversation_id, generation)` chokepoint constraint serializes the
+     * winner, race losers see HTTP 409 `AlreadyBootstrapped` and drop
+     * their pre-bootstrap MLS group cleanly.
+     *
+     * Idempotency: if the conversation is already `RESET_PENDING` at the
+     * same `reset_generation`, the call is a no-op (logged at INFO with the
+     * `request_event_id` for audit).
+     */
+    func recordResetRequested(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws 
+    
+    /**
      * Remove a device.
      */
     func removeDevice(deviceId: String) throws 
@@ -3467,6 +3507,56 @@ open func recordGroupReset(convoId: String, newGroupIdHex: String, resetGenerati
         FfiConverterString.lower(convoId),
         FfiConverterString.lower(newGroupIdHex),
         FfiConverterInt32.lower(resetGeneration),$0
+    )
+}
+}
+    
+    /**
+     * Persist a Phase 2.5 `resetRequestedEvent` from the DS — the indirect-
+     * trigger SSE event where the server has NOT minted a new MLS group id
+     * and is asking subscribed clients to elect a first responder
+     * (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1).
+     *
+     * Same deferred-recovery contract as `record_group_reset`: this writes
+     * `RESET_PENDING` state + payload, deletes the old local MLS group,
+     * clears recovery counters, and flips `needs_rejoin` so the next
+     * `MLSOrchestrator::sync_with_server` cycle drives `join_or_rejoin`,
+     * which already includes the first-responder bootstrap branch
+     * (`recovery.rs:1173-1215`). NO inline External Commit — preserves the
+     * "no External Commits in event handlers" invariant that orchestrator-
+     * using clients (catmos, BIRDaemon, WASM) rely on to avoid the
+     * epoch-inflation class of bug observed in March 2026.
+     *
+     * - `convo_id`: stable conversation id.
+     * - `crypto_session_id`: prior session id, now in `reset_requested`
+     * server-side (lexicon `cryptoSessionId`).
+     * - `reset_generation`: monotonic per conversation (lexicon `generation`,
+     * `i32` here to match the existing `reset_generation` field).
+     * - `trigger`: `quorumVote | systemSweep | inlineCommit409 |
+     * inlineGroupInfo404 | adminRequest` (lexicon-owned set; logged here).
+     * - `request_event_id`: deterministic dedup key from the server (plan
+     * §3 idempotency scheme).
+     * - `expected_new_mls_group_id_hex`: usually `None` (indirect triggers
+     * never mint client-visible material per Phase 2.5 §1 locked decision);
+     * admin path may pass `Some(hex_id)`. When `None`, this function mints
+     * a fresh local UUIDv4-style 32-hex-char id for the client's race-
+     * bootstrap candidate; the server's `crypto_sessions UNIQUE
+     * (conversation_id, generation)` chokepoint constraint serializes the
+     * winner, race losers see HTTP 409 `AlreadyBootstrapped` and drop
+     * their pre-bootstrap MLS group cleanly.
+     *
+     * Idempotency: if the conversation is already `RESET_PENDING` at the
+     * same `reset_generation`, the call is a no-op (logged at INFO with the
+     * `request_event_id` for audit).
+     */
+open func recordResetRequested(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_record_reset_requested(self.uniffiClonePointer(),
+        FfiConverterString.lower(convoId),
+        FfiConverterString.lower(cryptoSessionId),
+        FfiConverterInt32.lower(resetGeneration),
+        FfiConverterString.lower(trigger),
+        FfiConverterString.lower(requestEventId),
+        FfiConverterOptionString.lower(expectedNewMlsGroupIdHex),$0
     )
 }
 }
@@ -13246,6 +13336,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset() != 51559) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_record_reset_requested() != 65518) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_device() != 60366) {

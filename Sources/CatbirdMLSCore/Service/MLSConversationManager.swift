@@ -1051,6 +1051,126 @@ public final class MLSConversationManager {
     }
   }
 
+  /// Handle a Phase 2.5 indirect-trigger `resetRequestedEvent` from the SSE/
+  /// WebSocket stream.
+  ///
+  /// Phase 2.5 (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1)
+  /// closes the indirect-flow gap where the server previously minted a new
+  /// `mls_group_id` itself. With the chokepoint funnel, indirect triggers
+  /// (quorum vote, system sweep, inline 409, inline groupinfo-404) only emit
+  /// `crypto_session_reset_requested`; subscribed clients then elect a first
+  /// responder via `bootstrapResetGroup` / `commitGroupChange` (the
+  /// `crypto_sessions UNIQUE (conversation_id, generation)` constraint
+  /// serializes the winner — first commit wins, losers receive an HTTP 409
+  /// `AlreadyBootstrapped` response).
+  ///
+  /// Mirrors `handleGroupReset(event:)` exactly:
+  /// 1. Delete the old MLS group state (the prior crypto session is now
+  ///    `reset_requested` server-side; its keys are no longer authoritative).
+  /// 2. Remove the old group from in-memory caches.
+  /// 3. Flag `needsReset = true` with `pendingNewGroupId = nil` — the
+  ///    indirect path has no announced group id, so deferred recovery's
+  ///    initiator branch (mint local group + race-bootstrap) handles election.
+  /// 4. Trigger a sync cycle to drive deferred recovery.
+  ///
+  /// Idempotency: if the incoming `generation` is already <= the stored
+  /// `pendingResetGeneration`, `markConversationNeedsReset` skips the write.
+  /// Required because the global (AppState) + per-convo (DetailView) WS
+  /// subscriptions both deliver this event for active conversations.
+  ///
+  /// - Parameters:
+  ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
+  ///     session id, generation, trigger, and dedup id.
+  public func handleResetRequested(
+    event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
+  ) async {
+    let convoId = event.convoId
+    let generation = event.generation
+    let trigger = event.trigger
+
+    logger.info(
+      "🔄 [handleResetRequested] Conversation \(convoId.prefix(16)) reset requested (gen \(generation), trigger=\(trigger), eventId=\(event.requestEventId.prefix(16)))"
+    )
+
+    guard let userDid = userDid else {
+      logger.warning("⚠️ [handleResetRequested] No user DID available")
+      return
+    }
+
+    guard await ensureActiveAccount(for: userDid, operation: "handleResetRequested") else {
+      return
+    }
+
+    // 1. Delete old MLS group state.
+    //    The prior crypto session is now `reset_requested` server-side; its
+    //    keys are no longer authoritative. Resolve the old group id from
+    //    memory or the DB, then drop OpenMLS state.
+    var oldGroupId: Data?
+    if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
+      oldGroupId = gid
+    } else {
+      do {
+        if let model = try await storage.fetchConversation(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          oldGroupId = model.groupID
+        }
+      } catch {
+        logger.warning(
+          "⚠️ [handleResetRequested] Database lookup for old group failed: \(error.localizedDescription)"
+        )
+      }
+    }
+
+    if let oldGroupId = oldGroupId {
+      do {
+        try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
+        logger.info("🗑️ [handleResetRequested] Deleted old MLS state for \(convoId.prefix(16))")
+      } catch {
+        logger.warning(
+          "⚠️ [handleResetRequested] Failed to delete old MLS state: \(error.localizedDescription)"
+        )
+        // Continue anyway — old state may already be gone.
+      }
+    } else {
+      logger.info(
+        "ℹ️ [handleResetRequested] No old group ID found for \(convoId.prefix(16)) — may already be cleaned up"
+      )
+    }
+
+    // 2. Remove old group state from in-memory caches.
+    if let convo = conversations[convoId] {
+      groupStates[convo.groupId] = nil
+    }
+
+    // 3. Flag RESET_PENDING with `pendingNewGroupId = nil`.
+    //    Phase 2.5 indirect triggers do NOT carry an announced new group id;
+    //    deferred recovery's initiator branch (mint local group + race-
+    //    bootstrap) drives election. The server's chokepoint UNIQUE
+    //    constraint serializes the winning candidate.
+    do {
+      try await markConversationNeedsReset(
+        convoId,
+        pendingNewGroupId: nil,
+        pendingResetGeneration: Int64(generation)
+      )
+      logger.info(
+        "🏴 [handleResetRequested] Flagged \(convoId.prefix(16)) as RESET_PENDING (initiator path) — gen \(generation), trigger=\(trigger)"
+      )
+    } catch {
+      logger.error(
+        "❌ [handleResetRequested] Failed to flag RESET_PENDING: \(error.localizedDescription)"
+      )
+    }
+
+    // 4. Trigger a sync cycle to pick up the deferred recovery promptly.
+    Task {
+      try? await self.syncWithServer(fullSync: false)
+    }
+  }
+
   /// Handle re-addition request from SSE stream
   /// When a member's rejoin attempts are exhausted (Welcome failed, External Commit failed),
   /// they request active members to re-add them. This method re-adds the user with fresh KeyPackages.

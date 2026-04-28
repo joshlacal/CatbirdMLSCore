@@ -50,6 +50,10 @@ public actor MLSEventStreamManager {
         public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
         public var onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)?
         public var onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)?
+        /// Phase 2.5 indirect-trigger reset request from the DS — see
+        /// `MLSWebSocketManager.EventHandler.onResetRequested` for shape.
+        public var onResetRequested:
+            ((BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent) async -> Void)?
         public var onError: ((Error) async -> Void)?
         public var onReconnected: (() async -> Void)?
 
@@ -68,6 +72,7 @@ public actor MLSEventStreamManager {
             onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)? = nil,
             onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)? = nil,
             onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)? = nil,
+            onResetRequested: ((BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent) async -> Void)? = nil,
             onError: ((Error) async -> Void)? = nil,
             onReconnected: (() async -> Void)? = nil
         ) {
@@ -83,6 +88,7 @@ public actor MLSEventStreamManager {
             self.onConversationNeedsRecovery = onConversationNeedsRecovery
             self.onTreeChanged = onTreeChanged
             self.onGroupReset = onGroupReset
+            self.onResetRequested = onResetRequested
             self.onError = onError
             self.onReconnected = onReconnected
         }
@@ -433,6 +439,12 @@ public actor MLSEventStreamManager {
                 "Group reset: convo=\(groupReset.convoId), newGroup=\(groupReset.newGroupId.prefix(16)), gen=\(groupReset.resetGeneration)")
             saveCursor(groupReset.cursor, for: convoId)
             await handler.onGroupReset?(groupReset)
+
+        case .resetRequestedEvent(let resetRequested):
+            logger.info(
+                "Reset requested: convo=\(resetRequested.convoId), gen=\(resetRequested.generation), trigger=\(resetRequested.trigger), eventId=\(resetRequested.requestEventId.prefix(16))")
+            saveCursor(resetRequested.cursor, for: convoId)
+            await handler.onResetRequested?(resetRequested)
 
         case .groupInfoRefreshRequestedEvent(let refreshEvent):
             logger.info("GroupInfo refresh requested: convo=\(refreshEvent.convoId)")
