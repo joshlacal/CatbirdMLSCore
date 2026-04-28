@@ -699,6 +699,37 @@ public final class MLSAPIClient {
         "❌ [MLSAPIClient.bootstrapResetGroup] Structured error: \(error.error.errorName) (status \(error.statusCode))"
       )
       throw MLSAPIError(from: error)
+    } catch let networkError as NetworkError {
+      // Petrel doesn't always decode 4xx bodies into the typed lexicon error
+      // (the response shape can differ from the generated wrapper). Map the
+      // documented bootstrapResetGroup status codes here so the orchestrator
+      // can switch on `MLSAPIError` instead of falling through to "unexpected
+      // error" and wiping local state on what is really a race-loss (or, more
+      // dangerously, on our own retry of our own success — see the 409 path
+      // in MLSConversationManager+Sync.attemptFirstResponderBootstrap).
+      let code: Int? = {
+        switch networkError {
+        case .responseError(let code), .serverError(let code, _): return code
+        default: return nil
+        }
+      }()
+      if let code {
+        logger.error(
+          "❌ [MLSAPIClient.bootstrapResetGroup] HTTP \(code) (NetworkError, no typed body) — mapping to MLSAPIError"
+        )
+        switch code {
+        case 409: throw MLSAPIError.alreadyBootstrapped(detail: nil)
+        case 404: throw MLSAPIError.bootstrapTargetNotFound(detail: nil)
+        case 403: throw MLSAPIError.notMember(detail: nil)
+        default:
+          throw MLSAPIError.httpError(
+            statusCode: code, message: "bootstrapResetGroup failed (NetworkError)")
+        }
+      }
+      logger.error(
+        "❌ [MLSAPIClient.bootstrapResetGroup] NetworkError (no status): \(networkError)"
+      )
+      throw networkError
     } catch {
       logger.error("❌ [MLSAPIClient.bootstrapResetGroup] Unexpected error: \(error)")
       throw error

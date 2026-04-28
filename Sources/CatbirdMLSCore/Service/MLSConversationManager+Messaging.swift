@@ -1037,7 +1037,19 @@ public extension MLSConversationManager {
         case .needsDeferredRejoin(_, let reason):
           logger.warning("[SEQ-ORDER] Epoch catch-up needs deferred rejoin for \(message.convoId.prefix(16))...: \(reason)")
           try? await markConversationNeedsRejoin(message.convoId)
-        case .noGap, .serverDataGap, .transientFetchError:
+        case .serverDataGap:
+          // Bootstrap commit was never written to wire — standard catch-up
+          // can never bridge this gap. Track strikes; trigger Mode B reset
+          // at threshold so all stuck members rebootstrap on a fresh group.
+          if let groupIdData = Data(hexEncoded: convo.groupId) {
+            let auth = await mlsClient.epochAuthenticatorHex(
+              for: userDid, groupId: groupIdData)
+            if let recoveryManager = await mlsClient.recovery(for: userDid) {
+              await recoveryManager.recordServerDataGap(
+                convoId: message.convoId, epochAuthenticatorHex: auth)
+            }
+          }
+        case .noGap, .transientFetchError:
           break
         }
       }
@@ -1271,7 +1283,14 @@ public extension MLSConversationManager {
                   case .needsDeferredRejoin(_, let reason):
                     logger.warning("⚠️ [EPOCH-RECOVERY] Deferred rejoin needed for \(message.convoId.prefix(16))...: \(reason)")
                     try? await markConversationNeedsRejoin(message.convoId)
-                  case .noGap, .serverDataGap, .transientFetchError:
+                  case .serverDataGap:
+                    let auth = await mlsClient.epochAuthenticatorHex(
+                      for: userDid, groupId: groupIdData)
+                    if let recoveryManager = await mlsClient.recovery(for: userDid) {
+                      await recoveryManager.recordServerDataGap(
+                        convoId: message.convoId, epochAuthenticatorHex: auth)
+                    }
+                  case .noGap, .transientFetchError:
                     break
                   }
                 }
@@ -5531,9 +5550,32 @@ public extension MLSConversationManager {
 
       // Record the failure for tracking
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
-        // Check if this is a server data corruption error
+        // Check if this is a server data corruption error.
+        // Includes:
+        //   - byte-level corruption (invalidVectorLength, endOfStream, etc.)
+        //   - server-side GroupInfo MISSING (`getGroupInfo` 404 from any layer:
+        //     `MLSAPIError.httpError(404)`, `MLSAPIError.invalidResponse`
+        //     "no GroupInfo available", or raw `Petrel.NetworkError`
+        //     responseError 404 surfacing as "status code: 404" in description).
+        //     This is the trifecta-fingerprint case: client lost local state +
+        //     server lost GroupInfo → External Commit cannot make progress and
+        //     the only path is a server-side reset. Classifying this as Mode B
+        //     (`remote_data_error → group_state_unrecoverable`) lets the
+        //     `reportRecoveryFailure` vote count toward quorum (1:1 = single
+        //     vote triggers reset), instead of being stranded as Mode A
+        //     telemetry that never fires reset.
+        let isGroupInfo404 =
+          errorMessage.contains("status code: 404")
+          || errorMessage.contains("(statuscode: 404)")
+          || errorMessage.contains("no groupinfo")
+          || (error as? MLSAPIError).map { err in
+            if case .httpError(let code, _) = err { return code == 404 }
+            if case .invalidResponse = err { return true }
+            return false
+          } == true
         let isServerDataCorruption =
-          errorMessage.contains("invalidvectorlength") || errorMessage.contains("endofstream")
+          isGroupInfo404
+          || errorMessage.contains("invalidvectorlength") || errorMessage.contains("endofstream")
           || errorMessage.contains("malformed") || errorMessage.contains("truncat")
           || errorMessage.contains("server data corrupted")
 

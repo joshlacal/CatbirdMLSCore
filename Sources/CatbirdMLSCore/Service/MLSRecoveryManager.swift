@@ -89,6 +89,25 @@ public actor MLSRecoveryManager {
   /// Maximum consecutive 404s before tripping the circuit breaker
   private let groupInfo404MaxStrikes = 3
 
+  // MARK: - Unbridgeable Epoch Gap (bootstrap commit-not-on-wire)
+
+  /// Per-conversation consecutive `serverDataGap` counter from
+  /// `fetchAndProcessMissingCommits`. When it returns `.serverDataGap`
+  /// repeatedly for the same convo, the local FFI is stuck at an epoch the
+  /// wire commit history cannot reach. Typical fingerprint: bootstrap
+  /// creator's `confirmCommit` was lost to a context-reload race; the
+  /// addMembers commit only ever existed in the Welcome bytes, never on the
+  /// wire (`mls-ds/server/src/handlers/mls_chat/bootstrap_reset_group.rs`
+  /// has no `INSERT INTO messages`). The only recovery path is a
+  /// server-side group reset.
+  private var serverDataGapCounts: [String: Int] = [:]
+
+  /// Threshold for transitioning to "report unrecoverable to server" on
+  /// repeated `serverDataGap` returns. Matches existing thresholds
+  /// (`commitFailureThreshold`, `decryptionFailureThreshold`,
+  /// `groupInfo404MaxStrikes`).
+  private let serverDataGapMaxStrikes = 3
+
   // MARK: - Global Rejoin Floor (Spec §8.4 / §10)
 
   /// GLOBAL minimum interval between External Commit rejoin attempts across
@@ -523,6 +542,81 @@ public actor MLSRecoveryManager {
     }
   }
 
+  /// Record an unbridgeable epoch gap (`fetchAndProcessMissingCommits`
+  /// returned `.serverDataGap` despite a known epoch gap).
+  ///
+  /// When this fires N times in a row for the same convo, the local FFI is
+  /// stuck at an epoch the wire commit history cannot reach — the typical
+  /// fingerprint is a bootstrap creator whose `confirmCommit` was lost to a
+  /// concurrent context reload, since the addMembers commit only ever
+  /// existed in the Welcome bytes (no `INSERT INTO messages` in
+  /// `bootstrap_reset_group.rs`). Standard epoch-recovery cannot bridge it,
+  /// so the only fix is a server-side group reset.
+  ///
+  /// At threshold (`serverDataGapMaxStrikes`), reports recovery failure as
+  /// Mode B (`group_state_unrecoverable`) so 1:1 convos auto-reset on a
+  /// single vote and group convos progress toward quorum. Resets the counter
+  /// after dispatch so we don't spam the server every sync — re-enters only
+  /// if `serverDataGapMaxStrikes` more consecutive gaps occur post-report
+  /// (i.e. the reset didn't actually fire / hasn't propagated yet).
+  ///
+  /// Caller should compute `epochAuthenticatorHex` via
+  /// `MLSClient.epochAuthenticatorHex(for:groupId:)` so the vote counts
+  /// toward quorum (server short-circuits as `missing_authenticator`
+  /// otherwise).
+  public func recordServerDataGap(
+    convoId: String,
+    epochAuthenticatorHex: String? = nil
+  ) {
+    let count = (serverDataGapCounts[convoId] ?? 0) + 1
+    serverDataGapCounts[convoId] = count
+    logger.warning(
+      "📊 [MLSRecoveryManager] serverDataGap strike \(count)/\(self.serverDataGapMaxStrikes) for \(convoId.prefix(16)) — epoch recovery cannot bridge gap"
+    )
+    guard count >= serverDataGapMaxStrikes else { return }
+
+    serverDataGapCounts[convoId] = 0
+
+    logger.error(
+      "🚨 [MLSRecoveryManager] Unbridgeable epoch gap confirmed for \(convoId.prefix(16)) — reporting Mode B (group_state_unrecoverable, failureType=bootstrap_commit_unbridgeable)"
+    )
+    if epochAuthenticatorHex == nil {
+      logger.warning(
+        "⚠️ [MLSRecoveryManager] recordServerDataGap missing epochAuthenticator for \(convoId.prefix(16)) — server will short-circuit vote (reason: missing_authenticator). Caller should pass MLSContext.epochAuthenticator(groupId:) hex."
+      )
+    }
+    let authenticator = epochAuthenticatorHex
+    Task {
+      do {
+        let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
+          convoId: convoId,
+          failureType: "bootstrap_commit_unbridgeable",
+          failureMode: "group_state_unrecoverable",
+          epochAuthenticator: authenticator
+        )
+        let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat
+          .reportRecoveryFailure(input: input)
+        self.logger.info(
+          "📡 [MLSRecoveryManager] Reported unbridgeable epoch gap for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) reason=\(output?.reason ?? "nil")"
+        )
+      } catch {
+        self.logger.error(
+          "❌ [MLSRecoveryManager] Failed to report unbridgeable epoch gap for \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+    }
+  }
+
+  /// Clear the unbridgeable-epoch-gap counter (called on successful epoch
+  /// advance / rejoin).
+  public func clearServerDataGap(convoId: String) {
+    if serverDataGapCounts.removeValue(forKey: convoId) != nil {
+      logger.debug(
+        "[MLSRecoveryManager] Cleared serverDataGap counter for \(convoId.prefix(16))"
+      )
+    }
+  }
+
   /// Clear rejoin tracking for a conversation (on success).
   ///
   /// Also clears transient state and failure counters so the conversation
@@ -533,6 +627,7 @@ public actor MLSRecoveryManager {
     transientStates.removeValue(forKey: convoId)
     commitFailureCounts.removeValue(forKey: convoId)
     decryptionFailureCounts.removeValue(forKey: convoId)
+    serverDataGapCounts.removeValue(forKey: convoId)
     // Stamp the global rejoin floor on the success outcome (spec §8.4 / §10,
     // mirrors Rust `RecoveryTracker::clear` which stamps unconditionally —
     // see comment at `catbird-mls/src/orchestrator/recovery.rs` near line 108:

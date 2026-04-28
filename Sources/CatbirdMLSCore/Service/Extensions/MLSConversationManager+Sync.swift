@@ -247,7 +247,13 @@ public extension MLSConversationManager {
                   logger.warning("   Reason: \(reason)")
                   try? await markConversationNeedsRejoin(convo.conversationId)
                 case .serverDataGap:
-                  logger.warning("⚠️ Server data gap (new group) for \(convo.conversationId.prefix(16))... - will retry next sync")
+                  logger.warning("⚠️ Server data gap (new group) for \(convo.conversationId.prefix(16))... - epoch \(ffiEpoch) unbridgeable to \(serverEpoch)")
+                  let auth = await mlsClient.epochAuthenticatorHex(
+                    for: userDid, groupId: groupIdData)
+                  if let recoveryManager = await mlsClient.recovery(for: userDid) {
+                    await recoveryManager.recordServerDataGap(
+                      convoId: convo.conversationId, epochAuthenticatorHex: auth)
+                  }
                 case .transientFetchError(let reason):
                   logger.warning("⚠️ Transient fetch error (new group) for \(convo.conversationId.prefix(16))...: \(reason) - will retry next sync")
                 }
@@ -312,7 +318,13 @@ public extension MLSConversationManager {
                     logger.warning("   Reason: \(reason)")
                     try? await markConversationNeedsRejoin(convo.conversationId)
                   case .serverDataGap:
-                    logger.warning("⚠️ Server data gap (update) for \(convo.conversationId.prefix(16))... - will retry next sync")
+                    logger.warning("⚠️ Server data gap (update) for \(convo.conversationId.prefix(16))... - epoch \(ffiEpoch) unbridgeable to \(serverEpoch)")
+                    let auth = await mlsClient.epochAuthenticatorHex(
+                      for: userDid, groupId: groupIdData)
+                    if let recoveryManager = await mlsClient.recovery(for: userDid) {
+                      await recoveryManager.recordServerDataGap(
+                        convoId: convo.conversationId, epochAuthenticatorHex: auth)
+                    }
                   case .transientFetchError(let reason):
                     logger.warning("⚠️ Transient fetch error (update) for \(convo.conversationId.prefix(16))...: \(reason) - will retry next sync")
                   }
@@ -1364,26 +1376,164 @@ public extension MLSConversationManager {
     } catch let error as MLSAPIError {
       switch error {
       case .alreadyBootstrapped:
-        // Race lost. The winner's Welcome will arrive on the next sync;
-        // discard the local pre-bootstrap MLS state so it doesn't conflict
-        // with the winner's group state. Leave RESET_PENDING set so the
-        // next deferred-recovery loop processes the Welcome.
+        // 409 has TWO causes that look identical from the wire:
+        //   (a) sibling beat us to POST → we lost the race, server holds
+        //       sibling's group_info, a Welcome was inserted for us.
+        //   (b) OUR earlier POST committed the transaction but the response
+        //       was lost (network 5xx, dropped TLS, etc.) → we retried,
+        //       server says "already done", but the bootstrap that won was
+        //       OURS — there is no Welcome for us, and the local stagedHandle
+        //       is the one that produced the server's group_info.
+        // Disambiguate via getWelcome: if a Welcome targeted at us exists,
+        // (a) is true; otherwise (b) is true and we should commit our staged
+        // state instead of wiping it (B16).
         logger.warning(
-          "🥈 [BOOTSTRAP] Race lost for \(convoId.prefix(16)) (AlreadyBootstrapped 409) — clearing local pre-bootstrap state, awaiting Welcome"
+          "🥈 [BOOTSTRAP] 409 for \(convoId.prefix(16)) — disambiguating winner-vs-loser via Welcome lookup"
         )
-        if let handle = stagedHandle {
-          await mlsClient.discardPending(for: userDid, handle: handle)
-        }
-        // B15 (Half 2): only delete if WE created this group. The 409 means
-        // the SERVER already has bootstrap state for this convo — but the
-        // local group at `pendingGroupIdData` may belong to a sibling
-        // External Commit / bootstrap that beat us locally.
-        if wasGroupCreatedByUs {
-          try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
-        } else {
-          logger.info(
-            "🛡️ [BOOTSTRAP] Skipping deleteGroup on 409 for \(convoId.prefix(16)) — group not owned by this attempt"
+        var welcomeForUs: Bool = false
+        do {
+          _ = try await apiClient.getWelcome(convoId: convoId)
+          welcomeForUs = true
+        } catch let mlsErr as MLSAPIError {
+          if case .invalidResponse = mlsErr {
+            welcomeForUs = false
+          } else {
+            // Treat unknown errors as "loser" (the safer default — we won't
+            // accidentally double-commit, just retry next loop).
+            logger.warning(
+              "⚠️ [BOOTSTRAP] getWelcome errored during 409 disambiguation for \(convoId.prefix(16)): \(mlsErr.errorDescription ?? "?") — defaulting to loser path"
+            )
+            welcomeForUs = true
+          }
+        } catch {
+          logger.warning(
+            "⚠️ [BOOTSTRAP] getWelcome errored during 409 disambiguation for \(convoId.prefix(16)): \(error.localizedDescription) — defaulting to loser path"
           )
+          welcomeForUs = true
+        }
+
+        if welcomeForUs {
+          // Race lost. The winner's Welcome will be consumed by the
+          // deferred-recovery loop. Discard our staging so it doesn't conflict.
+          logger.warning(
+            "🥈 [BOOTSTRAP] Race lost for \(convoId.prefix(16)) (Welcome present) — clearing local pre-bootstrap state, awaiting Welcome"
+          )
+          if let handle = stagedHandle {
+            await mlsClient.discardPending(for: userDid, handle: handle)
+          }
+          if wasGroupCreatedByUs {
+            try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+          } else {
+            logger.info(
+              "🛡️ [BOOTSTRAP] Skipping deleteGroup on 409 for \(convoId.prefix(16)) — group not owned by this attempt"
+            )
+          }
+        } else {
+          // (b) — our prior POST committed; this 409 is our own retry
+          // hitting our own success. Confirm the staged commit and persist
+          // exactly as the 200 path would. Without this branch we destroy
+          // the local group state that the server is now bound to and the
+          // user gets stuck with `GroupNotFound` on every send.
+          logger.warning(
+            "🏆 [BOOTSTRAP] 409 with no Welcome for us → treating as WE WON (lost-response recovery) for \(convoId.prefix(16))"
+          )
+          let serverConvo: BlueCatbirdMlsChatDefs.ConvoView?
+          do {
+            serverConvo = try await apiClient.getConversation(convoId: convoId)
+          } catch {
+            serverConvo = nil
+          }
+          if let handle = stagedHandle {
+            let serverEpoch = UInt64(serverConvo?.epoch ?? 1)
+            do {
+              _ = try await mlsClient.confirmCommit(
+                for: userDid, handle: handle, serverEpoch: serverEpoch)
+            } catch {
+              // CRITICAL: confirmCommit lost (likely a concurrent context
+              // reload wiped the in-memory staged-commit map between stage and
+              // confirm). The local group at `pendingGroupIdData` still exists
+              // BUT IS AT THE WRONG EPOCH — createGroupWithId puts it at
+              // epoch 0; the staged addMembers commit (which would have
+              // advanced to epoch 1) was never applied. The server, however,
+              // is at epoch 1 because the bootstrap committed there.
+              //
+              // We CANNOT just persist as success — the local group's epoch-0
+              // ratchet keys are incompatible with anything that comes through
+              // the server (which sees epoch 1). Sends would encrypt at
+              // epoch 0 and other members (joined via Welcome at epoch 1)
+              // could not decrypt them. This was the original symptom: both
+              // accounts could send but neither received.
+              //
+              // The bootstrap addMembers commit is delivered ONLY via the
+              // Welcome — it is NOT stored on the wire as type=commit — so
+              // we cannot recover by fetching the commit and processing it.
+              // The only recovery is to delete the half-baked local group and
+              // rejoin via External Commit (which advances server epoch and
+              // triggers a commit fanout that other members will process).
+              logger.error(
+                "❌ [BOOTSTRAP] confirmCommit failed during 409-winner recovery for \(convoId.prefix(16)): \(error.localizedDescription) — local group is stuck at pre-confirm epoch; deleting and queuing External Commit rejoin"
+              )
+              try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+              if let recoveryManager = await mlsClient.recovery(for: userDid) {
+                // Don't increment failure counter — this is an in-band
+                // recovery, not a true failure. Just clear so next sync sees
+                // it as eligible for External Commit join.
+                await recoveryManager.clearRejoinTracking(convoId: convoId)
+              }
+              return
+            }
+          }
+          let landedEpoch: Int64
+          do {
+            landedEpoch = Int64(
+              try await mlsClient.getEpoch(for: userDid, groupId: pendingGroupIdData))
+          } catch {
+            landedEpoch = Int64(serverConvo?.epoch ?? 1)
+          }
+          let now = Date()
+          do {
+            try await database.write { db in
+              let currentGeneration = try MLSConversationResetSQL.loadPendingResetGeneration(
+                db: db, conversationID: convoId, currentUserDID: userDid)
+              let generationAdvanced: Bool = {
+                switch (currentGeneration, observedGeneration) {
+                case let (.some(current), .some(observed)):
+                  return current > observed
+                case (.some, .none):
+                  return true
+                default:
+                  return false
+                }
+              }()
+              if generationAdvanced {
+                try MLSConversationResetSQL.clearPendingReset(
+                  db: db, conversationID: convoId, currentUserDID: userDid, now: now)
+              } else {
+                try MLSConversationResetSQL.applyRecipientResetSuccess(
+                  db: db,
+                  conversationID: convoId,
+                  currentUserDID: userDid,
+                  newGroupID: pendingGroupIdData,
+                  newEpoch: landedEpoch,
+                  now: now
+                )
+              }
+            }
+            groupStates.removeValue(forKey: convoId)
+            if let serverConvo {
+              conversations[convoId] = serverConvo
+            }
+            logger.warning(
+              "✅ [BOOTSTRAP] 409-winner recovery complete for \(convoId.prefix(16)) → epoch=\(landedEpoch)"
+            )
+            if let recoveryManager = await mlsClient.recovery(for: userDid) {
+              await recoveryManager.clearRejoinTracking(convoId: convoId)
+            }
+          } catch {
+            logger.error(
+              "❌ [BOOTSTRAP] DB write failed during 409-winner recovery for \(convoId.prefix(16)): \(error.localizedDescription)"
+            )
+          }
         }
 
       case .bootstrapTargetNotFound, .notMember:
