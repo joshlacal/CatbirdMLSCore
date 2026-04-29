@@ -1051,6 +1051,214 @@ public final class MLSConversationManager {
     }
   }
 
+  /// Handle a Phase 2.5 indirect-trigger `resetRequestedEvent` from the SSE/
+  /// WebSocket stream.
+  ///
+  /// Phase 2.5 (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1)
+  /// closes the indirect-flow gap where the server previously minted a new
+  /// `mls_group_id` itself. With the chokepoint funnel, indirect triggers
+  /// (quorum vote, system sweep, inline 409, inline groupinfo-404) only emit
+  /// `crypto_session_reset_requested`; subscribed clients then elect a first
+  /// responder via `bootstrapResetGroup` / `commitGroupChange` (the
+  /// `crypto_sessions UNIQUE (conversation_id, generation)` constraint
+  /// serializes the winner — first commit wins, losers receive HTTP 409
+  /// `AlreadyBootstrapped` and drop their pre-bootstrap MLS state cleanly).
+  ///
+  /// Mirrors `handleGroupReset(event:)`:
+  /// 1. Delete the old MLS group state (the prior crypto session is now
+  ///    `reset_requested` server-side; its keys are no longer authoritative).
+  /// 2. Remove the old group from in-memory caches.
+  /// 3. Flag `needsReset = true`. Resolution:
+  ///    - If the server attached `expectedNewMlsGroupId` (admin override
+  ///      path, rare), stage that as `pendingNewGroupId`.
+  ///    - Otherwise mint a fresh client-side UUIDv4 candidate id (32 lower-
+  ///      case hex chars, mirroring `record_reset_requested` in
+  ///      `catbird-mls/src/orchestrator/recovery.rs`). This stages the row
+  ///      into the recipient-then-bootstrap branch that already exists in
+  ///      `runDeferredEpochRecovery` — first the External Commit attempt
+  ///      (which fails with `GroupInfo` absent post-reset), then
+  ///      `attemptFirstResponderBootstrap` races the candidate against
+  ///      siblings via `bootstrapResetGroup`. The chokepoint UNIQUE
+  ///      constraint elects the winner; race losers see HTTP 409 and drop
+  ///      their pre-bootstrap state.
+  /// 4. Trigger a sync cycle to drive deferred recovery promptly.
+  ///
+  /// **Why mint client-side instead of leaving `pendingNewGroupId == nil`?**
+  /// The existing sync-loop branch logic (`MLSConversationManager+Sync.swift`
+  /// line 635) treats `pendingNewGroupId == nil` as the **admin-initiator**
+  /// path that calls the privileged `resetGroup` endpoint and fails with
+  /// `notadmin` for non-admin members. Phase 2.5 explicitly retired the
+  /// admin-mint flow for indirect triggers. Minting client-side puts the row
+  /// into the bootstrap-race branch which is the correct Phase 2.5 endpoint
+  /// (`bootstrapResetGroup`) for any active member.
+  ///
+  /// Idempotency: a stale-generation guard runs **before** the destructive
+  /// `deleteGroup` call (mirrors `record_reset_requested` at
+  /// `catbird-mls/src/orchestrator/recovery.rs:1401`). If the stored
+  /// `pendingResetGeneration` is `>=` the incoming `event.generation`, the
+  /// handler returns early without touching MLS state — the row is already
+  /// at this or a newer generation. Required because the global (AppState)
+  /// + per-convo (DetailView) WS subscriptions both deliver this event for
+  /// active conversations, and `event_stream` cursor replay can re-deliver
+  /// after reconnect. `markConversationNeedsReset` applies the same guard
+  /// at the row-write layer as a second line of defense.
+  ///
+  /// - Parameters:
+  ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
+  ///     session id, generation, trigger, and dedup id.
+  public func handleResetRequested(
+    event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
+  ) async {
+    let convoId = event.convoId
+    let generation = event.generation
+    let trigger = event.trigger
+
+    logger.info(
+      "🔄 [handleResetRequested] Conversation \(convoId.prefix(16)) reset requested (gen \(generation), trigger=\(trigger), eventId=\(event.requestEventId.prefix(16)))"
+    )
+
+    guard let userDid = userDid else {
+      logger.warning("⚠️ [handleResetRequested] No user DID available")
+      return
+    }
+
+    guard await ensureActiveAccount(for: userDid, operation: "handleResetRequested") else {
+      return
+    }
+
+    // 0. Stale-generation guard (BEFORE destructive delete).
+    //    If a newer or equal `pendingResetGeneration` is already persisted,
+    //    treat this event as a stale replay / dual-subscription duplicate and
+    //    short-circuit. Mirrors `record_reset_requested` at
+    //    `catbird-mls/src/orchestrator/recovery.rs:1401` and the existing
+    //    Swift `markConversationNeedsReset` stale-guard at line 3353.
+    //
+    //    Without this check, a replayed event with an older generation would
+    //    delete the current MLS group state (which may already be operating
+    //    at a NEWER generation) before the staleness check inside
+    //    `markConversationNeedsReset` would reject the row write — clobbering
+    //    valid local state and forcing avoidable recovery.
+    do {
+      let stored = try await database.read { db in
+        try MLSConversationResetSQL.loadPendingResetGeneration(
+          db: db, conversationID: convoId, currentUserDID: userDid
+        )
+      }
+      if let stored = stored, stored >= Int64(generation) {
+        logger.info(
+          "⏭️ [handleResetRequested] Stale event for \(convoId.prefix(16)) — incoming gen \(generation) <= stored gen \(stored); no-op (eventId=\(event.requestEventId.prefix(16)))"
+        )
+        return
+      }
+    } catch {
+      // If the read itself fails, fall through and let the existing
+      // markConversationNeedsReset stale-guard catch it. We only short-circuit
+      // when we positively know the event is stale.
+      logger.warning(
+        "⚠️ [handleResetRequested] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
+      )
+    }
+
+    // 1. Delete old MLS group state.
+    //    The prior crypto session is now `reset_requested` server-side; its
+    //    keys are no longer authoritative. Resolve the old group id from
+    //    memory or the DB, then drop OpenMLS state.
+    var oldGroupId: Data?
+    if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
+      oldGroupId = gid
+    } else {
+      do {
+        if let model = try await storage.fetchConversation(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          oldGroupId = model.groupID
+        }
+      } catch {
+        logger.warning(
+          "⚠️ [handleResetRequested] Database lookup for old group failed: \(error.localizedDescription)"
+        )
+      }
+    }
+
+    if let oldGroupId = oldGroupId {
+      do {
+        try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
+        logger.info("🗑️ [handleResetRequested] Deleted old MLS state for \(convoId.prefix(16))")
+      } catch {
+        logger.warning(
+          "⚠️ [handleResetRequested] Failed to delete old MLS state: \(error.localizedDescription)"
+        )
+        // Continue anyway — old state may already be gone.
+      }
+    } else {
+      logger.info(
+        "ℹ️ [handleResetRequested] No old group ID found for \(convoId.prefix(16)) — may already be cleaned up"
+      )
+    }
+
+    // 2. Remove old group state from in-memory caches.
+    if let convo = conversations[convoId] {
+      groupStates[convo.groupId] = nil
+    }
+
+    // 3. Resolve the candidate `pendingNewGroupId` for the row.
+    //    Server-supplied (admin override) takes precedence; otherwise mint
+    //    a fresh UUIDv4-style 32-hex-char id locally for the race-bootstrap
+    //    candidate (mirrors `record_reset_requested` in
+    //    `catbird-mls/src/orchestrator/recovery.rs`).
+    let candidateGroupIdHex: String
+    if let serverHex = event.expectedNewMlsGroupId, !serverHex.isEmpty {
+      candidateGroupIdHex = serverHex
+      logger.info(
+        "🔄 [handleResetRequested] Using server-supplied expectedNewMlsGroupId \(serverHex.prefix(16))"
+      )
+    } else {
+      candidateGroupIdHex = Self.mintCandidateGroupIdHex()
+      logger.info(
+        "🔄 [handleResetRequested] Minting client-side candidate \(candidateGroupIdHex.prefix(16)) for first-responder bootstrap race"
+      )
+    }
+
+    // 4. Flag RESET_PENDING with the candidate id staged. The deferred
+    //    recovery loop will pick this up via `runDeferredEpochRecoveryRecipient`
+    //    → fall through to `attemptFirstResponderBootstrap` (GroupInfo absent
+    //    post-reset → bootstrap race).
+    do {
+      try await markConversationNeedsReset(
+        convoId,
+        pendingNewGroupId: candidateGroupIdHex,
+        pendingResetGeneration: Int64(generation)
+      )
+      logger.info(
+        "🏴 [handleResetRequested] Flagged \(convoId.prefix(16)) as RESET_PENDING — candidateNewGroupId=\(candidateGroupIdHex.prefix(16)), gen \(generation), trigger=\(trigger)"
+      )
+    } catch {
+      logger.error(
+        "❌ [handleResetRequested] Failed to flag RESET_PENDING: \(error.localizedDescription)"
+      )
+    }
+
+    // 5. Trigger a sync cycle to pick up the deferred recovery promptly.
+    Task {
+      do {
+        try await self.syncWithServer(fullSync: false)
+      } catch {
+        self.logger.warning(
+          "⚠️ [handleResetRequested] syncWithServer failed after reset request handling: \(error.localizedDescription)"
+        )
+      }
+    }
+  }
+
+  /// Mint a client-side UUIDv4-derived 32-lowercase-hex-char id for the
+  /// Phase 2.5 first-responder bootstrap race. Mirrors the Rust orchestrator
+  /// helper `format!("{:032x}", uuid::Uuid::new_v4().as_u128())`.
+  internal static func mintCandidateGroupIdHex() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  }
+
   /// Handle re-addition request from SSE stream
   /// When a member's rejoin attempts are exhausted (Welcome failed, External Commit failed),
   /// they request active members to re-add them. This method re-adds the user with fresh KeyPackages.
