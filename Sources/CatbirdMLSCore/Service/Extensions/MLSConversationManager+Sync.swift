@@ -1095,6 +1095,19 @@ public extension MLSConversationManager {
         // when the server returns 200 with null/empty payload, which is the
         // post-auto-reset signal.
         return true
+      case .httpError(let statusCode, _) where statusCode == 410:
+        // CLIENT L: HTTP 410 + structured groupReset body is SERVER B's
+        // post-auto-reset signal — the server's active `crypto_sessions` row
+        // exists but `group_info IS NULL` (legacy `do_reset_group` path,
+        // mls-ds/server/src/actors/conversation.rs:2272-2291). Treat
+        // identically to 404: GroupInfo is unfetchable, so the only way
+        // forward is first-responder bootstrap. CLIENT I covers the
+        // recipient-EC catch on Sync.swift:992-1042 separately; this branch
+        // unblocks B9 (creator) and B11 (rejoin) bootstrap fallbacks.
+        logger.warning(
+          "🚨 [410-BOOTSTRAP] groupReset detected for \(convoId.prefix(16)) — racing for first-responder bootstrap"
+        )
+        return true
       case .httpError(let statusCode, _) where statusCode == 404:
         return true
       default:
@@ -1109,7 +1122,23 @@ public extension MLSConversationManager {
       // returning `false`, which means `attemptFirstResponderBootstrap` never
       // fires from B9 (creator branch) or B11 (rejoin path) and reset convos
       // stay stuck forever.
+      //
+      // CLIENT L: extend to HTTP 410 (groupReset) — see `.httpError` arm above
+      // for full diagnosis. Petrel's `NetworkError.responseError` /
+      // `NetworkError.serverError` is what surfaces here when the lexicon
+      // codegen doesn't carry a typed body for the status code, which is the
+      // common path for the post-reset 410 today.
       switch networkError {
+      case .responseError(let code) where code == 410:
+        logger.warning(
+          "🚨 [410-BOOTSTRAP] groupReset detected for \(convoId.prefix(16)) — racing for first-responder bootstrap"
+        )
+        return true
+      case .serverError(let code, _) where code == 410:
+        logger.warning(
+          "🚨 [410-BOOTSTRAP] groupReset detected for \(convoId.prefix(16)) — racing for first-responder bootstrap"
+        )
+        return true
       case .responseError(let code):
         return code == 404
       case .serverError(let code, _):
