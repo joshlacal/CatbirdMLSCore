@@ -58,6 +58,15 @@ public extension MLSConversationManager {
     // Reconnect database pool if it was closed during recovery
     try await refreshDatabaseIfNeeded()
 
+    // 🪝 [CLIENT E] One-time-per-session boot scan for half-staged
+    // bootstrap groups. Must run BEFORE the first sync iteration so any
+    // half-staged group is cleaned up before the new sync's recovery
+    // logic re-encounters it and double-acts.
+    if !didRunBootstrapPendingScan {
+      didRunBootstrapPendingScan = true
+      await cleanUpHalfStagedBootstrapGroups()
+    }
+
     // Do not start sync while lifecycle has MLS paused/suspending.
     if isSyncPaused || isSuspending || MLSClient.isSuspensionInProgress {
       logger.info("⏸️ [SYNC] Skipping sync while MLS is paused/suspending")
@@ -1077,6 +1086,77 @@ public extension MLSConversationManager {
   /// the per-convo rejoin lock that `ensureGroupInitialized` had already
   /// claimed — so reset convos never got bootstrapped until the user
   /// quit and relaunched, and even then only via the deferred path.
+  /// CLIENT E: scan the bootstrap-pending table on first sync per session
+  /// and tear down any half-staged OpenMLS groups whose `confirmCommit`
+  /// never landed (process kill, account switch mid-flight, crash). The
+  /// surviving local group sits at epoch 0 with a phantom group_id —
+  /// `getEpoch` returns GroupNotFound forever and `sendMessage` 409s.
+  /// Cleanup deletes the local group and the marker; downstream sync
+  /// will re-discover the convo (Welcome from sibling winner, or fresh
+  /// bootstrap retry if we still need to be the first responder).
+  internal func cleanUpHalfStagedBootstrapGroups() async {
+    guard let userDid = userDid else { return }
+
+    let markers: [MLSBootstrapPendingModel]
+    do {
+      markers = try await MLSBootstrapPendingModel.fetchAll(
+        currentUserDID: userDid, database: database)
+    } catch {
+      logger.warning(
+        "🪝 [CLIENT E] Failed to fetch bootstrap-pending markers: \(error.localizedDescription)"
+      )
+      return
+    }
+
+    guard !markers.isEmpty else {
+      logger.debug("🪝 [CLIENT E] No half-staged bootstrap markers to clean up")
+      return
+    }
+
+    logger.warning(
+      "🪝 [CLIENT E] Cleaning up \(markers.count) half-staged bootstrap group(s) for \(userDid.prefix(20))"
+    )
+
+    for marker in markers {
+      guard let groupIdData = Data(hexEncoded: marker.groupIdHex) else {
+        logger.warning(
+          "🪝 [CLIENT E] Marker for \(marker.conversationID.prefix(16)) has invalid hex groupId — clearing without delete"
+        )
+        await MLSBootstrapPendingModel.clear(
+          conversationID: marker.conversationID,
+          currentUserDID: userDid,
+          database: database
+        )
+        continue
+      }
+
+      // Delete the OpenMLS group state. Idempotent — if confirmCommit
+      // had landed and the marker simply leaked, deleteGroup will surface
+      // an error which we tolerate (the convo's manifest entry already
+      // points at a valid group).
+      let exists = await mlsClient.groupExists(for: userDid, groupId: groupIdData)
+      if exists {
+        try? await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
+        logger.warning(
+          "🪝 [CLIENT E] Deleted half-staged group \(marker.groupIdHex.prefix(16)) for convo \(marker.conversationID.prefix(16))"
+        )
+      } else {
+        logger.info(
+          "🪝 [CLIENT E] Half-staged group \(marker.groupIdHex.prefix(16)) for convo \(marker.conversationID.prefix(16)) already absent — clearing marker only"
+        )
+      }
+
+      groupStates.removeValue(forKey: marker.conversationID)
+
+      // Always clear the marker so it doesn't fire again next boot.
+      await MLSBootstrapPendingModel.clear(
+        conversationID: marker.conversationID,
+        currentUserDID: userDid,
+        database: database
+      )
+    }
+  }
+
   internal func attemptFirstResponderBootstrap(
     convoId: String,
     userDid: String,
@@ -1156,6 +1236,23 @@ public extension MLSConversationManager {
     // `deleteGroup` cleanup below; `discardPending(handle:)` remains safe
     // (local-only) and is called regardless.
     var wasGroupCreatedByUs = false
+
+    // 🪝 [CLIENT E] Always clear the bootstrap-pending marker on function
+    // exit. Set after createGroupWithId; cleared here regardless of which
+    // path (200 success, 409 winner, 409 loser, irrecoverable, rollback)
+    // we exit through. The boot scan ignores rows that survive crashes —
+    // those are the genuine half-staged groups we need to clean.
+    let bootstrapPendingDB = self.database
+    defer {
+      Task { [bootstrapPendingDB] in
+        await MLSBootstrapPendingModel.clear(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: bootstrapPendingDB
+        )
+      }
+    }
+
     if await mlsClient.groupExists(for: userDid, groupId: pendingGroupIdData) {
       logger.info(
         "ℹ️ [BOOTSTRAP] Group \(pendingNewGroupIdHex.prefix(16)) already exists locally for \(convoId.prefix(16)) — sibling won the create race; reusing without delete-on-failure"
@@ -1166,6 +1263,18 @@ public extension MLSConversationManager {
         _ = try await mlsClient.createGroupWithId(
           for: userDid, groupId: pendingGroupIdData, configuration: groupConfig)
         wasGroupCreatedByUs = true
+        // 🪝 [CLIENT E] Atomic bootstrap-pending marker. Recorded
+        // immediately after the FFI's durable createGroupWithId returns
+        // and cleared after confirmCommit (or on every rollback path).
+        // Boot-time scan will clean up half-staged groups whose
+        // confirmCommit never landed (process kill, account switch,
+        // crash between createGroupWithId and confirmCommit).
+        try? await MLSBootstrapPendingModel.record(
+          conversationID: convoId,
+          groupIdHex: pendingNewGroupIdHex,
+          currentUserDID: userDid,
+          database: database
+        )
       } catch {
         // `MLSClient.createGroupWithId` swallows the underlying `MlsError`
         // variant and re-throws as bare `MLSError.operationFailed`, so we
@@ -1434,8 +1543,15 @@ public extension MLSConversationManager {
           // exactly as the 200 path would. Without this branch we destroy
           // the local group state that the server is now bound to and the
           // user gets stuck with `GroupNotFound` on every send.
+          //
+          // 🛡️ [CLIENT D] Verify-after-confirm: absence of welcome alone
+          // does NOT prove we won. A sibling could have won and the server
+          // simply never had a welcome for us. We must verify that the
+          // server-bound group_id matches our pendingNewGroupIdHex BEFORE
+          // ratcheting, and verify the post-confirm epoch matches the
+          // server's groupInfo AFTER ratcheting.
           logger.warning(
-            "🏆 [BOOTSTRAP] 409 with no Welcome for us → treating as WE WON (lost-response recovery) for \(convoId.prefix(16))"
+            "🏆 [BOOTSTRAP] 409 with no Welcome for us → tentatively WE WON (lost-response recovery) for \(convoId.prefix(16)); verifying"
           )
           let serverConvo: BlueCatbirdMlsChatDefs.ConvoView?
           do {
@@ -1443,6 +1559,33 @@ public extension MLSConversationManager {
           } catch {
             serverConvo = nil
           }
+
+          // Pre-confirm groupId verification: cheapest discriminator. If
+          // the server's bound group_id is NOT our pendingNewGroupIdHex,
+          // the sibling won and we must take the loser path (regardless
+          // of welcome presence — server B may not have inserted one yet).
+          if let serverConvo {
+            let serverGroupIdHex = serverConvo.groupId
+            if !serverGroupIdHex.isEmpty
+              && serverGroupIdHex.lowercased() != pendingNewGroupIdHex.lowercased()
+            {
+              logger.warning(
+                "🛡️ [CLIENT D] BOOTSTRAP race lost (verified): serverGroupId=\(serverGroupIdHex.prefix(16)) ≠ pendingNewGroupId=\(pendingNewGroupIdHex.prefix(16)) — rolling back to loser path"
+              )
+              if let handle = stagedHandle {
+                await mlsClient.discardPending(for: userDid, handle: handle)
+              }
+              if wasGroupCreatedByUs {
+                try? await mlsClient.deleteGroup(
+                  for: userDid, groupId: pendingGroupIdData)
+              }
+              if let recoveryManager = await mlsClient.recovery(for: userDid) {
+                await recoveryManager.clearRejoinTracking(convoId: convoId)
+              }
+              return
+            }
+          }
+
           if let handle = stagedHandle {
             let serverEpoch = UInt64(serverConvo?.epoch ?? 1)
             do {
@@ -1490,6 +1633,47 @@ public extension MLSConversationManager {
           } catch {
             landedEpoch = Int64(serverConvo?.epoch ?? 1)
           }
+
+          // 🛡️ [CLIENT D] Post-confirm cryptographic backstop. Fetch the
+          // server's authoritative groupInfo and compare its epoch to
+          // landedEpoch. If they diverge — or if the server returns 404
+          // (no groupInfo bound, e.g. server B fix not deployed) — we
+          // can't prove we actually won. Roll back rather than persist a
+          // ratchet the server hasn't accepted.
+          var verifiedWin = false
+          do {
+            let (_, serverInfoEpoch, _) = try await apiClient.getGroupInfo(
+              convoId: convoId, maxRetries: 1)
+            if Int64(serverInfoEpoch) == landedEpoch {
+              verifiedWin = true
+              logger.info(
+                "🛡️ [CLIENT D] Post-confirm verify OK for \(convoId.prefix(16)): server epoch=\(serverInfoEpoch) matches landedEpoch=\(landedEpoch)"
+              )
+            } else {
+              logger.warning(
+                "🛡️ [CLIENT D] Post-confirm epoch mismatch for \(convoId.prefix(16)): server=\(serverInfoEpoch) vs local=\(landedEpoch) — rolling back"
+              )
+            }
+          } catch {
+            logger.warning(
+              "🛡️ [CLIENT D] Post-confirm getGroupInfo failed for \(convoId.prefix(16)) (\(error.localizedDescription)) — treating as ambiguous, rolling back"
+            )
+          }
+
+          if !verifiedWin {
+            // Rollback: the local ratchet has advanced past confirmCommit,
+            // but we cannot prove the server is bound to it. Tear down the
+            // local group; recovery will re-discover via Welcome (loser
+            // path) or External Commit on the next sync. Do NOT call
+            // markConversationNeedsReset here — that path is owned by
+            // CLIENT G's WrongGroupId handler.
+            try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
+            if let recoveryManager = await mlsClient.recovery(for: userDid) {
+              await recoveryManager.clearRejoinTracking(convoId: convoId)
+            }
+            return
+          }
+
           let now = Date()
           do {
             try await database.write { db in
@@ -1524,7 +1708,7 @@ public extension MLSConversationManager {
               conversations[convoId] = serverConvo
             }
             logger.warning(
-              "✅ [BOOTSTRAP] 409-winner recovery complete for \(convoId.prefix(16)) → epoch=\(landedEpoch)"
+              "✅ [BOOTSTRAP] 409-winner recovery complete for \(convoId.prefix(16)) → epoch=\(landedEpoch) (verified)"
             )
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
               await recoveryManager.clearRejoinTracking(convoId: convoId)

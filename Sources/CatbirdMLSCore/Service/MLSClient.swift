@@ -3535,6 +3535,56 @@ public actor MLSClient {
       logger.info("✅ [SyncKeyPackages] No orphaned key packages found - all synced!")
     }
 
+    // Step 3.5: 🧹 [CLIENT F] Evict stale LOCAL bundles whose hashes the
+    // server has no record of for this device. Without this, a desync
+    // where local has thousands of zombie bundles (e.g. 6500 local vs
+    // 30 server) re-uploads stale-hash arrays on every reconciliation
+    // cycle. The server's `syncKeyPackages` response includes the
+    // canonical `serverHashes` for THIS device — anything in
+    // `localHashes` that is not in `serverHashes` is local-only and
+    // should be deleted from local FFI storage.
+    do {
+      let serverHashSet = Set(result.serverHashes.map { $0.lowercased() })
+      let staleLocalHashes = localHashes.filter {
+        !serverHashSet.contains($0.lowercased())
+      }
+
+      // Cap evictions per cycle so we don't stall the FFI on a runaway
+      // desync (e.g. 6500 stale entries) while still making forward
+      // progress on subsequent runs.
+      let evictionCap = 500
+      let toEvict = Array(staleLocalHashes.prefix(evictionCap))
+
+      if !toEvict.isEmpty {
+        // Convert hex hashes back to Data hashRefs for the FFI.
+        let hashRefs: [Data] = toEvict.compactMap { Data(hexEncoded: $0) }
+        if hashRefs.count != toEvict.count {
+          logger.warning(
+            "🧹 [CLIENT F] \(toEvict.count - hashRefs.count) hash strings failed hex decode and were skipped"
+          )
+        }
+        if !hashRefs.isEmpty {
+          do {
+            let evicted = try await deleteKeyPackageBundles(for: userDID, hashRefs: hashRefs)
+            logger.warning(
+              "🧹 [CLIENT F] Evicted \(evicted) stale local key packages (totalStale=\(staleLocalHashes.count), capped at \(evictionCap))"
+            )
+            if staleLocalHashes.count > evictionCap {
+              logger.warning(
+                "🧹 [CLIENT F] \(staleLocalHashes.count - evictionCap) stale local packages deferred to next sync cycle"
+              )
+            }
+          } catch {
+            logger.error(
+              "🧹 [CLIENT F] deleteKeyPackageBundles failed: \(error.localizedDescription) — leaving stale bundles in place"
+            )
+          }
+        }
+      } else {
+        logger.debug("🧹 [CLIENT F] No stale local key packages to evict")
+      }
+    }
+
     // Step 4: Check if replenishment is needed
     if result.remainingAvailable < 20 {
       logger.warning(

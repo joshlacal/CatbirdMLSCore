@@ -189,6 +189,11 @@ public final class MLSConversationManager {
   private let removalTombstoneLock = NSLock()
   private let removalTombstoneKeyPrefix = "mls.removal_tombstones."
 
+  /// CLIENT E: ensure the bootstrap-pending half-staged scan only runs
+  /// once per process per user. Cleared on account switch via session
+  /// generation rollover (this manager instance is also discarded then).
+  internal var didRunBootstrapPendingScan: Bool = false
+
   /// Track own commits to prevent re-processing them via SSE
   /// Maps commit hash (SHA256 of commit data) -> timestamp
   /// Commits are removed after 10 minutes to prevent unbounded growth

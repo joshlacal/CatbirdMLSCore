@@ -3747,20 +3747,26 @@ public extension MLSConversationManager {
       groupStates[convo.groupId] = state
     }
 
-    // Persist epoch to GRDB (fire-and-forget since this function is not async)
+    // Persist epoch to GRDB (fire-and-forget since this function is not async).
+    //
+    // 🔒 [CLIENT H] Resolve `database` INSIDE the Task body, not at capture
+    // time. The pool can be drained mid-Task (account-switch closeAndDrain)
+    // and a captured stale handle would surface as "Connection is closed".
+    // Calling `refreshDatabaseIfNeeded()` first transparently reconnects.
     if let userDid = userDid {
       let conversationId = convo.conversationId
       let epochValue = Int64(newEpoch)
       let storage = self.storage
-      let database = self.database
       let logger = self.logger
-      Task {
+      Task { [weak self] in
+        guard let self else { return }
+        try? await self.refreshDatabaseIfNeeded()
         do {
           try await storage.updateConversationEpoch(
             conversationID: conversationId,
             currentUserDID: userDid,
             epoch: epochValue,
-            database: database
+            database: self.database
           )
         } catch {
           logger.warning("Failed to persist epoch in handleEpochUpdate: \(error.localizedDescription)")
@@ -3925,9 +3931,119 @@ public extension MLSConversationManager {
     let epochBefore =
       (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
 
-    // Process commit through MLS client (auto-merges the staged commit internally)
-    let result = try await mlsClient.processCommit(
-      for: userDid, groupId: groupIdData, commitData: commitData)
+    // Process commit through MLS client (auto-merges the staged commit internally).
+    //
+    // 🔄 [CLIENT G] Centralize WrongGroupId detection. WrongGroupId means
+    // our local crypto session is SUPERSEDED — the server's active session
+    // has a different mls_group_id. The correct recovery is to rejoin
+    // the existing active session via External Commit (NOT to call
+    // resetGroup, which would supersede the already-active session and
+    // cause an availability regression for every peer).
+    //
+    // The recipient path (`runDeferredEpochRecoveryRecipient`) handles
+    // this exactly — but it requires `pendingNewGroupId` to be set so
+    // `recoverDeferredEpochResets` takes the recipient branch instead of
+    // the admin-reset branch. Source the new groupId from the server's
+    // ConvoView (`apiClient.getConversation`), then stage RESET_PENDING
+    // with both `needsReset=1` AND `pendingNewGroupId=<server's groupId>`.
+    //
+    // The recipient path also handles the NULL-group_info active-session
+    // case via fallback to `attemptFirstResponderBootstrap`, which is
+    // exactly the production state team-lead's diagnostic showed.
+    let result: ProcessCommitResult
+    do {
+      result = try await mlsClient.processCommit(
+        for: userDid, groupId: groupIdData, commitData: commitData)
+    } catch {
+      let lowered = error.localizedDescription.lowercased()
+      let isWrongGroupId =
+        lowered.contains("wronggroupid")
+        || (lowered.contains("validationerror") && lowered.contains("wrong group id"))
+      if isWrongGroupId {
+        if let convoEntry = conversations.first(where: {
+          $0.value.groupId.lowercased() == groupId.lowercased()
+        }) {
+          let convoId = convoEntry.key
+          logger.error(
+            "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoId.prefix(16)) localGroupId=\(groupId.prefix(16)) — staging recipient rejoin"
+          )
+
+          // Three-way decision tree (locked with team-lead):
+          //   1. Server has a different groupId in metadata → recipient
+          //      path (joinByExternalCommit verifies landed group).
+          //   2. Server returns 410 groupReset (mid-reset, no successor
+          //      groupId yet) → admin reset path (provides new material).
+          //   3. Anything else (network failure, timeout, stale wire
+          //      frame) → needsRejoin (defensive default; retry).
+          //
+          // Why not needsRejoin for case 2: needsRejoin → recoverDeferredRejoins
+          // → joinByExternalCommit → getGroupInfo → 410 again. Loops
+          // until backoff. Admin reset path is the convergence step.
+          do {
+            if let serverConvo = try await apiClient.getConversation(convoId: convoId) {
+              let serverGroupIdHex = serverConvo.groupId
+              let serverGeneration = serverConvo.resetGeneration.map { Int64($0) }
+              if !serverGroupIdHex.isEmpty
+                && serverGroupIdHex.lowercased() != groupId.lowercased()
+              {
+                try? await markConversationNeedsReset(
+                  convoId,
+                  pendingNewGroupId: serverGroupIdHex,
+                  pendingResetGeneration: serverGeneration
+                )
+                logger.warning(
+                  "🛡️ [CLIENT G] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration.map(String.init) ?? "nil")"
+                )
+              } else {
+                logger.error(
+                  "🛡️ [CLIENT G] Server's groupId matches our local groupId for \(convoId.prefix(16)) — WrongGroupId from a stale wire frame? Falling back to needsRejoin"
+                )
+                try? await markConversationNeedsRejoin(convoId)
+              }
+            } else {
+              logger.error(
+                "🛡️ [CLIENT G] getConversation returned nil for \(convoId.prefix(16)) — cannot stage recipient rejoin; falling back to needsRejoin"
+              )
+              try? await markConversationNeedsRejoin(convoId)
+            }
+          } catch {
+            // 410-shaped failure means the server's active crypto_session
+            // is mid-reset (`reset_requested` / `superseding`) or has
+            // NULL group_info. There's no successor groupId yet, so
+            // recipient path can't run. Admin path (single-arg
+            // markConversationNeedsReset) routes through resetGroup
+            // with iOS-provided material → server creates a fresh active
+            // session with populated group_info → conversation heals.
+            let isGroupResetSignal: Bool = {
+              if let mlsErr = error as? MLSAPIError,
+                case .httpError(let code, _) = mlsErr, code == 410
+              {
+                return true
+              }
+              let lowered = error.localizedDescription.lowercased()
+              return lowered.contains("groupreset") || lowered.contains("410")
+            }()
+
+            if isGroupResetSignal {
+              logger.warning(
+                "🛡️ [CLIENT G] getConversation surfaced 410/groupReset for \(convoId.prefix(16)) — server mid-reset; falling back to admin reset path"
+              )
+              try? await markConversationNeedsReset(convoId)
+            } else {
+              logger.error(
+                "🛡️ [CLIENT G] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription) — falling back to needsRejoin"
+              )
+              try? await markConversationNeedsRejoin(convoId)
+            }
+          }
+        } else {
+          logger.error(
+            "🔄 [CLIENT G] processCommit WrongGroupId for groupId=\(groupId.prefix(16)) but no matching conversation found — cannot stage rejoin"
+          )
+        }
+      }
+      throw error
+    }
     let mergedEpoch = result.newEpoch
     logger.debug("Processed commit: epoch \(epochBefore) -> \(mergedEpoch)")
 
