@@ -3933,21 +3933,23 @@ public extension MLSConversationManager {
 
     // Process commit through MLS client (auto-merges the staged commit internally).
     //
-    // 🔄 [CLIENT G] Centralize WrongGroupId detection. WrongGroupId is
-    // semantically distinct from epoch-divergence: epoch-divergence means
-    // we're in the SAME crypto session but at a different epoch, while
-    // WrongGroupId means our local crypto session is SUPERSEDED — the
-    // server's active session has a different mls_group_id. The right
-    // recovery is to rejoin the existing active session via External
-    // Commit, NOT to call resetGroup (which would supersede the already-
-    // active session and cause an availability regression for everyone).
+    // 🔄 [CLIENT G] Centralize WrongGroupId detection. WrongGroupId means
+    // our local crypto session is SUPERSEDED — the server's active session
+    // has a different mls_group_id. The correct recovery is to rejoin
+    // the existing active session via External Commit (NOT to call
+    // resetGroup, which would supersede the already-active session and
+    // cause an availability regression for every peer).
     //
-    // markConversationNeedsRejoin flows through `recoverDeferredRejoins`
-    // (Sync.swift Phase 2), which deletes the stale local group and calls
-    // attemptExternalCommitFallback. This is the correct path: the local
-    // group at the wrong groupId is torn down, then we External Commit
-    // against the server's current groupInfo for the convoId (which
-    // points to the new active session).
+    // The recipient path (`runDeferredEpochRecoveryRecipient`) handles
+    // this exactly — but it requires `pendingNewGroupId` to be set so
+    // `recoverDeferredEpochResets` takes the recipient branch instead of
+    // the admin-reset branch. Source the new groupId from the server's
+    // ConvoView (`apiClient.getConversation`), then stage RESET_PENDING
+    // with both `needsReset=1` AND `pendingNewGroupId=<server's groupId>`.
+    //
+    // The recipient path also handles the NULL-group_info active-session
+    // case via fallback to `attemptFirstResponderBootstrap`, which is
+    // exactly the production state team-lead's diagnostic showed.
     let result: ProcessCommitResult
     do {
       result = try await mlsClient.processCommit(
@@ -3961,13 +3963,50 @@ public extension MLSConversationManager {
         if let convoEntry = conversations.first(where: {
           $0.value.groupId.lowercased() == groupId.lowercased()
         }) {
+          let convoId = convoEntry.key
           logger.error(
-            "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoEntry.key.prefix(16)) localGroupId=\(groupId.prefix(16)) — local crypto session superseded; flagging for External Commit rejoin"
+            "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoId.prefix(16)) localGroupId=\(groupId.prefix(16)) — staging recipient rejoin"
           )
-          try? await markConversationNeedsRejoin(convoEntry.key)
+
+          // Look up server's authoritative groupId + reset generation.
+          // ConvoView exposes both fields directly, so we don't need to
+          // parse the binary GroupInfo bytes.
+          do {
+            if let serverConvo = try await apiClient.getConversation(convoId: convoId) {
+              let serverGroupIdHex = serverConvo.groupId
+              let serverGeneration = serverConvo.resetGeneration.map { Int64($0) }
+              if !serverGroupIdHex.isEmpty
+                && serverGroupIdHex.lowercased() != groupId.lowercased()
+              {
+                try? await markConversationNeedsReset(
+                  convoId,
+                  pendingNewGroupId: serverGroupIdHex,
+                  pendingResetGeneration: serverGeneration
+                )
+                logger.warning(
+                  "🛡️ [CLIENT G] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration.map(String.init) ?? "nil")"
+                )
+              } else {
+                logger.error(
+                  "🛡️ [CLIENT G] Server's groupId matches our local groupId for \(convoId.prefix(16)) — WrongGroupId from a stale wire frame? Falling back to needsRejoin"
+                )
+                try? await markConversationNeedsRejoin(convoId)
+              }
+            } else {
+              logger.error(
+                "🛡️ [CLIENT G] getConversation returned nil for \(convoId.prefix(16)) — cannot stage recipient rejoin; falling back to needsRejoin"
+              )
+              try? await markConversationNeedsRejoin(convoId)
+            }
+          } catch {
+            logger.error(
+              "🛡️ [CLIENT G] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription) — falling back to needsRejoin"
+            )
+            try? await markConversationNeedsRejoin(convoId)
+          }
         } else {
           logger.error(
-            "🔄 [CLIENT G] processCommit WrongGroupId for groupId=\(groupId.prefix(16)) but no matching conversation found — cannot flag for rejoin"
+            "🔄 [CLIENT G] processCommit WrongGroupId for groupId=\(groupId.prefix(16)) but no matching conversation found — cannot stage rejoin"
           )
         }
       }
