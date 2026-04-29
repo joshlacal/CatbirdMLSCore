@@ -5233,6 +5233,25 @@ public actor MLSGRDBManager {
       }
     }
 
+    // MARK: v29 — bootstrap-pending markers (CLIENT E)
+    // First-responder bootstrap creates a local OpenMLS group via
+    // `createGroupWithId` (durable on the FFI side) BEFORE issuing the
+    // network call to `bootstrapResetGroup`. If the process is killed or
+    // an account-switch fires between createGroup and confirmCommit, the
+    // durable group persists with a phantom epoch, and `getEpoch` returns
+    // GroupNotFound forever for that conversation. This table records
+    // every in-flight bootstrap attempt so the boot path can clean up
+    // half-staged groups.
+    migrator.registerMigration("v29_bootstrap_pending") { db in
+      try db.create(table: "MLSBootstrapPendingModel", ifNotExists: true) { t in
+        t.column("conversationID", .text).notNull()
+        t.column("groupIdHex", .text).notNull()
+        t.column("currentUserDID", .text).notNull()
+        t.column("createdAt", .datetime).notNull()
+        t.primaryKey(["conversationID", "currentUserDID"])
+      }
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }
