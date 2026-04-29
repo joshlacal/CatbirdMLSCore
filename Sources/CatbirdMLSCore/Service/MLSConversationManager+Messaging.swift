@@ -2001,20 +2001,42 @@ public extension MLSConversationManager {
     if UInt64(message.epoch) < UInt64(localEpoch) {
       let divergence = UInt64(localEpoch) - UInt64(message.epoch)
       if divergence > maxEpochDivergence {
-        logger.error("🚨 [EPOCH-DIVERGENCE] local=\(localEpoch) server=\(message.epoch) divergence=\(divergence) for \(message.convoId.prefix(16)) — marking for reset")
-        try? await markConversationNeedsReset(message.convoId)
-        // Cache as undecryptable, skip MLS processing entirely
-        let ctx = ProcessingContext(
-          attemptID: context.attemptID,
-          source: context.source,
-          queueIndex: context.queueIndex
-        )
-        return try await saveErrorPlaceholder(
-          message: message,
-          error: "Epoch divergence (\(divergence)) exceeds threshold — group marked for reset",
-          validationReason: "Epoch divergence detected",
-          context: ctx
-        )
+        // 🛡️ [CLIENT J] Skip the divergence detector when this message is a
+        // historical-replay (seq <= lastProcessed but missing from DB). In
+        // that case `message.epoch` is an old commit's epoch, not the
+        // server's current state, so comparing to `localEpoch` is
+        // meaningless. The ordering coordinator's "MISSING from DB —
+        // re-processing" path returns `.processNow` for these messages,
+        // and the divergence detector here would otherwise nuke the
+        // conversation.
+        let storedLastProcessedSeq = (try? await storage.getLastProcessedSeq(
+          conversationID: message.convoId,
+          currentUserDID: userDid,
+          database: database
+        )) ?? 0
+        let isHistoricalReplay = storedLastProcessedSeq > 0 && Int64(message.seq) <= storedLastProcessedSeq
+        if isHistoricalReplay {
+          logger.info(
+            "⏭️ [CLIENT J] Historical-replay message \(message.id.prefix(16)) seq=\(message.seq) epoch=\(message.epoch) (≤ lastProcessed=\(storedLastProcessedSeq)) — local=\(localEpoch); not divergence, attempting decryption"
+          )
+        } else {
+          logger.error(
+            "🚨 [EPOCH-DIVERGENCE] local=\(localEpoch) server=\(message.epoch) divergence=\(divergence) seq=\(message.seq) lastProcessed=\(storedLastProcessedSeq) for \(message.convoId.prefix(16)) — marking for reset"
+          )
+          try? await markConversationNeedsReset(message.convoId)
+          // Cache as undecryptable, skip MLS processing entirely
+          let ctx = ProcessingContext(
+            attemptID: context.attemptID,
+            source: context.source,
+            queueIndex: context.queueIndex
+          )
+          return try await saveErrorPlaceholder(
+            message: message,
+            error: "Epoch divergence (\(divergence)) exceeds threshold — group marked for reset",
+            validationReason: "Epoch divergence detected",
+            context: ctx
+          )
+        }
       }
       logger.info("[EPOCH-INFO] Server-reported epoch \(message.epoch) < local epoch \(localEpoch) for \(message.id) — attempting decryption anyway")
     }

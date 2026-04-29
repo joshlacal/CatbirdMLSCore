@@ -3552,7 +3552,22 @@ public actor MLSClient {
       // Cap evictions per cycle so we don't stall the FFI on a runaway
       // desync (e.g. 6500 stale entries) while still making forward
       // progress on subsequent runs.
-      let evictionCap = 500
+      //
+      // 🧹 [CLIENT K] Adaptive cap: when initial drift exceeds 1000 the
+      // user is in a high-drift state (typical: thousands of zombie
+      // bundles after FFI restore from backup or storage corruption).
+      // Raise the cap to 2000 so they drain in ~3 cycles instead of
+      // ~10. Each cycle ships 184-438 KB of zombie hashes; faster drain
+      // measurably reduces wasted bandwidth. Conservative 500 cap stays
+      // for normal/small drift to avoid stalling the FFI for routine
+      // reconciliations.
+      let highDrift = staleLocalHashes.count > 1000
+      let evictionCap = highDrift ? 2000 : 500
+      if highDrift {
+        logger.warning(
+          "🧹 [CLIENT K] High-drift KP eviction (\(staleLocalHashes.count) stale) — raising cap to \(evictionCap) for faster drain"
+        )
+      }
       let toEvict = Array(staleLocalHashes.prefix(evictionCap))
 
       if !toEvict.isEmpty {

@@ -989,6 +989,58 @@ public extension MLSConversationManager {
         "❌ [EPOCH-RESET] Recipient rejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
       )
 
+      // CLIENT I: Detect "server's active session has NULL group_info"
+      // (server returns HTTP 410 + groupReset on getGroupInfo / getGroupState
+      // ?include=groupInfo). When this happens the recipient path is
+      // permanently dead — no one can External-Commit-join because there's
+      // no GroupInfo to commit against, and the server's reset detector is
+      // gated by cooldown so it won't bump the generation. Escalate to the
+      // admin branch by clearing pendingNewGroupId so the next sync tick
+      // takes the admin path (createGroup → getGroupInfo locally → resetGroup
+      // funnels new material into the chokepoint, which writes a new
+      // crypto_session WITH group_info populated and heals the conversation).
+      // Symmetric with CLIENT G option (b) for WrongGroupId 410.
+      let isGroupReset410: Bool = {
+        if let mlsErr = error as? MLSAPIError,
+           case .httpError(let code, _) = mlsErr,
+           code == 410 {
+          return true
+        }
+        let lowered = error.localizedDescription.lowercased()
+        return lowered.contains("410") || lowered.contains("groupreset")
+      }()
+      if isGroupReset410 {
+        logger.warning(
+          "🚨 [CLIENT I] Recipient rejoin saw 410 groupReset for \(convoId.prefix(16)) — server's active session has NULL group_info; escalating to admin path"
+        )
+        // Clear pendingNewGroupId so the next runDeferredEpochRecovery
+        // iteration takes the admin branch. Keep needsReset=1.
+        do {
+          try await database.write { db in
+            try db.execute(
+              sql: """
+                UPDATE MLSConversationModel
+                SET pendingNewGroupId = NULL,
+                    pendingResetGeneration = NULL,
+                    updatedAt = ?
+                WHERE conversationID = ? AND currentUserDID = ?;
+              """,
+              arguments: [Date(), convoId, userDid]
+            )
+          }
+        } catch {
+          logger.error(
+            "❌ [CLIENT I] Failed to clear pendingNewGroupId for \(convoId.prefix(16)): \(error.localizedDescription)"
+          )
+        }
+        // Clear backoff so admin path can fire on the next tick instead of
+        // sitting in cooldown from the failed recipient attempt.
+        if let recoveryManager = await mlsClient.recovery(for: userDid) {
+          await recoveryManager.clearRejoinTracking(convoId: convoId)
+        }
+        return
+      }
+
       // First-responder bootstrap (spec §8.5):
       // After auto-reset, the server clears `group_info` to NULL. External
       // Commit needs GroupInfo to land — so EC will keep failing until
