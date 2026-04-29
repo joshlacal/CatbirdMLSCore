@@ -3747,20 +3747,26 @@ public extension MLSConversationManager {
       groupStates[convo.groupId] = state
     }
 
-    // Persist epoch to GRDB (fire-and-forget since this function is not async)
+    // Persist epoch to GRDB (fire-and-forget since this function is not async).
+    //
+    // 🔒 [CLIENT H] Resolve `database` INSIDE the Task body, not at capture
+    // time. The pool can be drained mid-Task (account-switch closeAndDrain)
+    // and a captured stale handle would surface as "Connection is closed".
+    // Calling `refreshDatabaseIfNeeded()` first transparently reconnects.
     if let userDid = userDid {
       let conversationId = convo.conversationId
       let epochValue = Int64(newEpoch)
       let storage = self.storage
-      let database = self.database
       let logger = self.logger
-      Task {
+      Task { [weak self] in
+        guard let self else { return }
+        try? await self.refreshDatabaseIfNeeded()
         do {
           try await storage.updateConversationEpoch(
             conversationID: conversationId,
             currentUserDID: userDid,
             epoch: epochValue,
-            database: database
+            database: self.database
           )
         } catch {
           logger.warning("Failed to persist epoch in handleEpochUpdate: \(error.localizedDescription)")
@@ -3925,9 +3931,42 @@ public extension MLSConversationManager {
     let epochBefore =
       (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
 
-    // Process commit through MLS client (auto-merges the staged commit internally)
-    let result = try await mlsClient.processCommit(
-      for: userDid, groupId: groupIdData, commitData: commitData)
+    // Process commit through MLS client (auto-merges the staged commit internally).
+    //
+    // 🔄 [CLIENT G] Centralize WrongGroupId detection: when OpenMLS rejects a
+    // commit because the wire-frame's group_id does not match our local
+    // group's group_id, the conversation has diverged from the server's
+    // canonical group identity (typically a server-side reset that happened
+    // out of band). This is structurally identical to the
+    // `EPOCH-DIVERGENCE` condition the existing detector handles via
+    // `markConversationNeedsReset` — feed it through the same path so the
+    // recipient-rejoin loop reconciles. NEVER use force_rejoin here; that
+    // creates an External Commit and inflates the server's epoch.
+    let result: ProcessCommitResult
+    do {
+      result = try await mlsClient.processCommit(
+        for: userDid, groupId: groupIdData, commitData: commitData)
+    } catch {
+      let lowered = error.localizedDescription.lowercased()
+      let isWrongGroupId =
+        lowered.contains("wronggroupid")
+        || (lowered.contains("validationerror") && lowered.contains("wrong group id"))
+      if isWrongGroupId {
+        if let convoEntry = conversations.first(where: {
+          $0.value.groupId.lowercased() == groupId.lowercased()
+        }) {
+          logger.error(
+            "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoEntry.key.prefix(16)) localGroupId=\(groupId.prefix(16)) — marking conversation for automatic reset"
+          )
+          try? await markConversationNeedsReset(convoEntry.key)
+        } else {
+          logger.error(
+            "🔄 [CLIENT G] processCommit WrongGroupId for groupId=\(groupId.prefix(16)) but no matching conversation found — cannot mark for reset"
+          )
+        }
+      }
+      throw error
+    }
     let mergedEpoch = result.newEpoch
     logger.debug("Processed commit: epoch \(epochBefore) -> \(mergedEpoch)")
 
