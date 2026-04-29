@@ -265,11 +265,19 @@ public extension MLSConversationManager {
         "🧾 [ATOMIC] Commit attempt=\(context.attemptID) queue=\(context.queueIndex) msg=\(message.id.prefix(16)) seq=\(message.seq) cursor=\(cursorAfter)"
       )
 
-      // Notify app/NSE peers and bump disk version for stale-context detection.
+      // Darwin self-loop fix (2026-04): App-originated mutations must NOT post the
+      // cross-process `stateChanged` Darwin notification or bump the cross-process
+      // disk version. Both signals are NSE→app only. The version bump caused the
+      // main app's own `MLSCoreContext` stale check (disk > memory) to tear down
+      // and reload its context after every send/receive. Cross-process correctness
+      // is preserved by SQLite WAL persistence + the encrypt/decrypt path's own
+      // FFI epoch pre-flight check. We still emit the audit log for routing/owner.
       MLSNotificationCoordinator.publishMutation(
         userDID: userDid,
         source: "message_processing_atomic_commit",
-        decryptionOwner: .appSync
+        decryptionOwner: .appSync,
+        incrementVersion: false,
+        postStateChanged: false
       )
 
       return adopted
@@ -1114,11 +1122,15 @@ public extension MLSConversationManager {
           database: self.database
         )
 
-        // Notify app/NSE peers and bump disk version for stale-context detection.
+        // Darwin self-loop fix (2026-04): App-originated mutations must NOT post
+        // the `stateChanged` Darwin notification or bump the cross-process disk
+        // version (NSE→app only). See note at message_processing_atomic_commit.
         MLSNotificationCoordinator.publishMutation(
           userDID: userDid,
           source: "message_processing_sequence_commit",
-          decryptionOwner: .appSync
+          decryptionOwner: .appSync,
+          incrementVersion: false,
+          postStateChanged: false
         )
 
         // Process any buffered messages that are now ready (recursive processing)
@@ -2019,7 +2031,13 @@ public extension MLSConversationManager {
         messageData: ciphertextData
       )
 
-      MLSStateVersionManager.shared.incrementVersion(for: userDid)
+      // Darwin self-loop fix (2026-04): The cross-process disk version is
+      // bumped only by NSE; the main app has no peer that consults this
+      // counter (NSE creates a fresh MLSCoreContext per invocation and reads
+      // disk state from scratch). Bumping it from the main app instead caused
+      // the local stale-context check (disk > memory) to tear down our own
+      // context after every decode. Cross-process correctness is preserved by
+      // SQLite WAL persistence and the encrypt/decrypt FFI epoch pre-flight.
       clearSelfDecryptFailures(conversationID: message.convoId)
 
       switch processedContent {
@@ -4798,8 +4816,12 @@ public extension MLSConversationManager {
     let encryptResult = try await mlsClient.encryptMessage(
       for: userDid, groupId: groupIdData, plaintext: plaintext)
 
-    // Signal ratchet advance to other in-process/cross-process contexts.
-    MLSStateVersionManager.shared.incrementVersion(for: userDid)
+    // Darwin self-loop fix (2026-04): Do NOT bump the cross-process disk
+    // version on app-originated encrypt. The version counter is NSE-only;
+    // bumping it here caused the local `MLSCoreContext` stale check to fire
+    // after every send, tearing down and reloading our own context. The
+    // encrypt epoch pre-flight above (FFI getEpoch) is the authoritative
+    // cross-process check; SQLite WAL persists the ratchet advance.
 
     logger.debug(
       "mlsClient.encryptMessage succeeded, ciphertext.count=\(encryptResult.ciphertext.count)")
@@ -4870,8 +4892,11 @@ public extension MLSConversationManager {
         messageData: ciphertextData
       )
 
-      // Signal ratchet advance to other in-process/cross-process contexts.
-      MLSStateVersionManager.shared.incrementVersion(for: userDid)
+      // Darwin self-loop fix (2026-04): Do NOT bump the cross-process disk
+      // version on app-originated decrypt. The pre-flight epoch check above
+      // (FFI getEpoch) handles cross-process detection; SQLite WAL persists
+      // the ratchet advance. Bumping the version here was self-defeating —
+      // it tripped the main app's own stale-context guard on every receive.
 
       // CRITICAL FIX: Persist MLS state after decryption (receiver ratchet advanced)
       // This prevents SecretReuseError when trying to decrypt subsequent messages
