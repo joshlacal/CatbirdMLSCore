@@ -3968,9 +3968,17 @@ public extension MLSConversationManager {
             "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoId.prefix(16)) localGroupId=\(groupId.prefix(16)) — staging recipient rejoin"
           )
 
-          // Look up server's authoritative groupId + reset generation.
-          // ConvoView exposes both fields directly, so we don't need to
-          // parse the binary GroupInfo bytes.
+          // Three-way decision tree (locked with team-lead):
+          //   1. Server has a different groupId in metadata → recipient
+          //      path (joinByExternalCommit verifies landed group).
+          //   2. Server returns 410 groupReset (mid-reset, no successor
+          //      groupId yet) → admin reset path (provides new material).
+          //   3. Anything else (network failure, timeout, stale wire
+          //      frame) → needsRejoin (defensive default; retry).
+          //
+          // Why not needsRejoin for case 2: needsRejoin → recoverDeferredRejoins
+          // → joinByExternalCommit → getGroupInfo → 410 again. Loops
+          // until backoff. Admin reset path is the convergence step.
           do {
             if let serverConvo = try await apiClient.getConversation(convoId: convoId) {
               let serverGroupIdHex = serverConvo.groupId
@@ -3999,10 +4007,34 @@ public extension MLSConversationManager {
               try? await markConversationNeedsRejoin(convoId)
             }
           } catch {
-            logger.error(
-              "🛡️ [CLIENT G] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription) — falling back to needsRejoin"
-            )
-            try? await markConversationNeedsRejoin(convoId)
+            // 410-shaped failure means the server's active crypto_session
+            // is mid-reset (`reset_requested` / `superseding`) or has
+            // NULL group_info. There's no successor groupId yet, so
+            // recipient path can't run. Admin path (single-arg
+            // markConversationNeedsReset) routes through resetGroup
+            // with iOS-provided material → server creates a fresh active
+            // session with populated group_info → conversation heals.
+            let isGroupResetSignal: Bool = {
+              if let mlsErr = error as? MLSAPIError,
+                case .httpError(let code, _) = mlsErr, code == 410
+              {
+                return true
+              }
+              let lowered = error.localizedDescription.lowercased()
+              return lowered.contains("groupreset") || lowered.contains("410")
+            }()
+
+            if isGroupResetSignal {
+              logger.warning(
+                "🛡️ [CLIENT G] getConversation surfaced 410/groupReset for \(convoId.prefix(16)) — server mid-reset; falling back to admin reset path"
+              )
+              try? await markConversationNeedsReset(convoId)
+            } else {
+              logger.error(
+                "🛡️ [CLIENT G] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription) — falling back to needsRejoin"
+              )
+              try? await markConversationNeedsRejoin(convoId)
+            }
           }
         } else {
           logger.error(
