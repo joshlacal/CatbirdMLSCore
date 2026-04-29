@@ -3933,15 +3933,21 @@ public extension MLSConversationManager {
 
     // Process commit through MLS client (auto-merges the staged commit internally).
     //
-    // 🔄 [CLIENT G] Centralize WrongGroupId detection: when OpenMLS rejects a
-    // commit because the wire-frame's group_id does not match our local
-    // group's group_id, the conversation has diverged from the server's
-    // canonical group identity (typically a server-side reset that happened
-    // out of band). This is structurally identical to the
-    // `EPOCH-DIVERGENCE` condition the existing detector handles via
-    // `markConversationNeedsReset` — feed it through the same path so the
-    // recipient-rejoin loop reconciles. NEVER use force_rejoin here; that
-    // creates an External Commit and inflates the server's epoch.
+    // 🔄 [CLIENT G] Centralize WrongGroupId detection. WrongGroupId is
+    // semantically distinct from epoch-divergence: epoch-divergence means
+    // we're in the SAME crypto session but at a different epoch, while
+    // WrongGroupId means our local crypto session is SUPERSEDED — the
+    // server's active session has a different mls_group_id. The right
+    // recovery is to rejoin the existing active session via External
+    // Commit, NOT to call resetGroup (which would supersede the already-
+    // active session and cause an availability regression for everyone).
+    //
+    // markConversationNeedsRejoin flows through `recoverDeferredRejoins`
+    // (Sync.swift Phase 2), which deletes the stale local group and calls
+    // attemptExternalCommitFallback. This is the correct path: the local
+    // group at the wrong groupId is torn down, then we External Commit
+    // against the server's current groupInfo for the convoId (which
+    // points to the new active session).
     let result: ProcessCommitResult
     do {
       result = try await mlsClient.processCommit(
@@ -3956,12 +3962,12 @@ public extension MLSConversationManager {
           $0.value.groupId.lowercased() == groupId.lowercased()
         }) {
           logger.error(
-            "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoEntry.key.prefix(16)) localGroupId=\(groupId.prefix(16)) — marking conversation for automatic reset"
+            "🔄 [CLIENT G] processCommit WrongGroupId for convo=\(convoEntry.key.prefix(16)) localGroupId=\(groupId.prefix(16)) — local crypto session superseded; flagging for External Commit rejoin"
           )
-          try? await markConversationNeedsReset(convoEntry.key)
+          try? await markConversationNeedsRejoin(convoEntry.key)
         } else {
           logger.error(
-            "🔄 [CLIENT G] processCommit WrongGroupId for groupId=\(groupId.prefix(16)) but no matching conversation found — cannot mark for reset"
+            "🔄 [CLIENT G] processCommit WrongGroupId for groupId=\(groupId.prefix(16)) but no matching conversation found — cannot flag for rejoin"
           )
         }
       }
