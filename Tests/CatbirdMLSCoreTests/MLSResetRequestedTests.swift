@@ -74,23 +74,44 @@ final class MLSResetRequestedTests: XCTestCase {
     XCTAssertEqual(event.reason, "GroupInfo 404 threshold crossed")
   }
 
-  // MARK: - Mark RESET_PENDING with nil pendingNewGroupId
+  // MARK: - Mint candidate id and stage RESET_PENDING (bootstrap-race path)
 
-  /// `handleResetRequested` calls
-  /// `markConversationNeedsReset(convoId, pendingNewGroupId: nil,
-  /// pendingResetGeneration: Int64(event.generation))`. This test verifies
-  /// the resulting row state: `needsReset = 1`, `pendingNewGroupId = NULL`,
-  /// `pendingResetGeneration = event.generation`. Mirrors the legacy
-  /// `handleGroupReset` SQL but with `pendingNewGroupId = nil` so the
-  /// deferred recovery loop takes the **initiator** branch (mint a local
-  /// group id and race-bootstrap via the chokepoint UNIQUE constraint)
-  /// rather than the recipient branch (External Commit into the announced
-  /// group). See `docs/plans/phase-2-5-indirect-funneling.md` §3.
-  func testMarkResetPendingWithNilNewGroupIdSetsInitiatorPath() async throws {
-    let convoId = "convo-2-5-initiator"
+  /// The mint helper produces a 32-lowercase-hex-char id that mirrors the
+  /// Rust orchestrator's `format!("{:032x}", uuid::Uuid::new_v4().as_u128())`.
+  /// Required for the candidate id to be parseable by `Data(hexEncoded:)`
+  /// downstream in `attemptFirstResponderBootstrap` (line 1111 of
+  /// `MLSConversationManager+Sync.swift`).
+  func testMintCandidateGroupIdHexProducesValid32CharLowercaseHex() {
+    let id = MLSConversationManager.mintCandidateGroupIdHex()
+    XCTAssertEqual(id.count, 32, "must be 32 hex chars (uuid u128 → 32x4-bit nibbles)")
+    XCTAssertEqual(id, id.lowercased(), "must be all lowercase to match the Rust mint")
+    let allowed: Set<Character> = Set("0123456789abcdef")
+    for ch in id {
+      XCTAssertTrue(allowed.contains(ch), "non-hex char in minted id: \(ch)")
+    }
+    XCTAssertNotNil(Data(hexEncoded: id),
+                    "id must round-trip through Data(hexEncoded:) for downstream MLS use")
+  }
+
+  /// `handleResetRequested` mints a client-side candidate id and stages it
+  /// as `pendingNewGroupId` along with the event's `generation`. This test
+  /// verifies the resulting row state: `needsReset = 1`, a non-nil 32-hex
+  /// `pendingNewGroupId`, and `pendingResetGeneration = event.generation`.
+  ///
+  /// **Why a non-nil id?** The existing sync-loop branch in
+  /// `MLSConversationManager+Sync.swift:635` treats `pendingNewGroupId == nil`
+  /// as the admin-only `resetGroup` path that fails with `notadmin` for
+  /// non-admin members. Phase 2.5 retires the admin-mint flow for indirect
+  /// triggers; staging a client-minted candidate routes the row through the
+  /// recipient-then-bootstrap branch (the bootstrap call uses the chokepoint
+  /// UNIQUE constraint to elect a single winner; race losers see HTTP 409
+  /// `AlreadyBootstrapped` and drop their pre-bootstrap state).
+  func testMarkResetPendingWithMintedCandidateStagesBootstrapPath() async throws {
+    let convoId = "convo-2-5-bootstrap"
     let userDid = "did:plc:initiator"
     let staleGroup = Data(repeating: 0xAA, count: 32)
     let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let candidate = MLSConversationManager.mintCandidateGroupIdHex()
 
     try await dbQueue.write { db in
       try Self.insertConversation(
@@ -106,7 +127,9 @@ final class MLSResetRequestedTests: XCTestCase {
       )
     }
 
-    // Simulate the SQL `markConversationNeedsReset` writes.
+    // Simulate the SQL `markConversationNeedsReset` writes after the handler
+    // resolves a candidate id (client-minted in this test, since no
+    // `expectedNewMlsGroupId` was supplied by the server).
     try await dbQueue.write { db in
       try db.execute(
         sql: """
@@ -119,12 +142,7 @@ final class MLSResetRequestedTests: XCTestCase {
                   updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
           """,
-        arguments: [
-          // pendingNewGroupId = NULL — Phase 2.5 indirect triggers carry no
-          // announced group id; the initiator branch races the bootstrap.
-          nil as String?,
-          Int64(17), now, convoId, userDid,
-        ]
+        arguments: [candidate, Int64(17), now, convoId, userDid]
       )
     }
 
@@ -141,8 +159,10 @@ final class MLSResetRequestedTests: XCTestCase {
     XCTAssertTrue(row.needsReset, "needsReset must be set after a resetRequestedEvent")
     XCTAssertFalse(row.needsRejoin, "needsRejoin must clear")
     XCTAssertFalse(row.isUnrecoverable, "isUnrecoverable must clear")
-    XCTAssertNil(row.pendingNewGroupId,
-                 "indirect triggers MUST persist nil pendingNewGroupId (no server-announced id)")
+    XCTAssertEqual(
+      row.pendingNewGroupId, candidate,
+      "indirect-trigger handler must stage a client-minted candidate so the sync-loop bootstrap-race branch fires (NOT the admin-only initiator branch)"
+    )
     XCTAssertEqual(row.pendingResetGeneration, 17, "generation must mirror the event")
     XCTAssertEqual(row.persistedRecoveryState, .resetPending,
                    "row should derive RESET_PENDING from needsReset = 1")

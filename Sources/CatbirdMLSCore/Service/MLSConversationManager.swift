@@ -1061,17 +1061,36 @@ public final class MLSConversationManager {
   /// `crypto_session_reset_requested`; subscribed clients then elect a first
   /// responder via `bootstrapResetGroup` / `commitGroupChange` (the
   /// `crypto_sessions UNIQUE (conversation_id, generation)` constraint
-  /// serializes the winner — first commit wins, losers receive an HTTP 409
-  /// `AlreadyBootstrapped` response).
+  /// serializes the winner — first commit wins, losers receive HTTP 409
+  /// `AlreadyBootstrapped` and drop their pre-bootstrap MLS state cleanly).
   ///
-  /// Mirrors `handleGroupReset(event:)` exactly:
+  /// Mirrors `handleGroupReset(event:)`:
   /// 1. Delete the old MLS group state (the prior crypto session is now
   ///    `reset_requested` server-side; its keys are no longer authoritative).
   /// 2. Remove the old group from in-memory caches.
-  /// 3. Flag `needsReset = true` with `pendingNewGroupId = nil` — the
-  ///    indirect path has no announced group id, so deferred recovery's
-  ///    initiator branch (mint local group + race-bootstrap) handles election.
-  /// 4. Trigger a sync cycle to drive deferred recovery.
+  /// 3. Flag `needsReset = true`. Resolution:
+  ///    - If the server attached `expectedNewMlsGroupId` (admin override
+  ///      path, rare), stage that as `pendingNewGroupId`.
+  ///    - Otherwise mint a fresh client-side UUIDv4 candidate id (32 lower-
+  ///      case hex chars, mirroring `record_reset_requested` in
+  ///      `catbird-mls/src/orchestrator/recovery.rs`). This stages the row
+  ///      into the recipient-then-bootstrap branch that already exists in
+  ///      `runDeferredEpochRecovery` — first the External Commit attempt
+  ///      (which fails with `GroupInfo` absent post-reset), then
+  ///      `attemptFirstResponderBootstrap` races the candidate against
+  ///      siblings via `bootstrapResetGroup`. The chokepoint UNIQUE
+  ///      constraint elects the winner; race losers see HTTP 409 and drop
+  ///      their pre-bootstrap state.
+  /// 4. Trigger a sync cycle to drive deferred recovery promptly.
+  ///
+  /// **Why mint client-side instead of leaving `pendingNewGroupId == nil`?**
+  /// The existing sync-loop branch logic (`MLSConversationManager+Sync.swift`
+  /// line 635) treats `pendingNewGroupId == nil` as the **admin-initiator**
+  /// path that calls the privileged `resetGroup` endpoint and fails with
+  /// `notadmin` for non-admin members. Phase 2.5 explicitly retired the
+  /// admin-mint flow for indirect triggers. Minting client-side puts the row
+  /// into the bootstrap-race branch which is the correct Phase 2.5 endpoint
+  /// (`bootstrapResetGroup`) for any active member.
   ///
   /// Idempotency: if the incoming `generation` is already <= the stored
   /// `pendingResetGeneration`, `markConversationNeedsReset` skips the write.
@@ -1145,19 +1164,36 @@ public final class MLSConversationManager {
       groupStates[convo.groupId] = nil
     }
 
-    // 3. Flag RESET_PENDING with `pendingNewGroupId = nil`.
-    //    Phase 2.5 indirect triggers do NOT carry an announced new group id;
-    //    deferred recovery's initiator branch (mint local group + race-
-    //    bootstrap) drives election. The server's chokepoint UNIQUE
-    //    constraint serializes the winning candidate.
+    // 3. Resolve the candidate `pendingNewGroupId` for the row.
+    //    Server-supplied (admin override) takes precedence; otherwise mint
+    //    a fresh UUIDv4-style 32-hex-char id locally for the race-bootstrap
+    //    candidate (mirrors `record_reset_requested` in
+    //    `catbird-mls/src/orchestrator/recovery.rs`).
+    let candidateGroupIdHex: String
+    if let serverHex = event.expectedNewMlsGroupId, !serverHex.isEmpty {
+      candidateGroupIdHex = serverHex
+      logger.info(
+        "🔄 [handleResetRequested] Using server-supplied expectedNewMlsGroupId \(serverHex.prefix(16))"
+      )
+    } else {
+      candidateGroupIdHex = Self.mintCandidateGroupIdHex()
+      logger.info(
+        "🔄 [handleResetRequested] Minting client-side candidate \(candidateGroupIdHex.prefix(16)) for first-responder bootstrap race"
+      )
+    }
+
+    // 4. Flag RESET_PENDING with the candidate id staged. The deferred
+    //    recovery loop will pick this up via `runDeferredEpochRecoveryRecipient`
+    //    → fall through to `attemptFirstResponderBootstrap` (GroupInfo absent
+    //    post-reset → bootstrap race).
     do {
       try await markConversationNeedsReset(
         convoId,
-        pendingNewGroupId: nil,
+        pendingNewGroupId: candidateGroupIdHex,
         pendingResetGeneration: Int64(generation)
       )
       logger.info(
-        "🏴 [handleResetRequested] Flagged \(convoId.prefix(16)) as RESET_PENDING (initiator path) — gen \(generation), trigger=\(trigger)"
+        "🏴 [handleResetRequested] Flagged \(convoId.prefix(16)) as RESET_PENDING — candidateNewGroupId=\(candidateGroupIdHex.prefix(16)), gen \(generation), trigger=\(trigger)"
       )
     } catch {
       logger.error(
@@ -1165,10 +1201,17 @@ public final class MLSConversationManager {
       )
     }
 
-    // 4. Trigger a sync cycle to pick up the deferred recovery promptly.
+    // 5. Trigger a sync cycle to pick up the deferred recovery promptly.
     Task {
       try? await self.syncWithServer(fullSync: false)
     }
+  }
+
+  /// Mint a client-side UUIDv4-derived 32-lowercase-hex-char id for the
+  /// Phase 2.5 first-responder bootstrap race. Mirrors the Rust orchestrator
+  /// helper `format!("{:032x}", uuid::Uuid::new_v4().as_u128())`.
+  internal static func mintCandidateGroupIdHex() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
   }
 
   /// Handle re-addition request from SSE stream
