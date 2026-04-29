@@ -963,12 +963,19 @@ public extension MLSConversationManager {
             db: db, conversationID: convoId, currentUserDID: userDid, now: now
           )
         } else {
+          // CLIENT M (Task #75): seed `pendingResetGeneration` with the
+          // observed event generation so the pre-delete stale-replay guards
+          // in `handleGroupReset` / `handleResetRequested` have a real number
+          // to compare against. Without this, replayed historical reset
+          // events from the WebSocket cursor pass the (vacuous) guard and
+          // call `deleteGroup` on the just-rejoined group.
           try MLSConversationResetSQL.applyRecipientResetSuccess(
             db: db,
             conversationID: convoId,
             currentUserDID: userDid,
             newGroupID: newGroupIdData,
             newEpoch: landedEpoch,
+            appliedGeneration: observedGeneration,
             now: now
           )
         }
@@ -977,7 +984,7 @@ public extension MLSConversationManager {
       groupStates.removeValue(forKey: convoId)
 
       logger.warning(
-        "✅ [EPOCH-RESET] Recipient rejoin succeeded for \(convoId.prefix(16)) → newGroupId=\(landedHex.prefix(16)), epoch=\(landedEpoch)"
+        "✅ [EPOCH-RESET] Recipient rejoin succeeded for \(convoId.prefix(16)) → newGroupId=\(landedHex.prefix(16)), epoch=\(landedEpoch), seededGen=\(observedGeneration.map(String.init) ?? "nil")"
       )
 
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
@@ -1518,6 +1525,58 @@ public extension MLSConversationManager {
       }
 
       let now = Date()
+      // CLIENT M (Task #75): seed `pendingResetGeneration` post-bootstrap so
+      // historical SSE/WS replay events with `gen <= seededGen` short-circuit
+      // in `handleGroupReset` / `handleResetRequested` BEFORE they call
+      // `deleteGroup`. Without this, replays destroy the freshly bootstrapped
+      // group (the production bug observed at b947c701a32943d0 / gen 25).
+      //
+      // The right seed is the HIGHEST generation the server knows about, not
+      // just the bootstrap-time session generation. Why: bootstrap may
+      // self-heal at gen=N (preserved across self-heal — no +1), but
+      // server-side sweeps that fired DURING our bootstrap could have
+      // advanced reset_count to gen=N+k. Replayed historical events for
+      // those higher gens would otherwise pass the `>= N` gate and call
+      // `deleteGroup`. Refetch via `getConversation` post-bootstrap to pick
+      // up any sweep-driven advancement; take the max across:
+      //   (a) bootstrap response's `convo.resetGeneration` (= reset_count at
+      //       T+0 of the chokepoint UPDATE, immediate post-activation)
+      //   (b) refetched `convo.resetGeneration` (= reset_count at T+latency,
+      //       reflects sweeps that fired between activation and refetch)
+      //   (c) `observedGeneration` (the event that triggered the bootstrap;
+      //       should be ≤ a or b, but defensive)
+      //
+      // The fetch is best-effort — if it fails, fall through to the bootstrap
+      // response value (still better than the previous nil-on-success).
+      //
+      // TODO(server-half): once the lexicon adds `output.generation`
+      // (currently in the Rust generated types but not in
+      // `Petrel/.../BlueCatbirdMlsChatBootstrapResetGroup.swift` Output),
+      // prefer that field over the refetch — it's the authoritative
+      // session_generation rather than the conversations.reset_count proxy
+      // and avoids the extra round trip.
+      let refetchedGeneration: Int64? = await {
+        do {
+          if let refetched = try await apiClient.getConversation(convoId: convoId),
+             let serverGen = refetched.resetGeneration
+          {
+            return Int64(serverGen)
+          }
+        } catch {
+          logger.warning(
+            "⚠️ [BOOTSTRAP] post-bootstrap getConversation refetch failed for \(convoId.prefix(16)): \(error.localizedDescription) — seeding with bootstrap response only"
+          )
+        }
+        return nil
+      }()
+      let seededGeneration: Int64? = {
+        let candidates: [Int64?] = [
+          bootstrapped.resetGeneration.map(Int64.init),
+          refetchedGeneration,
+          observedGeneration,
+        ]
+        return candidates.compactMap { $0 }.max()
+      }()
       do {
         try await database.write { db in
           let currentGeneration = try MLSConversationResetSQL.loadPendingResetGeneration(
@@ -1543,6 +1602,7 @@ public extension MLSConversationManager {
               currentUserDID: userDid,
               newGroupID: pendingGroupIdData,
               newEpoch: landedEpoch,
+              appliedGeneration: seededGeneration,
               now: now
             )
           }
@@ -1552,7 +1612,7 @@ public extension MLSConversationManager {
         conversations[convoId] = bootstrapped
 
         logger.warning(
-          "✅ [BOOTSTRAP] Won race for \(convoId.prefix(16)) → newGroupId=\(pendingNewGroupIdHex.prefix(16)), epoch=\(landedEpoch)"
+          "✅ [BOOTSTRAP] Won race for \(convoId.prefix(16)) → newGroupId=\(pendingNewGroupIdHex.prefix(16)), epoch=\(landedEpoch), seededGen=\(seededGeneration.map(String.init) ?? "nil") (serverGen=\(bootstrapped.resetGeneration.map(String.init) ?? "nil"), observedGen=\(observedGeneration.map(String.init) ?? "nil"))"
         )
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
           await recoveryManager.clearRejoinTracking(convoId: convoId)
@@ -1756,6 +1816,35 @@ public extension MLSConversationManager {
           }
 
           let now = Date()
+          // CLIENT M (Task #75): seed `pendingResetGeneration` post-409-winner
+          // recovery the same way the 200 path does. We already have a
+          // `serverConvo` from the in-band verification call above; refetch
+          // again (cheap, best-effort) to pick up any further sweep
+          // advancement that landed since `serverConvo` was fetched. Take
+          // the max across all three candidates. See the long comment on
+          // the 200 path above for the rationale.
+          let refetchedGeneration409: Int64? = await {
+            do {
+              if let refetched = try await apiClient.getConversation(convoId: convoId),
+                 let serverGen = refetched.resetGeneration
+              {
+                return Int64(serverGen)
+              }
+            } catch {
+              logger.warning(
+                "⚠️ [BOOTSTRAP] post-409-recovery getConversation refetch failed for \(convoId.prefix(16)): \(error.localizedDescription) — seeding with prior response value only"
+              )
+            }
+            return nil
+          }()
+          let seededGeneration409: Int64? = {
+            let candidates: [Int64?] = [
+              serverConvo?.resetGeneration.map(Int64.init),
+              refetchedGeneration409,
+              observedGeneration,
+            ]
+            return candidates.compactMap { $0 }.max()
+          }()
           do {
             try await database.write { db in
               let currentGeneration = try MLSConversationResetSQL.loadPendingResetGeneration(
@@ -1780,6 +1869,7 @@ public extension MLSConversationManager {
                   currentUserDID: userDid,
                   newGroupID: pendingGroupIdData,
                   newEpoch: landedEpoch,
+                  appliedGeneration: seededGeneration409,
                   now: now
                 )
               }
@@ -1789,7 +1879,7 @@ public extension MLSConversationManager {
               conversations[convoId] = serverConvo
             }
             logger.warning(
-              "✅ [BOOTSTRAP] 409-winner recovery complete for \(convoId.prefix(16)) → epoch=\(landedEpoch) (verified)"
+              "✅ [BOOTSTRAP] 409-winner recovery complete for \(convoId.prefix(16)) → epoch=\(landedEpoch) (verified, seededGen=\(seededGeneration409.map(String.init) ?? "nil"))"
             )
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
               await recoveryManager.clearRejoinTracking(convoId: convoId)

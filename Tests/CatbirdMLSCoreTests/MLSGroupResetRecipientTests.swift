@@ -54,12 +54,17 @@ final class MLSGroupResetRecipientTests: XCTestCase {
 
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     try await dbQueue.write { db in
+      // CLIENT M (Task #75): pass `appliedGeneration: nil` to verify the
+      // legacy "null on success" behavior is preserved when no generation
+      // is supplied. Real callers in MLSConversationManager+Sync pass the
+      // observed generation through (see seeds-pendingResetGeneration test).
       try MLSConversationResetSQL.applyRecipientResetSuccess(
         db: db,
         conversationID: convoId,
         currentUserDID: userDid,
         newGroupID: newGroup,
         newEpoch: 0,
+        appliedGeneration: nil,
         now: now
       )
     }
@@ -80,11 +85,92 @@ final class MLSGroupResetRecipientTests: XCTestCase {
     XCTAssertFalse(row.needsRejoin, "needsRejoin must clear on success")
     XCTAssertFalse(row.isUnrecoverable, "isUnrecoverable must clear on success")
     XCTAssertNil(row.pendingNewGroupId, "pendingNewGroupId must be nulled")
-    XCTAssertNil(row.pendingResetGeneration, "pendingResetGeneration must be nulled")
+    XCTAssertNil(
+      row.pendingResetGeneration,
+      "pendingResetGeneration must be nulled when appliedGeneration is nil (back-compat)"
+    )
     XCTAssertEqual(row.consecutiveFailures, 0, "consecutiveFailures must reset")
     XCTAssertEqual(row.lastRecoveryAttempt, now)
     XCTAssertEqual(row.updatedAt, now)
     XCTAssertEqual(row.persistedRecoveryState, .healthy, "row should be HEALTHY after success")
+  }
+
+  /// CLIENT M (Task #75): when `appliedGeneration` is supplied, the helper
+  /// must persist it instead of nulling. This is the seed value used by the
+  /// pre-delete stale-replay guards in `handleGroupReset` /
+  /// `handleResetRequested`. A nil seed makes those guards vacuous and
+  /// allows historical SSE/WS replays to call `deleteGroup` on the freshly
+  /// bootstrapped group (the production bug observed at b947c701a32943d0).
+  func testApplyRecipientResetSuccessSeedsPendingGenerationWhenSupplied() async throws {
+    let convoId = "convo-recipient-seed"
+    let userDid = "did:plc:seed"
+    let staleGroup = Data(repeating: 0xAA, count: 32)
+    let newGroup = Data(repeating: 0xCD, count: 32)
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: staleGroup,
+        epoch: 1,
+        needsReset: true,
+        pendingNewGroupId: newGroup.hexEncodedString(),
+        pendingResetGeneration: 25,
+        consecutiveFailures: 0
+      )
+    }
+
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    try await dbQueue.write { db in
+      try MLSConversationResetSQL.applyRecipientResetSuccess(
+        db: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        newGroupID: newGroup,
+        newEpoch: 1,
+        appliedGeneration: 25,
+        now: now
+      )
+    }
+
+    let reloaded = try await dbQueue.read { db in
+      try MLSConversationModel.fetchOne(
+        db,
+        sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+        arguments: [convoId, userDid]
+      )
+    }
+
+    let row = try XCTUnwrap(reloaded)
+    XCTAssertEqual(row.groupID, newGroup, "groupID should swap to the bootstrapped bytes")
+    XCTAssertEqual(row.epoch, 1, "epoch should track post-bootstrap value")
+    XCTAssertFalse(row.needsReset, "needsReset must clear on success")
+    XCTAssertFalse(row.needsRejoin, "needsRejoin must clear on success")
+    XCTAssertNil(row.pendingNewGroupId, "pendingNewGroupId must be nulled (bootstrap landed)")
+    XCTAssertEqual(
+      row.pendingResetGeneration, 25,
+      "appliedGeneration must seed pendingResetGeneration so subsequent stale replays at gen<=25 are rejected before deleteGroup runs"
+    )
+    XCTAssertEqual(row.persistedRecoveryState, .healthy)
+
+    // Replay-defense check: simulate the next stale event arriving with the
+    // same generation. The guard inside handleGroupReset / handleResetRequested
+    // reads `loadPendingResetGeneration` and compares `stored >= incoming`.
+    // With the seed, gen=25 (replayed) is rejected, NOT propagated to deleteGroup.
+    let storedAfterSeed = try await dbQueue.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }
+    XCTAssertEqual(
+      storedAfterSeed, 25,
+      "loadPendingResetGeneration must return the seeded value (the live read used by the pre-delete stale guard)"
+    )
+    XCTAssertTrue(
+      (storedAfterSeed ?? Int64.min) >= Int64(25),
+      "stored >= incoming(25) → pre-delete stale guard short-circuits the replayed event"
+    )
   }
 
   // MARK: - clearPendingReset

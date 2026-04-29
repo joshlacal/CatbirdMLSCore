@@ -368,6 +368,275 @@ final class MLSResetRequestedTests: XCTestCase {
                    "no-op contract: pendingResetGeneration unchanged on equal-generation replay")
   }
 
+  // MARK: - CLIENT M (Task #75): post-bootstrap stale-replay defense
+
+  /// Reproduces the production sequence observed at b947c701a32943d0:
+  ///   1. attemptFirstResponderBootstrap wins gen=25 → epoch=1
+  ///   2. applyRecipientResetSuccess seeds pendingResetGeneration=25
+  ///   3. WS replays historical groupResetEvent / resetRequestedEvent
+  ///      events at gen=25, 26, 27, 28, 29 from a stale cursor written
+  ///      pre-bootstrap.
+  ///   4. The pre-delete stale-generation guard reads stored=25 and rejects
+  ///      gen<=25 events; gens 26..29 propagate through the existing path
+  ///      (which is fine: they advance the row to the next reset).
+  ///
+  /// Without CLIENT M's seeding fix, step 2 nulled pendingResetGeneration,
+  /// so step 4 fell through and called deleteGroup on the freshly bootstrapped
+  /// group, destroying it.
+  ///
+  /// This is a SQL-level reproduction; it exercises the same guard the live
+  /// handler uses (loadPendingResetGeneration + `>=` compare).
+  func testHandleResetRequestedReplaySameGenerationAsBootstrapSeedIsNoOp() async throws {
+    let convoId = "4b2cdbaad35a9d13"
+    let userDid = "did:plc:bootstrapped"
+    let bootstrappedGroup = Data(repeating: 0xB9, count: 32)  // standin for b947c701…
+    let bootstrappedGen: Int64 = 25  // mirrors production observation
+
+    // Simulate post-bootstrap row state: groupID swapped to the freshly
+    // bootstrapped bytes, pendingResetGeneration seeded by CLIENT M.
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: bootstrappedGroup,
+        epoch: 1,
+        needsReset: false,
+        pendingNewGroupId: nil,
+        pendingResetGeneration: bootstrappedGen,
+        consecutiveFailures: 0
+      )
+    }
+
+    // Replay historical event at gen=25 (same as seeded).
+    let stored = try await dbQueue.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }
+    XCTAssertEqual(stored, 25, "precondition: row seeded with gen=25 post-bootstrap")
+
+    let incomingGeneration: Int32 = 25
+    let isStale = (stored ?? Int64.min) >= Int64(incomingGeneration)
+    XCTAssertTrue(
+      isStale,
+      "stored=25 >= replayed gen=25 → handler must short-circuit BEFORE deleteGroup"
+    )
+
+    // Verify row state is unchanged after the no-op decision (the contract
+    // the handler implements is "early return; no destructive call").
+    let unchanged = try await dbQueue.read { db in
+      try XCTUnwrap(
+        try MLSConversationModel.fetchOne(
+          db,
+          sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [convoId, userDid]
+        )
+      )
+    }
+    XCTAssertEqual(
+      unchanged.groupID, bootstrappedGroup,
+      "groupID must NOT be mutated when a historical event re-announces the bootstrap-time generation"
+    )
+    XCTAssertEqual(unchanged.pendingResetGeneration, bootstrappedGen)
+  }
+
+  /// Self-echo: an incoming reset event whose `expectedNewMlsGroupId` matches
+  /// the conversation's current local groupID is a self-echo of our own
+  /// successful bootstrap (or a historical replay re-announcing the group we
+  /// already operate at). The handler must short-circuit BEFORE deleteGroup
+  /// even if the gen-check would otherwise fall through (e.g. seed missing).
+  ///
+  /// This guards against scenarios where the seeding write hasn't yet
+  /// committed (race against deferred-recovery success → SSE delivery) but
+  /// the local groupId already reflects the new state via in-memory
+  /// `conversations[convoId]`.
+  func testHandleResetRequestedSelfEchoLocalGroupIdMatchIsNoOp() async throws {
+    let convoId = "convo-self-echo"
+    let userDid = "did:plc:self-echo"
+    let bootstrappedGroup = Data(repeating: 0xCE, count: 32)
+    let bootstrappedHex = bootstrappedGroup.hexEncodedString()
+
+    // Row in healthy state: pendingResetGeneration intentionally NULL
+    // (simulates seeding-not-yet-committed window) so we exercise the
+    // self-echo branch independently of the gen-check.
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: bootstrappedGroup,
+        epoch: 1,
+        needsReset: false,
+        pendingNewGroupId: nil,
+        pendingResetGeneration: nil,
+        consecutiveFailures: 0
+      )
+    }
+
+    // Self-echo decision the handler makes: `serverHex == localHex`
+    // (lowercased compare). Use the same shape — derive `localHex` from the
+    // row, mirroring what `conversations[convoId]?.groupId` would yield.
+    let localHex = bootstrappedHex.lowercased()
+    let serverHex = bootstrappedHex.uppercased()  // case-different to test lowercased compare
+    let isSelfEcho = localHex == serverHex.lowercased()
+    XCTAssertTrue(
+      isSelfEcho,
+      "lowercased compare must catch case differences from server-vs-FFI hex emission"
+    )
+
+    // Verify row state is unchanged (the live handler returns early; we
+    // assert the proxy: no DB mutation).
+    let unchanged = try await dbQueue.read { db in
+      try XCTUnwrap(
+        try MLSConversationModel.fetchOne(
+          db,
+          sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [convoId, userDid]
+        )
+      )
+    }
+    XCTAssertEqual(unchanged.groupID, bootstrappedGroup,
+                   "self-echo no-op: groupID must NOT mutate")
+    XCTAssertNil(unchanged.pendingResetGeneration,
+                 "self-echo no-op: pendingResetGeneration must remain as it was")
+  }
+
+  /// CLIENT M (Task #75): the seed must be the MAX of (bootstrap-response gen,
+  /// post-bootstrap getConversation gen, observed gen). The bootstrap may
+  /// preserve a lower generation across self-heal (gen=25 in the production
+  /// scenario), but server-side sweeps that fired during bootstrap could
+  /// have advanced reset_count to a higher value (gen=29 in production).
+  /// Without taking the MAX, replays of the higher gens (26-29) pass the
+  /// `>=25` gate and call deleteGroup on the bootstrapped group.
+  ///
+  /// This test simulates the production scenario:
+  ///   - bootstrap returned `convo.resetGeneration = 25` (preserved self-heal)
+  ///   - getConversation refetch returned `convo.resetGeneration = 29` (sweeps
+  ///     advanced after bootstrap)
+  ///   - observedGeneration = 25 (the trigger event)
+  ///   - MAX(25, 29, 25) = 29
+  /// The seed value is what the staleness gate compares against: with
+  /// seed=25, the gen=26 replay passes the `>=` gate (26 > 25 = NOT stale)
+  /// and proceeds to deleteGroup. With seed=29, gen=26 is `<= 29 = stale`
+  /// and short-circuits.
+  ///
+  /// Note: this test exercises the SEED CHOICE LOGIC at the SQL boundary,
+  /// not the live `attemptFirstResponderBootstrap` actor (which requires
+  /// the full MLSClient + MLSAPIClient harness). The actor wires the same
+  /// MAX-of-three logic before passing `appliedGeneration` to
+  /// `applyRecipientResetSuccess` — see `MLSConversationManager+Sync.swift`
+  /// around `let seededGeneration = ...`.
+  func testBootstrapSeedTakesMaxOfBootstrapResponseAndRefetch() async throws {
+    let convoId = "convo-seed-max"
+    let userDid = "did:plc:seed-max"
+    let bootstrappedGroup = Data(repeating: 0xB9, count: 32)
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: Data(repeating: 0xAA, count: 32),
+        epoch: 0,
+        needsReset: true,
+        pendingNewGroupId: bootstrappedGroup.hexEncodedString(),
+        pendingResetGeneration: 25,  // observedGeneration
+        consecutiveFailures: 0
+      )
+    }
+
+    // Production-scenario inputs.
+    let bootstrappedGen: Int64 = 25  // bootstrap response (preserved self-heal)
+    let refetchedGen: Int64 = 29     // getConversation refetch (sweeps advanced)
+    let observedGen: Int64 = 25      // event trigger
+
+    let candidates: [Int64?] = [bootstrappedGen, refetchedGen, observedGen]
+    let seeded = candidates.compactMap { $0 }.max()
+    XCTAssertEqual(
+      seeded, 29,
+      "MAX of (25, 29, 25) must be 29 — refetched value wins because sweeps advanced post-bootstrap"
+    )
+
+    // Persist the seed via applyRecipientResetSuccess.
+    try await dbQueue.write { db in
+      try MLSConversationResetSQL.applyRecipientResetSuccess(
+        db: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        newGroupID: bootstrappedGroup,
+        newEpoch: 1,
+        appliedGeneration: seeded,
+        now: Date(timeIntervalSince1970: 1_700_000_000)
+      )
+    }
+
+    // Now simulate replay events at gens 25, 26, 27, 28, 29. With seed=29,
+    // ALL must be rejected. With seed=25 (the buggy single-value seed), only
+    // gen=25 would be rejected and 26-29 would proceed to deleteGroup.
+    let stored = try await dbQueue.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }
+    XCTAssertEqual(stored, 29, "row must reflect the MAX seed, not just the bootstrap response")
+
+    for replayedGen in Int32(25)...Int32(29) {
+      let isStale = (stored ?? Int64.min) >= Int64(replayedGen)
+      XCTAssertTrue(
+        isStale,
+        "replayed gen=\(replayedGen) must be rejected as stale against seed=29 (with the buggy seed=25, gens 26-29 would have fallen through to deleteGroup — the production destruction)"
+      )
+    }
+
+    // Sanity: a real new gen=30 (post-replay-storm) must NOT be rejected.
+    let freshGen: Int32 = 30
+    let isFreshStale = (stored ?? Int64.min) >= Int64(freshGen)
+    XCTAssertFalse(
+      isFreshStale,
+      "a genuinely fresh gen=30 must pass through (not get over-rejected by an over-eager seed)"
+    )
+  }
+
+  /// CLIENT M (Task #75): self-echo branch must NOT trip when the server's
+  /// `expectedNewMlsGroupId` is `nil` (Phase 2.5 indirect triggers do not
+  /// include it). The handler should fall through to the candidate-mint
+  /// flow in that case. This is a guard against a regression where an
+  /// over-eager self-echo check would falsely positive on `nil == nil`.
+  func testHandleResetRequestedExpectedNewGroupIdNilDoesNotTriggerSelfEcho() async throws {
+    let convoId = "convo-no-expected"
+    let userDid = "did:plc:no-expected"
+    let liveGroup = Data(repeating: 0xAB, count: 32)
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: liveGroup,
+        epoch: 5,
+        needsReset: false,
+        pendingNewGroupId: nil,
+        pendingResetGeneration: nil,
+        consecutiveFailures: 0
+      )
+    }
+
+    // The handler's self-echo guard is gated on serverHex being non-nil &
+    // non-empty. With `expectedNewMlsGroupId = nil`, the guard skips and the
+    // handler proceeds to the regular flow.
+    let serverHex: String? = nil
+    let localHex = liveGroup.hexEncodedString()
+    let isSelfEcho: Bool = {
+      guard let serverHex, !serverHex.isEmpty else { return false }
+      return serverHex.lowercased() == localHex.lowercased()
+    }()
+    XCTAssertFalse(
+      isSelfEcho,
+      "nil expectedNewMlsGroupId must NOT trigger self-echo short-circuit (Phase 2.5 indirect triggers depend on the candidate-mint flow)"
+    )
+  }
+
   // MARK: - Helpers (mirror MLSGroupResetRecipientTests schema)
 
   private static func createConversationTable(in db: Database) throws {

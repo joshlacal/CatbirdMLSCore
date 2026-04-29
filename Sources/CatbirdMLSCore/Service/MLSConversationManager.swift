@@ -983,6 +983,65 @@ public final class MLSConversationManager {
       return
     }
 
+    // CLIENT M (Task #75): one-line entry summary for grep-based forensic
+    // analysis of replay-storm sequences. Mirror the same shape as
+    // handleResetRequested. The `try?` collapses any GRDB error to nil; the
+    // outer flatten unwraps the Optional<Optional<Int64>> to a single
+    // optional for log formatting.
+    let localGroupIdHex = conversations[convoId]?.groupId
+    let storedGenForLog: Int64? = (try? await database.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }) ?? nil
+    logger.info(
+      "🔍 [RESET-EVENT] handler=handleGroupReset convo=\(convoId.prefix(16)) incomingGen=\(event.resetGeneration) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(newGroupId.prefix(16))"
+    )
+
+    // CLIENT M (Task #75) — fix #1: pre-delete stale-generation guard.
+    // Mirrors `handleResetRequested`'s pre-delete check (this handler was
+    // missing it). If a newer-or-equal `pendingResetGeneration` is already
+    // persisted, the incoming event is a stale replay (WS cursor replay
+    // after first-responder bootstrap success) — short-circuit BEFORE any
+    // destructive call. Without this, the event flood after bootstrap
+    // success calls `MLSClient.deleteGroup` on the freshly bootstrapped
+    // group and destroys it. Production observed at b947c701a32943d0 right
+    // after a successful bootstrap won the race for 4b2cdbaad35a9d13 / gen 25.
+    do {
+      let stored = try await database.read { db in
+        try MLSConversationResetSQL.loadPendingResetGeneration(
+          db: db, conversationID: convoId, currentUserDID: userDid
+        )
+      }
+      if let stored = stored, stored >= Int64(event.resetGeneration) {
+        logger.info(
+          "⏭️ [STALE-RESET] Skipping incoming gen=\(event.resetGeneration) for convo=\(convoId.prefix(16)) (storedGen=\(stored)) — pre-delete guard"
+        )
+        return
+      }
+    } catch {
+      logger.warning(
+        "⚠️ [handleGroupReset] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
+      )
+    }
+
+    // CLIENT M (Task #75) — fix #2: self-echo / replay-into-current short-circuit.
+    // If the incoming `newGroupId` matches the conversation's current local
+    // `groupId`, the event is either a self-echo of our own bootstrap or a
+    // historical replay re-announcing the group we already operate at. In
+    // either case there is nothing to reset. Without this, even after the
+    // stale-gen guard short-circuits the destruction the handler still
+    // re-flags RESET_PENDING + minted candidates and forces a needless
+    // recovery cycle. Use lowercased compare; FFI-minted ids are lowercase
+    // hex but server-canonicalized fields elsewhere have varied historically.
+    if let localHex = localGroupIdHex,
+       localHex.lowercased() == newGroupId.lowercased() {
+      logger.info(
+        "⏭️ [SELF-ECHO] Skipping reset event — newGroupId=\(newGroupId.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+      )
+      return
+    }
+
     // 1. Delete old MLS group state
     // Try to resolve the old group ID from memory or database
     var oldGroupId: Data?
@@ -1131,6 +1190,20 @@ public final class MLSConversationManager {
       return
     }
 
+    // CLIENT M (Task #75): one-line entry summary for grep-based forensic
+    // analysis of replay-storm sequences. Mirror the same shape as
+    // handleGroupReset. The `try?` + `?? nil` flattens the
+    // Optional<Optional<Int64>> for clean log formatting.
+    let localGroupIdHex = conversations[convoId]?.groupId
+    let storedGenForLog: Int64? = (try? await database.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }) ?? nil
+    logger.info(
+      "🔍 [RESET-EVENT] handler=handleResetRequested convo=\(convoId.prefix(16)) incomingGen=\(generation) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(event.expectedNewMlsGroupId?.prefix(16) ?? "nil")"
+    )
+
     // 0. Stale-generation guard (BEFORE destructive delete).
     //    If a newer or equal `pendingResetGeneration` is already persisted,
     //    treat this event as a stale replay / dual-subscription duplicate and
@@ -1143,6 +1216,14 @@ public final class MLSConversationManager {
     //    at a NEWER generation) before the staleness check inside
     //    `markConversationNeedsReset` would reject the row write — clobbering
     //    valid local state and forcing avoidable recovery.
+    //
+    //    CLIENT M (Task #75) note: this guard relies on success paths writing
+    //    a non-nil `pendingResetGeneration`. Prior to CLIENT M,
+    //    `applyRecipientResetSuccess` nulled this column; that left the guard
+    //    vacuous (`stored == nil` falls through), so historical SSE replays
+    //    after a successful bootstrap still ran through to `deleteGroup` and
+    //    destroyed the freshly-bootstrapped group. The fix is the
+    //    `appliedGeneration` plumbing in `MLSConversationManager+Sync`.
     do {
       let stored = try await database.read { db in
         try MLSConversationResetSQL.loadPendingResetGeneration(
@@ -1151,7 +1232,7 @@ public final class MLSConversationManager {
       }
       if let stored = stored, stored >= Int64(generation) {
         logger.info(
-          "⏭️ [handleResetRequested] Stale event for \(convoId.prefix(16)) — incoming gen \(generation) <= stored gen \(stored); no-op (eventId=\(event.requestEventId.prefix(16)))"
+          "⏭️ [STALE-RESET] Skipping incoming gen=\(generation) for convo=\(convoId.prefix(16)) (storedGen=\(stored)) — pre-delete guard (eventId=\(event.requestEventId.prefix(16)))"
         )
         return
       }
@@ -1162,6 +1243,23 @@ public final class MLSConversationManager {
       logger.warning(
         "⚠️ [handleResetRequested] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
       )
+    }
+
+    // CLIENT M (Task #75) — fix #2: self-echo / replay-into-current short-circuit.
+    // ResetRequestedEvent's `expectedNewMlsGroupId` is OPTIONAL (Phase 2.5
+    // indirect triggers don't include it; only admin-override paths do). When
+    // it IS present and matches the conversation's current local groupId,
+    // the event is announcing the group we already operate at — skip the
+    // destructive path entirely. When absent, fall through to the existing
+    // candidate-mint flow.
+    if let serverHex = event.expectedNewMlsGroupId,
+       !serverHex.isEmpty,
+       let localHex = localGroupIdHex,
+       localHex.lowercased() == serverHex.lowercased() {
+      logger.info(
+        "⏭️ [SELF-ECHO] Skipping reset event — expectedNewMlsGroupId=\(serverHex.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+      )
+      return
     }
 
     // 1. Delete old MLS group state.

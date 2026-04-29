@@ -15,9 +15,22 @@ public enum MLSConversationResetSQL {
   /// Updates the row identified by `(conversationID, currentUserDID)` to point
   /// at the new MLS group: replaces `groupID`, resets `epoch` to the freshly
   /// landed value, clears `needsReset` / `needsRejoin` / `isUnrecoverable`, and
-  /// nulls the `pendingNewGroupId` + `pendingResetGeneration` staging columns.
-  /// Also resets the recovery counters so the next failure is treated as the
-  /// first one.
+  /// nulls the `pendingNewGroupId` staging column. Also resets the recovery
+  /// counters so the next failure is treated as the first one.
+  ///
+  /// `pendingResetGeneration` is **preserved** rather than nulled when
+  /// `appliedGeneration` is supplied. Why: the WebSocket cursor for an
+  /// unsubscribed conversation can replay historical `groupResetEvent` /
+  /// `resetRequestedEvent` rows after a successful first-responder bootstrap.
+  /// The `[STALE-RESET]` / pre-delete stale-generation guards in
+  /// `handleGroupReset` and `handleResetRequested` short-circuit on
+  /// `incomingGen <= storedGen`. If we null `pendingResetGeneration` here, the
+  /// guards become vacuous (`stored == nil` falls through), the handlers
+  /// proceed to call `MLSClient.deleteGroup` on the freshly bootstrapped
+  /// group, and the convo is destroyed by replay traffic. CLIENT M (Task #75)
+  /// added the `appliedGeneration` plumbing so success paths leave a real
+  /// number behind. Pass `nil` from non-reset success paths to fall back to
+  /// the legacy null-on-success behavior.
   ///
   /// Generation staleness must be checked by the caller before invoking this
   /// helper — see `MLSConversationResetSQL.loadPendingResetGeneration`.
@@ -27,6 +40,7 @@ public enum MLSConversationResetSQL {
     currentUserDID: String,
     newGroupID: Data,
     newEpoch: Int64,
+    appliedGeneration: Int64?,
     now: Date
   ) throws {
     try db.execute(
@@ -39,13 +53,16 @@ public enum MLSConversationResetSQL {
                 needsRejoin = 0,
                 isUnrecoverable = 0,
                 pendingNewGroupId = NULL,
-                pendingResetGeneration = NULL,
+                pendingResetGeneration = ?,
                 consecutiveFailures = 0,
                 lastRecoveryAttempt = ?,
                 updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?;
         """,
-      arguments: [newGroupID, newEpoch, newEpoch, now, now, conversationID, currentUserDID]
+      arguments: [
+        newGroupID, newEpoch, newEpoch, appliedGeneration, now, now,
+        conversationID, currentUserDID,
+      ]
     )
   }
 
