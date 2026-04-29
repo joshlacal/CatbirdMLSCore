@@ -1436,6 +1436,30 @@ public extension MLSConversationManager {
         landedEpoch = Int64(bootstrapped.epoch)
       }
 
+      // 🛡️ [CLIENT D] Publish post-confirm groupInfo. The bootstrap RPC's
+      // groupInfo arg captured the PRE-confirm group at epoch 0; after
+      // confirmCommit the local group advances to epoch 1+, and no other
+      // path uploads the post-commit groupInfo. Without this publish,
+      // server.active_crypto_session.group_info stays NULL forever, which
+      // means subsequent External Commit attempts on this convo all 404
+      // (the production state from team-lead's 4b2cdbaa diagnostic).
+      // Asymmetric failure handling: this is the 200 path so the server
+      // already committed our bootstrap — log warning but DO NOT roll
+      // back. The publish is best-effort polish on top of the win.
+      do {
+        try await mlsClient.publishGroupInfo(
+          for: userDid, convoId: convoId, groupId: pendingGroupIdData,
+          knownServerEpoch: UInt64(landedEpoch)
+        )
+        logger.info(
+          "🛡️ [CLIENT D] Published post-confirm groupInfo at epoch=\(landedEpoch) for \(convoId.prefix(16)) (200 winner)"
+        )
+      } catch {
+        logger.warning(
+          "🛡️ [CLIENT D] Post-confirm publishGroupInfo failed for \(convoId.prefix(16)) on 200 path: \(error.localizedDescription) — keeping local win, server-side groupInfo will need backfill"
+        )
+      }
+
       let now = Date()
       do {
         try await database.write { db in
@@ -1634,42 +1658,129 @@ public extension MLSConversationManager {
             landedEpoch = Int64(serverConvo?.epoch ?? 1)
           }
 
-          // 🛡️ [CLIENT D] Post-confirm cryptographic backstop. Fetch the
-          // server's authoritative groupInfo and compare its epoch to
-          // landedEpoch. If they diverge — or if the server returns 404
-          // (no groupInfo bound, e.g. server B fix not deployed) — we
-          // can't prove we actually won. Roll back rather than persist a
-          // ratchet the server hasn't accepted.
+          // 🛡️ [CLIENT D] Publish-then-verify backstop. The server's
+          // active crypto_session for a freshly-bootstrapped convo
+          // typically has group_info=NULL — confirmCommit advanced our
+          // local ratchet but no one has published the post-commit
+          // groupInfo yet. The actual proof of winning is whether the
+          // server accepts OUR publish (the alternative — sibling won
+          // and is the rightful publisher — would either reject our
+          // publish via 410 groupReset, or our re-fetch would surface
+          // a different groupInfo than what we just sent).
+          //
+          // 1. Publish our post-confirm groupInfo.
+          // 2. Re-fetch (with one retry to absorb stale read).
+          // 3. Verify epoch matches AND non-NULL groupInfo present.
+          //
+          // 410 Gone (server contract: locked with SERVER B PR #11) is
+          // the unambiguous "you lost / mid-reset" signal. Any other
+          // failure or mismatch is treated as ambiguous → roll back.
           var verifiedWin = false
+          var detectedGroupReset = false
           do {
-            let (_, serverInfoEpoch, _) = try await apiClient.getGroupInfo(
-              convoId: convoId, maxRetries: 1)
-            if Int64(serverInfoEpoch) == landedEpoch {
-              verifiedWin = true
-              logger.info(
-                "🛡️ [CLIENT D] Post-confirm verify OK for \(convoId.prefix(16)): server epoch=\(serverInfoEpoch) matches landedEpoch=\(landedEpoch)"
+            try await mlsClient.publishGroupInfo(
+              for: userDid, convoId: convoId, groupId: pendingGroupIdData,
+              knownServerEpoch: UInt64(landedEpoch)
+            )
+            logger.info(
+              "🛡️ [CLIENT D] Published groupInfo at epoch=\(landedEpoch) for \(convoId.prefix(16)); verifying server accepted"
+            )
+
+            // Re-fetch with one retry to absorb stale-read race.
+            var attempt = 0
+            while attempt < 2 {
+              do {
+                let (_, serverInfoEpoch, _) = try await apiClient.getGroupInfo(
+                  convoId: convoId, maxRetries: 1)
+                if Int64(serverInfoEpoch) == landedEpoch {
+                  verifiedWin = true
+                  logger.info(
+                    "🛡️ [CLIENT D] Post-publish verify OK for \(convoId.prefix(16)): server epoch=\(serverInfoEpoch) matches landedEpoch=\(landedEpoch)"
+                  )
+                  break
+                } else {
+                  logger.warning(
+                    "🛡️ [CLIENT D] Post-publish epoch mismatch for \(convoId.prefix(16)): server=\(serverInfoEpoch) vs local=\(landedEpoch) — sibling won"
+                  )
+                  break
+                }
+              } catch let mlsErr as MLSAPIError {
+                // 410 from getGroupInfo surfaces as MLSAPIError.httpError.
+                // 410 is the SERVER B "groupReset" signal — convo is
+                // mid-reset or in a superseded crypto session.
+                if case .httpError(let code, _) = mlsErr, code == 410 {
+                  detectedGroupReset = true
+                  logger.warning(
+                    "🛡️ [CLIENT D] Post-publish saw 410 groupReset for \(convoId.prefix(16)) — server has new active session; rolling back to recipient-rejoin"
+                  )
+                  break
+                }
+                if attempt == 0 {
+                  attempt += 1
+                  try? await Task.sleep(nanoseconds: 750_000_000)
+                  continue
+                }
+                logger.warning(
+                  "🛡️ [CLIENT D] Post-publish getGroupInfo failed for \(convoId.prefix(16)): \(mlsErr.errorDescription ?? "?") — treating as ambiguous"
+                )
+                break
+              }
+            }
+          } catch {
+            // publishGroupInfo failure is itself evidence we did not win
+            // — server rejected our update (likely because the active
+            // crypto session is bound to a sibling's groupId).
+            let lowered = error.localizedDescription.lowercased()
+            if lowered.contains("410") || lowered.contains("groupreset") {
+              detectedGroupReset = true
+              logger.warning(
+                "🛡️ [CLIENT D] publishGroupInfo got 410/groupReset for \(convoId.prefix(16)) — sibling owns the active session"
               )
             } else {
               logger.warning(
-                "🛡️ [CLIENT D] Post-confirm epoch mismatch for \(convoId.prefix(16)): server=\(serverInfoEpoch) vs local=\(landedEpoch) — rolling back"
+                "🛡️ [CLIENT D] publishGroupInfo failed for \(convoId.prefix(16)) (\(error.localizedDescription)) — treating as ambiguous"
               )
             }
-          } catch {
-            logger.warning(
-              "🛡️ [CLIENT D] Post-confirm getGroupInfo failed for \(convoId.prefix(16)) (\(error.localizedDescription)) — treating as ambiguous, rolling back"
-            )
           }
 
           if !verifiedWin {
-            // Rollback: the local ratchet has advanced past confirmCommit,
-            // but we cannot prove the server is bound to it. Tear down the
-            // local group; recovery will re-discover via Welcome (loser
-            // path) or External Commit on the next sync. Do NOT call
-            // markConversationNeedsReset here — that path is owned by
-            // CLIENT G's WrongGroupId handler.
+            // Rollback. The local ratchet has advanced past confirmCommit,
+            // but we cannot prove the server is bound to it. Tear down
+            // the local group; recovery's downstream path depends on
+            // signal type:
+            //   - 410 groupReset: server has a new active crypto session;
+            //     stage recipient rejoin against that session (same path
+            //     as CLIENT G uses for WrongGroupId).
+            //   - everything else: ambiguous, sit on RESET_PENDING and
+            //     let next sync iteration retry.
             try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
               await recoveryManager.clearRejoinTracking(convoId: convoId)
+            }
+
+            if detectedGroupReset {
+              // Look up server's current authoritative groupId so the
+              // recipient path can verify the landed group matches.
+              do {
+                if let serverConvo = try await apiClient.getConversation(convoId: convoId) {
+                  let serverGroupIdHex = serverConvo.groupId
+                  let serverGeneration = serverConvo.resetGeneration.map { Int64($0) }
+                  if !serverGroupIdHex.isEmpty {
+                    try? await markConversationNeedsReset(
+                      convoId,
+                      pendingNewGroupId: serverGroupIdHex,
+                      pendingResetGeneration: serverGeneration
+                    )
+                    logger.warning(
+                      "🛡️ [CLIENT D] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration.map(String.init) ?? "nil")"
+                    )
+                  }
+                }
+              } catch {
+                logger.warning(
+                  "🛡️ [CLIENT D] Could not stage recipient rejoin after groupReset for \(convoId.prefix(16)) — getConversation failed: \(error.localizedDescription)"
+                )
+              }
             }
             return
           }
