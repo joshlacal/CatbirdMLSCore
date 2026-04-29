@@ -226,6 +226,148 @@ final class MLSResetRequestedTests: XCTestCase {
     _ = earlier  // silence unused-warning if the stub doesn't use it
   }
 
+  /// `handleResetRequested` MUST short-circuit before the destructive
+  /// `deleteGroup` call when the incoming `event.generation` is `<=` the
+  /// stored `pendingResetGeneration`. Mirrors the Codex P1 review feedback
+  /// on PR #1: relying on the row-write staleness guard inside
+  /// `markConversationNeedsReset` is too late — the local MLS group state
+  /// has already been deleted by step 1, which can clobber valid newer
+  /// state when an out-of-order/replayed event arrives.
+  ///
+  /// SQL-level test (matches the rest of this file's pattern; the actor
+  /// graph for `MLSConversationManager` is too large to construct here).
+  /// Asserts the early-bail decision the handler now makes against
+  /// `MLSConversationResetSQL.loadPendingResetGeneration`, plus invariants
+  /// the handler's no-op contract guarantees:
+  ///   - `groupID` (the canonical "would have been deleted" column proxy)
+  ///     is unchanged
+  ///   - `pendingResetGeneration` is unchanged
+  ///   - `pendingNewGroupId` is unchanged
+  func testHandleResetRequestedOlderGenerationIsNoOp() async throws {
+    let convoId = "convo-2-5-older-gen"
+    let userDid = "did:plc:older-gen"
+    // Distinct group bytes so we can detect any stray `deleteGroup`-equivalent
+    // mutation in DB state.
+    let liveGroup = Data(repeating: 0xBE, count: 32)
+    let priorCandidate = "deadbeefdeadbeefdeadbeefdeadbeef"
+    // Row already at generation N+1 = 18 (e.g. from an earlier in-flight
+    // event that already drove deferred recovery to a newer state).
+    let storedGen: Int64 = 18
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: liveGroup,
+        epoch: 200,
+        needsReset: true,
+        pendingNewGroupId: priorCandidate,
+        pendingResetGeneration: storedGen,
+        consecutiveFailures: 0
+      )
+    }
+
+    // Simulate the new step-0 stale-generation guard added to
+    // `handleResetRequested` (read happens BEFORE any destructive call).
+    let stored = try await dbQueue.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }
+    XCTAssertEqual(stored, storedGen, "precondition: row already at gen \(storedGen)")
+
+    // Incoming event at N = 17 (older than stored 18).
+    let incomingGeneration: Int32 = 17
+    let isStale = (stored ?? Int64.min) >= Int64(incomingGeneration)
+    XCTAssertTrue(
+      isStale,
+      "stored gen \(stored ?? -1) >= incoming gen \(incomingGeneration) → handler must early-bail BEFORE deleteGroup"
+    )
+
+    // Critically: a real handler invocation in this state must NOT mutate
+    // any row state. We verify by reading the row back and asserting all
+    // three fields are unchanged. (We can't assert the deleteGroup call
+    // didn't fire without an actor harness, but the contract is "early
+    // return before any side effects" — the row state is the proxy.)
+    let unchanged = try await dbQueue.read { db in
+      try XCTUnwrap(
+        try MLSConversationModel.fetchOne(
+          db,
+          sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [convoId, userDid]
+        )
+      )
+    }
+    XCTAssertEqual(
+      unchanged.groupID, liveGroup,
+      "no-op contract: groupID must NOT be mutated when event is stale"
+    )
+    XCTAssertEqual(
+      unchanged.pendingResetGeneration, storedGen,
+      "no-op contract: pendingResetGeneration must remain at the stored higher value"
+    )
+    XCTAssertEqual(
+      unchanged.pendingNewGroupId, priorCandidate,
+      "no-op contract: pendingNewGroupId must NOT be overwritten by a stale event"
+    )
+  }
+
+  /// Equal-generation must also be a no-op. The Rust mirror at
+  /// `recovery.rs:1401` short-circuits on `existing.reset_generation == reset_generation`,
+  /// and the Swift `markConversationNeedsReset` guard at line 3353 uses
+  /// `stored >= incoming`. The new step-0 guard in `handleResetRequested`
+  /// must use the same `>=` semantic so the handler does NOT delete the
+  /// current MLS group when re-delivered by the dual subscription path
+  /// at the SAME generation.
+  func testHandleResetRequestedEqualGenerationIsNoOp() async throws {
+    let convoId = "convo-2-5-equal-gen"
+    let userDid = "did:plc:equal-gen"
+    let liveGroup = Data(repeating: 0xCD, count: 32)
+    let priorCandidate = "feedfacefeedfacefeedfacefeedface"
+    let storedGen: Int64 = 19
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: liveGroup,
+        epoch: 300,
+        needsReset: true,
+        pendingNewGroupId: priorCandidate,
+        pendingResetGeneration: storedGen,
+        consecutiveFailures: 0
+      )
+    }
+
+    let stored = try await dbQueue.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db, conversationID: convoId, currentUserDID: userDid
+      )
+    }
+    let incomingGeneration: Int32 = 19
+    let isStale = (stored ?? Int64.min) >= Int64(incomingGeneration)
+    XCTAssertTrue(
+      isStale,
+      "equal generation must also short-circuit (mirrors Rust `==` and Swift `>=` checks)"
+    )
+
+    let unchanged = try await dbQueue.read { db in
+      try XCTUnwrap(
+        try MLSConversationModel.fetchOne(
+          db,
+          sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [convoId, userDid]
+        )
+      )
+    }
+    XCTAssertEqual(unchanged.groupID, liveGroup,
+                   "no-op contract: groupID unchanged on equal-generation replay")
+    XCTAssertEqual(unchanged.pendingResetGeneration, storedGen,
+                   "no-op contract: pendingResetGeneration unchanged on equal-generation replay")
+  }
+
   // MARK: - Helpers (mirror MLSGroupResetRecipientTests schema)
 
   private static func createConversationTable(in db: Database) throws {

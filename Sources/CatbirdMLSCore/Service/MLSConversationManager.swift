@@ -1092,10 +1092,16 @@ public final class MLSConversationManager {
   /// into the bootstrap-race branch which is the correct Phase 2.5 endpoint
   /// (`bootstrapResetGroup`) for any active member.
   ///
-  /// Idempotency: if the incoming `generation` is already <= the stored
-  /// `pendingResetGeneration`, `markConversationNeedsReset` skips the write.
-  /// Required because the global (AppState) + per-convo (DetailView) WS
-  /// subscriptions both deliver this event for active conversations.
+  /// Idempotency: a stale-generation guard runs **before** the destructive
+  /// `deleteGroup` call (mirrors `record_reset_requested` at
+  /// `catbird-mls/src/orchestrator/recovery.rs:1401`). If the stored
+  /// `pendingResetGeneration` is `>=` the incoming `event.generation`, the
+  /// handler returns early without touching MLS state — the row is already
+  /// at this or a newer generation. Required because the global (AppState)
+  /// + per-convo (DetailView) WS subscriptions both deliver this event for
+  /// active conversations, and `event_stream` cursor replay can re-deliver
+  /// after reconnect. `markConversationNeedsReset` applies the same guard
+  /// at the row-write layer as a second line of defense.
   ///
   /// - Parameters:
   ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
@@ -1118,6 +1124,39 @@ public final class MLSConversationManager {
 
     guard await ensureActiveAccount(for: userDid, operation: "handleResetRequested") else {
       return
+    }
+
+    // 0. Stale-generation guard (BEFORE destructive delete).
+    //    If a newer or equal `pendingResetGeneration` is already persisted,
+    //    treat this event as a stale replay / dual-subscription duplicate and
+    //    short-circuit. Mirrors `record_reset_requested` at
+    //    `catbird-mls/src/orchestrator/recovery.rs:1401` and the existing
+    //    Swift `markConversationNeedsReset` stale-guard at line 3353.
+    //
+    //    Without this check, a replayed event with an older generation would
+    //    delete the current MLS group state (which may already be operating
+    //    at a NEWER generation) before the staleness check inside
+    //    `markConversationNeedsReset` would reject the row write — clobbering
+    //    valid local state and forcing avoidable recovery.
+    do {
+      let stored = try await database.read { db in
+        try MLSConversationResetSQL.loadPendingResetGeneration(
+          db: db, conversationID: convoId, currentUserDID: userDid
+        )
+      }
+      if let stored = stored, stored >= Int64(generation) {
+        logger.info(
+          "⏭️ [handleResetRequested] Stale event for \(convoId.prefix(16)) — incoming gen \(generation) <= stored gen \(stored); no-op (eventId=\(event.requestEventId.prefix(16)))"
+        )
+        return
+      }
+    } catch {
+      // If the read itself fails, fall through and let the existing
+      // markConversationNeedsReset stale-guard catch it. We only short-circuit
+      // when we positively know the event is stale.
+      logger.warning(
+        "⚠️ [handleResetRequested] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
+      )
     }
 
     // 1. Delete old MLS group state.
@@ -1203,7 +1242,13 @@ public final class MLSConversationManager {
 
     // 5. Trigger a sync cycle to pick up the deferred recovery promptly.
     Task {
-      try? await self.syncWithServer(fullSync: false)
+      do {
+        try await self.syncWithServer(fullSync: false)
+      } catch {
+        self.logger.warning(
+          "⚠️ [handleResetRequested] syncWithServer failed after reset request handling: \(error.localizedDescription)"
+        )
+      }
     }
   }
 
