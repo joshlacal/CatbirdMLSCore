@@ -667,13 +667,24 @@ public actor MLSClient {
     }
   }
 
-  /// Update encrypted metadata in MLS group context extension
+  /// Update group metadata via the legacy plaintext path.
+  ///
+  /// **DEPRECATED — post metadata cutover this no longer writes a
+  /// plaintext 0xff00 GroupContext extension and does NOT upload an
+  /// encrypted blob; renames will not propagate to other clients.**
+  /// Migrate to `updateGroupMetadataEncrypted(for:groupId:title:description:avatarBlobLocator:avatarContentType:)`
+  /// which atomically stages the commit, derives the post-commit
+  /// metadata key, encrypts a `GroupMetadataV1` payload, and returns
+  /// the commit bytes + ciphertext + reference + version + locator
+  /// the platform layer needs to upload via `putGroupMetadataBlob`.
+  ///
   /// - Parameters:
   ///   - userDID: The user's DID
   ///   - groupId: Raw group ID bytes
   ///   - name: New group name (nil to leave unchanged)
   ///   - description: New group description (nil to leave unchanged)
   /// - Returns: Commit data to send to server
+  @available(*, deprecated, message: "Use updateGroupMetadataEncrypted; the legacy path no longer propagates renames")
   public func updateGroupMetadata(
     for userDID: String,
     groupId: Data,
@@ -688,6 +699,44 @@ public actor MLSClient {
     }
 
     return commitData
+  }
+
+  /// Atomic encrypted metadata update (Phase A.2).
+  ///
+  /// Stages a GroupContextExtensions commit + derives the post-commit
+  /// metadata key from the staged commit's exporter + encrypts a fresh
+  /// `GroupMetadataV1` payload in one FFI call. Returns everything the
+  /// platform layer needs to:
+  ///   1. Upload `metadataBlobCiphertext` via `putGroupMetadataBlob`
+  ///      with `metadataBlobLocator` + `metadataVersion` + `kind=metadata`.
+  ///   2. POST `commitBytes` via `commitGroupChange` with
+  ///      `action=updateMetadata`.
+  ///   3. Call `mergePendingCommit(groupId:)` after server ACK to
+  ///      apply locally.
+  ///   4. Cache `metadataReferenceJson` (final reference, real hash)
+  ///      in the local conversation row.
+  ///
+  /// Empty `title` and `description` are encoded as empty strings;
+  /// callers can treat empty as "unset". `avatarBlobLocator` /
+  /// `avatarContentType` should reference a separately-uploaded
+  /// avatar blob (use `mlsEncryptAvatarBlob` + `putGroupMetadataBlob(kind: "avatar")`).
+  public func updateGroupMetadataEncrypted(
+    for userDID: String,
+    groupId: Data,
+    title: String?,
+    description: String?,
+    avatarBlobLocator: String? = nil,
+    avatarContentType: String? = nil
+  ) async throws -> UpdateGroupMetadataResultFfi {
+    return try await runFFIWithRecovery(for: userDID) { ctx in
+      try ctx.updateGroupMetadataEncrypted(
+        groupId: groupId,
+        title: title,
+        description: description,
+        avatarBlobLocator: avatarBlobLocator,
+        avatarContentType: avatarContentType
+      )
+    }
   }
 
   /// Join an existing group using a welcome message (low-level with explicit identity)
