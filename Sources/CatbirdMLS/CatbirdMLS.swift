@@ -1585,8 +1585,32 @@ public protocol MlsContextProtocol : AnyObject {
     
     /**
      * Update group metadata. Returns commit bytes to send to server.
+     *
+     * DEPRECATED — produces a no-op for plaintext under the metadata cutover
+     * (Phase A removed the 0xff00 write). New callers should use
+     * `update_group_metadata_encrypted` which atomically returns the
+     * encrypted blob, locator, version, and final MetadataReference.
      */
     func updateGroupMetadata(groupId: Data, metadataJson: Data) throws  -> Data
+    
+    /**
+     * Atomic encrypted metadata update (Phase A.2).
+     *
+     * Stages the GroupContextExtensions commit + derives the post-commit
+     * metadata key from the staged commit's exporter + encrypts a fresh
+     * `GroupMetadataV1` payload, all in one call. Returns everything the
+     * caller needs to upload + send + merge:
+     * - `commit_bytes` → send to DS via `commitGroupChange`/`updateConvo`
+     * - `metadata_blob_ciphertext` → upload via `putGroupMetadataBlob` with
+     * `metadata_blob_locator` and `metadata_version`
+     * - `metadata_reference_json` → cache locally (final reference, real hash)
+     *
+     * After server ACK, caller invokes `merge_pending_commit(group_id)` to
+     * apply the commit locally; joiners on the new epoch read the
+     * MetadataReference from AppDataDictionary 0x8001 and bootstrap the
+     * blob via `getGroupMetadataBlob`.
+     */
+    func updateGroupMetadataEncrypted(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws  -> UpdateGroupMetadataResultFfi
     
     /**
      * 🔒 FIX #3: Validate GroupInfo format before upload
@@ -2853,12 +2877,46 @@ open func syncDatabase()throws  {try rustCallWithError(FfiConverterTypeMLSError.
     
     /**
      * Update group metadata. Returns commit bytes to send to server.
+     *
+     * DEPRECATED — produces a no-op for plaintext under the metadata cutover
+     * (Phase A removed the 0xff00 write). New callers should use
+     * `update_group_metadata_encrypted` which atomically returns the
+     * encrypted blob, locator, version, and final MetadataReference.
      */
 open func updateGroupMetadata(groupId: Data, metadataJson: Data)throws  -> Data {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata(self.uniffiClonePointer(),
         FfiConverterData.lower(groupId),
         FfiConverterData.lower(metadataJson),$0
+    )
+})
+}
+    
+    /**
+     * Atomic encrypted metadata update (Phase A.2).
+     *
+     * Stages the GroupContextExtensions commit + derives the post-commit
+     * metadata key from the staged commit's exporter + encrypts a fresh
+     * `GroupMetadataV1` payload, all in one call. Returns everything the
+     * caller needs to upload + send + merge:
+     * - `commit_bytes` → send to DS via `commitGroupChange`/`updateConvo`
+     * - `metadata_blob_ciphertext` → upload via `putGroupMetadataBlob` with
+     * `metadata_blob_locator` and `metadata_version`
+     * - `metadata_reference_json` → cache locally (final reference, real hash)
+     *
+     * After server ACK, caller invokes `merge_pending_commit(group_id)` to
+     * apply the commit locally; joiners on the new epoch read the
+     * MetadataReference from AppDataDictionary 0x8001 and bootstrap the
+     * blob via `getGroupMetadataBlob`.
+     */
+open func updateGroupMetadataEncrypted(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?)throws  -> UpdateGroupMetadataResultFfi {
+    return try  FfiConverterTypeUpdateGroupMetadataResultFfi.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata_encrypted(self.uniffiClonePointer(),
+        FfiConverterData.lower(groupId),
+        FfiConverterOptionString.lower(title),
+        FfiConverterOptionString.lower(description),
+        FfiConverterOptionString.lower(avatarBlobLocator),
+        FfiConverterOptionString.lower(avatarContentType),$0
     )
 })
 }
@@ -7864,6 +7922,138 @@ public func FfiConverterTypeTreeHashData_lift(_ buf: RustBuffer) throws -> TreeH
 #endif
 public func FfiConverterTypeTreeHashData_lower(_ value: TreeHashData) -> RustBuffer {
     return FfiConverterTypeTreeHashData.lower(value)
+}
+
+
+/**
+ * FFI surface for `MLSContext::update_group_metadata_encrypted` (Phase A.2).
+ *
+ * All five fields are mandatory. The caller must:
+ * 1. Send `commit_bytes` to the DS (e.g. via `commitGroupChange`).
+ * 2. Upload `metadata_blob_ciphertext` via `putGroupMetadataBlob` with
+ * `metadata_blob_locator` and `metadata_version` query params.
+ * 3. After server ACK, call `merge_pending_commit(group_id)` to apply
+ * the commit locally.
+ * 4. Cache `metadata_reference_json` (the FINAL reference with real hash)
+ * in the local conversation row.
+ */
+public struct UpdateGroupMetadataResultFfi {
+    /**
+     * TLS-serialized commit message to send to the DS.
+     */
+    public var commitBytes: Data
+    /**
+     * Encrypted `GroupMetadataV1` blob (`nonce || ciphertext || tag`).
+     */
+    public var metadataBlobCiphertext: Data
+    /**
+     * JSON-serialized `MetadataReference` (with real ciphertext hash) for local cache.
+     */
+    public var metadataReferenceJson: Data
+    /**
+     * Monotonic counter (per conversation) for this metadata revision.
+     */
+    public var metadataVersion: UInt64
+    /**
+     * UUIDv4 locator the caller uses with `putGroupMetadataBlob`.
+     */
+    public var metadataBlobLocator: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * TLS-serialized commit message to send to the DS.
+         */commitBytes: Data, 
+        /**
+         * Encrypted `GroupMetadataV1` blob (`nonce || ciphertext || tag`).
+         */metadataBlobCiphertext: Data, 
+        /**
+         * JSON-serialized `MetadataReference` (with real ciphertext hash) for local cache.
+         */metadataReferenceJson: Data, 
+        /**
+         * Monotonic counter (per conversation) for this metadata revision.
+         */metadataVersion: UInt64, 
+        /**
+         * UUIDv4 locator the caller uses with `putGroupMetadataBlob`.
+         */metadataBlobLocator: String) {
+        self.commitBytes = commitBytes
+        self.metadataBlobCiphertext = metadataBlobCiphertext
+        self.metadataReferenceJson = metadataReferenceJson
+        self.metadataVersion = metadataVersion
+        self.metadataBlobLocator = metadataBlobLocator
+    }
+}
+
+
+
+extension UpdateGroupMetadataResultFfi: Equatable, Hashable {
+    public static func ==(lhs: UpdateGroupMetadataResultFfi, rhs: UpdateGroupMetadataResultFfi) -> Bool {
+        if lhs.commitBytes != rhs.commitBytes {
+            return false
+        }
+        if lhs.metadataBlobCiphertext != rhs.metadataBlobCiphertext {
+            return false
+        }
+        if lhs.metadataReferenceJson != rhs.metadataReferenceJson {
+            return false
+        }
+        if lhs.metadataVersion != rhs.metadataVersion {
+            return false
+        }
+        if lhs.metadataBlobLocator != rhs.metadataBlobLocator {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(commitBytes)
+        hasher.combine(metadataBlobCiphertext)
+        hasher.combine(metadataReferenceJson)
+        hasher.combine(metadataVersion)
+        hasher.combine(metadataBlobLocator)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUpdateGroupMetadataResultFfi: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UpdateGroupMetadataResultFfi {
+        return
+            try UpdateGroupMetadataResultFfi(
+                commitBytes: FfiConverterData.read(from: &buf), 
+                metadataBlobCiphertext: FfiConverterData.read(from: &buf), 
+                metadataReferenceJson: FfiConverterData.read(from: &buf), 
+                metadataVersion: FfiConverterUInt64.read(from: &buf), 
+                metadataBlobLocator: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: UpdateGroupMetadataResultFfi, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.commitBytes, into: &buf)
+        FfiConverterData.write(value.metadataBlobCiphertext, into: &buf)
+        FfiConverterData.write(value.metadataReferenceJson, into: &buf)
+        FfiConverterUInt64.write(value.metadataVersion, into: &buf)
+        FfiConverterString.write(value.metadataBlobLocator, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUpdateGroupMetadataResultFfi_lift(_ buf: RustBuffer) throws -> UpdateGroupMetadataResultFfi {
+    return try FfiConverterTypeUpdateGroupMetadataResultFfi.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUpdateGroupMetadataResultFfi_lower(_ value: UpdateGroupMetadataResultFfi) -> RustBuffer {
+    return FfiConverterTypeUpdateGroupMetadataResultFfi.lower(value)
 }
 
 
@@ -13275,7 +13465,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_sync_database() != 29289) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata() != 18130) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata() != 49869) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata_encrypted() != 40933) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_validate_group_info_format() != 57471) {
