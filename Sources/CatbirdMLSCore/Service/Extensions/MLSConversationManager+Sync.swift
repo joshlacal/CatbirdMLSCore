@@ -1406,20 +1406,15 @@ public extension MLSConversationManager {
           logger.warning(
             "⏳ [BOOTSTRAP] Missing peer key packages for \(missing.count) member(s) in \(convoId.prefix(16)); requesting replenish and waiting"
           )
-          do {
-            let replenish = try await apiClient.requestKeyPackageReplenish(
-              dids: missing,
-              reason: "bootstrap_missing_key_packages",
-              convoId: convoId
-            )
-            logger.info(
-              "📤 [BOOTSTRAP] Requested key package replenish for \(missing.count) member(s) in \(convoId.prefix(16)) — requested=\(replenish.requested), devices=\(replenish.deviceCount), delivered=\(replenish.deliveredCount)"
-            )
-          } catch {
-            logger.warning(
-              "⚠️ [BOOTSTRAP] Failed to request key package replenish for \(convoId.prefix(16)): \(error.localizedDescription)"
-            )
-          }
+          // Phase F: peer-replenish RPC retired with the publishKeyPackages
+          // lexicon reshape. The bootstrap path no longer asks peers to
+          // upload more key packages — the missing-keypackages condition
+          // is surfaced via a normal error path; the user can wait for the
+          // peer's next normal local replenish (publishKeyPackages on
+          // bundle-low) to land.
+          logger.warning(
+            "⏳ [BOOTSTRAP] No peer-replenish RPC available for \(missing.count) member(s) in \(convoId.prefix(16)); waiting for normal peer replenish."
+          )
           // B15 (Half 2): only delete if WE created this group. If a
           // sibling External Commit / bootstrap got here first, the group
           // is theirs — destroying it would undo their successful join.
@@ -2081,9 +2076,12 @@ public extension MLSConversationManager {
           .filter(MLSConversationModel.Columns.currentUserDID == userDid)
           .fetchOne(db)
 
+        // Phase F: ConvoView.metadata removed from the lexicon.
+        // Server-side title is no longer available; merge picks
+        // encrypted (from bootstrap) over the existing local row.
         let title = MLSConversationMetadataSQL.mergedTitle(
           encryptedTitle: mlsMeta?.name,
-          serverTitle: convo.metadata?.name,
+          serverTitle: nil,
           existingTitle: existing?.title
         )
 

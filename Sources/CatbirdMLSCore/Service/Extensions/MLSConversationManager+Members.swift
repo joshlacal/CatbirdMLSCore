@@ -248,17 +248,11 @@ public extension MLSConversationManager {
           switch normalizedError {
           case .keyPackageNotFound(let detail):
             await recordKeyPackageFailure(detail: detail)
-            do {
-              _ = try await apiClient.requestKeyPackageReplenish(
-                dids: dids,
-                reason: "addMembers",
-                convoId: convoId
-              )
-            } catch {
-              logger.warning(
-                "⚠️ [MLSConversationManager.addMembers] Failed to request peer key package replenish signal: \(error.localizedDescription)"
-              )
-            }
+            // Phase F: peer-replenish RPC retired with the
+            // publishKeyPackages lexicon reshape. Surface the
+            // missing-key-packages error to the caller as before;
+            // the user / a future flow can prompt the peer to
+            // open the app via a separate channel.
             throw MLSConversationError.missingKeyPackages(memberDids)
           case .conversationNotFound:
             throw MLSConversationError.conversationNotFound

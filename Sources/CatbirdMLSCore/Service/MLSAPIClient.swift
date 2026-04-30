@@ -561,7 +561,6 @@ public final class MLSAPIClient {
     cipherSuite: String,
     initialMembers: [DID]? = nil,
     welcomeMessage: Data? = nil,
-    metadata: BlueCatbirdMlsChatCreateConvo.MetadataInput? = nil,
     keyPackageHashes: [BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry]? = nil,
     idempotencyKey: String? = nil
   ) async throws -> BlueCatbirdMlsChatDefs.ConvoView {
@@ -571,13 +570,17 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.createConversation] START - groupId: \(groupId.prefix(16))..., members: \(initialMembers?.count ?? 0), hashes: \(keyPackageHashes?.count ?? 0), idempotencyKey: \(idemKey)"
     )
 
+    // Phase D removed `metadata` from createConvo input. Title /
+    // description / avatar flow through the encrypted blob path
+    // (putGroupMetadataBlob) after creation; the UI calls
+    // `updateGroupMetadataEncrypted` to seed the first encrypted
+    // blob if it has a name to set.
     let input = BlueCatbirdMlsChatCreateConvo.Input(
       groupId: groupId,
       cipherSuite: cipherSuite,
       initialMembers: initialMembers,
       welcomeMessage: welcomeMessage.map { Bytes(data: $0) },
-      keyPackageHashes: keyPackageHashes,
-      metadata: metadata
+      keyPackageHashes: keyPackageHashes
     )
 
     logger.debug("📍 [MLSAPIClient.createConversation] Request payload:")
@@ -588,7 +591,6 @@ public final class MLSAPIClient {
     if let welcome = welcomeMessage {
       logger.debug("  - welcomeMessage prefix: \(welcome.prefix(50).base64EncodedString().prefix(50))...")
     }
-    logger.debug("  - metadata: \(metadata != nil ? "present" : "nil")")
     logger.debug("  - keyPackageHashes: \(keyPackageHashes?.count ?? 0) items")
     if let hashes = keyPackageHashes {
       for (idx, hash) in hashes.enumerated() {
@@ -1887,55 +1889,11 @@ public final class MLSAPIClient {
     return (output.success, nil)
   }
 
-  /// Request one or more peers to replenish their key package inventory.
-  /// - Parameters:
-  ///   - dids: Target peer DIDs that are missing packages
-  ///   - reason: Optional context for telemetry and logging
-  ///   - convoId: Optional conversation context
-  /// - Returns: Tuple describing whether notifications were delivered
-  public func requestKeyPackageReplenish(
-    dids: [DID],
-    reason: String? = nil,
-    convoId: String? = nil
-  ) async throws -> (requested: Bool, targetCount: Int, deviceCount: Int, deliveredCount: Int) {
-    logger.info("📤 [requestKeyPackageReplenish] START - targets: \(dids.count)")
-
-    let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
-      action: "requestReplenish",
-      targetDids: dids,
-      reason: reason,
-      convoId: convoId
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(
-      input: input
-    )
-
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [requestKeyPackageReplenish] Failed with HTTP \(responseCode)")
-      throw MLSAPIError.httpError(
-        statusCode: responseCode,
-        message: "requestKeyPackageReplenish failed with HTTP \(responseCode)"
-      )
-    }
-
-    logger.info(
-      "✅ [requestKeyPackageReplenish] SUCCESS"
-    )
-    if let replenishResult = output.replenishResult {
-      return (
-        replenishResult.requested,
-        replenishResult.targetCount,
-        replenishResult.deviceCount,
-        replenishResult.deliveredCount
-      )
-    }
-
-    logger.warning(
-      "⚠️ [requestKeyPackageReplenish] Server response missing replenishResult; assuming request accepted"
-    )
-    return (true, dids.count, 0, 0)
-  }
+  // `requestKeyPackageReplenish` deleted in Phase F. The publishKeyPackages
+  // lexicon was reshaped to a publish-only flow; the legacy
+  // `requestReplenish` action with targetDids/reason/convoId no longer
+  // exists on the protocol. There were no in-tree callers; if a future
+  // ask-peer-to-publish flow is needed, it'll need its own lexicon path.
 
   // MARK: - Admin Operations
 

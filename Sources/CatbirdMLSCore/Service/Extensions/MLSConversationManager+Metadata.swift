@@ -505,7 +505,11 @@ extension MLSConversationManager {
       let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
       currentMetadata = GroupMetadataV1(
         title: localTitle,
-        description: localDisplayMetadata?.description ?? "",
+        // LocalDisplayMetadata doesn't carry description (the GRDB
+        // helper only persists title + avatarImageData). Re-wrap
+        // ships an empty description; if the description was set
+        // previously it can be re-derived from a separate fetch.
+        description: "",
         avatar_blob_locator: avatarLocator
       )
     } else {

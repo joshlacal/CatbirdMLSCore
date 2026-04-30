@@ -1122,7 +1122,9 @@ extension MLSConversationManager {
 
         let joined = await attemptRejoinWithWelcomeFallback(
           convoId: convo.conversationId,
-          displayName: convo.metadata?.name,
+          // Phase F: ConvoView.metadata removed from the lexicon.
+          // Display name comes from local GRDB cache.
+          displayName: nil,
           reason: "server reported missing",
           preDeleteAuthHex: preDeleteAuthHex
         )

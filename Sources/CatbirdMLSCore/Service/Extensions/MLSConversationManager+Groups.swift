@@ -226,9 +226,9 @@ extension MLSConversationManager {
     var welcomeDataArray: [Data] = []
     var commitData: Data?
 
-    // Metadata is now encrypted inside MLS group context extensions (via GroupConfig).
-    // Do NOT send plaintext metadata to the server.
-    let metadataInput: BlueCatbirdMlsChatCreateConvo.MetadataInput? = nil
+    // Phase D removed `metadata` from createConvo input. Title /
+    // description / avatar flow through the encrypted blob path
+    // (`updateGroupMetadataEncrypted` after server-create returns).
 
     // Create conversation on server (handles key package retries internally)
     let creationResult: ServerConversationCreationResult
@@ -237,8 +237,7 @@ extension MLSConversationManager {
         userDid: userDid,
         groupId: groupId,
         groupIdHex: groupIdHex,
-        initialMembers: filteredMembers,  // ⭐ Use filtered members (self-DID removed)
-        metadata: metadataInput
+        initialMembers: filteredMembers  // ⭐ Use filtered members (self-DID removed)
       )
     } catch {
       logger.error(

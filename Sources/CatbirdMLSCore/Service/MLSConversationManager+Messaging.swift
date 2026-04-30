@@ -3779,7 +3779,6 @@ public extension MLSConversationManager {
       cipherSuite: convo.cipherSuite,
       createdAt: convo.createdAt,
       lastMessageAt: convo.lastMessageAt,
-      metadata: convo.metadata,
       confirmationTag: convo.confirmationTag,
       resetGeneration: convo.resetGeneration
     )
@@ -6309,8 +6308,7 @@ public extension MLSConversationManager {
     userDid: String,
     groupId: Data,
     groupIdHex: String,
-    initialMembers: [DID]?,
-    metadata: BlueCatbirdMlsChatCreateConvo.MetadataInput?
+    initialMembers: [DID]?
   ) async throws -> ServerConversationCreationResult {
     let hasInitialMembers = initialMembers?.isEmpty == false
     let maxAttempts = hasInitialMembers ? 3 : 1
@@ -6363,7 +6361,6 @@ public extension MLSConversationManager {
           cipherSuite: defaultCipherSuite,
           initialMembers: initialMembers,
           welcomeMessage: prepared?.welcomeData,
-          metadata: metadata,
           keyPackageHashes: prepared?.hashEntries
         )
 
@@ -6383,11 +6380,11 @@ public extension MLSConversationManager {
           await recordKeyPackageFailure(detail: detail)
           if let members = initialMembers, !members.isEmpty {
             do {
-              _ = try await apiClient.requestKeyPackageReplenish(
-                dids: members,
-                reason: "createGroup",
-                convoId: nil
-              )
+              // Phase F: requestKeyPackageReplenish path retired with the
+              // publishKeyPackages lexicon reshape; no peer-replenish
+              // RPC exists today. Local replenish (publishKeyPackages
+              // for this device) still runs separately on bundle low.
+              ()
             } catch {
               logger.warning(
                 "⚠️ [MLSConversationManager.createGroup] Failed to request peer key package replenish signal: \(error.localizedDescription)"
@@ -6447,11 +6444,11 @@ public extension MLSConversationManager {
           !members.isEmpty
         {
           do {
-            _ = try await apiClient.requestKeyPackageReplenish(
-              dids: members,
-              reason: "createGroup",
-              convoId: nil
-            )
+            // Phase F: requestKeyPackageReplenish path retired with the
+              // publishKeyPackages lexicon reshape; no peer-replenish
+              // RPC exists today. Local replenish (publishKeyPackages
+              // for this device) still runs separately on bundle low.
+              ()
           } catch {
             logger.warning(
               "⚠️ [MLSConversationManager.createGroup] Failed to request peer key package replenish signal on final failure: \(error.localizedDescription)"
@@ -6526,10 +6523,9 @@ public extension MLSConversationManager {
         }
         if !replenishTargets.isEmpty {
           do {
-            let replenishResult = try await apiClient.requestKeyPackageReplenish(
-              dids: replenishTargets,
-              reason: reason,
-              convoId: convoId
+            // Phase F: see requestKeyPackageReplenish removal in MLSAPIClient.
+            let replenishResult = (
+              requested: false, targetCount: 0, deviceCount: 0, deliveredCount: 0
             )
 
             if replenishResult.deliveredCount > 0 {
