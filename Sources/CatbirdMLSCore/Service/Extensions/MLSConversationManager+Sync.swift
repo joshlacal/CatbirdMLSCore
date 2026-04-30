@@ -2050,20 +2050,12 @@ public extension MLSConversationManager {
       }
     }
 
-    // Pre-fetch MLS metadata for all conversations (encrypted in group context extensions).
-    // This runs outside the database write block since FFI calls are async.
-    var mlsMetadataByGroupId: [String: GroupMetadataPayload] = [:]
-    for convo in convos {
-      guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
-      do {
-        if let metadata = try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData) {
-          mlsMetadataByGroupId[convo.conversationId] = metadata
-        }
-      } catch {
-        // Non-fatal: group may not exist locally yet (e.g., pending welcome)
-        logger.debug("⚠️ Could not read MLS metadata for \(convo.conversationId.prefix(16))...: \(error.localizedDescription)")
-      }
-    }
+    // Phase F: legacy 0xff00 plaintext pre-fetch removed. Decrypted
+    // metadata lives in `MLSConversationModel.title` / `.description`,
+    // populated by `MLSConversationManager+Metadata.bootstrapMetadataAfterJoin`
+    // after Welcome / commit-merge. The merge below uses the row's
+    // existing title rather than a freshly-read MLS-context value.
+    let mlsMetadataByGroupId: [String: GroupMetadataPayload] = [:]
 
     let resolvedTrustCheckResults = trustCheckResults
     let resolvedMLSMetadataByConversationId = mlsMetadataByGroupId

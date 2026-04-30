@@ -496,36 +496,22 @@ extension MLSConversationManager {
       )
     }
 
-    // Fetch current metadata from local storage (FFI layer for title/description)
-    let currentMetadata: GroupMetadataV1?
+    // Phase F: legacy 0xff00 reader removed. Source the title from
+    // local GRDB (the cache populated by `bootstrapMetadataAfterJoin`).
+    // The avatar bytes live alongside it on `MLSConversationModel`.
     let localAvatarData = localDisplayMetadata?.avatarImageData
-    do {
-      if let groupIdData = Data(hexEncoded: groupIdHex),
-        let payload = try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData)
-      {
-        // Build metadata with avatar locator if we have avatar data to re-encrypt
-        let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
-        currentMetadata = GroupMetadataV1(
-          title: payload.name ?? localDisplayMetadata?.title ?? "",
-          description: payload.description ?? "",
-          avatar_blob_locator: avatarLocator
-        )
-      } else if let localTitle = localDisplayMetadata?.title, !localTitle.isEmpty {
-        let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
-        currentMetadata = GroupMetadataV1(
-          title: localTitle,
-          description: "",
-          avatar_blob_locator: avatarLocator
-        )
-      } else {
-        currentMetadata = nil
-      }
-    } catch {
-      logger.debug(
-        "⚠️ [Metadata] Could not read current metadata for re-wrap: \(error.localizedDescription)"
+    let currentMetadata: GroupMetadataV1?
+    if let localTitle = localDisplayMetadata?.title, !localTitle.isEmpty {
+      let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
+      currentMetadata = GroupMetadataV1(
+        title: localTitle,
+        description: localDisplayMetadata?.description ?? "",
+        avatar_blob_locator: avatarLocator
       )
+    } else {
       currentMetadata = nil
     }
+    _ = userDid
 
     guard let metadata = currentMetadata else {
       logger.debug("📋 [Metadata] No metadata to re-wrap for group \(groupIdHex.prefix(16))...")

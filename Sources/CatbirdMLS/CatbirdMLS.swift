@@ -1235,12 +1235,6 @@ public protocol MlsContextProtocol : AnyObject {
     func getGroupMemberCount(groupId: Data) throws  -> UInt32
     
     /**
-     * Read encrypted group metadata from MLS group context.
-     * Returns JSON bytes of the metadata, or empty vec if none set.
-     */
-    func getGroupMetadata(groupId: Data) throws  -> Data
-    
-    /**
      * Get the number of key package bundles currently cached
      *
      * This provides a direct count of key package bundles available for
@@ -1586,10 +1580,14 @@ public protocol MlsContextProtocol : AnyObject {
     /**
      * Update group metadata. Returns commit bytes to send to server.
      *
-     * DEPRECATED — produces a no-op for plaintext under the metadata cutover
-     * (Phase A removed the 0xff00 write). New callers should use
-     * `update_group_metadata_encrypted` which atomically returns the
-     * encrypted blob, locator, version, and final MetadataReference.
+     * Used by the orchestrator's `CommitKind::UpdateMetadata` stage_commit
+     * dispatch (iOS three-phase rename path). The `metadata_json` is the
+     * legacy `GroupMetadataPayload` shape; its contents are NOT written
+     * into the MLS group context (Phase A retired 0xff00). The caller
+     * re-encrypts the metadata blob post-merge using the new epoch's
+     * metadata key (iOS `reWrapMetadataAfterMerge`). Direct callers
+     * wanting an atomic encrypted update should use
+     * `update_group_metadata_encrypted` (Phase A.2).
      */
     func updateGroupMetadata(groupId: Data, metadataJson: Data) throws  -> Data
     
@@ -2287,18 +2285,6 @@ open func getGroupMemberCount(groupId: Data)throws  -> UInt32 {
 }
     
     /**
-     * Read encrypted group metadata from MLS group context.
-     * Returns JSON bytes of the metadata, or empty vec if none set.
-     */
-open func getGroupMetadata(groupId: Data)throws  -> Data {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
-    uniffi_catbird_mls_fn_method_mlscontext_get_group_metadata(self.uniffiClonePointer(),
-        FfiConverterData.lower(groupId),$0
-    )
-})
-}
-    
-    /**
      * Get the number of key package bundles currently cached
      *
      * This provides a direct count of key package bundles available for
@@ -2878,10 +2864,14 @@ open func syncDatabase()throws  {try rustCallWithError(FfiConverterTypeMLSError.
     /**
      * Update group metadata. Returns commit bytes to send to server.
      *
-     * DEPRECATED — produces a no-op for plaintext under the metadata cutover
-     * (Phase A removed the 0xff00 write). New callers should use
-     * `update_group_metadata_encrypted` which atomically returns the
-     * encrypted blob, locator, version, and final MetadataReference.
+     * Used by the orchestrator's `CommitKind::UpdateMetadata` stage_commit
+     * dispatch (iOS three-phase rename path). The `metadata_json` is the
+     * legacy `GroupMetadataPayload` shape; its contents are NOT written
+     * into the MLS group context (Phase A retired 0xff00). The caller
+     * re-encrypts the metadata blob post-merge using the new epoch's
+     * metadata key (iOS `reWrapMetadataAfterMerge`). Direct callers
+     * wanting an atomic encrypted update should use
+     * `update_group_metadata_encrypted` (Phase A.2).
      */
 open func updateGroupMetadata(groupId: Data, metadataJson: Data)throws  -> Data {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
@@ -13351,9 +13341,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_get_group_member_count() != 41317) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_get_group_metadata() != 1765) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_get_key_package_bundle_count() != 28432) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13465,7 +13452,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_sync_database() != 29289) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata() != 49869) {
+    if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata() != 19771) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata_encrypted() != 40933) {

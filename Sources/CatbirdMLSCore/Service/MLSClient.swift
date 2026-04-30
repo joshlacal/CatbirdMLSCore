@@ -645,61 +645,16 @@ public actor MLSClient {
 
   // MARK: - Group Metadata
 
-  /// Get decrypted metadata from MLS group context extension
-  /// - Parameters:
-  ///   - userDID: The user's DID
-  ///   - groupId: Raw group ID bytes
-  /// - Returns: Decoded group metadata, or nil if no metadata is set
-  public func getGroupMetadata(for userDID: String, groupId: Data) async throws -> GroupMetadataPayload? {
-    let metadataBytes = try await runFFIWithRecovery(for: userDID) { ctx in
-      try ctx.getGroupMetadata(groupId: groupId)
-    }
-
-    guard !metadataBytes.isEmpty else {
-      return nil
-    }
-
-    do {
-      return try JSONDecoder().decode(GroupMetadataPayload.self, from: metadataBytes)
-    } catch {
-      logger.error("❌ [MLSClient.getGroupMetadata] Failed to decode metadata JSON: \(error.localizedDescription)")
-      return nil
-    }
-  }
-
-  /// Update group metadata via the legacy plaintext path.
-  ///
-  /// **DEPRECATED — post metadata cutover this no longer writes a
-  /// plaintext 0xff00 GroupContext extension and does NOT upload an
-  /// encrypted blob; renames will not propagate to other clients.**
-  /// Migrate to `updateGroupMetadataEncrypted(for:groupId:title:description:avatarBlobLocator:avatarContentType:)`
-  /// which atomically stages the commit, derives the post-commit
-  /// metadata key, encrypts a `GroupMetadataV1` payload, and returns
-  /// the commit bytes + ciphertext + reference + version + locator
-  /// the platform layer needs to upload via `putGroupMetadataBlob`.
-  ///
-  /// - Parameters:
-  ///   - userDID: The user's DID
-  ///   - groupId: Raw group ID bytes
-  ///   - name: New group name (nil to leave unchanged)
-  ///   - description: New group description (nil to leave unchanged)
-  /// - Returns: Commit data to send to server
-  @available(*, deprecated, message: "Use updateGroupMetadataEncrypted; the legacy path no longer propagates renames")
-  public func updateGroupMetadata(
-    for userDID: String,
-    groupId: Data,
-    name: String?,
-    description: String?
-  ) async throws -> Data {
-    let payload = GroupMetadataPayload(v: 1, name: name, description: description)
-    let metadataJson = try JSONEncoder().encode(payload)
-
-    let commitData = try await runFFIWithRecovery(for: userDID) { ctx in
-      try ctx.updateGroupMetadata(groupId: groupId, metadataJson: metadataJson)
-    }
-
-    return commitData
-  }
+  // `getGroupMetadata` (legacy 0xff00 reader) deleted in Phase F. Read
+  // metadata from the local GRDB cache populated by
+  // `MLSConversationManager+Metadata.bootstrapMetadataAfterJoin` —
+  // `MLSConversationModel.title` / `.description` /
+  // `.avatarImageData`.
+  //
+  // `updateGroupMetadata(for:groupId:name:description:)` deleted in
+  // Phase F. Use
+  // `updateGroupMetadataEncrypted(for:groupId:title:description:avatarBlobLocator:avatarContentType:)`
+  // below.
 
   /// Atomic encrypted metadata update (Phase A.2).
   ///

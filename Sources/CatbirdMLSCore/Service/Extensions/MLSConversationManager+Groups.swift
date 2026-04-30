@@ -957,84 +957,89 @@ extension MLSConversationManager {
 
   // MARK: - Group Metadata (Encrypted)
 
-  /// Read decrypted group metadata from the MLS group context extension.
-  /// Metadata is encrypted with a per-group MEK and never stored in plaintext on the server.
+  // `getGroupMetadata` removed in Phase F. Read metadata from the
+  // local GRDB cache: `MLSConversationModel.title` / `.description` /
+  // `.avatarImageData` populated by
+  // `MLSConversationManager+Metadata.bootstrapMetadataAfterJoin`.
+
+  // `updateGroupMetadata(conversationId:name:description:)` (legacy
+  // three-phase: stage_commit FFICommitKind::UpdateMetadata → POST →
+  // confirm_commit → reWrapMetadataAfterMerge) was deleted in Phase F.
+  // Use `updateGroupMetadataEncrypted` below — same end result in a
+  // single atomic FFI call.
+
+  /// Atomic encrypted metadata update (Phase A.2 / Phase F).
   ///
-  /// - Parameter conversationId: Conversation/group ID (hex string)
-  /// - Returns: Decoded metadata payload, or nil if no metadata is set
-  public func getGroupMetadata(conversationId: String) async throws -> GroupMetadataPayload? {
-    guard let userDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-
-    guard isInitialized else {
-      throw MLSConversationError.contextNotInitialized
-    }
-
-    guard let groupIdData = Data(hexEncoded: conversationId) else {
-      throw MLSConversationError.invalidGroupId
-    }
-
-    return try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData)
-  }
-
-  /// Update encrypted group metadata in the MLS group context extension.
-  /// This creates an MLS commit that re-encrypts the metadata and sends it to the server.
-  /// Other group members will receive the updated metadata through the commit.
+  /// Uses `MLSContext.updateGroupMetadataEncrypted` to stage the
+  /// GroupContextExtensions commit + derive the post-commit metadata key
+  /// from the staged commit's exporter + encrypt a fresh `GroupMetadataV1`
+  /// payload in one shot. Then uploads the ciphertext, ships the commit,
+  /// and merges locally — no separate `reWrapMetadataAfterMerge` step.
   ///
-  /// - Parameters:
-  ///   - conversationId: Conversation/group ID (hex string)
-  ///   - name: New group name (nil to leave unchanged)
-  ///   - description: New group description (nil to leave unchanged)
-  public func updateGroupMetadata(
+  /// This is the path UI rename buttons (e.g.
+  /// `Catbird/Features/MLSChat/Views/MLSGroupDetailView.swift::saveGroupName`)
+  /// should call. The legacy `updateGroupMetadata(conversationId:name:description:)`
+  /// is retained for the three-phase rename pattern that some
+  /// callers still drive through `mlsClient.stageCommit` + `confirmCommit`
+  /// + `reWrapMetadataAfterMerge`.
+  public func updateGroupMetadataEncrypted(
     conversationId: String,
-    name: String?,
-    description: String?
+    title: String?,
+    description: String?,
+    avatarBlobLocator: String?,
+    avatarContentType: String?
   ) async throws {
     logger.info(
-      "🔵 [updateGroupMetadata] START - convo: \(conversationId.prefix(16))..., name: \(name ?? "nil")"
+      "🔵 [updateGroupMetadataEncrypted] START - convo: \(conversationId.prefix(16))..., title: \(title ?? "nil")"
     )
 
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-
     guard isInitialized else {
       throw MLSConversationError.contextNotInitialized
     }
-
     guard let groupIdData = Data(hexEncoded: conversationId) else {
       throw MLSConversationError.invalidGroupId
     }
 
-    // Three-phase sender lifecycle (task #44/#62): stage → POST → confirm.
-    // commitGroupChange does NOT echo newEpoch, so we pass the skip-fence
-    // sentinel on confirm.
-
-    // 1. Build the GroupMetadataPayload JSON blob (matches what the legacy
-    //    `ctx.updateGroupMetadata(groupId:metadataJson:)` was producing
-    //    internally via the MLSClient wrapper).
-    let payload = GroupMetadataPayload(v: 1, name: name, description: description)
-    let metadataJson: Data
-    do {
-      metadataJson = try JSONEncoder().encode(payload)
-    } catch {
-      logger.error("❌ [updateGroupMetadata] Failed to encode metadata JSON: \(error.localizedDescription)")
-      throw MLSConversationError.operationFailed("Failed to encode metadata JSON")
-    }
-
-    // 2. Stage the updateMetadata commit
-    let plan = try await mlsClient.stageCommit(
+    // 1. Atomic FFI: stages commit + derives key + encrypts blob.
+    let result = try await mlsClient.updateGroupMetadataEncrypted(
       for: userDid,
-      conversationId: conversationId,
-      kind: .updateMetadata(groupInfoExtension: metadataJson)
+      groupId: groupIdData,
+      title: title,
+      description: description,
+      avatarBlobLocator: avatarBlobLocator,
+      avatarContentType: avatarContentType
     )
 
-    // 3. Send commit to server via commitGroupChange
+    // 2. Upload the encrypted blob first; if this fails we must clear
+    //    the pending commit so the local epoch doesn't advance into a
+    //    state other clients can't reach (no blob → no decryptable
+    //    metadata).
+    do {
+      _ = try await apiClient.putGroupMetadataBlob(
+        blobLocator: result.metadataBlobLocator,
+        groupId: conversationId,
+        conversationId: conversationId,
+        resetGeneration: nil,
+        metadataVersion: result.metadataVersion,
+        kind: "metadata",
+        encryptedBlob: result.metadataBlobCiphertext
+      )
+    } catch {
+      logger.error(
+        "❌ [updateGroupMetadataEncrypted] putGroupMetadataBlob failed: \(error.localizedDescription)"
+      )
+      try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
+      throw error
+    }
+
+    // 3. POST commitGroupChange.
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: conversationId,
       action: "updateMetadata",
-      commit: Bytes(data: plan.commitBytes)
+      commit: Bytes(data: result.commitBytes)
     )
 
     let responseCode: Int
@@ -1044,60 +1049,67 @@ extension MLSConversationManager {
         input: input
       )
     } catch {
-      await mlsClient.discardPending(for: userDid, handle: plan.handle)
+      try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
       throw error
     }
 
     guard responseCode == 200, output != nil else {
-      logger.error("❌ [updateGroupMetadata] Server rejected commit: HTTP \(responseCode)")
-      await mlsClient.discardPending(for: userDid, handle: plan.handle)
+      logger.error(
+        "❌ [updateGroupMetadataEncrypted] Server rejected commit: HTTP \(responseCode)"
+      )
+      try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
       throw MLSConversationError.operationFailed(
         "Server rejected metadata update commit (HTTP \(responseCode))"
       )
     }
 
-    // 4. Confirm commit locally. commitGroupChange does not echo newEpoch,
-    //    so fence with the skip sentinel and trust the staged target epoch.
-    //    If confirm throws (e.g. EpochMismatch — #63 flat error), the Rust
-    //    side leaves the staged commit in place; explicitly discard so we
-    //    don't carry stale pending state.
-    let confirmed: FfiConfirmedCommit
-    do {
-      confirmed = try await mlsClient.confirmCommit(
-        for: userDid,
-        handle: plan.handle,
-        serverEpoch: mlsSkipServerEpochFence()
-      )
-    } catch {
-      await mlsClient.discardPending(for: userDid, handle: plan.handle)
-      throw error
-    }
-    let mergedEpoch = confirmed.newEpoch
-    logger.info("✅ [updateGroupMetadata] Commit merged - epoch now: \(mergedEpoch)")
+    // 4. Merge locally — advances epoch, applies the new
+    //    MetadataReference at AppDataDictionary 0x8001.
+    let mergedEpoch = try await mlsClient.mergePendingCommit(
+      for: userDid,
+      groupId: groupIdData
+    )
+    logger.info(
+      "✅ [updateGroupMetadataEncrypted] Commit merged - epoch now: \(mergedEpoch), version: \(result.metadataVersion)"
+    )
 
-    // 5. Update local group state
+    // 5. Update local group state cache.
     groupStates[conversationId]?.epoch = mergedEpoch
 
-    // 6. METADATA: Re-wrap metadata for the new epoch.
-    // After a metadata update commit, the metadata must be re-encrypted
-    // with the new epoch's key and uploaded to the server.
-    if let key = confirmed.metadataKey {
-      await reWrapMetadataAfterMerge(
-        groupIdHex: conversationId,
-        metadataKey: key,
-        epoch: mergedEpoch
-      )
+    // 6. Persist decrypted title on the local conversation row so
+    //    subsequent reads (search, list view) pick up the change
+    //    without waiting for a bootstrap-after-join.
+    if let title {
+      let now = Date()
+      do {
+        try await database.write { db in
+          _ = try MLSConversationMetadataSQL.updateDecryptedMetadata(
+            db: db,
+            currentUserDID: userDid,
+            groupIdHex: conversationId,
+            title: title,
+            avatarImageData: nil,
+            now: now
+          )
+        }
+      } catch {
+        logger.warning(
+          "⚠️ [updateGroupMetadataEncrypted] Local title cache update failed: \(error.localizedDescription)"
+        )
+      }
     }
 
-    // 7. Publish updated GroupInfo for external joins
+    // 7. Publish updated GroupInfo for external joins.
     try await publishLatestGroupInfo(
       userDid: userDid,
       convoId: conversationId,
       groupId: groupIdData,
-      context: "after updateGroupMetadata"
+      context: "after updateGroupMetadataEncrypted"
     )
 
-    logger.info("✅ [updateGroupMetadata] COMPLETE - convo: \(conversationId.prefix(16))...")
+    logger.info(
+      "✅ [updateGroupMetadataEncrypted] COMPLETE - convo: \(conversationId.prefix(16))..."
+    )
   }
 
 }
