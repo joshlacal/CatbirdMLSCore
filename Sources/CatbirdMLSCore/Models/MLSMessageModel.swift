@@ -8,6 +8,11 @@
 import Foundation
 import GRDB
 
+public enum MLSMessageProcessingState {
+  public static let cached = "cached"
+  public static let pendingSelfSend = "pendingSelfSend"
+}
+
 /// MLS message model with full payload storage
 public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   public let messageID: String
@@ -409,6 +414,14 @@ extension MLSMessageModel {
   /// Check if message has payload available
   public var hasPayload: Bool {
     payloadJSON != nil && !payloadExpired
+  }
+
+  /// True only after the row contains a successfully decoded plaintext payload.
+  public var hasProcessedPayloadForOrdering: Bool {
+    processingState != MLSMessageProcessingState.pendingSelfSend
+      && processingError == nil
+      && !payloadExpired
+      && parsedPayload != nil
   }
 
   /// Check if message can be retried

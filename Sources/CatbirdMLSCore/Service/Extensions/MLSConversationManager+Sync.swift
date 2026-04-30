@@ -187,8 +187,9 @@ public extension MLSConversationManager {
       if !staleConvoIds.isEmpty {
         logger.info("🧹 [SYNC] Cleaning up \(staleConvoIds.count) stale conversation(s) after leave")
         for convoId in staleConvoIds {
+          let cachedGroupId = conversations[convoId]?.groupId
           conversations.removeValue(forKey: convoId)
-          groupStates.removeValue(forKey: convoId)
+          removeCachedGroupState(conversationID: convoId, groupIdHex: cachedGroupId)
         }
         // Delete from database (await to ensure plaintext is securely deleted)
         try await deleteConversationsFromDatabase(staleConvoIds)
@@ -687,7 +688,7 @@ public extension MLSConversationManager {
         }
 
         // 5. Clear old group state
-        groupStates.removeValue(forKey: convo.conversationID)
+        removeCachedGroupState(conversationID: convo.conversationID, groupID: convo.groupID)
 
         logger.warning(
           "✅ [EPOCH-RESET] Successfully reset \(convo.conversationID.prefix(16)) — newGroupId=\(newGroupIdHex.prefix(16)), generation=\(result.resetGeneration)"
@@ -776,9 +777,9 @@ public extension MLSConversationManager {
           )
           let serverEpoch = convo.epoch
           if serverEpoch > Int64(localEpoch) {
-            let groupIdHex = convo.conversationID  // conversationID is the hex group ID
+            let groupIdHex = groupIdData.hexEncodedString()
             let result = await fetchAndProcessMissingCommits(
-              conversationID: groupIdHex,
+              conversationID: convo.conversationID,
               groupId: groupIdHex,
               localEpoch: localEpoch,
               targetEpoch: Int(serverEpoch)
@@ -825,7 +826,7 @@ public extension MLSConversationManager {
             "⚠️ [DEFERRED-RECOVERY] Failed to delete stale group: \(error.localizedDescription)"
           )
         }
-        groupStates.removeValue(forKey: convo.conversationID)
+        removeCachedGroupState(conversationID: convo.conversationID, groupID: groupIdData)
       }
 
       let succeeded = await attemptRejoinWithWelcomeFallback(
@@ -904,7 +905,7 @@ public extension MLSConversationManager {
           "⚠️ [EPOCH-RESET] Failed to delete stale local group for \(convoId.prefix(16)): \(error.localizedDescription)"
         )
       }
-      groupStates.removeValue(forKey: convoId)
+      removeCachedGroupState(conversationID: convoId, groupID: convo.groupID)
     }
 
     do {
@@ -981,10 +982,15 @@ public extension MLSConversationManager {
         }
       }
 
-      groupStates.removeValue(forKey: convoId)
+      removeCachedGroupState(conversationID: convoId, groupID: convo.groupID)
 
       logger.warning(
         "✅ [EPOCH-RESET] Recipient rejoin succeeded for \(convoId.prefix(16)) → newGroupId=\(landedHex.prefix(16)), epoch=\(landedEpoch), seededGen=\(observedGeneration.map(String.init) ?? "nil")"
+      )
+
+      await bootstrapMetadataAfterJoin(
+        groupIdHex: landedHex,
+        joinSource: "group reset recipient"
       )
 
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
@@ -1234,7 +1240,7 @@ public extension MLSConversationManager {
         )
       }
 
-      groupStates.removeValue(forKey: marker.conversationID)
+      removeCachedGroupState(conversationID: marker.conversationID, groupID: groupIdData)
 
       // Always clear the marker so it doesn't fire again next boot.
       await MLSBootstrapPendingModel.clear(
@@ -1397,9 +1403,23 @@ public extension MLSConversationManager {
         let (keyPackages, missing) = try await apiClient.getKeyPackages(
           dids: otherMemberDids, forceRefresh: false)
         if let missing, !missing.isEmpty {
-          logger.error(
-            "❌ [BOOTSTRAP] Missing key packages for \(missing.count) member(s) in \(convoId.prefix(16))"
+          logger.warning(
+            "⏳ [BOOTSTRAP] Missing peer key packages for \(missing.count) member(s) in \(convoId.prefix(16)); requesting replenish and waiting"
           )
+          do {
+            let replenish = try await apiClient.requestKeyPackageReplenish(
+              dids: missing,
+              reason: "bootstrap_missing_key_packages",
+              convoId: convoId
+            )
+            logger.info(
+              "📤 [BOOTSTRAP] Requested key package replenish for \(missing.count) member(s) in \(convoId.prefix(16)) — requested=\(replenish.requested), devices=\(replenish.deviceCount), delivered=\(replenish.deliveredCount)"
+            )
+          } catch {
+            logger.warning(
+              "⚠️ [BOOTSTRAP] Failed to request key package replenish for \(convoId.prefix(16)): \(error.localizedDescription)"
+            )
+          }
           // B15 (Half 2): only delete if WE created this group. If a
           // sibling External Commit / bootstrap got here first, the group
           // is theirs — destroying it would undo their successful join.
@@ -1411,8 +1431,7 @@ public extension MLSConversationManager {
             )
           }
           if let recoveryManager = await mlsClient.recovery(for: userDid) {
-            await recoveryManager.recordFailedRejoin(
-              convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
+            await recoveryManager.recordPeerKeyPackagesMissing(convoId: convoId)
           }
           return
         }
@@ -1608,11 +1627,15 @@ public extension MLSConversationManager {
           }
         }
 
-        groupStates.removeValue(forKey: convoId)
+        removeCachedGroupState(conversationID: convoId, groupID: pendingGroupIdData)
         conversations[convoId] = bootstrapped
 
         logger.warning(
           "✅ [BOOTSTRAP] Won race for \(convoId.prefix(16)) → newGroupId=\(pendingNewGroupIdHex.prefix(16)), epoch=\(landedEpoch), seededGen=\(seededGeneration.map(String.init) ?? "nil") (serverGen=\(bootstrapped.resetGeneration.map(String.init) ?? "nil"), observedGen=\(observedGeneration.map(String.init) ?? "nil"))"
+        )
+        await bootstrapMetadataAfterJoin(
+          groupIdHex: pendingNewGroupIdHex,
+          joinSource: "bootstrap reset"
         )
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
           await recoveryManager.clearRejoinTracking(convoId: convoId)
@@ -1874,12 +1897,16 @@ public extension MLSConversationManager {
                 )
               }
             }
-            groupStates.removeValue(forKey: convoId)
+            removeCachedGroupState(conversationID: convoId, groupID: pendingGroupIdData)
             if let serverConvo {
               conversations[convoId] = serverConvo
             }
             logger.warning(
               "✅ [BOOTSTRAP] 409-winner recovery complete for \(convoId.prefix(16)) → epoch=\(landedEpoch) (verified, seededGen=\(seededGeneration409.map(String.init) ?? "nil"))"
+            )
+            await bootstrapMetadataAfterJoin(
+              groupIdHex: pendingNewGroupIdHex,
+              joinSource: "bootstrap reset 409-winner"
             )
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
               await recoveryManager.clearRejoinTracking(convoId: convoId)
@@ -2009,12 +2036,12 @@ public extension MLSConversationManager {
 
         if isCreator {
           // User created this conversation - not a request
-          trustCheckResults[convo.conversationId] = .none
+          trustCheckResults[convo.conversationId] = MLSRequestState.none
         } else {
           // Someone else created - check if we trust them
           let isTrusted = await trustChecker.isTrusted(did: creatorDid)
           if isTrusted {
-            trustCheckResults[convo.conversationId] = .none
+            trustCheckResults[convo.conversationId] = MLSRequestState.none
           } else {
             logger.info("📬 New inbound chat request from \(creatorDid.prefix(20))...")
             trustCheckResults[convo.conversationId] = .pendingInbound
@@ -2038,6 +2065,9 @@ public extension MLSConversationManager {
       }
     }
 
+    let resolvedTrustCheckResults = trustCheckResults
+    let resolvedMLSMetadataByConversationId = mlsMetadataByGroupId
+
     try await database.write { db in
       for convo in convos {
         guard let groupIdData = Data(hexEncoded: convo.groupId) else {
@@ -2045,10 +2075,11 @@ public extension MLSConversationManager {
           continue
         }
 
-        // Prefer MLS-encrypted metadata over server plaintext metadata
-        let mlsMeta = mlsMetadataByGroupId[convo.conversationId]
-        let title = mlsMeta?.name ?? convo.metadata?.name
-        let requestState = trustCheckResults[convo.conversationId] ?? .none
+        // Prefer MLS-encrypted metadata over server plaintext metadata, but
+        // never blank an existing stable-row title just because a rotated
+        // group's metadata has not been bootstrapped yet.
+        let mlsMeta = resolvedMLSMetadataByConversationId[convo.conversationId]
+        let requestState = resolvedTrustCheckResults[convo.conversationId] ?? .none
 
         // Merge with existing row to preserve local-only state (lastMessageAt,
         // mutedUntil, joinMethod, consecutiveFailures, etc.) that would be
@@ -2057,6 +2088,12 @@ public extension MLSConversationManager {
           .filter(MLSConversationModel.Columns.conversationID == convo.conversationId)
           .filter(MLSConversationModel.Columns.currentUserDID == userDid)
           .fetchOne(db)
+
+        let title = MLSConversationMetadataSQL.mergedTitle(
+          encryptedTitle: mlsMeta?.name,
+          serverTitle: convo.metadata?.name,
+          existingTitle: existing?.title
+        )
 
         // For lastMessageAt, prefer the most recent value between server and local
         let serverLastMessage = convo.lastMessageAt?.date

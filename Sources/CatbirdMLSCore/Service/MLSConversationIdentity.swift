@@ -9,4 +9,13 @@ enum MLSConversationIdentity {
 
     return conversationId == requestedId || groupId == requestedId
   }
+
+  static func processingGroupIdHex(conversationID: String, groupId: String?) -> String {
+    let trimmedGroupId = groupId?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let trimmedGroupId, !trimmedGroupId.isEmpty else {
+      return conversationID
+    }
+
+    return trimmedGroupId
+  }
 }

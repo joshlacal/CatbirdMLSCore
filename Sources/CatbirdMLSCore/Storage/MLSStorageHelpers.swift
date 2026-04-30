@@ -44,8 +44,8 @@ public struct MLSStorageHelpers {
     newEpoch: Int64,
     newSequenceNumber: Int64
   ) -> Bool {
-    if newEpoch > existingEpoch { return true }
-    if newEpoch < existingEpoch { return false }
+    _ = existingEpoch
+    _ = newEpoch
     return newSequenceNumber > existingSequenceNumber
   }
 
@@ -83,7 +83,7 @@ public struct MLSStorageHelpers {
   ///   - currentUserDID: DID of the current user (scopes update/insert)
   ///   - senderID: Sender DID extracted from MLS credentials
   ///   - epoch: MLS epoch number
-  ///   - sequenceNumber: Message sequence in epoch
+  ///   - sequenceNumber: Stable conversation sequence
   public static func savePayload(
     in database: MLSDatabase,
     messageID: String,
@@ -182,7 +182,7 @@ public struct MLSStorageHelpers {
   ///   - payload: Decrypted message payload
   ///   - senderID: Sender DID extracted from MLS credentials
   ///   - epoch: MLS epoch number
-  ///   - sequenceNumber: Message sequence in epoch
+  ///   - sequenceNumber: Stable conversation sequence
   ///   - timestamp: Message timestamp
   public static func savePayloadSync(
     in db: Database,
@@ -626,7 +626,7 @@ public struct MLSStorageHelpers {
 
   /// Upsert/advance the local read frontier for a conversation.
   ///
-  /// Monotonicity is enforced by `(epoch, sequenceNumber)` ordering.
+  /// Monotonicity is enforced by stable conversation `sequenceNumber`.
   ///
   /// - Returns: `true` when the frontier was inserted/advanced, `false` when ignored.
   @discardableResult
@@ -747,7 +747,7 @@ public struct MLSStorageHelpers {
 
   /// Persist the latest known read cursor for a remote participant.
   ///
-  /// Cursor monotonicity is enforced when `(epoch, sequenceNumber)` metadata is available.
+  /// Cursor monotonicity is enforced when stable conversation `sequenceNumber` metadata is available.
   /// Message identifiers may be stored independently so ordering metadata can be backfilled later.
   @discardableResult
   public static func upsertRemoteReadCursor(
@@ -852,9 +852,9 @@ public struct MLSStorageHelpers {
         .filter(MLSRemoteReadCursorModel.Columns.conversationID == conversationID)
         .filter(MLSRemoteReadCursorModel.Columns.currentUserDID == normalizedUserDID)
         .order(
-          MLSRemoteReadCursorModel.Columns.epoch.desc,
           MLSRemoteReadCursorModel.Columns.sequenceNumber.desc,
-          MLSRemoteReadCursorModel.Columns.updatedAt.desc
+          MLSRemoteReadCursorModel.Columns.updatedAt.desc,
+          MLSRemoteReadCursorModel.Columns.epoch.desc
         )
         .fetchAll(db)
     }
@@ -871,16 +871,16 @@ public struct MLSStorageHelpers {
       .filter(MLSRemoteReadCursorModel.Columns.conversationID == conversationID)
       .filter(MLSRemoteReadCursorModel.Columns.currentUserDID == normalizedUserDID)
       .order(
-        MLSRemoteReadCursorModel.Columns.epoch.desc,
         MLSRemoteReadCursorModel.Columns.sequenceNumber.desc,
-        MLSRemoteReadCursorModel.Columns.updatedAt.desc
+        MLSRemoteReadCursorModel.Columns.updatedAt.desc,
+        MLSRemoteReadCursorModel.Columns.epoch.desc
       )
       .fetchAll(db)
   }
 
   /// Apply the stored read frontier to message read state.
   ///
-  /// This marks late/backfilled messages as read if their `(epoch, sequenceNumber)`
+  /// This marks late/backfilled messages as read if their conversation sequence
   /// is at or before the local frontier.
   ///
   /// - Returns: Number of rows marked as read.
@@ -927,16 +927,11 @@ public struct MLSStorageHelpers {
           AND isRead = 0
           AND processingError IS NULL
           AND payloadExpired = 0
-          AND (
-            epoch < ?
-            OR (epoch = ? AND sequenceNumber <= ?)
-          )
+          AND sequenceNumber <= ?
         """,
       arguments: [
         frontier.conversationID,
         frontier.currentUserDID,
-        frontier.epoch,
-        frontier.epoch,
         frontier.sequenceNumber,
       ]
     )

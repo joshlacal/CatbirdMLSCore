@@ -446,8 +446,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
       return try request
         .order(
-          MLSMessageModel.Columns.epoch.desc,
-          MLSMessageModel.Columns.sequenceNumber.desc
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
         )
         .limit(Int(limit))
         .fetchAll(db)

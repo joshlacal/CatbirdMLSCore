@@ -455,6 +455,22 @@ public final class MLSConversationManager {
     logger.info("✅ [deinit] MLSConversationManager cleanup completed")
   }
 
+  internal func removeCachedGroupState(
+    conversationID: String,
+    groupID: Data? = nil,
+    groupIdHex: String? = nil
+  ) {
+    groupStates.removeValue(forKey: conversationID)
+
+    if let groupIdHex, !groupIdHex.isEmpty {
+      groupStates.removeValue(forKey: groupIdHex)
+    }
+
+    if let groupID {
+      groupStates.removeValue(forKey: groupID.hexEncodedString())
+    }
+  }
+
   // MARK: - Database Pool Refresh
 
   /// Checks if the current database pool has been closed (e.g., after WAL corruption

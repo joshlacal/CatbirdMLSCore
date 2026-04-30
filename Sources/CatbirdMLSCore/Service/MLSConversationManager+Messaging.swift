@@ -534,7 +534,8 @@ public extension MLSConversationManager {
             ),
             payload: payload,
             senderDID: userDid,
-            currentUserDID: userDid
+            currentUserDID: userDid,
+            processingState: MLSMessageProcessingState.pendingSelfSend
           )
           logger.debug("💾 [Gen: \(self.currentCoordinationGeneration)] Pre-cached self-sent message \(localMsgId)")
         } catch {
@@ -766,11 +767,12 @@ public extension MLSConversationManager {
             seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
             messageType: "reaction"
-          ),
-          payload: payload,
-          senderDID: userDid,
-          currentUserDID: userDid
-        )
+        ),
+        payload: payload,
+        senderDID: userDid,
+        currentUserDID: userDid,
+        processingState: MLSMessageProcessingState.pendingSelfSend
+      )
 
         // Send
         let sendResult = try await apiClient.sendMessage(
@@ -2421,7 +2423,7 @@ public extension MLSConversationManager {
   /// MLS authoritatively tells us this message was sent by the current user (senders
   /// cannot decrypt their own ciphertext). Instead of saving an error placeholder,
   /// we look up the oldest unconfirmed pre-cached send for this conversation
-  /// (identifiable by senderID == userDid AND sequenceNumber == 0) and adopt its
+  /// (identifiable by senderID == userDid AND processingState == pendingSelfSend) and adopt its
   /// payload. This eliminates the race between SSE delivery and the HTTP send response.
   ///
   /// Falls back to error placeholder only if no pending send is found.
@@ -2522,7 +2524,15 @@ public extension MLSConversationManager {
     let sortedEpochs = messagesByEpoch.keys.sorted()
     var processedPayloads: [MLSMessagePayload] = []
 
-    guard let groupIdData = Data(hexEncoded: conversationID) else {
+    let groupIdHex = MLSConversationIdentity.processingGroupIdHex(
+      conversationID: conversationID,
+      groupId: conversations[conversationID]?.groupId
+    )
+    if groupIdHex != conversationID {
+      logger.debug("[SEQ-ORDER] Resolved conversation \(conversationID.prefix(16)) to MLS group \(groupIdHex.prefix(16)) for epoch lookup")
+    }
+
+    guard let groupIdData = Data(hexEncoded: groupIdHex) else {
       throw MLSConversationError.invalidGroupId
     }
 
@@ -2684,6 +2694,8 @@ public extension MLSConversationManager {
       } catch {
         logger.warning("Failed to update lastMessageAt after receive: \(error.localizedDescription)")
       }
+
+      notifyObservers(.messagesUpdated(convoId: conversationID, count: processedPayloads.count))
     }
 
     return processedPayloads
@@ -2970,12 +2982,20 @@ public extension MLSConversationManager {
 
         if !buffered.isEmpty {
           logger.info("[SEQ-ORDER] Processing \(buffered.count) buffered messages after catchup")
+          var flushedApplicationCount = 0
           for pending in buffered {
             if let msg = deserializeMessageView(pending.messageViewJSON) {
-              _ = try? await processServerMessage(msg, source: "buffered")
+              if let outcome = try? await processServerMessage(msg, source: "buffered"),
+                case .application = outcome
+              {
+                flushedApplicationCount += 1
+              }
             } else {
               logger.warning("[SEQ-ORDER] Failed to deserialize buffered message \(pending.messageID)")
             }
+          }
+          if flushedApplicationCount > 0 {
+            notifyObservers(.messagesUpdated(convoId: convo.conversationId, count: flushedApplicationCount))
           }
         }
       } catch {
@@ -3216,7 +3236,8 @@ public extension MLSConversationManager {
     message: BlueCatbirdMlsChatDefs.MessageView,
     payload: MLSMessagePayload,
     senderDID: String,
-    currentUserDID: String
+    currentUserDID: String,
+    processingState: String = MLSMessageProcessingState.cached
   ) async throws {
     // Retry logic for robust caching (max 3 attempts)
     // We CANNOT proceed without caching, or we will hit CannotDecryptOwnMessage on echo
@@ -3232,7 +3253,8 @@ public extension MLSConversationManager {
               epoch: Int64(message.epoch),
               sequenceNumber: Int64(message.seq),
               timestamp: message.createdAt.date,
-              database: db
+              database: db,
+              processingState: processingState
           )
         }
         // Success

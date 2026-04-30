@@ -308,7 +308,7 @@ public final class MLSStorage: @unchecked Sendable {
   ///   - senderID: DID of message sender
   ///   - currentUserDID: DID of current user
   ///   - epoch: MLS epoch number
-  ///   - sequenceNumber: MLS sequence number within epoch
+  ///   - sequenceNumber: Stable conversation sequence number
   ///   - timestamp: Message timestamp
   ///   - database: MLSDatabase to use for operations
   ///   - processingError: Optional error from processing
@@ -327,6 +327,7 @@ public final class MLSStorage: @unchecked Sendable {
     database: MLSDatabase,
     processingError: String? = nil,
     validationFailureReason: String? = nil,
+    processingState: String = MLSMessageProcessingState.cached,
     advanceSequenceState: Bool = false
   ) async throws -> [AdoptedReaction] {
     logger.info(
@@ -405,6 +406,7 @@ public final class MLSStorage: @unchecked Sendable {
                   timestamp = ?,
                   isRead = CASE WHEN ? = 1 THEN 1 ELSE isRead END,
                   payloadExpired = 0,
+                  processingState = ?,
                   processingError = ?,
                   processingAttempts = processingAttempts + 1,
                   validationFailureReason = ?
@@ -417,6 +419,7 @@ public final class MLSStorage: @unchecked Sendable {
               sequenceNumber,
               timestamp,
               shouldBeUnread ? 0 : 1,
+              processingState,
               processingError,
               validationFailureReason,
               messageID,
@@ -446,7 +449,7 @@ public final class MLSStorage: @unchecked Sendable {
           isSent: true,
           sendAttempts: 0,
           error: nil,
-          processingState: "cached",
+          processingState: processingState,
           gapBefore: false,
           payloadExpired: false,
           processingError: processingError,
@@ -587,8 +590,15 @@ public final class MLSStorage: @unchecked Sendable {
         // 2. Update metadata in temp table (changing the ID to the new Server ID)
         try db.execute(
           sql:
-            "UPDATE temp_msg_update SET messageID = ?, epoch = ?, sequenceNumber = ?, timestamp = ? WHERE messageID = ?",
-          arguments: [newID, epoch, sequenceNumber, timestamp, messageID]
+            "UPDATE temp_msg_update SET messageID = ?, epoch = ?, sequenceNumber = ?, timestamp = ?, processingState = ? WHERE messageID = ?",
+          arguments: [
+            newID,
+            epoch,
+            sequenceNumber,
+            timestamp,
+            MLSMessageProcessingState.cached,
+            messageID,
+          ]
         )
 
         // 3. Insert new record (replacing if exists to ensure we keep the local payload if checking against placeholder)
@@ -614,13 +624,15 @@ public final class MLSStorage: @unchecked Sendable {
                 UPDATE MLSMessageModel
                 SET epoch = ?,
                     sequenceNumber = ?,
-                    timestamp = ?
+                    timestamp = ?,
+                    processingState = ?
               WHERE messageID = ? AND currentUserDID IN (?, ?);
             """,
           arguments: [
             epoch,
             sequenceNumber,
             timestamp,
+            MLSMessageProcessingState.cached,
             messageID,
             normalizeDID(currentUserDID),
             currentUserDID,
@@ -748,10 +760,10 @@ public final class MLSStorage: @unchecked Sendable {
 
   /// Fetch the oldest unconfirmed self-sent message for a conversation.
   ///
-  /// Pre-cached self-sent messages are stored with sequenceNumber == 0 before the
-  /// server confirms them. When an SSE echo arrives before the HTTP send response,
-  /// the message is still stored under its local temp ID. This method finds that
-  /// pending message so its payload can be adopted for the server-assigned ID.
+  /// Pre-cached self-sent messages are stored under their local temp ID with
+  /// `processingState == pendingSelfSend` until the HTTP send response promotes
+  /// them to the server-assigned ID. The optimistic sequence number is only for
+  /// UI ordering and must not be used as the pending marker.
   ///
   /// - Parameters:
   ///   - conversationID: Conversation identifier
@@ -772,7 +784,9 @@ public final class MLSStorage: @unchecked Sendable {
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.senderID == senderDID)
-        .filter(MLSMessageModel.Columns.sequenceNumber == 0)
+        .filter(MLSMessageModel.Columns.processingState == MLSMessageProcessingState.pendingSelfSend)
+        .filter(MLSMessageModel.Columns.processingError == nil)
+        .filter(MLSMessageModel.Columns.payloadJSON != nil)
         .order(MLSMessageModel.Columns.timestamp.asc)
         .fetchOne(db)
     }
@@ -806,7 +820,11 @@ public final class MLSStorage: @unchecked Sendable {
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
-        .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
+        .order(
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
+        )
         .limit(limit)
         .fetchAll(db)
     }
@@ -825,7 +843,9 @@ public final class MLSStorage: @unchecked Sendable {
     return orderedMessages
   }
 
-  /// Fetch messages older than a specific epoch/sequence for pagination
+  /// Fetch messages older than a specific conversation sequence for pagination.
+  /// `beforeEpoch` is retained for API compatibility, but display ordering is sequence-first
+  /// because MLS epoch resets when recovery rotates the underlying group.
   public func fetchMessagesBeforeSequence(
     conversationId: String,
     currentUserDID: String,
@@ -840,15 +860,20 @@ public final class MLSStorage: @unchecked Sendable {
     )
 
     let messages = try await database.read { db in
-      try MLSMessageModel
+      var request = MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationId)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
-        .filter(
-          MLSMessageModel.Columns.epoch < beforeEpoch
-            || (MLSMessageModel.Columns.epoch == beforeEpoch
-              && MLSMessageModel.Columns.sequenceNumber < beforeSeq)
+
+      if beforeSeq > 0 && beforeSeq < Int64.max {
+        request = request.filter(MLSMessageModel.Columns.sequenceNumber < beforeSeq)
+      }
+
+      return try request
+        .order(
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
         )
-        .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
         .limit(limit)
         .fetchAll(db)
     }
@@ -1124,12 +1149,24 @@ public final class MLSStorage: @unchecked Sendable {
     userDID: String,
     database: MLSDatabase
   ) async throws {
+    let normalizedUserDID = normalizeDID(userDID)
 
     try await database.write { db in
+      let epochKeyID = "\(conversationID)-\(epoch)"
+      let existingKey =
+        try MLSEpochKeyModel
+        .filter(MLSEpochKeyModel.Columns.epochKeyID == epochKeyID)
+        .fetchOne(db)
+
+      guard existingKey == nil else {
+        logger.debug("Epoch key already recorded: \(conversationID) epoch \(epoch)")
+        return
+      }
+
       let epochKey = MLSEpochKeyModel(
-        epochKeyID: "\(conversationID)-\(epoch)",
+        epochKeyID: epochKeyID,
         conversationID: conversationID,
-        currentUserDID: userDID,
+        currentUserDID: normalizedUserDID,
         epoch: epoch,
         keyMaterial: Data(),  // Placeholder - actual key material should be provided
         createdAt: Date(),
@@ -1424,14 +1461,15 @@ public final class MLSStorage: @unchecked Sendable {
     }
   }
 
-  /// Fetch the last message cursor (epoch, sequence) for a conversation.
+  /// Fetch the last message cursor for a conversation.
   /// Used for pagination when fetching newer messages from server.
   ///
   /// - Parameters:
   ///   - conversationID: Conversation identifier
   ///   - currentUserDID: Current user's DID
   ///   - database: Database writer
-  /// - Returns: Tuple of (epoch, sequenceNumber, messageID) or nil if no messages cached
+  /// - Returns: Tuple of (epoch, sequenceNumber, messageID) or nil if no messages cached.
+  ///   `sequenceNumber` is the stable conversation timeline cursor; `epoch` is retained for crypto diagnostics.
   public func fetchLastMessageCursor(
     conversationID: String,
     currentUserDID: String,
@@ -1442,7 +1480,11 @@ public final class MLSStorage: @unchecked Sendable {
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
-        .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
+        .order(
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
+        )
         .limit(1)
         .fetchOne(db)
         .map { ($0.epoch, $0.sequenceNumber, $0.messageID) }
@@ -1474,7 +1516,7 @@ public final class MLSStorage: @unchecked Sendable {
               json_extract(CAST(payloadJSON AS TEXT), '$.messageType'),
               json_extract(CAST(payloadJSON AS TEXT), '$.type')
             ) IN ('text', 'system')
-          ORDER BY epoch DESC, sequenceNumber DESC
+          ORDER BY sequenceNumber DESC, timestamp DESC, messageID DESC
           LIMIT 1
           """,
         arguments: [conversationID, normalizedUserDID]
@@ -1514,7 +1556,11 @@ public final class MLSStorage: @unchecked Sendable {
       }
 
       return try request
-        .order(MLSMessageModel.Columns.epoch.desc, MLSMessageModel.Columns.sequenceNumber.desc)
+        .order(
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
+        )
         .limit(1)
         .fetchOne(db)
         .map { ($0.epoch, $0.sequenceNumber, $0.messageID) }
@@ -1583,7 +1629,7 @@ public final class MLSStorage: @unchecked Sendable {
 
   /// Upsert/advance local read frontier for a conversation.
   ///
-  /// Monotonicity is enforced by `(epoch, sequenceNumber)`.
+  /// Monotonicity is enforced by stable conversation `sequenceNumber`.
   ///
   /// - Returns: `true` when frontier is inserted/advanced, `false` when ignored.
   @discardableResult

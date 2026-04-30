@@ -173,6 +173,126 @@ final class MLSGroupResetRecipientTests: XCTestCase {
     )
   }
 
+  func testApplyRecipientResetSuccessPreservesDisplayMetadata() async throws {
+    let convoId = "convo-recipient-metadata"
+    let userDid = "did:plc:metadata"
+    let staleGroup = Data(repeating: 0xA1, count: 32)
+    let newGroup = Data(repeating: 0xB2, count: 32)
+    let avatarData = Data([0x01, 0x02, 0x03, 0x04])
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: staleGroup,
+        epoch: 4,
+        needsReset: true,
+        pendingNewGroupId: newGroup.hexEncodedString(),
+        pendingResetGeneration: 11,
+        title: "Encrypted Group Title",
+        avatarImageData: avatarData
+      )
+    }
+
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    try await dbQueue.write { db in
+      try MLSConversationResetSQL.applyRecipientResetSuccess(
+        db: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        newGroupID: newGroup,
+        newEpoch: 0,
+        appliedGeneration: 11,
+        now: now
+      )
+    }
+
+    let row = try await dbQueue.read { db in
+      try XCTUnwrap(
+        try MLSConversationModel.fetchOne(
+          db,
+          sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [convoId, userDid]
+        )
+      )
+    }
+
+    XCTAssertEqual(row.groupID, newGroup)
+    XCTAssertEqual(row.title, "Encrypted Group Title")
+    XCTAssertEqual(row.avatarImageData, avatarData)
+  }
+
+  // MARK: - Metadata identity helpers
+
+  func testMetadataUpdateResolvesStableConversationByRotatedGroupId() async throws {
+    let convoId = "stable-conversation-id"
+    let userDid = "did:plc:metadata"
+    let rotatedGroup = Data(repeating: 0xC3, count: 32)
+    let avatarData = Data([0x09, 0x08, 0x07])
+
+    try await dbQueue.write { db in
+      try Self.insertConversation(
+        in: db,
+        conversationID: convoId,
+        currentUserDID: userDid,
+        groupID: rotatedGroup,
+        epoch: 0,
+        needsReset: false,
+        pendingNewGroupId: nil,
+        pendingResetGeneration: nil,
+        title: "Old Title"
+      )
+    }
+
+    let updatedConversationID = try await dbQueue.write { db in
+      try MLSConversationMetadataSQL.updateDecryptedMetadata(
+        db: db,
+        currentUserDID: userDid,
+        groupIdHex: rotatedGroup.hexEncodedString(),
+        title: "Restored Group Title",
+        avatarImageData: avatarData,
+        now: Date(timeIntervalSince1970: 1_700_000_100)
+      )
+    }
+
+    XCTAssertEqual(updatedConversationID, convoId)
+
+    let row = try await dbQueue.read { db in
+      try XCTUnwrap(
+        try MLSConversationModel.fetchOne(
+          db,
+          sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [convoId, userDid]
+        )
+      )
+    }
+
+    XCTAssertEqual(row.title, "Restored Group Title")
+    XCTAssertEqual(row.avatarImageData, avatarData)
+    XCTAssertFalse(row.isPlaceholder)
+  }
+
+  func testMergedTitlePreservesExistingWhenRotatedMetadataUnavailable() {
+    XCTAssertEqual(
+      MLSConversationMetadataSQL.mergedTitle(
+        encryptedTitle: nil,
+        serverTitle: nil,
+        existingTitle: "Existing Group Title"
+      ),
+      "Existing Group Title"
+    )
+
+    XCTAssertEqual(
+      MLSConversationMetadataSQL.mergedTitle(
+        encryptedTitle: "",
+        serverTitle: "Server Group Title",
+        existingTitle: "Existing Group Title"
+      ),
+      "Server Group Title"
+    )
+  }
+
   // MARK: - clearPendingReset
 
   func testClearPendingResetLeavesNeedsResetIntact() async throws {
@@ -301,23 +421,25 @@ final class MLSGroupResetRecipientTests: XCTestCase {
     needsReset: Bool,
     pendingNewGroupId: String?,
     pendingResetGeneration: Int64?,
-    consecutiveFailures: Int = 0
+    consecutiveFailures: Int = 0,
+    title: String? = nil,
+    avatarImageData: Data? = nil
   ) throws {
     let now = Date(timeIntervalSince1970: 1_699_000_000)
     try db.execute(
       sql: """
             INSERT INTO MLSConversationModel (
               conversationID, currentUserDID, groupID, epoch,
-              joinMethod, joinEpoch, createdAt, updatedAt,
+              joinMethod, joinEpoch, title, avatarImageData, createdAt, updatedAt,
               unacknowledgedMemberChanges, isActive,
               needsRejoin, needsReset, isUnrecoverable,
               consecutiveFailures, isPlaceholder, requestState,
               pendingNewGroupId, pendingResetGeneration
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
       arguments: [
         conversationID, currentUserDID, groupID, epoch,
-        "externalCommit", 0, now, now,
+        "externalCommit", 0, title, avatarImageData, now, now,
         0, true,
         false, needsReset, false,
         consecutiveFailures, false, "none",

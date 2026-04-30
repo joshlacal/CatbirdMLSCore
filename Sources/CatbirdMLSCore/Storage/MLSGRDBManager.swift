@@ -4649,8 +4649,8 @@ public actor MLSGRDBManager {
             DROP INDEX IF EXISTS idx_message_conversation_timestamp;
           """)
 
-      // Create new index matching actual query ordering (epoch, sequenceNumber)
-      // This prevents messages from appearing out of order during epoch transitions
+      // Legacy index for the old epoch-first query shape. Kept for existing
+      // installs; v30 adds the sequence-first timeline index.
       try db.execute(
         sql: """
             CREATE INDEX IF NOT EXISTS idx_message_conversation_epoch_seq
@@ -5250,6 +5250,17 @@ public actor MLSGRDBManager {
         t.column("createdAt", .datetime).notNull()
         t.primaryKey(["conversationID", "currentUserDID"])
       }
+    }
+
+    // MARK: v30 — sequence-first message timeline index
+    // MLS epochs can reset when a conversation rotates to a new MLS group.
+    // Display/history pagination is keyed by stable conversation sequence.
+    migrator.registerMigration("v30_message_timeline_sequence_index") { db in
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_message_conversation_sequence
+            ON MLSMessageModel(conversationID, currentUserDID, sequenceNumber ASC);
+          """)
     }
 
     // Execute all migrations

@@ -16,7 +16,7 @@ import OSLog
 import Petrel
 
 /// Decision result for whether a message can be processed now
-public enum MessageOrderingDecision {
+public enum MessageOrderingDecision: Sendable {
   case processNow           // seq == lastProcessed + 1, process immediately
   case buffer               // seq > lastProcessed + 1, buffer and wait
   case bufferForFutureEpoch // message epoch > local epoch, need to fetch commits first
@@ -127,21 +127,28 @@ public actor MLSMessageOrderingCoordinator {
       // CRITICAL FIX: Even if seq <= lastProcessed, the message might be missing
       // (e.g. if we gap-jumped or force-processed without saving).
       // Check if it actually exists in DB before skipping.
-      let exists = try await storage.fetchMessage(
+      let existingMessage = try await storage.fetchMessage(
         messageID: messageID,
         currentUserDID: currentUserDID,
         database: database
-      ) != nil
+      )
 
-      if exists {
-        logger.debug("[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) already processed & exists - skipping")
+      if existingMessage?.hasProcessedPayloadForOrdering == true {
+        logger.debug("[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) already processed with decrypted payload - skipping")
         return .alreadyProcessed
       } else {
         let normalizedUserDID = MLSStorageHelpers.normalizeDID(currentUserDID)
         let messageEpochValue = messageEpoch.map(String.init) ?? "unknown"
         let localEpochValue = localEpoch.map(String.init) ?? "unknown"
+        let rowState: String
+        if let existingMessage {
+          rowState =
+            "state=\(existingMessage.processingState), hasPayloadJSON=\(existingMessage.payloadJSON != nil), decoded=\(existingMessage.parsedPayload != nil), error=\(existingMessage.processingError ?? "nil"), expired=\(existingMessage.payloadExpired)"
+        } else {
+          rowState = "missing-row"
+        }
         logger.warning(
-          "[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) is <= lastProcessed (\(lastProcessedSeq)) but MISSING from DB - re-processing (user=\(normalizedUserDID), msg_epoch=\(messageEpochValue), local_epoch=\(localEpochValue))")
+          "[SEQ-ORDER] Message \(messageID.prefix(16)) seq=\(sequenceNumber) is <= lastProcessed (\(lastProcessedSeq)) but not decrypted in DB (\(rowState)) - re-processing (user=\(normalizedUserDID), msg_epoch=\(messageEpochValue), local_epoch=\(localEpochValue))")
         return .processNow
       }
     }

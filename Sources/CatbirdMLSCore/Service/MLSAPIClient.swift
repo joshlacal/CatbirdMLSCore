@@ -935,8 +935,8 @@ public final class MLSAPIClient {
   ///   - convoId: Conversation identifier
   ///   - limit: Maximum number of messages to return (1-100, default: 50)
   ///   - sinceSeq: Sequence number to fetch messages after (pagination cursor). Messages with seq > sinceSeq are returned.
-  /// - Returns: Tuple of messages array (guaranteed sorted by epoch ASC, seq ASC), optional lastSeq, and optional gapInfo
-  /// - Note: Server GUARANTEES messages are pre-sorted by (epoch ASC, seq ASC). No client-side sorting needed.
+  /// - Returns: Tuple of messages array (guaranteed sorted by stable conversation seq ASC), optional lastSeq, and optional gapInfo
+  /// - Note: Server GUARANTEES messages are pre-sorted by conversation sequence. Epoch is MLS crypto state, not UI order.
   public func getMessages(
     convoId: String,
     limit: Int = 50,
@@ -1900,7 +1900,12 @@ public final class MLSAPIClient {
   ) async throws -> (requested: Bool, targetCount: Int, deviceCount: Int, deliveredCount: Int) {
     logger.info("📤 [requestKeyPackageReplenish] START - targets: \(dids.count)")
 
-    let input = BlueCatbirdMlsChatPublishKeyPackages.Input(action: "requestReplenish")
+    let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
+      action: "requestReplenish",
+      targetDids: dids,
+      reason: reason,
+      convoId: convoId
+    )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(
       input: input
@@ -1916,6 +1921,18 @@ public final class MLSAPIClient {
 
     logger.info(
       "✅ [requestKeyPackageReplenish] SUCCESS"
+    )
+    if let replenishResult = output.replenishResult {
+      return (
+        replenishResult.requested,
+        replenishResult.targetCount,
+        replenishResult.deviceCount,
+        replenishResult.deliveredCount
+      )
+    }
+
+    logger.warning(
+      "⚠️ [requestKeyPackageReplenish] Server response missing replenishResult; assuming request accepted"
     )
     return (true, dids.count, 0, 0)
   }
@@ -2918,6 +2935,10 @@ public extension MLSAPIClient {
   public func putGroupMetadataBlob(
     blobLocator: String,
     groupId: String,
+    conversationId: String? = nil,
+    resetGeneration: Int? = nil,
+    metadataVersion: UInt64? = nil,
+    kind: String? = nil,
     encryptedBlob: Data
   ) async throws -> (blobLocator: String, size: Int) {
     logger.info(
@@ -2930,7 +2951,11 @@ public extension MLSAPIClient {
       stripMetadata: false,
       params: BlueCatbirdMlsChatPutGroupMetadataBlob.Parameters(
         blobLocator: blobLocator,
-        groupId: groupId
+        groupId: groupId,
+        convoId: conversationId,
+        resetGeneration: resetGeneration,
+        metadataVersion: metadataVersion.map(Int.init),
+        kind: kind
       )
     )
 
@@ -2960,7 +2985,11 @@ public extension MLSAPIClient {
   /// - Throws: MLSAPIError on failure (including BlobNotFound for GC'd blobs)
   public func getGroupMetadataBlob(
     blobLocator: String,
-    groupId: String
+    groupId: String,
+    conversationId: String? = nil,
+    resetGeneration: Int? = nil,
+    metadataVersion: UInt64? = nil,
+    kind: String? = nil
   ) async throws -> Data {
     logger.info(
       "📥 [MLSAPIClient.getGroupMetadataBlob] START - locator: \(blobLocator.prefix(8))..., group: \(groupId.prefix(16))..."
@@ -2968,7 +2997,11 @@ public extension MLSAPIClient {
 
     let input = BlueCatbirdMlsChatGetGroupMetadataBlob.Parameters(
       blobLocator: blobLocator,
-      groupId: groupId
+      convoId: conversationId,
+      groupId: groupId,
+      resetGeneration: resetGeneration,
+      metadataVersion: metadataVersion.map(Int.init),
+      kind: kind
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupMetadataBlob(
@@ -3010,7 +3043,11 @@ public extension MLSAPIClient {
   /// - Returns: The encrypted blob bytes
   /// - Throws: MLSAPIError on failure (including 404 if no blob exists for this group)
   public func getLatestGroupMetadataBlob(
-    groupId: String
+    groupId: String,
+    conversationId: String? = nil,
+    resetGeneration: Int? = nil,
+    metadataVersion: UInt64? = nil,
+    kind: String? = nil
   ) async throws -> Data {
     logger.info(
       "📥 [MLSAPIClient.getLatestGroupMetadataBlob] START - group: \(groupId.prefix(16))... (no locator, fetching latest)"
@@ -3018,7 +3055,11 @@ public extension MLSAPIClient {
 
     // Pass nil blobLocator — server will return the latest blob for this group
     let input = BlueCatbirdMlsChatGetGroupMetadataBlob.Parameters(
-      groupId: groupId
+      convoId: conversationId,
+      groupId: groupId,
+      resetGeneration: resetGeneration,
+      metadataVersion: metadataVersion.map(Int.init),
+      kind: kind
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupMetadataBlob(

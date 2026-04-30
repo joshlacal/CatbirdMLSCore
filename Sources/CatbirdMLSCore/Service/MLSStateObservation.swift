@@ -9,6 +9,7 @@ public enum MLSStateEvent {
   case conversationRequestAccepted(String)  // convoId - chat request was accepted
   case membersAdded(String, [DID])
   case messageSent(String, ATProtocolDate)
+  case messagesUpdated(convoId: String, count: Int)
   case epochUpdated(String, Int)
   case syncCompleted(Int)
   case syncFailed(Error)
@@ -33,6 +34,8 @@ public enum MLSStateEvent {
       return "Members added to \(convoId): \(members.count)"
     case .messageSent(let msgId, _):
       return "Message sent: \(msgId)"
+    case .messagesUpdated(let convoId, let count):
+      return "Messages updated in \(convoId): \(count)"
     case .epochUpdated(let convoId, let epoch):
       return "Epoch updated for \(convoId): \(epoch)"
     case .syncCompleted(let count):

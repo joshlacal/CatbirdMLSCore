@@ -10,7 +10,7 @@ import GRDB
 
 /// Local read frontier for a conversation.
 ///
-/// The frontier is monotonic by (epoch, sequenceNumber). `messageID` is optional
+/// The frontier is monotonic by stable conversation sequenceNumber. `messageID` is optional
 /// metadata for traceability when the frontier came from a specific message.
 public struct MLSReadFrontierModel: Codable, FetchableRecord, PersistableRecord, Sendable {
   public static let databaseTableName = "mls_conversation_read_frontier"

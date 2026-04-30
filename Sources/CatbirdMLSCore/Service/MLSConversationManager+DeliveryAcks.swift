@@ -137,7 +137,8 @@ extension MLSConversationManager {
           ),
           payload: payload,
           senderDID: userDid,
-          currentUserDID: userDid
+          currentUserDID: userDid,
+          processingState: MLSMessageProcessingState.pendingSelfSend
         )
 
         let sendResult = try await apiClient.sendMessage(
@@ -257,7 +258,8 @@ extension MLSConversationManager {
           ),
           payload: payload,
           senderDID: userDid,
-          currentUserDID: userDid
+          currentUserDID: userDid,
+          processingState: MLSMessageProcessingState.pendingSelfSend
         )
 
         let sendResult = try await apiClient.sendMessage(
@@ -371,7 +373,8 @@ extension MLSConversationManager {
           ),
           payload: recoveryPayload,
           senderDID: userDid,
-          currentUserDID: userDid
+          currentUserDID: userDid,
+          processingState: MLSMessageProcessingState.pendingSelfSend
         )
 
         let sendResult = try await apiClient.sendMessage(

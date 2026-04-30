@@ -542,6 +542,27 @@ public actor MLSRecoveryManager {
     }
   }
 
+  /// Record a retryable bootstrap stall caused by missing peer key packages.
+  ///
+  /// This is not an External Commit exhaustion and must not contribute a reset
+  /// vote. We still stamp normal cooldown state so the reset-pending loop waits
+  /// for peer replenishment instead of hammering `getKeyPackages`.
+  public func recordPeerKeyPackagesMissing(convoId: String) {
+    let existing = failedRejoins[convoId] ?? (attempts: 0, lastAttempt: Date.distantPast)
+    let nextAttempts: Int
+    if existing.attempts >= maxRejoinAttempts {
+      nextAttempts = existing.attempts
+    } else {
+      nextAttempts = min(existing.attempts + 1, maxRejoinAttempts - 1)
+    }
+
+    failedRejoins[convoId] = (attempts: nextAttempts, lastAttempt: Date())
+    lastGlobalRejoinAttemptAt = Date()
+    logger.warning(
+      "⏳ [MLSRecoveryManager] Waiting for peer key packages for \(convoId.prefix(16)) - cooldown attempt \(nextAttempts)/\(self.maxRejoinAttempts - 1)"
+    )
+  }
+
   /// Record an unbridgeable epoch gap (`fetchAndProcessMissingCommits`
   /// returned `.serverDataGap` despite a known epoch gap).
   ///

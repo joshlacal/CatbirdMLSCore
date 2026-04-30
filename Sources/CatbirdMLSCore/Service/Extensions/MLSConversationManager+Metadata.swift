@@ -183,9 +183,13 @@ extension MLSConversationManager {
       }
 
       // Legacy compatibility path for groups that still lack MetadataReference.
+      let metadataVersion: UInt64 = 1
       let encryptedBlob: Data
       do {
-        encryptedBlob = try await apiClient.getLatestGroupMetadataBlob(groupId: groupIdHex)
+        encryptedBlob = try await apiClient.getLatestGroupMetadataBlob(
+          groupId: groupIdHex,
+          metadataVersion: metadataVersion
+        )
         logger.debug(
           "📥 [Metadata] Fetched latest blob for bootstrap: \(encryptedBlob.count) bytes"
         )
@@ -197,7 +201,6 @@ extension MLSConversationManager {
       }
 
       // Decrypt the blob using metadataVersion 1 (the version used during initial encryption)
-      let metadataVersion: UInt64 = 1
       let metadata = try decryptMetadataBlobSwift(
         key: metadataKey,
         groupId: groupIdHex,
@@ -246,9 +249,14 @@ extension MLSConversationManager {
     )
 
     do {
+      let reference = metadataReferenceJSON.flatMap {
+        try? JSONDecoder().decode(MetadataReferenceJSON.self, from: $0)
+      }
       let (confirmedLocator, size) = try await apiClient.putGroupMetadataBlob(
         blobLocator: blobLocator,
         groupId: groupIdHex,
+        conversationId: groupIdHex,
+        metadataVersion: reference?.metadata_version,
         encryptedBlob: encryptedBlob
       )
       logger.info(
@@ -256,17 +264,12 @@ extension MLSConversationManager {
       )
 
       // Parse and cache the MetadataReference for future re-wraps
-      if let refJSON = metadataReferenceJSON {
-        do {
-          let ref = try JSONDecoder().decode(MetadataReferenceJSON.self, from: refJSON)
-          logger.debug(
-            "📋 [Metadata] Cached metadata reference: version=\(ref.metadata_version), schema=\(ref.schema)"
-          )
-        } catch {
-          logger.warning(
-            "⚠️ [Metadata] Failed to parse metadata reference JSON: \(error.localizedDescription)"
-          )
-        }
+      if let reference {
+        logger.debug(
+          "📋 [Metadata] Cached metadata reference: version=\(reference.metadata_version), schema=\(reference.schema)"
+        )
+      } else if metadataReferenceJSON != nil {
+        logger.warning("⚠️ [Metadata] Failed to parse metadata reference JSON")
       }
     } catch {
       // Non-fatal: Group creation succeeds even if blob upload fails.
@@ -339,7 +342,10 @@ extension MLSConversationManager {
     let encryptedBlob: Data
     do {
       if shouldFetchLatestBlob {
-        encryptedBlob = try await apiClient.getLatestGroupMetadataBlob(groupId: groupIdHex)
+        encryptedBlob = try await apiClient.getLatestGroupMetadataBlob(
+          groupId: groupIdHex,
+          metadataVersion: metadataVersion
+        )
         logger.debug(
           "📥 [Metadata] Fetched latest encrypted blob: \(encryptedBlob.count) bytes"
         )
@@ -350,7 +356,8 @@ extension MLSConversationManager {
         }
         encryptedBlob = try await apiClient.getGroupMetadataBlob(
           blobLocator: locator,
-          groupId: groupIdHex
+          groupId: groupIdHex,
+          metadataVersion: metadataVersion
         )
         logger.debug(
           "📥 [Metadata] Fetched encrypted blob: \(encryptedBlob.count) bytes"
@@ -367,7 +374,10 @@ extension MLSConversationManager {
         recordBlobFetchFailure(locator: locator, groupId: groupIdHex)
         logger.warning("   Falling back to latest-blob lookup for legacy compatibility")
         do {
-          encryptedBlob = try await apiClient.getLatestGroupMetadataBlob(groupId: groupIdHex)
+          encryptedBlob = try await apiClient.getLatestGroupMetadataBlob(
+            groupId: groupIdHex,
+            metadataVersion: metadataVersion
+          )
         } catch {
           logger.warning(
             "⚠️ [Metadata] Legacy fallback fetch also failed: \(error.localizedDescription)"
@@ -478,27 +488,33 @@ extension MLSConversationManager {
       )
     }
 
+    let localDisplayMetadata = try? await database.read { db in
+      try MLSConversationMetadataSQL.loadLocalDisplayMetadata(
+        db: db,
+        currentUserDID: userDid,
+        groupIdHex: groupIdHex
+      )
+    }
+
     // Fetch current metadata from local storage (FFI layer for title/description)
     let currentMetadata: GroupMetadataV1?
-    var localAvatarData: Data?
+    let localAvatarData = localDisplayMetadata?.avatarImageData
     do {
       if let groupIdData = Data(hexEncoded: groupIdHex),
         let payload = try await mlsClient.getGroupMetadata(for: userDid, groupId: groupIdData)
       {
-        // Read locally cached avatar image data from the database
-        localAvatarData = try await database.read { db in
-          try Data.fetchOne(
-            db,
-            sql: "SELECT avatarImageData FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
-            arguments: [groupIdHex, userDid]
-          )
-        }
-
         // Build metadata with avatar locator if we have avatar data to re-encrypt
         let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
         currentMetadata = GroupMetadataV1(
-          title: payload.name ?? "",
+          title: payload.name ?? localDisplayMetadata?.title ?? "",
           description: payload.description ?? "",
+          avatar_blob_locator: avatarLocator
+        )
+      } else if let localTitle = localDisplayMetadata?.title, !localTitle.isEmpty {
+        let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
+        currentMetadata = GroupMetadataV1(
+          title: localTitle,
+          description: "",
           avatar_blob_locator: avatarLocator
         )
       } else {
@@ -531,6 +547,7 @@ extension MLSConversationManager {
       let (confirmedLocator, size) = try await apiClient.putGroupMetadataBlob(
         blobLocator: uploadLocator,
         groupId: groupIdHex,
+        metadataVersion: metadataVersion,
         encryptedBlob: encryptedBlob
       )
       logger.info(
@@ -551,6 +568,7 @@ extension MLSConversationManager {
         let (avatarConfirmed, avatarSize) = try await apiClient.putGroupMetadataBlob(
           blobLocator: avatarLocator,
           groupId: groupIdHex,
+          metadataVersion: metadataVersion,
           encryptedBlob: encryptedAvatar
         )
         logger.info(
@@ -573,7 +591,8 @@ extension MLSConversationManager {
   /// If the metadata contains an avatar blob locator, fetches and decrypts the avatar.
   ///
   /// - Parameters:
-  ///   - groupIdHex: Hex-encoded group ID (also the conversation ID)
+  ///   - groupIdHex: Hex-encoded group ID used for metadata decryption.
+  ///     The stable conversation row is resolved from this `groupID`.
   ///   - metadata: Decrypted GroupMetadataV1 payload
   ///   - metadataKey: Optional 32-byte key for decrypting the avatar blob
   ///   - epoch: Post-commit epoch the key is bound to
@@ -603,24 +622,25 @@ extension MLSConversationManager {
     }
 
     do {
-      try await database.write { db in
-        try db.execute(
-          sql: """
-            UPDATE MLSConversationModel
-            SET title = ?, avatarImageData = ?, updatedAt = ?, isPlaceholder = 0
-            WHERE conversationID = ? AND currentUserDID = ?
-            """,
-          arguments: [
-            metadata.title.isEmpty ? nil : metadata.title,
-            avatarData,
-            Date(),
-            groupIdHex,
-            userDid,
-          ]
+      let decryptedAvatarData = avatarData
+      let updatedConversationID = try await database.write { db in
+        try MLSConversationMetadataSQL.updateDecryptedMetadata(
+          db: db,
+          currentUserDID: userDid,
+          groupIdHex: groupIdHex,
+          title: metadata.title.isEmpty ? nil : metadata.title,
+          avatarImageData: decryptedAvatarData,
+          now: Date()
         )
       }
+      guard let updatedConversationID else {
+        logger.warning(
+          "⚠️ [Metadata] No conversation row found for group \(groupIdHex.prefix(16))...; metadata decrypted but not applied"
+        )
+        return
+      }
       logger.debug(
-        "✅ [Metadata] Updated conversation metadata for \(groupIdHex.prefix(16))...: title='\(metadata.title)', hasAvatar=\(avatarData != nil)"
+        "✅ [Metadata] Updated conversation metadata for \(updatedConversationID.prefix(16))... via group \(groupIdHex.prefix(16)): title='\(metadata.title)', hasAvatar=\(avatarData != nil)"
       )
 
       // Notify observers that conversation metadata changed.
@@ -659,7 +679,8 @@ extension MLSConversationManager {
     do {
       let encryptedAvatar = try await apiClient.getGroupMetadataBlob(
         blobLocator: blobLocator,
-        groupId: groupIdHex
+        groupId: groupIdHex,
+        metadataVersion: metadataVersion
       )
       logger.debug(
         "📥 [Metadata] Fetched encrypted avatar blob: \(encryptedAvatar.count) bytes"

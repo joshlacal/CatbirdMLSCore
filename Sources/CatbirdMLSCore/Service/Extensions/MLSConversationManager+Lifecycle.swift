@@ -999,7 +999,7 @@ extension MLSConversationManager {
               logger.warning(
                 "⚠️ [REJOIN] Failed to delete stale group: \(error.localizedDescription)")
             }
-            groupStates.removeValue(forKey: convo.conversationID)
+            removeCachedGroupState(conversationID: convo.conversationID, groupID: groupIdData)
           }
 
           let succeeded = await attemptRejoinWithWelcomeFallback(
