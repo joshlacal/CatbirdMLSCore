@@ -244,3 +244,61 @@ final class MLSAPIClientBuildAddMembersInputTests: XCTestCase {
     XCTAssertEqual(input.keyPackageHashes?.first?.hash, "abc123")
   }
 }
+
+final class MLSAPIClientBuildRemoveMemberInputTests: XCTestCase {
+
+  func testBuildRemoveMemberInputForwardsGroupInfo() throws {
+    let commit = Data(repeating: 0xAA, count: 64)
+    let groupInfo = Data(repeating: 0xCC, count: 256)
+    let dids = [try DID(didString: "did:plc:alice")]
+
+    let input = MLSAPIClient.buildRemoveMemberInput(
+      convoId: "convo-x",
+      didList: dids,
+      commit: commit,
+      groupInfo: groupInfo,
+      confirmationTag: nil,
+      idempotencyKey: "test-idem-1"
+    )
+
+    XCTAssertEqual(input.action, "removeMember")
+    XCTAssertEqual(input.convoId, "convo-x")
+    XCTAssertEqual(input.memberDids, dids)
+    XCTAssertEqual(input.commit?.data, commit)
+    XCTAssertEqual(
+      input.groupInfo?.data, groupInfo,
+      "groupInfo must be wrapped into Bytes and forwarded — the bug we're fixing")
+    XCTAssertEqual(input.idempotencyKey, "test-idem-1")
+    XCTAssertNil(input.confirmationTag)
+  }
+
+  func testBuildRemoveMemberInputNilGroupInfoIsNil() throws {
+    let input = MLSAPIClient.buildRemoveMemberInput(
+      convoId: "convo-y",
+      didList: [try DID(didString: "did:plc:bob")],
+      commit: nil,
+      groupInfo: nil,
+      confirmationTag: nil,
+      idempotencyKey: "test-idem-2"
+    )
+    XCTAssertNil(input.groupInfo)
+  }
+
+  func testBuildRemoveMemberInputDecodesConfirmationTag() throws {
+    let rawTagBytes = Data([0xDE, 0xAD, 0xBE, 0xEF])
+    let tagB64 = rawTagBytes.base64EncodedString()
+
+    let input = MLSAPIClient.buildRemoveMemberInput(
+      convoId: "convo-z",
+      didList: [try DID(didString: "did:plc:carol")],
+      commit: nil,
+      groupInfo: nil,
+      confirmationTag: tagB64,
+      idempotencyKey: "test-idem-3"
+    )
+
+    XCTAssertEqual(
+      input.confirmationTag?.data, rawTagBytes,
+      "helper must base64-decode the String input and forward raw Bytes")
+  }
+}
