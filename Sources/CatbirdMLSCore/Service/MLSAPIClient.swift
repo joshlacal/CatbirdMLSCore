@@ -881,6 +881,11 @@ public final class MLSAPIClient {
   ///   - didList: Array of member DIDs to add
   ///   - commit: MLS Commit message data
   ///   - welcomeMessage: Welcome message data for new members
+  ///   - groupInfo: Serialized POST-commit MLS GroupInfo bytes. Server stores
+  ///     this atomically inside the same txn that advances the epoch (closes
+  ///     the race where the next External-Commit joiner reads stale state).
+  ///     Pass nil only if you cannot export post-commit GroupInfo locally —
+  ///     server keeps existing (stale) state and logs a warning.
   ///   - keyPackageHashes: Optional array of key package hashes identifying which key packages were used
   ///   - idempotencyKey: Optional client-generated UUID for idempotent retries (auto-generated if nil)
   /// - Returns: Success status and new epoch number
@@ -889,6 +894,7 @@ public final class MLSAPIClient {
     didList: [DID],
     commit: Data? = nil,
     welcomeMessage: Data? = nil,
+    groupInfo: Data? = nil,
     keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry]? = nil,
     confirmationTag: String? = nil,
     idempotencyKey: String? = nil
@@ -899,18 +905,15 @@ public final class MLSAPIClient {
       "Adding \(didList.count) members to conversation: \(convoId), hashes: \(keyPackageHashes?.count ?? 0), idempotencyKey: \(idemKey)"
     )
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+    let input = Self.buildAddMembersInput(
       convoId: convoId,
-      action: "addMembers",
-      memberDids: didList,
-      commit: commit.map { Bytes(data: $0) },
-      welcome: welcomeMessage.map { Bytes(data: $0) },
+      didList: didList,
+      commit: commit,
+      welcomeMessage: welcomeMessage,
+      groupInfo: groupInfo,
       keyPackageHashes: keyPackageHashes,
-      idempotencyKey: idemKey,
-      // confirmationTag is still a pre-encoded base64 String at the public API;
-      // decode at this boundary so the Bytes-typed lexicon field gets raw bytes.
-      // Callers can migrate to passing Data directly later.
-      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+      confirmationTag: confirmationTag,
+      idempotencyKey: idemKey
     )
 
     do {
@@ -1349,6 +1352,52 @@ public final class MLSAPIClient {
       action: "externalCommit",
       commit: Bytes(data: externalCommit),
       groupInfo: groupInfo.map { Bytes(data: $0) },
+      idempotencyKey: idempotencyKey,
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+    )
+  }
+
+  /// Pure builder for the `BlueCatbirdMlsChatCommitGroupChange.Input` payload
+  /// sent over the wire by `addMembers`.
+  ///
+  /// This exists as a test seam: the wire-payload construction is otherwise
+  /// untestable without spinning up a network stub, and a previous bug had
+  /// `addMembers` not accepting a `groupInfo` parameter at all — silently
+  /// building an `Input` without it. Routing the wire build through this
+  /// helper makes the contract pinnable in unit tests (see
+  /// `MLSAPIClientBuildAddMembersInputTests`).
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - didList: Array of member DIDs being added.
+  ///   - commit: Optional MLS Commit message bytes.
+  ///   - welcomeMessage: Optional Welcome message bytes for the new members.
+  ///   - groupInfo: Optional serialized POST-commit MLS GroupInfo bytes.
+  ///     Server stores this atomically inside the same txn that advances the
+  ///     epoch.
+  ///   - keyPackageHashes: Optional per-device routing entries identifying
+  ///     which key packages were consumed by the commit.
+  ///   - confirmationTag: Optional base64-encoded confirmation tag string;
+  ///     decoded to raw `Bytes` for the wire.
+  ///   - idempotencyKey: Client-generated idempotency token.
+  internal static func buildAddMembersInput(
+    convoId: String,
+    didList: [DID],
+    commit: Data?,
+    welcomeMessage: Data?,
+    groupInfo: Data?,
+    keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry]?,
+    confirmationTag: String?,
+    idempotencyKey: String
+  ) -> BlueCatbirdMlsChatCommitGroupChange.Input {
+    BlueCatbirdMlsChatCommitGroupChange.Input(
+      convoId: convoId,
+      action: "addMembers",
+      memberDids: didList,
+      commit: commit.map { Bytes(data: $0) },
+      welcome: welcomeMessage.map { Bytes(data: $0) },
+      groupInfo: groupInfo.map { Bytes(data: $0) },
+      keyPackageHashes: keyPackageHashes,
       idempotencyKey: idempotencyKey,
       confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
     )
