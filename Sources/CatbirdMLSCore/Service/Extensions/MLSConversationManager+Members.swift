@@ -234,6 +234,21 @@ public extension MLSConversationManager {
         // Track this commit as our own to prevent re-processing via SSE
         trackOwnCommit(plan.commitBytes)
 
+        // Export POST-commit GroupInfo from local FFI state. After stageCommit,
+        // the FFI holds the new state at epoch N+1 — pass that to the server
+        // so it's stored atomically inside the same txn that records the
+        // commit (closes the External-Commit joiner stale-state race; the
+        // followup publishGroupInfo retry remains as a safety net).
+        let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
+          for: userDid,
+          groupId: groupIdData
+        )
+        if postCommitGroupInfo == nil {
+          logger.warning(
+            "⚠️ [MLSConversationManager.addMembers] Failed to export post-commit GroupInfo — falling back to publishGroupInfo retry"
+          )
+        }
+
         let addMembersResult: (success: Bool, newEpoch: Int)
         do {
           addMembersResult = try await apiClient.addMembers(
@@ -241,6 +256,7 @@ public extension MLSConversationManager {
             didList: dids,
             commit: plan.commitBytes,
             welcomeMessage: welcomeData,
+            groupInfo: postCommitGroupInfo,
             keyPackageHashes: keyPackageHashEntries
           )
         } catch let apiError as MLSAPIError {
@@ -451,6 +467,22 @@ public extension MLSConversationManager {
         let targetDid = try DID(didString: memberDid)
         let commitBase64 = plan.commitBytes.base64EncodedString()
 
+        // Export POST-commit GroupInfo from local FFI state. After stageCommit
+        // for the remove, the FFI holds the new state at epoch N+1 — pass that
+        // to the server so it's stored atomically inside the same txn that
+        // records the commit (closes the External-Commit joiner stale-state
+        // race; the followup publishGroupInfo retry below at line ~489
+        // remains as a safety net).
+        let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
+          for: userDid,
+          groupId: groupIdData
+        )
+        if postCommitGroupInfo == nil {
+          logger.warning(
+            "⚠️ [MLSConversationManager.removeMember] Failed to export post-commit GroupInfo — falling back to publishGroupInfo retry"
+          )
+        }
+
         let (ok, epochHint): (Bool, Int?)
         do {
           (ok, epochHint) = try await apiClient.removeMember(
@@ -458,6 +490,7 @@ public extension MLSConversationManager {
             targetDid: targetDid,
             reason: reason,
             commit: commitBase64,
+            groupInfo: postCommitGroupInfo,
             idempotencyKey: idempotencyKey
           )
         } catch {

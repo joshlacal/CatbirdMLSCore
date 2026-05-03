@@ -1236,7 +1236,11 @@ public actor MLSClient {
   /// Returns nil on FFI error, missing client identity, or if the exported
   /// bytes fail size validation. Callers handle nil by degrading
   /// gracefully — the followup `publishGroupInfo` retry is the safety net.
-  private func exportPostCommitGroupInfo(for userDID: String, groupId: Data) async -> Data? {
+  ///
+  /// `internal` so that `MLSConversationManager` and its extensions (same
+  /// module) can pass POST-commit GroupInfo to `apiClient.addMembers` /
+  /// `apiClient.removeMember` after staging a commit locally.
+  internal func exportPostCommitGroupInfo(for userDID: String, groupId: Data) async -> Data? {
     guard let clientIdentity = await getClientIdentity(for: userDID) else {
       logger.warning(
         "⚠️ [exportPostCommitGroupInfo] No client identity for user — skipping post-commit export"

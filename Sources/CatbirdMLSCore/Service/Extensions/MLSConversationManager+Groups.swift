@@ -421,6 +421,23 @@ extension MLSConversationManager {
           // ⚠️ NOTE: createConvo already atomically adds initialMembers.
           // This addMembers call is a confirmation/sync step and may return AlreadyMember
           // if the server processed members during createConvo. We handle this gracefully.
+
+          // Export POST-commit GroupInfo from local FFI state. The staged
+          // commit from createConversationOnServer is held by the FFI at
+          // epoch N+1 — pass that bytes to the server so it's stored
+          // atomically inside the same txn that records the commit (closes
+          // the External-Commit joiner stale-state race; followup
+          // publishGroupInfo retry remains as a safety net).
+          let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
+            for: userDid,
+            groupId: groupId
+          )
+          if postCommitGroupInfo == nil {
+            logger.warning(
+              "⚠️ [createGroup] Failed to export post-commit GroupInfo — falling back to publishGroupInfo retry"
+            )
+          }
+
           let addResult: (success: Bool, newEpoch: Int)
           do {
             logger.debug("📤 Calling addMembers API for group \(groupIdHex) with \(members.count) members")
@@ -428,7 +445,8 @@ extension MLSConversationManager {
               convoId: groupIdHex,
               didList: members,
               commit: commitData,
-              welcomeMessage: welcomeDataArray.first
+              welcomeMessage: welcomeDataArray.first,
+              groupInfo: postCommitGroupInfo
             )
             logger.debug("📥 addMembers API returned: success=\(addResult.success), newEpoch=\(addResult.newEpoch)")
           } catch let apiError as MLSAPIError {
