@@ -989,7 +989,24 @@ public actor MLSClient {
         // exit must discard it.
         pendingGroupId = Data(result.groupId)
 
-        // 6. Send Commit to Server — capture the returned server epoch
+        // 6. Export POST-commit GroupInfo from local FFI state. The pre-commit
+        // GroupInfo we fetched in step 1 is already on the server and isn't
+        // useful to send back. After createExternalCommit, the local FFI holds
+        // the new state at epoch N+1 — export and forward that so the server
+        // can store both the commit and the matching GroupInfo atomically
+        // (closes the race where the next External-Commit joiner reads stale
+        // server-side GroupInfo at epoch N).
+        let postCommitGroupInfo: Data? = await exportPostCommitGroupInfo(
+          for: userDID,
+          groupId: Data(result.groupId)
+        )
+        if postCommitGroupInfo == nil {
+          logger.warning(
+            "⚠️ [MLSClient.joinByExternalCommit] Failed to export post-commit GroupInfo — server keeps existing (may be stale) until publishGroupInfo fallback runs"
+          )
+        }
+
+        // 7. Send Commit to Server — capture the returned server epoch
         // Get confirmation tag from the new local group state after external commit
         let tagData = try? await getConfirmationTag(for: userDID, groupId: Data(result.groupId))
         let tagB64 = tagData?.base64EncodedString()
@@ -999,7 +1016,7 @@ public actor MLSClient {
           let (_, serverNewEpoch) = try await apiClient.processExternalCommit(
             convoId: convoId,
             externalCommit: result.commitData,
-            groupInfo: groupInfo,  // Send pre-commit GroupInfo so server can sync epoch
+            groupInfo: postCommitGroupInfo,  // POST-commit bytes from local FFI (step 6)
             confirmationTag: tagB64
           )
           serverEpochAfterCommit = UInt64(serverNewEpoch)
@@ -1208,6 +1225,43 @@ public actor MLSClient {
 
   /// Minimum valid GroupInfo size in bytes
   private static let minGroupInfoSize = 100
+
+  /// Exports POST-commit GroupInfo bytes from local FFI group state.
+  ///
+  /// Used by call sites that need to send post-commit GroupInfo to the
+  /// server atomically with a commit (closes the race where a stale
+  /// server-side GroupInfo causes downstream External-Commit joiners to
+  /// hit 409 epoch mismatches and trigger retry storms).
+  ///
+  /// Returns nil on FFI error, missing client identity, or if the exported
+  /// bytes fail size validation. Callers handle nil by degrading
+  /// gracefully — the followup `publishGroupInfo` retry is the safety net.
+  private func exportPostCommitGroupInfo(for userDID: String, groupId: Data) async -> Data? {
+    guard let clientIdentity = await getClientIdentity(for: userDID) else {
+      logger.warning(
+        "⚠️ [exportPostCommitGroupInfo] No client identity for user — skipping post-commit export"
+      )
+      return nil
+    }
+    let identityBytes = Data(clientIdentity.utf8)
+    do {
+      let bytes = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.exportGroupInfo(groupId: groupId, signerIdentityBytes: identityBytes)
+      }
+      guard bytes.count >= Self.minGroupInfoSize else {
+        logger.warning(
+          "⚠️ [exportPostCommitGroupInfo] Exported GroupInfo too small: \(bytes.count) bytes (min \(Self.minGroupInfoSize))"
+        )
+        return nil
+      }
+      return bytes
+    } catch {
+      logger.warning(
+        "⚠️ [exportPostCommitGroupInfo] FFI export failed: \(error.localizedDescription)"
+      )
+      return nil
+    }
+  }
 
   /// Publish GroupInfo to the server to allow external joins
   /// Should be called after any operation that advances the epoch (add, remove, update, commit)
