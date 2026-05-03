@@ -1320,6 +1320,40 @@ public final class MLSAPIClient {
     return .retryStaleRead(serverEpoch: storedEpoch)
   }
 
+  /// Pure builder for the `BlueCatbirdMlsChatCommitGroupChange.Input` payload
+  /// sent over the wire by `processExternalCommit`.
+  ///
+  /// This exists as a test seam: the wire-payload construction is otherwise
+  /// untestable without spinning up a network stub, and a previous bug had
+  /// `processExternalCommit` declaring `groupInfo: Data?` but silently dropping
+  /// it before reaching `Input(...)`. Routing the wire build through this
+  /// helper makes the contract pinnable in unit tests (see
+  /// `MLSAPIClientBuildExternalCommitInputTests`).
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - externalCommit: Serialized MLS External Commit bytes.
+  ///   - groupInfo: Optional serialized POST-commit MLS GroupInfo bytes.
+  ///   - confirmationTag: Optional base64-encoded confirmation tag string;
+  ///     decoded to raw `Bytes` for the wire.
+  ///   - idempotencyKey: Client-generated idempotency token.
+  internal static func buildExternalCommitInput(
+    convoId: String,
+    externalCommit: Data,
+    groupInfo: Data?,
+    confirmationTag: String?,
+    idempotencyKey: String
+  ) -> BlueCatbirdMlsChatCommitGroupChange.Input {
+    BlueCatbirdMlsChatCommitGroupChange.Input(
+      convoId: convoId,
+      action: "externalCommit",
+      commit: Bytes(data: externalCommit),
+      groupInfo: groupInfo.map { Bytes(data: $0) },
+      idempotencyKey: idempotencyKey,
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+    )
+  }
+
   /// Update GroupInfo for a conversation with retry logic and post-upload verification
   ///
   /// CRITICAL: This method now verifies the upload by fetching the stored data back.
@@ -1726,7 +1760,11 @@ public final class MLSAPIClient {
   /// - Parameters:
   ///   - convoId: Conversation identifier
   ///   - externalCommit: Serialized MLS External Commit data
-  ///   - groupInfo: Optional serialized GroupInfo data (for atomic update)
+  ///   - groupInfo: Serialized POST-commit MLS GroupInfo bytes. Server stores
+  ///     this atomically inside the same txn that advances the epoch (closes
+  ///     the race where the next External-Commit joiner reads stale state).
+  ///     Pass nil only if you cannot export post-commit GroupInfo locally —
+  ///     server keeps existing (stale) state and logs a warning.
   ///   - idempotencyKey: Optional client-generated UUID
   /// - Returns: Success status and new epoch (0 if not provided by server)
   public func processExternalCommit(
@@ -1741,12 +1779,12 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.processExternalCommit] START - convoId: \(convoId), commit: \(externalCommit.count) bytes, idempotencyKey: \(idemKey)"
     )
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+    let input = Self.buildExternalCommitInput(
       convoId: convoId,
-      action: "externalCommit",
-      commit: Bytes(data: externalCommit),
-      idempotencyKey: idemKey,
-      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+      externalCommit: externalCommit,
+      groupInfo: groupInfo,
+      confirmationTag: confirmationTag,
+      idempotencyKey: idemKey
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
