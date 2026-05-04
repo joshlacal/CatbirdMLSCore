@@ -881,6 +881,11 @@ public final class MLSAPIClient {
   ///   - didList: Array of member DIDs to add
   ///   - commit: MLS Commit message data
   ///   - welcomeMessage: Welcome message data for new members
+  ///   - groupInfo: Serialized POST-commit MLS GroupInfo bytes. Server stores
+  ///     this atomically inside the same txn that advances the epoch (closes
+  ///     the race where the next External-Commit joiner reads stale state).
+  ///     Pass nil only if you cannot export post-commit GroupInfo locally —
+  ///     server keeps existing (stale) state and logs a warning.
   ///   - keyPackageHashes: Optional array of key package hashes identifying which key packages were used
   ///   - idempotencyKey: Optional client-generated UUID for idempotent retries (auto-generated if nil)
   /// - Returns: Success status and new epoch number
@@ -889,6 +894,7 @@ public final class MLSAPIClient {
     didList: [DID],
     commit: Data? = nil,
     welcomeMessage: Data? = nil,
+    groupInfo: Data? = nil,
     keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry]? = nil,
     confirmationTag: String? = nil,
     idempotencyKey: String? = nil
@@ -899,18 +905,15 @@ public final class MLSAPIClient {
       "Adding \(didList.count) members to conversation: \(convoId), hashes: \(keyPackageHashes?.count ?? 0), idempotencyKey: \(idemKey)"
     )
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+    let input = Self.buildAddMembersInput(
       convoId: convoId,
-      action: "addMembers",
-      memberDids: didList,
-      commit: commit.map { Bytes(data: $0) },
-      welcome: welcomeMessage.map { Bytes(data: $0) },
+      didList: didList,
+      commit: commit,
+      welcomeMessage: welcomeMessage,
+      groupInfo: groupInfo,
       keyPackageHashes: keyPackageHashes,
-      idempotencyKey: idemKey,
-      // confirmationTag is still a pre-encoded base64 String at the public API;
-      // decode at this boundary so the Bytes-typed lexicon field gets raw bytes.
-      // Callers can migrate to passing Data directly later.
-      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+      confirmationTag: confirmationTag,
+      idempotencyKey: idemKey
     )
 
     do {
@@ -1320,6 +1323,125 @@ public final class MLSAPIClient {
     return .retryStaleRead(serverEpoch: storedEpoch)
   }
 
+  /// Pure builder for the `BlueCatbirdMlsChatCommitGroupChange.Input` payload
+  /// sent over the wire by `processExternalCommit`.
+  ///
+  /// This exists as a test seam: the wire-payload construction is otherwise
+  /// untestable without spinning up a network stub, and a previous bug had
+  /// `processExternalCommit` declaring `groupInfo: Data?` but silently dropping
+  /// it before reaching `Input(...)`. Routing the wire build through this
+  /// helper makes the contract pinnable in unit tests (see
+  /// `MLSAPIClientBuildExternalCommitInputTests`).
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - externalCommit: Serialized MLS External Commit bytes.
+  ///   - groupInfo: Optional serialized POST-commit MLS GroupInfo bytes.
+  ///   - confirmationTag: Optional base64-encoded confirmation tag string;
+  ///     decoded to raw `Bytes` for the wire.
+  ///   - idempotencyKey: Client-generated idempotency token.
+  internal static func buildExternalCommitInput(
+    convoId: String,
+    externalCommit: Data,
+    groupInfo: Data?,
+    confirmationTag: String?,
+    idempotencyKey: String
+  ) -> BlueCatbirdMlsChatCommitGroupChange.Input {
+    BlueCatbirdMlsChatCommitGroupChange.Input(
+      convoId: convoId,
+      action: "externalCommit",
+      commit: Bytes(data: externalCommit),
+      groupInfo: groupInfo.map { Bytes(data: $0) },
+      idempotencyKey: idempotencyKey,
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+    )
+  }
+
+  /// Pure builder for the `BlueCatbirdMlsChatCommitGroupChange.Input` payload
+  /// sent over the wire by `addMembers`.
+  ///
+  /// This exists as a test seam: the wire-payload construction is otherwise
+  /// untestable without spinning up a network stub, and a previous bug had
+  /// `addMembers` not accepting a `groupInfo` parameter at all — silently
+  /// building an `Input` without it. Routing the wire build through this
+  /// helper makes the contract pinnable in unit tests (see
+  /// `MLSAPIClientBuildAddMembersInputTests`).
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - didList: Array of member DIDs being added.
+  ///   - commit: Optional MLS Commit message bytes.
+  ///   - welcomeMessage: Optional Welcome message bytes for the new members.
+  ///   - groupInfo: Optional serialized POST-commit MLS GroupInfo bytes.
+  ///     Server stores this atomically inside the same txn that advances the
+  ///     epoch.
+  ///   - keyPackageHashes: Optional per-device routing entries identifying
+  ///     which key packages were consumed by the commit.
+  ///   - confirmationTag: Optional base64-encoded confirmation tag string;
+  ///     decoded to raw `Bytes` for the wire.
+  ///   - idempotencyKey: Client-generated idempotency token.
+  internal static func buildAddMembersInput(
+    convoId: String,
+    didList: [DID],
+    commit: Data?,
+    welcomeMessage: Data?,
+    groupInfo: Data?,
+    keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry]?,
+    confirmationTag: String?,
+    idempotencyKey: String
+  ) -> BlueCatbirdMlsChatCommitGroupChange.Input {
+    BlueCatbirdMlsChatCommitGroupChange.Input(
+      convoId: convoId,
+      action: "addMembers",
+      memberDids: didList,
+      commit: commit.map { Bytes(data: $0) },
+      welcome: welcomeMessage.map { Bytes(data: $0) },
+      groupInfo: groupInfo.map { Bytes(data: $0) },
+      keyPackageHashes: keyPackageHashes,
+      idempotencyKey: idempotencyKey,
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+    )
+  }
+
+  /// Pure builder for the `BlueCatbirdMlsChatCommitGroupChange.Input` payload
+  /// sent over the wire by `removeMember`.
+  ///
+  /// This exists as a test seam: the wire-payload construction is otherwise
+  /// untestable without spinning up a network stub, and a previous bug had
+  /// `removeMember` not accepting a `groupInfo` parameter at all — silently
+  /// building an `Input` without it. Routing the wire build through this
+  /// helper makes the contract pinnable in unit tests (see
+  /// `MLSAPIClientBuildRemoveMemberInputTests`).
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier.
+  ///   - didList: Array of member DIDs being removed.
+  ///   - commit: Optional MLS Commit message bytes.
+  ///   - groupInfo: Optional serialized POST-commit MLS GroupInfo bytes.
+  ///     Server stores this atomically inside the same txn that advances the
+  ///     epoch.
+  ///   - confirmationTag: Optional base64-encoded confirmation tag string;
+  ///     decoded to raw `Bytes` for the wire.
+  ///   - idempotencyKey: Client-generated idempotency token.
+  internal static func buildRemoveMemberInput(
+    convoId: String,
+    didList: [DID],
+    commit: Data?,
+    groupInfo: Data?,
+    confirmationTag: String?,
+    idempotencyKey: String
+  ) -> BlueCatbirdMlsChatCommitGroupChange.Input {
+    BlueCatbirdMlsChatCommitGroupChange.Input(
+      convoId: convoId,
+      action: "removeMember",
+      memberDids: didList,
+      commit: commit.map { Bytes(data: $0) },
+      groupInfo: groupInfo.map { Bytes(data: $0) },
+      idempotencyKey: idempotencyKey,
+      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+    )
+  }
+
   /// Update GroupInfo for a conversation with retry logic and post-upload verification
   ///
   /// CRITICAL: This method now verifies the upload by fetching the stored data back.
@@ -1726,7 +1848,11 @@ public final class MLSAPIClient {
   /// - Parameters:
   ///   - convoId: Conversation identifier
   ///   - externalCommit: Serialized MLS External Commit data
-  ///   - groupInfo: Optional serialized GroupInfo data (for atomic update)
+  ///   - groupInfo: Serialized POST-commit MLS GroupInfo bytes. Server stores
+  ///     this atomically inside the same txn that advances the epoch (closes
+  ///     the race where the next External-Commit joiner reads stale state).
+  ///     Pass nil only if you cannot export post-commit GroupInfo locally —
+  ///     server keeps existing (stale) state and logs a warning.
   ///   - idempotencyKey: Optional client-generated UUID
   /// - Returns: Success status and new epoch (0 if not provided by server)
   public func processExternalCommit(
@@ -1741,12 +1867,12 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.processExternalCommit] START - convoId: \(convoId), commit: \(externalCommit.count) bytes, idempotencyKey: \(idemKey)"
     )
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+    let input = Self.buildExternalCommitInput(
       convoId: convoId,
-      action: "externalCommit",
-      commit: Bytes(data: externalCommit),
-      idempotencyKey: idemKey,
-      confirmationTag: confirmationTag.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) }
+      externalCommit: externalCommit,
+      groupInfo: groupInfo,
+      confirmationTag: confirmationTag,
+      idempotencyKey: idemKey
     )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
@@ -1903,6 +2029,11 @@ public final class MLSAPIClient {
   ///   - targetDid: DID of member to remove
   ///   - reason: Optional reason for removal
   ///   - commit: Base64-encoded MLS commit message (REQUIRED for epoch sync)
+  ///   - groupInfo: Serialized POST-commit MLS GroupInfo bytes. Server stores
+  ///     this atomically inside the same txn that advances the epoch (closes
+  ///     the race where the next External-Commit joiner reads stale state).
+  ///     Pass nil only if you cannot export post-commit GroupInfo locally —
+  ///     server keeps existing (stale) state and logs a warning.
   ///   - idempotencyKey: Optional client-generated UUID for idempotent retries (auto-generated if nil)
   /// - Returns: Success status and epoch hint (if provided by server)
   public func removeMember(
@@ -1910,6 +2041,7 @@ public final class MLSAPIClient {
     targetDid: DID,
     reason: String? = nil,
     commit: String? = nil,
+    groupInfo: Data? = nil,
     idempotencyKey: String? = nil
   ) async throws -> (ok: Bool, epochHint: Int?) {
     let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
@@ -1917,11 +2049,16 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.removeMember] START - convoId: \(convoId), targetDid: \(targetDid), commit: \(commit != nil ? "\(commit!.count) chars" : "nil"), idempotencyKey: \(idemKey)"
     )
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+    // The public API still accepts `commit` as a base64-encoded String; decode
+    // here at the boundary so the helper can take Data?, matching the shape of
+    // buildAddMembersInput / buildExternalCommitInput.
+    let commitData = commit.flatMap { Data(base64Encoded: $0) }
+    let input = Self.buildRemoveMemberInput(
       convoId: convoId,
-      action: "removeMember",
-      memberDids: [targetDid],
-      commit: commit.flatMap { Data(base64Encoded: $0) }.map { Bytes(data: $0) },
+      didList: [targetDid],
+      commit: commitData,
+      groupInfo: groupInfo,
+      confirmationTag: nil,
       idempotencyKey: idemKey
     )
 
