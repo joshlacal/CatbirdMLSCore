@@ -3048,6 +3048,11 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func fetchMessages(conversationId: String, cursor: String?, limit: UInt32) throws  -> FfiFetchMessagesResult
     
     /**
+     * Snapshot of a conversation quarantine state, if any.
+     */
+    func getConversationQuarantineState(convoId: String)  -> FfiQuarantineState?
+    
+    /**
      * Get key package stats.
      */
     func getKeyPackageStats() throws  -> FfiKeyPackageStats
@@ -3211,6 +3216,11 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
     func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv: Data, sha256: String, size: UInt64, durationMs: UInt64, waveform: [Float], transcript: String?) throws  -> FfiMessage
     
     /**
+     * Install (or replace) the Layer 3 event callback. Pass None to detach.
+     */
+    func setEventCallback(callback: OrchestratorEventCallback?) 
+    
+    /**
      * Shut down the orchestrator.
      */
     func shutdown() 
@@ -3231,6 +3241,12 @@ public protocol OrchestratorBridgeProtocol : AnyObject {
      * Sync conversations with the server.
      */
     func syncWithServer(fullSync: Bool) throws 
+    
+    /**
+     * User explicitly tapped Reset conversation in the UI. Reports a vote
+     * to the server (spec section 8.6 quorum) and clears local quarantine.
+     */
+    func userConfirmedManualReset(convoId: String) throws 
     
 }
 
@@ -3408,6 +3424,17 @@ open func fetchMessages(conversationId: String, cursor: String?, limit: UInt32)t
         FfiConverterString.lower(conversationId),
         FfiConverterOptionString.lower(cursor),
         FfiConverterUInt32.lower(limit),$0
+    )
+})
+}
+    
+    /**
+     * Snapshot of a conversation quarantine state, if any.
+     */
+open func getConversationQuarantineState(convoId: String) -> FfiQuarantineState? {
+    return try!  FfiConverterOptionTypeFFIQuarantineState.lift(try! rustCall() {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_get_conversation_quarantine_state(self.uniffiClonePointer(),
+        FfiConverterString.lower(convoId),$0
     )
 })
 }
@@ -3690,6 +3717,16 @@ open func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv
 }
     
     /**
+     * Install (or replace) the Layer 3 event callback. Pass None to detach.
+     */
+open func setEventCallback(callback: OrchestratorEventCallback?) {try! rustCall() {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_set_event_callback(self.uniffiClonePointer(),
+        FfiConverterOptionCallbackInterfaceOrchestratorEventCallback.lower(callback),$0
+    )
+}
+}
+    
+    /**
      * Shut down the orchestrator.
      */
 open func shutdown() {try! rustCall() {
@@ -3730,6 +3767,17 @@ open func swapMembers(groupId: String, removeDids: [String], addDids: [String])t
 open func syncWithServer(fullSync: Bool)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
     uniffi_catbird_mls_fn_method_orchestratorbridge_sync_with_server(self.uniffiClonePointer(),
         FfiConverterBool.lower(fullSync),$0
+    )
+}
+}
+    
+    /**
+     * User explicitly tapped Reset conversation in the UI. Reports a vote
+     * to the server (spec section 8.6 quorum) and clears local quarantine.
+     */
+open func userConfirmedManualReset(convoId: String)throws  {try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+    uniffi_catbird_mls_fn_method_orchestratorbridge_user_confirmed_manual_reset(self.uniffiClonePointer(),
+        FfiConverterString.lower(convoId),$0
     )
 }
 }
@@ -6227,6 +6275,80 @@ public func FfiConverterTypeFFIProcessExternalCommitResult_lower(_ value: FfiPro
 }
 
 
+public struct FfiQuarantineState {
+    public var reason: FfiQuarantineReason
+    public var sinceMs: Int64
+    public var suspectedDids: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(reason: FfiQuarantineReason, sinceMs: Int64, suspectedDids: [String]) {
+        self.reason = reason
+        self.sinceMs = sinceMs
+        self.suspectedDids = suspectedDids
+    }
+}
+
+
+
+extension FfiQuarantineState: Equatable, Hashable {
+    public static func ==(lhs: FfiQuarantineState, rhs: FfiQuarantineState) -> Bool {
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.sinceMs != rhs.sinceMs {
+            return false
+        }
+        if lhs.suspectedDids != rhs.suspectedDids {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reason)
+        hasher.combine(sinceMs)
+        hasher.combine(suspectedDids)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIQuarantineState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiQuarantineState {
+        return
+            try FfiQuarantineState(
+                reason: FfiConverterTypeFFIQuarantineReason.read(from: &buf), 
+                sinceMs: FfiConverterInt64.read(from: &buf), 
+                suspectedDids: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiQuarantineState, into buf: inout [UInt8]) {
+        FfiConverterTypeFFIQuarantineReason.write(value.reason, into: &buf)
+        FfiConverterInt64.write(value.sinceMs, into: &buf)
+        FfiConverterSequenceString.write(value.suspectedDids, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIQuarantineState_lift(_ buf: RustBuffer) throws -> FfiQuarantineState {
+    return try FfiConverterTypeFFIQuarantineState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIQuarantineState_lower(_ value: FfiQuarantineState) -> RustBuffer {
+    return FfiConverterTypeFFIQuarantineState.lower(value)
+}
+
+
 /**
  * Opaque handle returned by `stage_commit`. Carries the group id and a
  * per-orchestrator monotonic nonce so stale handles are rejected cleanly.
@@ -8449,6 +8571,148 @@ extension FfiDeliveryStatus: Equatable, Hashable {}
 
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiQuarantineExitReason {
+    
+    case peerCommitSucceeded
+    case serverReset
+    case userConfirmedReset
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIQuarantineExitReason: FfiConverterRustBuffer {
+    typealias SwiftType = FfiQuarantineExitReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiQuarantineExitReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .peerCommitSucceeded
+        
+        case 2: return .serverReset
+        
+        case 3: return .userConfirmedReset
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiQuarantineExitReason, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .peerCommitSucceeded:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .serverReset:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .userConfirmedReset:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIQuarantineExitReason_lift(_ buf: RustBuffer) throws -> FfiQuarantineExitReason {
+    return try FfiConverterTypeFFIQuarantineExitReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIQuarantineExitReason_lower(_ value: FfiQuarantineExitReason) -> RustBuffer {
+    return FfiConverterTypeFFIQuarantineExitReason.lower(value)
+}
+
+
+
+extension FfiQuarantineExitReason: Equatable, Hashable {}
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiQuarantineReason {
+    
+    case peerBadCommit
+    case multiPeerBadCommits
+    case repeatedFramingFailures
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIQuarantineReason: FfiConverterRustBuffer {
+    typealias SwiftType = FfiQuarantineReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiQuarantineReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .peerBadCommit
+        
+        case 2: return .multiPeerBadCommits
+        
+        case 3: return .repeatedFramingFailures
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiQuarantineReason, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .peerBadCommit:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .multiPeerBadCommits:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .repeatedFramingFailures:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIQuarantineReason_lift(_ buf: RustBuffer) throws -> FfiQuarantineReason {
+    return try FfiConverterTypeFFIQuarantineReason.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIQuarantineReason_lower(_ value: FfiQuarantineReason) -> RustBuffer {
+    return FfiConverterTypeFFIQuarantineReason.lower(value)
+}
+
+
+
+extension FfiQuarantineReason: Equatable, Hashable {}
+
+
+
 
 /**
  * Dedicated error type for the sender-side three-phase commit surface on
@@ -9056,6 +9320,15 @@ public enum OrchestratorBridgeError {
      */
     case ServerError(status: UInt16, body: String
     )
+    /**
+     * Layer 3 quarantine: send/encrypt or auto-rejoin was refused because the
+     * conversation is in Quarantined state. Platforms should surface this to
+     * the UI (banner + disabled composer) and only clear via
+     * user_confirmed_manual_reset, server-pushed groupResetEvent, or a healthy
+     * peer commit.
+     */
+    case ConversationQuarantined(convoId: String, reason: String
+    )
 }
 
 
@@ -9106,6 +9379,10 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
         case 13: return .ServerError(
             status: try FfiConverterUInt16.read(from: &buf), 
             body: try FfiConverterString.read(from: &buf)
+            )
+        case 14: return .ConversationQuarantined(
+            convoId: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -9181,6 +9458,12 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(13))
             FfiConverterUInt16.write(status, into: &buf)
             FfiConverterString.write(body, into: &buf)
+            
+        
+        case let .ConversationQuarantined(convoId,reason):
+            writeInt(&buf, Int32(14))
+            FfiConverterString.write(convoId, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
             
         }
     }
@@ -11319,6 +11602,143 @@ extension FfiConverterCallbackInterfaceOrchestratorCredentialCallback : FfiConve
 
 
 /**
+ * UniFFI callback interface for Layer 3 quarantine events. Platforms
+ * (Android, catmos Tauri, catmos-cli, web) implement this and register via
+ * OrchestratorBridge::set_event_callback. The constructor is unchanged so
+ * existing platform code keeps compiling without binding regen.
+ */
+public protocol OrchestratorEventCallback : AnyObject {
+    
+    func onConversationQuarantined(convoId: String, reason: FfiQuarantineReason, suspectedDids: [String]) 
+    
+    func onConversationQuarantineCleared(convoId: String, via: FfiQuarantineExitReason) 
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceOrchestratorEventCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfaceOrchestratorEventCallback = UniffiVTableCallbackInterfaceOrchestratorEventCallback(
+        onConversationQuarantined: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            reason: RustBuffer,
+            suspectedDids: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onConversationQuarantined(
+                     convoId: try FfiConverterString.lift(convoId),
+                     reason: try FfiConverterTypeFFIQuarantineReason.lift(reason),
+                     suspectedDids: try FfiConverterSequenceString.lift(suspectedDids)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onConversationQuarantineCleared: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            via: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onConversationQuarantineCleared(
+                     convoId: try FfiConverterString.lift(convoId),
+                     via: try FfiConverterTypeFFIQuarantineExitReason.lift(via)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface OrchestratorEventCallback: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitOrchestratorEventCallback() {
+    uniffi_catbird_mls_fn_init_callback_vtable_orchestratoreventcallback(&UniffiCallbackInterfaceOrchestratorEventCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceOrchestratorEventCallback {
+    fileprivate static var handleMap = UniffiHandleMap<OrchestratorEventCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceOrchestratorEventCallback : FfiConverter {
+    typealias SwiftType = OrchestratorEventCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+
+
+/**
  * Storage backend callback interface for Swift/Kotlin.
  *
  * All methods are synchronous from UniFFI's perspective — the Swift side
@@ -12222,6 +12642,30 @@ fileprivate struct FfiConverterOptionTypeFFIMessage: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFFIQuarantineState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiQuarantineState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFFIQuarantineState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFFIQuarantineState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
     typealias SwiftType = GroupConfig?
 
@@ -12262,6 +12706,30 @@ fileprivate struct FfiConverterOptionTypeFFIDeliveryStatus: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFFIDeliveryStatus.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionCallbackInterfaceOrchestratorEventCallback: FfiConverterRustBuffer {
+    typealias SwiftType = OrchestratorEventCallback?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterCallbackInterfaceOrchestratorEventCallback.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterCallbackInterfaceOrchestratorEventCallback.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -13485,6 +13953,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_fetch_messages() != 30152) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_quarantine_state() != 47830) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13539,6 +14010,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_send_voice_message() != 34733) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_set_event_callback() != 27441) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13549,6 +14023,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_sync_with_server() != 17558) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratorbridge_user_confirmed_manual_reset() != 5441) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_constructor_catbirdclientbridge_new() != 35621) {
@@ -13680,6 +14157,12 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 40070) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantined() != 58743) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantine_cleared() != 22324) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 57265) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13745,6 +14228,7 @@ private var initializationResult: InitializationResult = {
     uniffiCallbackInitMLSLogger()
     uniffiCallbackInitOrchestratorAPICallback()
     uniffiCallbackInitOrchestratorCredentialCallback()
+    uniffiCallbackInitOrchestratorEventCallback()
     uniffiCallbackInitOrchestratorStorageCallback()
     return InitializationResult.ok
 }()

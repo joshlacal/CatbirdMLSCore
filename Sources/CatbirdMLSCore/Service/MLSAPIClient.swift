@@ -2968,6 +2968,23 @@ public extension MLSAPIError {
       self = .httpError(statusCode: 409, message: detail ?? "Pending addition already claimed")
     case .unauthorized:
       self = .httpError(statusCode: 403, message: detail ?? "Unauthorized")
+    // Layer 1 robustness errors (~/.claude/plans/rippling-greeting-whale.md §Layer 1).
+    // Map to httpError until/unless MLSAPIError gains dedicated cases.
+    case .noKeyPackagesPublished:
+      self = .httpError(
+        statusCode: 412,
+        message: detail ?? "Device must publish at least one key package before issuing an External Commit"
+      )
+    case .groupFrozen:
+      self = .httpError(
+        statusCode: 423,
+        message: detail ?? "Conversation is being repaired (epoch-storm circuit breaker). Retry shortly."
+      )
+    case .rateLimited:
+      // The 429 body carries structured retryAfterSeconds + scope, but we
+      // don't have access to it from this enum — caller can parse the
+      // response body separately if it needs the retry hint.
+      self = .rateLimited(retryAfter: nil)
     }
   }
 }
