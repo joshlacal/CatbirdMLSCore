@@ -542,6 +542,84 @@ public actor MLSRecoveryManager {
     }
   }
 
+  // MARK: - Rust-gate-aware outcome routing (2026-05-02 deadlock fix)
+
+  /// Parses Rust's
+  /// `OrchestratorError::RecoveryFailed("Rejoin suppressed for X: <kind>
+  /// (Ns remaining)")` shape into a `TimeInterval` of seconds remaining.
+  /// Returns nil for any other error.
+  ///
+  /// Mirrors the Kotlin `extractRustGateRemainingMs` in
+  /// `MLSRecoveryManager.kt`. When a rejoin attempt is rejected by Rust's
+  /// `RecoveryTracker` (no real network attempt happened), we should NOT
+  /// stamp our local `lastGlobalRejoinAttemptAt` to now — that doubles
+  /// the gate window unnecessarily and causes both gates to re-arm in
+  /// lockstep.
+  ///
+  /// Rust source: `catbird-mls/src/orchestrator/recovery.rs:551,572`.
+  internal static func extractRustGateRemainingSec(_ error: Error) -> TimeInterval? {
+    let message = String(describing: error)
+    guard message.contains("Rejoin suppressed") else { return nil }
+    // Match `(N seconds remaining)` or `(Ns remaining)` shape — Rust emits
+    // `(Ns remaining)` and the more verbose form is defensive future-proofing.
+    let pattern = #"\((\d+)s? ?(?:seconds? )?remaining\)"#
+    guard
+      let regex = try? NSRegularExpression(pattern: pattern),
+      let match = regex.firstMatch(
+        in: message,
+        range: NSRange(message.startIndex..., in: message)
+      ),
+      let range = Range(match.range(at: 1), in: message),
+      let seconds = Double(message[range])
+    else { return nil }
+    return seconds
+  }
+
+  /// Record the OUTCOME of a rejoin attempt that may have been a real
+  /// failure OR may have been a Rust-orchestrator gate suppression. If
+  /// the error is a gate suppression (no real attempt happened), project
+  /// `lastGlobalRejoinAttemptAt` so it clears at the same time as Rust's
+  /// gate, instead of stomping it to now and creating the gate-thrash
+  /// the 2026-05-02 prod incident exhibited.
+  ///
+  /// Use this in catch blocks that wrap calls into the Rust orchestrator
+  /// (`handleGroupReset`, `joinOrRejoin`, `bootstrapResetGroup`, etc.).
+  /// Existing callers that pass a real failure error see identical
+  /// behavior to `recordFailedRejoin` (since the gate-suppression check
+  /// short-circuits to false on those).
+  public func recordRejoinOutcome(
+    convoId: String,
+    error: Error,
+    epochAuthenticatorHex: String? = nil,
+    failureType: String = "external_commit_exhausted"
+  ) {
+    if let remainingSec = Self.extractRustGateRemainingSec(error) {
+      // Project local gate to clear at the same wall-clock instant as Rust's.
+      // Subtract `minGlobalRejoinIntervalSec` because `shouldSkipRejoin`
+      // compares against `(now - lastGlobalRejoinAttemptAt) >= interval`,
+      // so we need to write a future timestamp such that the inequality
+      // flips when Rust's gate also clears. Clamp to 0 to keep the timestamp
+      // realistic when Rust reports < 30 s remaining.
+      let projected = Date().addingTimeInterval(
+        max(0, remainingSec - Self.minGlobalRejoinIntervalSec)
+      )
+      lastGlobalRejoinAttemptAt = projected
+      logger.debug(
+        "⏸️ [MLSRecoveryManager] Rust rejoin gate active for \(convoId.prefix(16)) (\(Int(remainingSec))s remaining); projecting local gate, NOT stamping recordFailedRejoin (no real attempt happened)"
+      )
+      // Do NOT increment per-convo failure counter — Rust gate suppression
+      // means no real network attempt happened. Counting it would falsely
+      // accelerate the convo toward MAX_REJOIN_ATTEMPTS and trip the
+      // §8.6 escalation prematurely.
+      return
+    }
+    recordFailedRejoin(
+      convoId: convoId,
+      epochAuthenticatorHex: epochAuthenticatorHex,
+      failureType: failureType
+    )
+  }
+
   /// Record a retryable bootstrap stall caused by missing peer key packages.
   ///
   /// This is not an External Commit exhaustion and must not contribute a reset
@@ -920,8 +998,14 @@ public actor MLSRecoveryManager {
           // `remote_data_error` so the eventual recoveryFailure report sets
           // `failureMode = "group_state_unrecoverable"` (counts toward
           // server-side quorum auto-reset rather than self-heal).
+          // Gate-aware via recordRejoinOutcome: a Rust orchestrator gate
+          // suppression must NOT be misclassified as remote-data corruption.
           if let convoId = convoId {
-            recordFailedRejoin(convoId: convoId, failureType: "remote_data_error")
+            recordRejoinOutcome(
+              convoId: convoId,
+              error: error,
+              failureType: "remote_data_error"
+            )
           }
 
           return false
@@ -1008,9 +1092,11 @@ public actor MLSRecoveryManager {
       return true
     } catch {
       logger.error("❌ [MLSRecoveryManager] Auto-recovery failed: \(error.localizedDescription)")
-      // Record the failure for the triggering conversation
+      // Record the failure for the triggering conversation. Gate-aware:
+      // if `performSilentRecovery` propagated a Rust orchestrator gate
+      // suppression, project our local gate instead of stamping it.
       if let convoId = checkConvoId {
-        recordFailedRejoin(convoId: convoId)
+        recordRejoinOutcome(convoId: convoId, error: error)
       }
       return false
     }

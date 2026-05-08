@@ -5715,7 +5715,13 @@ public extension MLSConversationManager {
           // (External Commit is being attempted precisely because local state
           // is absent). FFI would return GroupNotFound. Server accepts nil
           // but short-circuits the A7 vote as `missing_authenticator`.
-          await recoveryManager.recordFailedRejoin(convoId: convoId, epochAuthenticatorHex: nil)
+          // Use the gate-aware outcome router so a Rust gate suppression
+          // doesn't double-arm our local gate (2026-05-02 deadlock fix).
+          await recoveryManager.recordRejoinOutcome(
+            convoId: convoId,
+            error: error,
+            epochAuthenticatorHex: nil
+          )
         }
 
         throw MLSConversationError.operationFailed("External Commit forbidden (HTTP 403)")
@@ -5769,9 +5775,12 @@ public extension MLSConversationManager {
           // vote but short-circuits as `missing_authenticator`.
           // ADR-008 D1: server-data corruption is Mode B — `remote_data_error`
           // maps to `failureMode = "group_state_unrecoverable"` inside
-          // `recordFailedRejoin`.
-          await recoveryManager.recordFailedRejoin(
+          // `recordFailedRejoin`. Routed through the gate-aware outcome
+          // router so a Rust orchestrator gate suppression (no real network
+          // attempt) doesn't get mis-recorded as a corruption-class failure.
+          await recoveryManager.recordRejoinOutcome(
             convoId: convoId,
+            error: error,
             epochAuthenticatorHex: nil,
             failureType: "remote_data_error"
           )
@@ -5797,7 +5806,13 @@ public extension MLSConversationManager {
           // No authenticator: early-return at L5281-5288 guarantees the group
           // is absent locally on this failure path. Server records the vote
           // but short-circuits as `missing_authenticator`.
-          await recoveryManager.recordFailedRejoin(convoId: convoId, epochAuthenticatorHex: nil)
+          // Gate-aware: a Rust orchestrator suppression here just projects
+          // our gate forward instead of stomping it (2026-05-02 deadlock fix).
+          await recoveryManager.recordRejoinOutcome(
+            convoId: convoId,
+            error: error,
+            epochAuthenticatorHex: nil
+          )
           let remaining = await recoveryManager.remainingRejoinAttempts(convoId: convoId)
           logger.info(
             "📊 [External Commit Fallback] \(remaining) rejoin attempts remaining for \(convoId.prefix(16))..."
