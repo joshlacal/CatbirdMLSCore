@@ -19,7 +19,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   public let currentUserDID: String
   public let conversationID: String
   public let senderID: String
-  public let payloadJSON: Data?  // Full MLSMessagePayload as JSON
+  /// Legacy column. After MLSMessageFieldMigrationV1, new rows write
+  /// encrypted data into `payloadEncrypted` instead. Preserved only for any
+  /// pre-migration rows that survive in dev/test data.
+  public let payloadJSON: Data?
   public let wireFormat: Data?
   public let contentType: String
   public let timestamp: Date
@@ -38,6 +41,16 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   public let processingError: String?
   public let processingAttempts: Int
   public let validationFailureReason: String?
+  /// Field-level encrypted payload (replaces `payloadJSON` post-migration).
+  public let payloadEncrypted: Data?
+  /// HMAC over the row's stable fields, computed with the row entry key.
+  public let entryHMAC: Data?
+  /// Version of the content root key used to derive this row's per-entry keys.
+  public let payloadKeyVersion: Int?
+  /// Tombstone flag (0 = live, 1 = tombstoned). Stored as Int for SQLite compatibility.
+  public let isTombstone: Int
+  /// Tombstone timestamp (unix epoch milliseconds). Nil when not tombstoned.
+  public let deletedAt: Int64?
 
   public var id: String { messageID }
 
@@ -89,7 +102,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     payloadExpired: Bool = false,
     processingError: String? = nil,
     processingAttempts: Int = 0,
-    validationFailureReason: String? = nil
+    validationFailureReason: String? = nil,
+    payloadEncrypted: Data? = nil,
+    entryHMAC: Data? = nil,
+    payloadKeyVersion: Int? = nil,
+    isTombstone: Int = 0,
+    deletedAt: Int64? = nil
   ) {
     self.messageID = messageID
     self.currentUserDID = currentUserDID
@@ -114,6 +132,11 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.processingError = processingError
     self.processingAttempts = processingAttempts
     self.validationFailureReason = validationFailureReason
+    self.payloadEncrypted = payloadEncrypted
+    self.entryHMAC = entryHMAC
+    self.payloadKeyVersion = payloadKeyVersion
+    self.isTombstone = isTombstone
+    self.deletedAt = deletedAt
   }
 
   // MARK: - Update Methods
@@ -144,7 +167,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       payloadExpired: false,
       processingError: processingError,
       processingAttempts: processingAttempts,
-      validationFailureReason: validationFailureReason
+      validationFailureReason: validationFailureReason,
+      payloadEncrypted: payloadEncrypted,
+      entryHMAC: entryHMAC,
+      payloadKeyVersion: payloadKeyVersion,
+      isTombstone: isTombstone,
+      deletedAt: deletedAt
     )
   }
 
@@ -173,7 +201,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       payloadExpired: payloadExpired,
       processingError: processingError,
       processingAttempts: processingAttempts,
-      validationFailureReason: validationFailureReason
+      validationFailureReason: validationFailureReason,
+      payloadEncrypted: payloadEncrypted,
+      entryHMAC: entryHMAC,
+      payloadKeyVersion: payloadKeyVersion,
+      isTombstone: isTombstone,
+      deletedAt: deletedAt
     )
   }
 
@@ -202,7 +235,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       payloadExpired: payloadExpired,
       processingError: processingError,
       processingAttempts: processingAttempts,
-      validationFailureReason: validationFailureReason
+      validationFailureReason: validationFailureReason,
+      payloadEncrypted: payloadEncrypted,
+      entryHMAC: entryHMAC,
+      payloadKeyVersion: payloadKeyVersion,
+      isTombstone: isTombstone,
+      deletedAt: deletedAt
     )
   }
 
@@ -231,7 +269,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       payloadExpired: payloadExpired,
       processingError: processingError,
       processingAttempts: processingAttempts,
-      validationFailureReason: validationFailureReason
+      validationFailureReason: validationFailureReason,
+      payloadEncrypted: payloadEncrypted,
+      entryHMAC: entryHMAC,
+      payloadKeyVersion: payloadKeyVersion,
+      isTombstone: isTombstone,
+      deletedAt: deletedAt
     )
   }
 
@@ -260,7 +303,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       payloadExpired: true,
       processingError: processingError,
       processingAttempts: processingAttempts,
-      validationFailureReason: validationFailureReason
+      validationFailureReason: validationFailureReason,
+      payloadEncrypted: nil,  // Clear encrypted payload for forward secrecy
+      entryHMAC: entryHMAC,
+      payloadKeyVersion: payloadKeyVersion,
+      isTombstone: isTombstone,
+      deletedAt: deletedAt
     )
   }
 
@@ -291,7 +339,12 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       payloadExpired: payloadExpired,
       processingError: errorMessage,
       processingAttempts: processingAttempts + 1,
-      validationFailureReason: validationReason
+      validationFailureReason: validationReason,
+      payloadEncrypted: payloadEncrypted,
+      entryHMAC: entryHMAC,
+      payloadKeyVersion: payloadKeyVersion,
+      isTombstone: isTombstone,
+      deletedAt: deletedAt
     )
   }
 }
@@ -324,6 +377,11 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     public static let processingError = Column("processingError")
     public static let processingAttempts = Column("processingAttempts")
     public static let validationFailureReason = Column("validationFailureReason")
+    public static let payloadEncrypted = Column("payloadEncrypted")
+    public static let entryHMAC = Column("entryHMAC")
+    public static let payloadKeyVersion = Column("payloadKeyVersion")
+    public static let isTombstone = Column("isTombstone")
+    public static let deletedAt = Column("deletedAt")
   }
 
   /// Custom init to handle both old (plaintext/embedData) and new (payloadJSON) column names
@@ -378,6 +436,13 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     processingError = row["processingError"]
     processingAttempts = row["processingAttempts"] ?? 0
     validationFailureReason = row["validationFailureReason"]
+
+    // Field-level encryption columns (nullable in pre-migration rows)
+    payloadEncrypted = row["payloadEncrypted"]
+    entryHMAC = row["entryHMAC"]
+    payloadKeyVersion = row["payloadKeyVersion"]
+    isTombstone = row["isTombstone"] ?? 0
+    deletedAt = row["deletedAt"]
   }
 
   /// Encode for persistence (only uses new column names)
@@ -405,6 +470,11 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     container["processingError"] = processingError
     container["processingAttempts"] = processingAttempts
     container["validationFailureReason"] = validationFailureReason
+    container["payloadEncrypted"] = payloadEncrypted
+    container["entryHMAC"] = entryHMAC
+    container["payloadKeyVersion"] = payloadKeyVersion
+    container["isTombstone"] = isTombstone
+    container["deletedAt"] = deletedAt
   }
 }
 
