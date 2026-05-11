@@ -5263,6 +5263,35 @@ public actor MLSGRDBManager {
           """)
     }
 
+    // MARK: v31 — field-level encryption columns on MLSMessageModel
+    // Adds per-row AES-GCM ciphertext, HMAC chain entry, payload key version,
+    // and tombstone metadata for soft-deleted messages. Field encryption
+    // requires a clean slate, so any pre-migration message rows are dropped
+    // (conversations are preserved). UX precedent matches
+    // MLSPlaintextHeaderMigrationV1.
+    migrator.registerMigration("v31_message_field_encryption") { db in
+      let existing = try db.columns(in: "MLSMessageModel").map { $0.name }
+      if !existing.contains("payloadEncrypted") {
+        try db.execute(sql: "ALTER TABLE MLSMessageModel ADD COLUMN payloadEncrypted BLOB")
+      }
+      if !existing.contains("entryHMAC") {
+        try db.execute(sql: "ALTER TABLE MLSMessageModel ADD COLUMN entryHMAC BLOB")
+      }
+      if !existing.contains("payloadKeyVersion") {
+        try db.execute(sql: "ALTER TABLE MLSMessageModel ADD COLUMN payloadKeyVersion INTEGER")
+      }
+      if !existing.contains("isTombstone") {
+        try db.execute(
+          sql: "ALTER TABLE MLSMessageModel ADD COLUMN isTombstone INTEGER NOT NULL DEFAULT 0")
+      }
+      if !existing.contains("deletedAt") {
+        try db.execute(sql: "ALTER TABLE MLSMessageModel ADD COLUMN deletedAt INTEGER")
+      }
+      // Field-encryption requires a clean slate: drop any pre-migration
+      // message rows. Conversations are preserved.
+      try db.execute(sql: "DELETE FROM MLSMessageModel")
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }

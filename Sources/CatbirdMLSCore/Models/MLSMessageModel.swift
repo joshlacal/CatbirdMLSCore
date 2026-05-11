@@ -19,7 +19,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   public let currentUserDID: String
   public let conversationID: String
   public let senderID: String
-  /// Legacy column. After MLSMessageFieldMigrationV1, new rows write
+  /// Legacy column. After the v31 field-encryption migration, new rows write
   /// encrypted data into `payloadEncrypted` instead. Preserved only for any
   /// pre-migration rows that survive in dev/test data.
   public let payloadJSON: Data?
@@ -137,6 +137,47 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.payloadKeyVersion = payloadKeyVersion
     self.isTombstone = isTombstone
     self.deletedAt = deletedAt
+  }
+
+  // MARK: - Codable
+
+  /// Custom `init(from:)` so pre-v31 JSON snapshots (which lack the
+  /// field-encryption columns) decode cleanly. Swift's synthesized
+  /// `init(from:)` does not honor stored-property defaults, so
+  /// `isTombstone` is decoded with `decodeIfPresent` and defaults to 0.
+  /// The other newly-added properties are already `Optional<T>` and decode
+  /// as nil when absent.
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.messageID = try container.decode(String.self, forKey: .messageID)
+    self.currentUserDID = try container.decode(String.self, forKey: .currentUserDID)
+    self.conversationID = try container.decode(String.self, forKey: .conversationID)
+    self.senderID = try container.decode(String.self, forKey: .senderID)
+    self.payloadJSON = try container.decodeIfPresent(Data.self, forKey: .payloadJSON)
+    self.wireFormat = try container.decodeIfPresent(Data.self, forKey: .wireFormat)
+    self.contentType = try container.decode(String.self, forKey: .contentType)
+    self.timestamp = try container.decode(Date.self, forKey: .timestamp)
+    self.epoch = try container.decode(Int64.self, forKey: .epoch)
+    self.sequenceNumber = try container.decode(Int64.self, forKey: .sequenceNumber)
+    self.authenticatedData = try container.decodeIfPresent(Data.self, forKey: .authenticatedData)
+    self.signature = try container.decodeIfPresent(Data.self, forKey: .signature)
+    self.isDelivered = try container.decode(Bool.self, forKey: .isDelivered)
+    self.isRead = try container.decode(Bool.self, forKey: .isRead)
+    self.isSent = try container.decode(Bool.self, forKey: .isSent)
+    self.sendAttempts = try container.decode(Int.self, forKey: .sendAttempts)
+    self.error = try container.decodeIfPresent(String.self, forKey: .error)
+    self.processingState = try container.decode(String.self, forKey: .processingState)
+    self.gapBefore = try container.decode(Bool.self, forKey: .gapBefore)
+    self.payloadExpired = try container.decode(Bool.self, forKey: .payloadExpired)
+    self.processingError = try container.decodeIfPresent(String.self, forKey: .processingError)
+    self.processingAttempts = try container.decode(Int.self, forKey: .processingAttempts)
+    self.validationFailureReason = try container.decodeIfPresent(
+      String.self, forKey: .validationFailureReason)
+    self.payloadEncrypted = try container.decodeIfPresent(Data.self, forKey: .payloadEncrypted)
+    self.entryHMAC = try container.decodeIfPresent(Data.self, forKey: .entryHMAC)
+    self.payloadKeyVersion = try container.decodeIfPresent(Int.self, forKey: .payloadKeyVersion)
+    self.isTombstone = try container.decodeIfPresent(Int.self, forKey: .isTombstone) ?? 0
+    self.deletedAt = try container.decodeIfPresent(Int64.self, forKey: .deletedAt)
   }
 
   // MARK: - Update Methods
