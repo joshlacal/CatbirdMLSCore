@@ -125,6 +125,7 @@ public actor MLSCoreContext {
 
     for (userDID, context) in contextsToClose {
       do {
+        context.clearContentRootKey()
         try context.flushAndPrepareClose()
         staticLogger.debug("✅ [0xdead10cc-FIX] Rust context closed for \(userDID.prefix(20), privacy: .private)...")
       } catch {
@@ -456,6 +457,7 @@ public actor MLSCoreContext {
         logger.info("   NSE advanced the ratchet - reloading context from disk")
 
         // Close the stale context
+        existingContext.clearContentRootKey()
         try? existingContext.flushAndPrepareClose()
         contexts.removeValue(forKey: userDid)
         contextVersions.removeValue(forKey: userDid)
@@ -502,6 +504,18 @@ public actor MLSCoreContext {
       logger.error("❌ Failed to configure epoch secret storage: \(error.localizedDescription)")
     }
 
+    // Load (or create) the per-DID content root key from Keychain and install
+    // it on the freshly-built MlsContext. The field-level encryption layer
+    // (MLSFieldEncryption / MLSStorage.savePayloadForMessage) requires this
+    // key to derive per-conversation encryption + HMAC keys.
+    //
+    // Bring-up MUST fail loud if the key cannot be loaded — otherwise every
+    // subsequent encrypt/decrypt call would fail with rootKeyMissing and the
+    // user would see silent message-cache corruption.
+    let contentRootKey = try MLSContentRootKey.loadOrCreate(for: userDid)
+    try newContext.setContentRootKey(key: contentRootKey)
+    logger.info("✅ Installed per-DID content root key on MLS context")
+
     // Track the current disk version at context creation time
     let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
     contexts[userDid] = newContext
@@ -530,6 +544,7 @@ public actor MLSCoreContext {
 
     // Close existing context if any
     if let existingContext = contexts.removeValue(forKey: userDid) {
+      existingContext.clearContentRootKey()
       try? existingContext.flushAndPrepareClose()
       Self.unregisterFromEmergencyClose(for: userDid)
     }
@@ -582,6 +597,7 @@ public actor MLSCoreContext {
   @discardableResult
   public func removeContext(for userDid: String) -> Bool {
     if let context = contexts.removeValue(forKey: userDid) {
+      context.clearContentRootKey()
       try? context.flushAndPrepareClose()
       Self.unregisterFromEmergencyClose(for: userDid)
       contextVersions.removeValue(forKey: userDid)
@@ -605,6 +621,7 @@ public actor MLSCoreContext {
 
     for userDid in usersToRemove {
       if let context = contexts.removeValue(forKey: userDid) {
+        context.clearContentRootKey()
         try? context.flushAndPrepareClose()
         Self.unregisterFromEmergencyClose(for: userDid)
       }
@@ -620,6 +637,7 @@ public actor MLSCoreContext {
   /// Clear all contexts
   public func clearAllContexts() {
     for (userDid, context) in contexts {
+      context.clearContentRootKey()
       try? context.flushAndPrepareClose()
       Self.unregisterFromEmergencyClose(for: userDid)
     }
@@ -655,6 +673,7 @@ public actor MLSCoreContext {
     if !staleContextUsers.isEmpty {
       for staleUser in staleContextUsers {
         if let context = contexts.removeValue(forKey: staleUser) {
+          context.clearContentRootKey()
           try? context.flushAndPrepareClose()
           Self.unregisterFromEmergencyClose(for: staleUser)
         }

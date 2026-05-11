@@ -1,13 +1,32 @@
 import XCTest
 import GRDB
 @testable import CatbirdMLSCore
+@testable import CatbirdMLS
 
 final class MLSReadFrontierTests: XCTestCase {
   private var dbQueue: DatabaseQueue!
+  private var mlsContext: MlsContext!
+  private var tempStorageDir: URL!
 
   override func setUp() async throws {
     try await super.setUp()
     dbQueue = try DatabaseQueue()
+
+    // Spin up an ephemeral MlsContext just for field-level encrypt + HMAC.
+    // Field-level encryption needs an MlsContext; persistence still goes
+    // through the in-memory dbQueue above (which sets up its own schema).
+    tempStorageDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("MLSReadFrontierTests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempStorageDir, withIntermediateDirectories: true)
+    let storagePath = tempStorageDir.appendingPathComponent("ctx.db").path
+    // 32-byte key encoded as hex (matches MLSCoreContext.getEncryptionKey).
+    let encryptionKey = String(repeating: "ab", count: 32)
+    mlsContext = try MlsContext(
+      storagePath: storagePath,
+      encryptionKey: encryptionKey,
+      keychain: InMemoryKeychainAccess()
+    )
+    try mlsContext.setContentRootKey(key: Data(repeating: 0x42, count: 32))
 
     try await dbQueue.write { db in
       try MLSReadFrontierModel.createTable(in: db)
@@ -37,6 +56,12 @@ final class MLSReadFrontierTests: XCTestCase {
         t.column("processingError", .text)
         t.column("processingAttempts", .integer).notNull().defaults(to: 0)
         t.column("validationFailureReason", .text)
+        // Field-level encryption columns (v31 in production migrator).
+        t.column("payloadEncrypted", .blob)
+        t.column("entryHMAC", .blob)
+        t.column("payloadKeyVersion", .integer).notNull().defaults(to: 1)
+        t.column("isTombstone", .integer).notNull().defaults(to: 0)
+        t.column("deletedAt", .integer)
       }
 
       try db.create(table: "MLSOrphanedReactionModel") { t in
@@ -50,6 +75,20 @@ final class MLSReadFrontierTests: XCTestCase {
         t.column("timestamp", .datetime).notNull()
       }
     }
+  }
+
+  override func tearDown() async throws {
+    if let ctx = mlsContext {
+      ctx.clearContentRootKey()
+      try? ctx.flushAndPrepareClose()
+    }
+    mlsContext = nil
+    if let dir = tempStorageDir {
+      try? FileManager.default.removeItem(at: dir)
+    }
+    tempStorageDir = nil
+    dbQueue = nil
+    try await super.tearDown()
   }
 
   func testReadFrontierOnlyAdvancesMonotonically() async throws {
@@ -132,7 +171,8 @@ final class MLSReadFrontierTests: XCTestCase {
     }
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-old",
+      context: mlsContext,
+      messageID:"msg-old",
       conversationID: conversationID,
       payload: .text("old"),
       senderID: senderDID,
@@ -144,7 +184,8 @@ final class MLSReadFrontierTests: XCTestCase {
     )
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-new",
+      context: mlsContext,
+      messageID:"msg-new",
       conversationID: conversationID,
       payload: .text("new"),
       senderID: senderDID,
@@ -186,7 +227,8 @@ final class MLSReadFrontierTests: XCTestCase {
     let senderDID = "did:plc:sender"
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-reaction",
+      context: mlsContext,
+      messageID:"msg-reaction",
       conversationID: conversationID,
       payload: .reaction(messageId: "msg-target", emoji: "👍", action: .add),
       senderID: senderDID,
@@ -214,7 +256,8 @@ final class MLSReadFrontierTests: XCTestCase {
     let currentUserDID = "did:plc:reader"
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-protocol",
+      context: mlsContext,
+      messageID:"msg-protocol",
       conversationID: conversationID,
       payload: .typing(isTyping: false),
       senderID: "unknown",
@@ -366,7 +409,8 @@ final class MLSReadFrontierTests: XCTestCase {
     let senderDID = "did:plc:sender"
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-text",
+      context: mlsContext,
+      messageID:"msg-text",
       conversationID: conversationID,
       payload: .text("visible"),
       senderID: senderDID,
@@ -378,7 +422,8 @@ final class MLSReadFrontierTests: XCTestCase {
     )
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-control",
+      context: mlsContext,
+      messageID:"msg-control",
       conversationID: conversationID,
       payload: .typing(isTyping: true),
       senderID: senderDID,
@@ -390,7 +435,8 @@ final class MLSReadFrontierTests: XCTestCase {
     )
 
     _ = try await storage.savePayloadForMessage(
-      messageID: "msg-error",
+      context: mlsContext,
+      messageID:"msg-error",
       conversationID: conversationID,
       payload: .text("broken"),
       senderID: senderDID,
