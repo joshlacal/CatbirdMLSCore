@@ -238,8 +238,13 @@ public extension MLSConversationManager {
       // No advisory lock needed - SQLite WAL handles concurrent access
       // Cross-process coordination uses MLSNotificationCoordinator.
 
+      // Field-level encryption requires an `MlsContext` to encrypt the payload
+      // and seal the per-row HMAC chain at write time.
+      let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+
       let adopted = try await self.withDatabaseRecovery(currentUserDID: userDid) { db in
         try await self.storage.savePayloadForMessage(
+          context: mlsContext,
           messageID: message.id,
           conversationID: message.convoId,
           payload: payload,
@@ -1850,8 +1855,11 @@ public extension MLSConversationManager {
 
     if let cachedSender, cachedSender == userDid {
       logger.info("[SELF-ECHO] Detected self-sent message \(message.id) from epoch \(message.epoch) (local: \(localEpoch))")
-      
-      if let cachedPayload = try? await storage.fetchPayloadForMessage(
+
+      let mlsContextForCache = try? await MLSCoreContext.shared.getContext(for: userDid)
+      if let mlsContextForCache,
+         let cachedPayload = try? await storage.fetchPayloadForMessage(
+        context: mlsContextForCache,
         message.id,
         currentUserDID: userDid,
         database: database
@@ -2716,8 +2724,11 @@ public extension MLSConversationManager {
     do {
       if let userDid = userDid {
         do {
+          // Field-level cache reads require an `MlsContext` to decrypt.
+          let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
           // Use self.database directly - it's already the correct database for this user
           if let cachedPayload = try await storage.fetchPayloadForMessage(
+            context: mlsContext,
             message.id,
             currentUserDID: userDid,
             database: database
@@ -2763,8 +2774,11 @@ public extension MLSConversationManager {
     } catch MLSError.secretReuseSkipped {
       if let userDid = userDid {
         do {
+          // Field-level cache reads require an `MlsContext` to decrypt.
+          let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
           // Use self.database directly - it's already the correct database for this user
           if let cachedPayload = try await storage.fetchPayloadForMessage(
+            context: mlsContext,
             message.id,
             currentUserDID: userDid,
             database: database
@@ -3241,10 +3255,14 @@ public extension MLSConversationManager {
   ) async throws {
     // Retry logic for robust caching (max 3 attempts)
     // We CANNOT proceed without caching, or we will hit CannotDecryptOwnMessage on echo
+    // Field-level encryption requires an `MlsContext` for both encrypt and HMAC.
+    let mlsContext = try await MLSCoreContext.shared.getContext(for: currentUserDID)
+
     for attempt in 1...3 {
       do {
         _ = try await withDatabaseRecovery(currentUserDID: currentUserDID) { db in
             try await self.storage.savePayloadForMessage(
+              context: mlsContext,
               messageID: message.id,
               conversationID: message.convoId,
               payload: payload,

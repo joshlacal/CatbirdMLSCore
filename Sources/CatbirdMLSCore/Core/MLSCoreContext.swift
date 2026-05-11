@@ -969,6 +969,12 @@ public actor MLSCoreContext {
         database = try await databaseManager.getDatabasePool(for: userDid)
       }
 
+      // Get context (must be done in actor context). Hoisted above the
+      // idempotency checks because the new field-encryption cache reader
+      // needs an `MlsContext` to decrypt `payloadEncrypted`. `getContext` is
+      // idempotent and reuses any cached context.
+      let context = try await getContext(for: userDid)
+
       // ═══════════════════════════════════════════════════════════════════════════
       // CRITICAL: Second Idempotency Check (Defense in Depth)
       // ═══════════════════════════════════════════════════════════════════════════
@@ -978,6 +984,7 @@ public actor MLSCoreContext {
       // ENHANCED (2025-01): Fetch full payload including reaction data
       // ═══════════════════════════════════════════════════════════════════════════
       if let cachedPayload = try await storage.fetchPayloadForMessage(
+        context: context,
         messageID,
         currentUserDID: userDid,
         database: database
@@ -998,9 +1005,6 @@ public actor MLSCoreContext {
           epoch: nil  // Cached - don't have epoch info
         )
       }
-
-      // Get context (must be done in actor context)
-      let context = try await getContext(for: userDid)
 
       // Padding is stripped by catbird-mls decrypt_message internally.
       let actualCiphertext = ciphertext
@@ -1031,6 +1035,7 @@ public actor MLSCoreContext {
           logger.info(
             "🔓 [DECRYPT] Self-sent message detected (sender == user) - checking cache only")
           if let cachedPayload = try await storage.fetchPayloadForMessage(
+            context: context,
             messageID,
             currentUserDID: userDid,
             database: database
@@ -1089,6 +1094,7 @@ public actor MLSCoreContext {
           logger.info("✅ [DECRYPT] Caught CannotDecryptOwnMessage - treating as self-message")
 
           if let cachedPayload = try? await storage.fetchPayloadForMessage(
+            context: context,
             messageID,
             currentUserDID: userDid,
             database: database
@@ -1130,6 +1136,7 @@ public actor MLSCoreContext {
             }
 
             if let cachedPayload = try? await storage.fetchPayloadForMessage(
+              context: context,
               messageID,
               currentUserDID: userDid,
               database: database
@@ -1325,6 +1332,7 @@ public actor MLSCoreContext {
       // Attempt to save payload with FK-error recovery
       do {
         try await MLSStorageHelpers.savePayload(
+          context: context,
           in: database,
           messageID: messageID,
           conversationID: effectiveConversationID,
@@ -1351,6 +1359,7 @@ public actor MLSCoreContext {
 
         // Retry the save
         try await MLSStorageHelpers.savePayload(
+          context: context,
           in: database,
           messageID: messageID,
           conversationID: retryConversationID,
@@ -1889,7 +1898,10 @@ public actor MLSCoreContext {
     // ═══════════════════════════════════════════════════════════════════════════
     do {
       let database = try await databaseManager.getEphemeralDatabasePool(for: userDid)
+      // Field-level cache reads need an `MlsContext` to decrypt payload.
+      let context = try await getContext(for: userDid)
       if let cachedPayload = try await storage.fetchPayloadForMessage(
+        context: context,
         messageID,
         currentUserDID: userDid,
         database: database

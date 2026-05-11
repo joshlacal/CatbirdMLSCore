@@ -710,34 +710,81 @@ extension MLSConversationManager {
       return
     }
 
-    let model = MLSMessageModel(
-      messageID: markerID,
-      currentUserDID: normalizedDID,
-      conversationID: conversationId,
-      senderID: normalizedDID,
-      payloadJSON: payloadData,
-      wireFormat: nil,
-      contentType: "application/json",
-      timestamp: Date(),
-      epoch: Int64(epoch),
-      sequenceNumber: 0,
-      authenticatedData: nil,
-      signature: nil,
-      isDelivered: true,
-      isRead: false,
-      isSent: true,
-      sendAttempts: 0,
-      error: nil,
-      processingState: "delivered",
-      gapBefore: false,
-      payloadExpired: false,
-      processingError: nil,
-      processingAttempts: 0,
-      validationFailureReason: nil
-    )
+    // Field-level encrypt + HMAC the marker so it lives on the same chain as
+    // user messages.
+    let mlsContext: MlsContext
+    do {
+      mlsContext = try await MLSCoreContext.shared.getContext(for: normalizedDID)
+    } catch {
+      logger.warning(
+        "⚠️ Failed to fetch MLS context for history boundary encrypt: \(error.localizedDescription)")
+      return
+    }
+
+    let encryptedWire: Data
+    do {
+      encryptedWire = try MLSFieldEncryption.encrypt(
+        context: mlsContext,
+        conversationID: conversationId,
+        plaintext: payloadData
+      )
+    } catch {
+      logger.warning("⚠️ Failed to encrypt history boundary payload: \(error.localizedDescription)")
+      return
+    }
 
     do {
       try await database.write { db in
+        // Walk the chain tail synchronously so this marker's HMAC is sealed
+        // against the most recent row in the conversation.
+        let prevHMAC: Data? = try MLSMessageModel
+          .filter(MLSMessageModel.Columns.conversationID == conversationId)
+          .filter(MLSMessageModel.Columns.currentUserDID == normalizedDID)
+          .order(
+            MLSMessageModel.Columns.sequenceNumber.desc,
+            MLSMessageModel.Columns.timestamp.desc,
+            MLSMessageModel.Columns.messageID.desc
+          )
+          .fetchOne(db)?
+          .entryHMAC
+
+        let entryHMAC = try MLSFieldEncryption.computeHMAC(
+          context: mlsContext,
+          conversationID: conversationId,
+          previousHMAC: prevHMAC,
+          messageID: markerID,
+          payloadWire: encryptedWire
+        )
+
+        let model = MLSMessageModel(
+          messageID: markerID,
+          currentUserDID: normalizedDID,
+          conversationID: conversationId,
+          senderID: normalizedDID,
+          payloadJSON: nil,
+          wireFormat: nil,
+          contentType: "application/json",
+          timestamp: Date(),
+          epoch: Int64(epoch),
+          sequenceNumber: 0,
+          authenticatedData: nil,
+          signature: nil,
+          isDelivered: true,
+          isRead: false,
+          isSent: true,
+          sendAttempts: 0,
+          error: nil,
+          processingState: "delivered",
+          gapBefore: false,
+          payloadExpired: false,
+          processingError: nil,
+          processingAttempts: 0,
+          validationFailureReason: nil,
+          payloadEncrypted: encryptedWire,
+          entryHMAC: entryHMAC,
+          payloadKeyVersion: 1
+        )
+
         try model.save(db)
       }
       logger.info("📌 Inserted history boundary marker: \(markerID)")

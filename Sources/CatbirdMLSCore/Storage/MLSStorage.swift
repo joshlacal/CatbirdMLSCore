@@ -6,6 +6,7 @@
 //  Designed for Swift 6 concurrency with proper actor isolation.
 //
 
+import CatbirdMLS
 import Foundation
 import GRDB
 import OSLog
@@ -291,6 +292,65 @@ public final class MLSStorage: @unchecked Sendable {
 
   // MARK: - Message Payload Caching
 
+  /// Walk the per-conversation HMAC chain to its tail and return the highest
+  /// sequence-number row's `entryHMAC` (sync helper for use inside a write
+  /// closure). Returns `nil` when there is no prior entry; the Rust HMAC
+  /// implementation will seed with 32 zero bytes in that case.
+  ///
+  /// Tombstones are intentionally NOT filtered: chain walking covers the full
+  /// transcript including soft-deleted rows so the verifier can prove
+  /// continuity.
+  fileprivate static func fetchLastEntryHMACSync(
+    conversationID: String,
+    currentUserDID: String,
+    legacyUserDID: String?,
+    db: Database
+  ) throws -> Data? {
+    if let row = try MLSMessageModel
+      .filter(MLSMessageModel.Columns.conversationID == conversationID)
+      .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+      .order(
+        MLSMessageModel.Columns.sequenceNumber.desc,
+        MLSMessageModel.Columns.timestamp.desc,
+        MLSMessageModel.Columns.messageID.desc
+      )
+      .fetchOne(db)
+    {
+      return row.entryHMAC
+    }
+    if let legacy = legacyUserDID, legacy != currentUserDID,
+       let row = try MLSMessageModel
+        .filter(MLSMessageModel.Columns.conversationID == conversationID)
+        .filter(MLSMessageModel.Columns.currentUserDID == legacy)
+        .order(
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
+        )
+        .fetchOne(db)
+    {
+      return row.entryHMAC
+    }
+    return nil
+  }
+
+  /// Async wrapper over `fetchLastEntryHMACSync` for tests / future callers.
+  public func fetchLastEntryHMAC(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> Data? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
+      try Self.fetchLastEntryHMACSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        legacyUserDID: currentUserDID,
+        db: db
+      )
+    }
+  }
+
   /// Save payload for a message after decryption
   ///
   /// **CRITICAL**: MLS ratchet burns secrets after first decryption - must cache immediately!
@@ -316,6 +376,7 @@ public final class MLSStorage: @unchecked Sendable {
   /// - Throws: MLSStorageError if save fails
   @discardableResult
   public func savePayloadForMessage(
+    context: MlsContext,
     messageID: String,
     conversationID: String,
     payload: MLSMessagePayload,
@@ -334,9 +395,17 @@ public final class MLSStorage: @unchecked Sendable {
       "💾 Caching payload: \(messageID) (epoch: \(epoch), seq: \(sequenceNumber), type: \(String(describing: payload.messageType)), hasEmbed: \(payload.embed != nil), hasError: \(processingError != nil))"
     )
 
-    // Encode full payload
+    // Encode full payload to JSON, then encrypt at the field level so the
+    // ciphertext is what lands in the DB (defense in depth above SQLCipher).
     let payloadData = try payload.encodeToJSON()
     logger.debug("Encoded payload (\(payloadData.count) bytes)")
+
+    let encryptedWire = try MLSFieldEncryption.encrypt(
+      context: context,
+      conversationID: conversationID,
+      plaintext: payloadData
+    )
+    logger.debug("Encrypted payload (\(encryptedWire.count) bytes wire)")
 
     let normalizedUserDID = normalizeDID(currentUserDID)
     let shouldBeUnread = shouldPersistAsUnread(
@@ -367,6 +436,26 @@ public final class MLSStorage: @unchecked Sendable {
 
       let exists = existingMessage != nil
 
+      // Compute the entry HMAC over (prev_hmac || messageID || encryptedWire).
+      // For the first message in a conversation prev_hmac is nil (Rust seeds
+      // with 32 zero bytes). For subsequent messages we walk the highest
+      // sequence-number row. This is a tail-insert chain; UPDATE-path rows
+      // re-seal with the same prev_hmac (best-effort under the current
+      // verifier contract).
+      let prevHMAC = try Self.fetchLastEntryHMACSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        legacyUserDID: currentUserDID,
+        db: db
+      )
+      let entryHMAC = try MLSFieldEncryption.computeHMAC(
+        context: context,
+        conversationID: conversationID,
+        previousHMAC: prevHMAC,
+        messageID: messageID,
+        payloadWire: encryptedWire
+      )
+
       if exists {
         // ═══════════════════════════════════════════════════════════════════════════
         // CRITICAL FIX: Don't overwrite valid data with errors (NSE/Foreground Race)
@@ -380,26 +469,37 @@ public final class MLSStorage: @unchecked Sendable {
         // ═══════════════════════════════════════════════════════════════════════════
         let existingHasValidPayload =
           (existingMessage?.processingError == nil)
-          && (existingMessage?.payloadJSON != nil)
-          && !(existingMessage?.payloadJSON?.isEmpty ?? true)
+          && (
+            (existingMessage?.payloadEncrypted != nil
+              && !(existingMessage?.payloadEncrypted?.isEmpty ?? true))
+            || (existingMessage?.payloadJSON != nil
+              && !(existingMessage?.payloadJSON?.isEmpty ?? true))
+          )
         let newHasError = (processingError != nil)
 
         if existingHasValidPayload && newHasError {
+          let existingSize = (existingMessage?.payloadEncrypted?.count
+            ?? existingMessage?.payloadJSON?.count ?? 0)
           logger.warning(
             "⚠️ [SAVE-SKIP] Message \(messageID) already has valid payload - NOT overwriting with error state"
           )
           logger.warning(
-            "   Existing payload size: \(existingMessage?.payloadJSON?.count ?? 0) bytes, error: \(existingMessage?.processingError ?? "none")"
+            "   Existing payload size: \(existingSize) bytes, error: \(existingMessage?.processingError ?? "none")"
           )
           logger.warning("   Skipped error: \(processingError ?? "unknown")")
           // Still need to adopt orphans even if we skip the update
           // Fall through to orphan adoption logic
         } else {
-          // Update existing message (normal path)
+          // Update existing message (normal path). Clear legacy payloadJSON
+          // and write the new encrypted columns; entryHMAC is recomputed
+          // against the latest tail (best-effort for mid-chain updates).
           try db.execute(
             sql: """
               UPDATE MLSMessageModel
-              SET payloadJSON = ?,
+              SET payloadJSON = NULL,
+                  payloadEncrypted = ?,
+                  entryHMAC = ?,
+                  payloadKeyVersion = 1,
                   senderID = ?,
                   epoch = ?,
                   sequenceNumber = ?,
@@ -413,7 +513,8 @@ public final class MLSStorage: @unchecked Sendable {
               WHERE messageID = ? AND currentUserDID IN (?, ?);
             """,
             arguments: [
-              payloadData,
+              encryptedWire,
+              entryHMAC,
               senderID,
               epoch,
               sequenceNumber,
@@ -427,16 +528,17 @@ public final class MLSStorage: @unchecked Sendable {
               currentUserDID,
             ])
 
-          logger.debug("Updated existing message with payload cache")
+          logger.debug("Updated existing message with encrypted payload + HMAC")
         }
       } else {
-        // Create new message
+        // Create new message — write only the encrypted columns; legacy
+        // payloadJSON stays nil for all new rows.
         let message = MLSMessageModel(
           messageID: messageID,
           currentUserDID: normalizedUserDID,
           conversationID: conversationID,
           senderID: senderID,
-          payloadJSON: payloadData,
+          payloadJSON: nil,
           wireFormat: Data(),
           contentType: "application/json",
           timestamp: timestamp,
@@ -454,11 +556,14 @@ public final class MLSStorage: @unchecked Sendable {
           payloadExpired: false,
           processingError: processingError,
           processingAttempts: processingError != nil ? 1 : 0,
-          validationFailureReason: validationFailureReason
+          validationFailureReason: validationFailureReason,
+          payloadEncrypted: encryptedWire,
+          entryHMAC: entryHMAC,
+          payloadKeyVersion: 1
         )
         try message.insert(db)
 
-        logger.debug("Created new message with payload cache")
+        logger.debug("Created new message with encrypted payload + HMAC")
       }
 
       _ = try MLSStorageHelpers.applyReadFrontierToMessagesSync(
@@ -663,6 +768,7 @@ public final class MLSStorage: @unchecked Sendable {
   /// - Returns: Cached payload if available, nil otherwise
   /// - Throws: MLSStorageError if fetch fails
   public func fetchPayloadForMessage(
+    context: MlsContext,
     _ messageID: String,
     currentUserDID: String,
     database: MLSDatabase
@@ -670,20 +776,51 @@ public final class MLSStorage: @unchecked Sendable {
     let normalizedUserDID = normalizeDID(currentUserDID)
     logger.debug("Fetching payload: \(messageID)")
 
-    let payload = try await database.read { db in
+    // Hide tombstones from user-facing reads; chain walkers use their own
+    // unfiltered queries.
+    let row = try await database.read { db -> MLSMessageModel? in
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
-        .fetchOne(db)?.parsedPayload
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
+        .fetchOne(db)
     }
 
-    if payload != nil {
-      logger.debug("✅ Found cached payload: \(messageID)")
-    } else {
+    guard let model = row else {
       logger.warning("⚠️ No cached payload found: \(messageID)")
+      return nil
     }
 
-    return payload
+    if let encrypted = model.payloadEncrypted, !encrypted.isEmpty {
+      do {
+        let plain = try MLSFieldEncryption.decrypt(
+          context: context,
+          conversationID: model.conversationID,
+          wire: encrypted
+        )
+        let payload = try MLSMessagePayload.decodeFromJSON(plain)
+        logger.debug("✅ Decrypted cached payload: \(messageID)")
+        return payload
+      } catch {
+        logger.error(
+          "❌ Failed to decrypt cached payload for \(messageID): \(error.localizedDescription)")
+        throw error
+      }
+    }
+
+    if let legacy = model.payloadJSON, !legacy.isEmpty {
+      // Pre-migration row — fall back to plaintext JSON.
+      let payload = try? MLSMessagePayload.decodeFromJSON(legacy)
+      if payload != nil {
+        logger.debug("✅ Found legacy plaintext payload: \(messageID)")
+      } else {
+        logger.warning("⚠️ Legacy payloadJSON failed to decode for \(messageID)")
+      }
+      return payload
+    }
+
+    logger.warning("⚠️ Row exists but no payload present: \(messageID)")
+    return nil
   }
 
   /// Fetch cached plaintext for a message (convenience wrapper)
@@ -697,12 +834,17 @@ public final class MLSStorage: @unchecked Sendable {
   /// - Returns: Cached plaintext if available, nil otherwise
   /// - Throws: MLSStorageError if fetch fails
   public func fetchPlaintextForMessage(
+    context: MlsContext,
     _ messageID: String,
     currentUserDID: String,
     database: MLSDatabase
   ) async throws -> String? {
-    try await fetchPayloadForMessage(messageID, currentUserDID: currentUserDID, database: database)?
-      .text
+    try await fetchPayloadForMessage(
+      context: context,
+      messageID,
+      currentUserDID: currentUserDID,
+      database: database
+    )?.text
   }
 
   /// Fetch cached embed data for a message (convenience wrapper)
@@ -716,12 +858,17 @@ public final class MLSStorage: @unchecked Sendable {
   /// - Returns: Cached embed data if available, nil otherwise
   /// - Throws: MLSStorageError if fetch fails
   public func fetchEmbedForMessage(
+    context: MlsContext,
     _ messageID: String,
     currentUserDID: String,
     database: MLSDatabase
   ) async throws -> MLSEmbedData? {
-    try await fetchPayloadForMessage(messageID, currentUserDID: currentUserDID, database: database)?
-      .embed
+    try await fetchPayloadForMessage(
+      context: context,
+      messageID,
+      currentUserDID: currentUserDID,
+      database: database
+    )?.embed
   }
 
   /// Fetch cached sender DID for a message
@@ -780,13 +927,20 @@ public final class MLSStorage: @unchecked Sendable {
   ) async throws -> MLSMessageModel? {
     let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
+      // Hide tombstones from user-facing reads. Accept either the new
+      // encrypted payload column or the legacy plaintext column so this query
+      // works across the migration window.
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.senderID == senderDID)
         .filter(MLSMessageModel.Columns.processingState == MLSMessageProcessingState.pendingSelfSend)
         .filter(MLSMessageModel.Columns.processingError == nil)
-        .filter(MLSMessageModel.Columns.payloadJSON != nil)
+        .filter(
+          MLSMessageModel.Columns.payloadEncrypted != nil
+            || MLSMessageModel.Columns.payloadJSON != nil
+        )
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
         .order(MLSMessageModel.Columns.timestamp.asc)
         .fetchOne(db)
     }
@@ -817,9 +971,11 @@ public final class MLSStorage: @unchecked Sendable {
     )
 
     let messages = try await database.read { db in
+      // Hide tombstones from user-facing reads
       try MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
         .order(
           MLSMessageModel.Columns.sequenceNumber.desc,
           MLSMessageModel.Columns.timestamp.desc,
@@ -860,9 +1016,11 @@ public final class MLSStorage: @unchecked Sendable {
     )
 
     let messages = try await database.read { db in
+      // Hide tombstones from user-facing reads
       var request = MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationId)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
 
       if beforeSeq > 0 && beforeSeq < Int64.max {
         request = request.filter(MLSMessageModel.Columns.sequenceNumber < beforeSeq)
@@ -1493,8 +1651,17 @@ public final class MLSStorage: @unchecked Sendable {
 
   /// Fetch the last successfully decrypted/displayable message cursor for a conversation.
   ///
-  /// This excludes payloads that failed processing, expired payloads, and non-displayable
-  /// control payloads so read receipts only advance on messages the user can actually read.
+  /// This excludes payloads that failed processing, expired payloads, and tombstones
+  /// so read receipts only advance on messages the user can actually read.
+  ///
+  /// NOTE (field encryption migration): The pre-encryption implementation used
+  /// SQL `json_extract` on `payloadJSON` to keep only `text`/`system` rows. SQL
+  /// cannot peek inside `payloadEncrypted`, so the messageType filter has been
+  /// dropped at the SQL layer. The cursor may now occasionally advance over a
+  /// non-displayable control row; the cross-platform chain verifier (Task 27)
+  /// will own message-type filtering by decrypting in-process. Until then,
+  /// callers that need a strict displayable cursor should fall back to the
+  /// in-memory model-level filter.
   public func fetchLastDecryptedMessageCursor(
     conversationID: String,
     currentUserDID: String,
@@ -1502,6 +1669,8 @@ public final class MLSStorage: @unchecked Sendable {
   ) async throws -> (epoch: Int64, seq: Int64, messageID: String)? {
     let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
+      // Hide tombstones from user-facing reads. Match rows that have either
+      // the new encrypted payload or a legacy plaintext payload.
       guard let row = try Row.fetchOne(
         db,
         sql: """
@@ -1511,11 +1680,11 @@ public final class MLSStorage: @unchecked Sendable {
             AND currentUserDID = ?
             AND processingError IS NULL
             AND payloadExpired = 0
-            AND json_valid(CAST(payloadJSON AS TEXT)) = 1
-            AND COALESCE(
-              json_extract(CAST(payloadJSON AS TEXT), '$.messageType'),
-              json_extract(CAST(payloadJSON AS TEXT), '$.type')
-            ) IN ('text', 'system')
+            AND isTombstone = 0
+            AND (
+              (payloadEncrypted IS NOT NULL AND LENGTH(payloadEncrypted) > 0)
+              OR (payloadJSON IS NOT NULL AND LENGTH(payloadJSON) > 0)
+            )
           ORDER BY sequenceNumber DESC, timestamp DESC, messageID DESC
           LIMIT 1
           """,
@@ -1543,11 +1712,13 @@ public final class MLSStorage: @unchecked Sendable {
     let senderCandidates = Array(Set([normalizedUserDID, currentUserDID]))
 
     return try await database.read { db in
+      // Hide tombstones from user-facing reads
       var request = MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.processingError == nil)
         .filter(MLSMessageModel.Columns.payloadExpired == false)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
 
       if senderCandidates.count == 1, let senderCandidate = senderCandidates.first {
         request = request.filter(MLSMessageModel.Columns.senderID == senderCandidate)
@@ -1581,9 +1752,11 @@ public final class MLSStorage: @unchecked Sendable {
   ) async throws -> MLSMessageModel? {
     let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
+      // Hide tombstones from user-facing reads
       if let normalizedMatch = try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
         .fetchOne(db)
       {
         return normalizedMatch
@@ -1594,6 +1767,7 @@ public final class MLSStorage: @unchecked Sendable {
       let legacyMatch = try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
         .fetchOne(db)
 
       if legacyMatch != nil {

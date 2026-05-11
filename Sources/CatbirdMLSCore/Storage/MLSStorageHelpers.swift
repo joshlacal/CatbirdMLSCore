@@ -6,6 +6,7 @@
 //  Provides payload caching, transactions, and complex queries
 //
 
+import CatbirdMLS
 import Foundation
 import GRDB
 import OSLog
@@ -85,6 +86,7 @@ public struct MLSStorageHelpers {
   ///   - epoch: MLS epoch number
   ///   - sequenceNumber: Stable conversation sequence
   public static func savePayload(
+    context: MlsContext,
     in database: MLSDatabase,
     messageID: String,
     conversationID: String,
@@ -99,15 +101,39 @@ public struct MLSStorageHelpers {
     let normalizedUserDID = normalizeDID(currentUserDID)
     let normalizedSenderID = normalizeDID(senderID)
 
-    // Encode payload
+    // Encode + encrypt payload (field-level encryption above SQLCipher)
     let payloadData = try payload.encodeToJSON()
+    let encryptedWire = try MLSFieldEncryption.encrypt(
+      context: context,
+      conversationID: conversationID,
+      plaintext: payloadData
+    )
 
     try await database.write { db in
-      // Update message with payload using GRDB QueryInterface
+      // Walk to the chain tail to seal this entry's HMAC.
+      let prevHMAC = try fetchLastEntryHMACSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        legacyUserDID: currentUserDID,
+        db: db
+      )
+      let entryHMAC = try MLSFieldEncryption.computeHMAC(
+        context: context,
+        conversationID: conversationID,
+        previousHMAC: prevHMAC,
+        messageID: messageID,
+        payloadWire: encryptedWire
+      )
+
+      // Update message with encrypted payload + entry HMAC. Clear the legacy
+      // plaintext column so the row carries only ciphertext.
       try db.execute(
         sql: """
           UPDATE MLSMessageModel
-          SET payloadJSON = ?,
+          SET payloadJSON = NULL,
+              payloadEncrypted = ?,
+              entryHMAC = ?,
+              payloadKeyVersion = 1,
               senderID = ?,
               epoch = ?,
               sequenceNumber = ?,
@@ -115,7 +141,8 @@ public struct MLSStorageHelpers {
           WHERE messageID = ? AND currentUserDID = ?;
           """,
         arguments: [
-          payloadData,
+          encryptedWire,
+          entryHMAC,
           normalizedSenderID,
           epoch,
           sequenceNumber,
@@ -140,7 +167,7 @@ public struct MLSStorageHelpers {
           currentUserDID: normalizedUserDID,
           conversationID: conversationID,
           senderID: normalizedSenderID,
-          payloadJSON: payloadData,
+          payloadJSON: nil,
           wireFormat: nil,
           contentType: "application/json",
           timestamp: timestamp,
@@ -158,14 +185,54 @@ public struct MLSStorageHelpers {
           payloadExpired: false,
           processingError: nil,
           processingAttempts: 0,
-          validationFailureReason: nil
+          validationFailureReason: nil,
+          payloadEncrypted: encryptedWire,
+          entryHMAC: entryHMAC,
+          payloadKeyVersion: 1
         )
 
         try message.insert(db)
       }
 
-      logger.info("💾 Cached payload for message: \(messageID)")
+      logger.info("💾 Cached encrypted payload for message: \(messageID)")
     }
+  }
+
+  /// Sync helper to fetch the last entry HMAC for a conversation (chain tail).
+  /// Tombstones are intentionally NOT filtered: chain walking covers the full
+  /// transcript so the verifier can prove continuity.
+  fileprivate static func fetchLastEntryHMACSync(
+    conversationID: String,
+    currentUserDID: String,
+    legacyUserDID: String?,
+    db: Database
+  ) throws -> Data? {
+    if let row = try MLSMessageModel
+      .filter(MLSMessageModel.Columns.conversationID == conversationID)
+      .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+      .order(
+        MLSMessageModel.Columns.sequenceNumber.desc,
+        MLSMessageModel.Columns.timestamp.desc,
+        MLSMessageModel.Columns.messageID.desc
+      )
+      .fetchOne(db)
+    {
+      return row.entryHMAC
+    }
+    if let legacy = legacyUserDID, legacy != currentUserDID,
+       let row = try MLSMessageModel
+        .filter(MLSMessageModel.Columns.conversationID == conversationID)
+        .filter(MLSMessageModel.Columns.currentUserDID == legacy)
+        .order(
+          MLSMessageModel.Columns.sequenceNumber.desc,
+          MLSMessageModel.Columns.timestamp.desc,
+          MLSMessageModel.Columns.messageID.desc
+        )
+        .fetchOne(db)
+    {
+      return row.entryHMAC
+    }
+    return nil
   }
 
   /// Synchronous version of savePayload for use within a write(for:) closure.
@@ -185,6 +252,7 @@ public struct MLSStorageHelpers {
   ///   - sequenceNumber: Stable conversation sequence
   ///   - timestamp: Message timestamp
   public static func savePayloadSync(
+    context: MlsContext,
     in db: Database,
     messageID: String,
     conversationID: String,
@@ -199,14 +267,35 @@ public struct MLSStorageHelpers {
     let normalizedUserDID = normalizeDID(currentUserDID)
     let normalizedSenderID = normalizeDID(senderID)
 
-    // Encode payload
+    // Encode + encrypt payload (field-level encryption above SQLCipher)
     let payloadData = try payload.encodeToJSON()
+    let encryptedWire = try MLSFieldEncryption.encrypt(
+      context: context,
+      conversationID: conversationID,
+      plaintext: payloadData
+    )
+    let prevHMAC = try fetchLastEntryHMACSync(
+      conversationID: conversationID,
+      currentUserDID: normalizedUserDID,
+      legacyUserDID: currentUserDID,
+      db: db
+    )
+    let entryHMAC = try MLSFieldEncryption.computeHMAC(
+      context: context,
+      conversationID: conversationID,
+      previousHMAC: prevHMAC,
+      messageID: messageID,
+      payloadWire: encryptedWire
+    )
 
-    // Update message with payload using GRDB QueryInterface
+    // Update message with encrypted payload + entry HMAC
     try db.execute(
       sql: """
         UPDATE MLSMessageModel
-        SET payloadJSON = ?,
+        SET payloadJSON = NULL,
+            payloadEncrypted = ?,
+            entryHMAC = ?,
+            payloadKeyVersion = 1,
             senderID = ?,
             epoch = ?,
             sequenceNumber = ?,
@@ -214,7 +303,8 @@ public struct MLSStorageHelpers {
         WHERE messageID = ? AND currentUserDID = ?;
         """,
       arguments: [
-        payloadData,
+        encryptedWire,
+        entryHMAC,
         normalizedSenderID,
         epoch,
         sequenceNumber,
@@ -237,7 +327,7 @@ public struct MLSStorageHelpers {
         currentUserDID: normalizedUserDID,
         conversationID: conversationID,
         senderID: normalizedSenderID,
-        payloadJSON: payloadData,
+        payloadJSON: nil,
         wireFormat: nil,
         contentType: "application/json",
         timestamp: timestamp,
@@ -255,13 +345,16 @@ public struct MLSStorageHelpers {
         payloadExpired: false,
         processingError: nil,
         processingAttempts: 0,
-        validationFailureReason: nil
+        validationFailureReason: nil,
+        payloadEncrypted: encryptedWire,
+        entryHMAC: entryHMAC,
+        payloadKeyVersion: 1
       )
 
       try message.insert(db)
     }
 
-    logger.info("💾 Cached payload for message (sync): \(messageID)")
+    logger.info("💾 Cached encrypted payload for message (sync): \(messageID)")
   }
 
   // MARK: - Reaction Persistence (Sync)

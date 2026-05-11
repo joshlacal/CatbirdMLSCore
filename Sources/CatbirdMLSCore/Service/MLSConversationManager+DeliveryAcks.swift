@@ -298,18 +298,38 @@ extension MLSConversationManager {
     guard let userDid = userDid else { return }
     guard requesterDID != userDid else { return }
 
-    // Check if we hold the plaintext for the requested message.
+    // Check if we hold the plaintext for the requested message. Prefer the
+    // new encrypted column; fall back to legacy plaintext for pre-migration
+    // rows.
     guard let storedMessage = try? await database.read({ db in
       try MLSMessageModel
         .filter(
           MLSMessageModel.Columns.messageID == payload.messageId &&
           MLSMessageModel.Columns.currentUserDID == MLSStorageHelpers.normalizeDID(userDid)
         )
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
         .fetchOne(db)
-    }),
-    let payloadJSONData = storedMessage.payloadJSON,
-    let originalPayload = try? JSONDecoder().decode(MLSMessagePayload.self, from: payloadJSONData)
+    })
     else { return }
+
+    let originalPayload: MLSMessagePayload
+    if let encrypted = storedMessage.payloadEncrypted, !encrypted.isEmpty {
+      // Field-level encryption requires an MlsContext to recover plaintext.
+      guard let mlsContext = try? await MLSCoreContext.shared.getContext(for: userDid),
+            let plain = try? MLSFieldEncryption.decrypt(
+              context: mlsContext,
+              conversationID: storedMessage.conversationID,
+              wire: encrypted
+            ),
+            let payload = try? MLSMessagePayload.decodeFromJSON(plain)
+      else { return }
+      originalPayload = payload
+    } else if let legacyJSON = storedMessage.payloadJSON,
+              let payload = try? MLSMessagePayload.decodeFromJSON(legacyJSON) {
+      originalPayload = payload
+    } else {
+      return
+    }
 
     // Jitter: 500–2000ms random delay before responding.
     // First responder wins; others observe the recovered message arrive on SSE and skip.
