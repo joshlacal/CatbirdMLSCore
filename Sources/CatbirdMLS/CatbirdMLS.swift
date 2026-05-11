@@ -941,6 +941,11 @@ public protocol MlsContextProtocol : AnyObject {
     func checkSuspended() throws 
     
     /**
+     * Drop the in-memory content root key.
+     */
+    func clearContentRootKey() 
+    
+    /**
      * Clear pending commit for a group
      * This should be called when a commit is rejected by the delivery service
      * to clean up pending state in OpenMLS
@@ -964,6 +969,13 @@ public protocol MlsContextProtocol : AnyObject {
      * - Throws: MLSError if deserialization or hashing fails
      */
     func computeKeyPackageHash(keyPackageBytes: Data) throws  -> Data
+    
+    /**
+     * Compute the chained HMAC tag for a message entry:
+     * `HMAC(K_hmac, prev_hmac || message_id || payload_wire)`. Use
+     * `prev_hmac = None` for the first entry in a chain (seeded with zeros).
+     */
+    func computeMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data) throws  -> Data
     
     /**
      * Confirm a previously staged commit: merge it locally, advance the
@@ -1058,6 +1070,12 @@ public protocol MlsContextProtocol : AnyObject {
     func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws  -> DecryptResult
     
     /**
+     * Decrypt a wire-format payload produced by
+     * [`encrypt_message_payload`] for the same `conversation_id`.
+     */
+    func decryptMessagePayload(conversationId: String, wire: Data) throws  -> Data
+    
+    /**
      * Delete an MLS group from storage
      * This should be called when a conversation is deleted or the user leaves
      */
@@ -1123,6 +1141,13 @@ public protocol MlsContextProtocol : AnyObject {
      * Async variant of encrypt_message - offloads crypto work to avoid blocking
      */
     func encryptMessageAsync(groupId: Data, plaintext: Data) async throws  -> EncryptResult
+    
+    /**
+     * Encrypt `plaintext` for `conversation_id` using the installed content
+     * root key. Returns the wire-format bytes: `[version(1) | nonce(12) |
+     * ciphertext+tag]`.
+     */
+    func encryptMessagePayload(conversationId: String, plaintext: Data) throws  -> Data
     
     /**
      * Return the RFC 9420 §8.7 `epoch_authenticator` for the group's current
@@ -1494,6 +1519,12 @@ public protocol MlsContextProtocol : AnyObject {
     func selfUpdate(groupId: Data) throws  -> AddMembersResult
     
     /**
+     * Install the content root key used by all subsequent
+     * encrypt/decrypt/hmac calls. Must be exactly 32 bytes.
+     */
+    func setContentRootKey(key: Data) throws 
+    
+    /**
      * Set the credential validator callback for client-side validation
      *
      * This enables the Swift layer to validate credentials before accepting
@@ -1625,6 +1656,12 @@ public protocol MlsContextProtocol : AnyObject {
      */
     func validateGroupInfoFormat(groupInfoBytes: Data)  -> Bool
     
+    /**
+     * Constant-time verify a previously-computed HMAC tag against the
+     * chain inputs.
+     */
+    func verifyMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data, expected: Data) throws  -> Bool
+    
 }
 
 /**
@@ -1743,6 +1780,15 @@ open func checkSuspended()throws  {try rustCallWithError(FfiConverterTypeMLSErro
 }
     
     /**
+     * Drop the in-memory content root key.
+     */
+open func clearContentRootKey() {try! rustCall() {
+    uniffi_catbird_mls_fn_method_mlscontext_clear_content_root_key(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
+    /**
      * Clear pending commit for a group
      * This should be called when a commit is rejected by the delivery service
      * to clean up pending state in OpenMLS
@@ -1780,6 +1826,22 @@ open func computeKeyPackageHash(keyPackageBytes: Data)throws  -> Data {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
     uniffi_catbird_mls_fn_method_mlscontext_compute_key_package_hash(self.uniffiClonePointer(),
         FfiConverterData.lower(keyPackageBytes),$0
+    )
+})
+}
+    
+    /**
+     * Compute the chained HMAC tag for a message entry:
+     * `HMAC(K_hmac, prev_hmac || message_id || payload_wire)`. Use
+     * `prev_hmac = None` for the first entry in a chain (seeded with zeros).
+     */
+open func computeMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_compute_message_hmac(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterOptionData.lower(prevHmac),
+        FfiConverterString.lower(messageId),
+        FfiConverterData.lower(payloadWire),$0
     )
 })
 }
@@ -1982,6 +2044,19 @@ open func decryptMessageAsync(groupId: Data, ciphertext: Data)async throws  -> D
 }
     
     /**
+     * Decrypt a wire-format payload produced by
+     * [`encrypt_message_payload`] for the same `conversation_id`.
+     */
+open func decryptMessagePayload(conversationId: String, wire: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_decrypt_message_payload(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterData.lower(wire),$0
+    )
+})
+}
+    
+    /**
      * Delete an MLS group from storage
      * This should be called when a conversation is deleted or the user leaves
      */
@@ -2095,6 +2170,20 @@ open func encryptMessageAsync(groupId: Data, plaintext: Data)async throws  -> En
             liftFunc: FfiConverterTypeEncryptResult.lift,
             errorHandler: FfiConverterTypeMLSError.lift
         )
+}
+    
+    /**
+     * Encrypt `plaintext` for `conversation_id` using the installed content
+     * root key. Returns the wire-format bytes: `[version(1) | nonce(12) |
+     * ciphertext+tag]`.
+     */
+open func encryptMessagePayload(conversationId: String, plaintext: Data)throws  -> Data {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_encrypt_message_payload(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterData.lower(plaintext),$0
+    )
+})
 }
     
     /**
@@ -2720,6 +2809,17 @@ open func selfUpdate(groupId: Data)throws  -> AddMembersResult {
 }
     
     /**
+     * Install the content root key used by all subsequent
+     * encrypt/decrypt/hmac calls. Must be exactly 32 bytes.
+     */
+open func setContentRootKey(key: Data)throws  {try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_set_content_root_key(self.uniffiClonePointer(),
+        FfiConverterData.lower(key),$0
+    )
+}
+}
+    
+    /**
      * Set the credential validator callback for client-side validation
      *
      * This enables the Swift layer to validate credentials before accepting
@@ -2928,6 +3028,22 @@ open func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_catbird_mls_fn_method_mlscontext_validate_group_info_format(self.uniffiClonePointer(),
         FfiConverterData.lower(groupInfoBytes),$0
+    )
+})
+}
+    
+    /**
+     * Constant-time verify a previously-computed HMAC tag against the
+     * chain inputs.
+     */
+open func verifyMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data, expected: Data)throws  -> Bool {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMLSError.lift) {
+    uniffi_catbird_mls_fn_method_mlscontext_verify_message_hmac(self.uniffiClonePointer(),
+        FfiConverterString.lower(conversationId),
+        FfiConverterOptionData.lower(prevHmac),
+        FfiConverterString.lower(messageId),
+        FfiConverterData.lower(payloadWire),
+        FfiConverterData.lower(expected),$0
     )
 })
 }
@@ -8921,6 +9037,27 @@ public enum MlsError {
     case OperationNotSupported(message: String)
     
     /**
+     * Invalid argument supplied to an FFI / public API call (e.g. wrong
+     * byte length for a fixed-size key). Mirrors `InvalidInput` but uses a
+     * single positional field for terse call sites in
+     * `mls_context::set_content_root_key` and similar.
+     */
+    case InvalidArgument(message: String)
+    
+    /**
+     * Caller invoked an operation that requires state which has not been
+     * initialised yet (e.g. encrypting a payload before the content root
+     * key has been set).
+     */
+    case InvalidState(message: String)
+    
+    /**
+     * Cryptography (AEAD / HKDF / HMAC) error surfaced from
+     * `crate::field_encryption` across the FFI boundary.
+     */
+    case Cryptography(message: String)
+    
+    /**
      * Fencing mismatch between the epoch the server advanced to and the
      * epoch the locally-staged commit would produce. Returned by
      * `confirm_commit` when `server_epoch` does not equal the plan's
@@ -9093,7 +9230,19 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 38: return .EpochMismatch(
+        case 38: return .InvalidArgument(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 39: return .InvalidState(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 40: return .Cryptography(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 41: return .EpochMismatch(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -9182,8 +9331,14 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(36))
         case .OperationNotSupported(_ /* message is ignored*/):
             writeInt(&buf, Int32(37))
-        case .EpochMismatch(_ /* message is ignored*/):
+        case .InvalidArgument(_ /* message is ignored*/):
             writeInt(&buf, Int32(38))
+        case .InvalidState(_ /* message is ignored*/):
+            writeInt(&buf, Int32(39))
+        case .Cryptography(_ /* message is ignored*/):
+            writeInt(&buf, Int32(40))
+        case .EpochMismatch(_ /* message is ignored*/):
+            writeInt(&buf, Int32(41))
 
         
         }
@@ -13701,6 +13856,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_check_suspended() != 40714) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_clear_content_root_key() != 23113) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_clear_pending_commit() != 5572) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13708,6 +13866,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_compute_key_package_hash() != 45775) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_compute_message_hmac() != 11875) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_confirm_commit() != 55382) {
@@ -13749,6 +13910,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message_async() != 34380) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message_payload() != 61226) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_delete_group() != 8672) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13768,6 +13932,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_encrypt_message_async() != 27448) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_encrypt_message_payload() != 19530) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_epoch_authenticator() != 21054) {
@@ -13890,6 +14057,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_catbird_mls_checksum_method_mlscontext_self_update() != 39880) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_set_content_root_key() != 29672) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_catbird_mls_checksum_method_mlscontext_set_credential_validator() != 10750) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13927,6 +14097,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_mlscontext_validate_group_info_format() != 57471) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_catbird_mls_checksum_method_mlscontext_verify_message_hmac() != 32676) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members() != 30814) {
