@@ -49,6 +49,13 @@ public enum MLSError: LocalizedError {
     /// logs can reason about the exact failure mode instead of a flat
     /// "operation failed".
     case commitProcessingFailed(message: String)
+    /// Server returned 429 Too Many Requests. `retryAfterSeconds` is the
+    /// server's hint (or a sane default when no `Retry-After` header / body
+    /// field is available). Callers should respect this hint and avoid
+    /// retrying earlier. Used by Fix C — external-commit rate-limit handling —
+    /// so the caller can schedule a delayed retry instead of destroying the
+    /// pending FFI state.
+    case rateLimited(retryAfterSeconds: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -109,6 +116,8 @@ public enum MLSError: LocalizedError {
         case .commitProcessingFailed(let message):
             let safeMessage = String(describing: message)
             return "Commit processing failed: \(safeMessage)"
+        case .rateLimited(let retryAfterSeconds):
+            return "Rate limited — retry after \(retryAfterSeconds)s"
         }
     }
 }

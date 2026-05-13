@@ -42,9 +42,9 @@ public actor MLSEventStreamManager {
         public var onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)?
         public var onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
         public var onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)?
-        public var onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
+        public var onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void)?
         public var onReadditionRequested:
-            ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
+            ((BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void)?
         public var onMembershipChanged: ((String, DID, MembershipAction) async -> Void)?
         public var onKickedFromConversation: ((String, DID, String?) async -> Void)?
         public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
@@ -65,8 +65,8 @@ public actor MLSEventStreamManager {
             onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)? = nil,
             onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
             onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)? = nil,
-            onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
-            onReadditionRequested: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
+            onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void)? = nil,
+            onReadditionRequested: ((BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void)? = nil,
             onMembershipChanged: ((String, DID, MembershipAction) async -> Void)? = nil,
             onKickedFromConversation: ((String, DID, String?) async -> Void)? = nil,
             onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)? = nil,
@@ -449,10 +449,12 @@ public actor MLSEventStreamManager {
         case .groupInfoRefreshRequestedEvent(let refreshEvent):
             logger.info("GroupInfo refresh requested: convo=\(refreshEvent.convoId)")
             saveCursor(refreshEvent.cursor, for: convoId)
+            await handler.onGroupInfoRefreshRequested?(refreshEvent)
 
         case .readditionRequestedEvent(let readditionEvent):
             logger.info("Readdition requested: convo=\(readditionEvent.convoId)")
             saveCursor(readditionEvent.cursor, for: convoId)
+            await handler.onReadditionRequested?(readditionEvent)
 
         case .membershipChangeEvent(let membershipEvent):
             logger.info("Membership change: convo=\(membershipEvent.convoId), did=\(membershipEvent.did)")

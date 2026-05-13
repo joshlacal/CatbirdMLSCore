@@ -375,7 +375,30 @@ public extension MLSConversationManager {
           let localTagB64 = localTagData?.base64EncodedString()
           if let localTagB64 = localTagB64, localTagB64 != serverTag.data.base64EncodedString() {
             logger.warning("⚠️ [SYNC] Tree divergence detected for \(convo.conversationId.prefix(16))... - local tag != server tag")
-            try? await markConversationNeedsRejoin(convo.conversationId)
+            // Fix D: do NOT call markConversationNeedsRejoin here — automated
+            // rejoin issues an External Commit, which inflates the epoch on
+            // every divergence detection (every sync forever) and is exactly
+            // the epoch-spiral failure mode called out in
+            // docs/program/status/hygiene-2026-05-11.md and MEMORY.md.
+            //
+            // Instead, re-publish fresh GroupInfo from our local state. If
+            // the divergence is because the server's GroupInfo is stale, this
+            // corrects it. If our local state is the wrong one, the server
+            // will reject (409 / 403) and the existing recovery paths take
+            // over without us forcing an epoch bump.
+            let convoIdForTask = convo.conversationId
+            Task { [weak self] in
+              guard let self = self else { return }
+              do {
+                try await self.mlsClient.publishGroupInfo(
+                  for: userDid, convoId: convoIdForTask, groupId: groupIdData)
+                self.logger.info(
+                  "✅ [SYNC] Re-published GroupInfo after tree divergence for \(convoIdForTask.prefix(16))")
+              } catch {
+                self.logger.warning(
+                  "⚠️ [SYNC] Failed to re-publish GroupInfo after tree divergence for \(convoIdForTask.prefix(16)): \(error.localizedDescription)")
+              }
+            }
           }
         }
 

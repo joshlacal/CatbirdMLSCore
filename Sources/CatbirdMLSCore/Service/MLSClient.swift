@@ -1036,6 +1036,23 @@ public actor MLSClient {
                 try await Task.sleep(for: .milliseconds(jitterMs))
                 continue
               }
+            } else if statusCode == 429 {
+              // Fix C: 429 Too Many Requests. Discarding the FFI pending state
+              // is required (we can't reliably keep it alive across a long
+              // sleep + OpenMLS garbage collection), but the CALLER will
+              // schedule a re-attempt after the server-hinted delay rather
+              // than treating this as a hard failure. Surface the retry hint
+              // via MLSError.rateLimited.
+              logger.warning(
+                "⚠️ [MLSClient.joinByExternalCommit] 429 RATE LIMITED on attempt \(attempt) — surfacing retry hint to caller"
+              )
+              await discardPendingIfNeeded()
+              let retryMs = MLSRecoveryManager.extractRetryAfterMs(apiError) ?? 5_000
+              let retrySeconds = max(1, Int((Double(retryMs) / 1000.0).rounded(.up)))
+              logger.warning(
+                "   Retry-after hint: \(retrySeconds)s (raw \(retryMs)ms; default applied if no hint)"
+              )
+              throw MLSError.rateLimited(retryAfterSeconds: retrySeconds)
             } else if statusCode == 403 {
               logger.warning(
                 "⚠️ [MLSClient.joinByExternalCommit] External Commit rejected (HTTP 403) - requesting GroupInfo refresh"
@@ -1270,8 +1287,13 @@ public actor MLSClient {
   /// Publish GroupInfo to the server to allow external joins
   /// Should be called after any operation that advances the epoch (add, remove, update, commit)
   /// CRITICAL: This function now throws errors - callers must handle failures
+  /// - Parameter allowRetry: When `true` (default), the publish will schedule a
+  ///   single-shot retry ~2s later if the server responds 409 (Fix A: server
+  ///   has observed a newer epoch due to a remote external-commit merge —
+  ///   waiting briefly lets our local FFI catch up, then re-exporting yields
+  ///   fresh GroupInfo). Recursive retries pass `false` so the retry caps at 1.
   /// - Throws: MLSError if export fails, validation fails, or upload fails
-  public func publishGroupInfo(for userDID: String, convoId: String, groupId: Data, knownServerEpoch: UInt64? = nil) async throws {
+  public func publishGroupInfo(for userDID: String, convoId: String, groupId: Data, knownServerEpoch: UInt64? = nil, allowRetry: Bool = true) async throws {
     logger.info("📤 [MLSClient.publishGroupInfo] Starting for \(convoId)")
 
     let normalizedDID = normalizeUserDID(userDID)
@@ -1331,8 +1353,35 @@ public actor MLSClient {
     }
 
     // 4. Upload to server (MLSAPIClient now has retry logic + verification)
-    try await apiClient.updateGroupInfo(
-      convoId: convoId, groupInfo: groupInfoBytes, epoch: Int(epoch))
+    do {
+      try await apiClient.updateGroupInfo(
+        convoId: convoId, groupInfo: groupInfoBytes, epoch: Int(epoch))
+    } catch let apiError as MLSAPIError {
+      // Fix A: 409 means the server already has a newer epoch (typically
+      // because a remote external-commit merge landed). Schedule one
+      // background retry after 2s so the local FFI has time to merge that
+      // commit; the re-export will produce GroupInfo at the new epoch.
+      if case .httpError(let statusCode, _) = apiError, statusCode == 409, allowRetry {
+        logger.warning(
+          "⚠️ [MLSClient.publishGroupInfo] 409 STALE EPOCH for \(convoId.prefix(16)) - scheduling single-shot retry in 2s (local epoch was \(epoch), server has newer)"
+        )
+        Task { [weak self] in
+          try? await Task.sleep(nanoseconds: 2_000_000_000)
+          guard let self = self else { return }
+          do {
+            try await self.publishGroupInfo(
+              for: userDID, convoId: convoId, groupId: groupId,
+              knownServerEpoch: nil, allowRetry: false)
+            self.logger.info(
+              "✅ [MLSClient.publishGroupInfo] 409 retry succeeded for \(convoId.prefix(16))")
+          } catch {
+            self.logger.warning(
+              "⚠️ [MLSClient.publishGroupInfo] 409 retry FAILED for \(convoId.prefix(16)): \(error.localizedDescription) — relying on next refresh interval / WS event")
+          }
+        }
+      }
+      throw apiError
+    }
 
     logger.info(
       "✅ [MLSClient.publishGroupInfo] Success - Published epoch \(epoch), size: \(groupInfoBytes.count) bytes"

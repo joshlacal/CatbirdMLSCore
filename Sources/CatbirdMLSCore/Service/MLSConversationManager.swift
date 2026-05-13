@@ -265,6 +265,14 @@ public final class MLSConversationManager {
   /// Flag indicating the manager is preparing for shutdown/storage reset
   public var isShuttingDown = false
 
+  /// Fix C: Per-conversation External Commit 429 retry counter. Capped at
+  /// `maxExternalCommit429Retries` per conversation per process lifetime so a
+  /// persistently-rate-limited convo doesn't spin retries forever. In-memory
+  /// only — cleared by app restart, which is fine because the server's rate
+  /// limit also has a finite reset window.
+  internal let externalCommit429RetryCounts = Mutex<[String: Int]>([:])
+  internal static let maxExternalCommit429Retries = 2
+
   // Note: isSuspending is defined in MLSConversationManager+Lifecycle.swift as a static-backed
   // computed property for 0xdead10cc prevention (extensions can't add stored instance properties)
 
@@ -348,11 +356,15 @@ public final class MLSConversationManager {
   /// Spec §10: KEY_PACKAGE_CHECK_INTERVAL_SEC = 300
   public let keyPackageRefreshInterval: TimeInterval = 300  // 5 minutes
 
-  /// GroupInfo refresh interval (in seconds) - 6 hours proactive refresh
-  /// Reduced from 12 hours to ensure GroupInfo doesn't expire before next refresh.
-  /// GroupInfo TTL is 24 hours, so 6 hour refresh provides 4x safety margin.
-  /// This is critical for External Commit - stale GroupInfo blocks new device joins.
-  public let groupInfoRefreshInterval: TimeInterval = 21600  // 6 hours
+  /// GroupInfo refresh interval (in seconds) - 1 hour proactive refresh
+  /// Reduced from 6 hours so a stale-post-remote-merge blob has at most ~1 hour
+  /// of bad state before this proactive refresh corrects it. WebSocket
+  /// `groupInfoRefreshRequested` events and the 409-on-update fast-retry path
+  /// are the primary recovery channels; this interval is the final safety net
+  /// for cases where both of those fail (e.g. WS not connected, all retries
+  /// exhausted). GroupInfo TTL is 24 hours so this still provides 24x safety
+  /// margin for the upload-cycle.
+  public let groupInfoRefreshInterval: TimeInterval = 3600  // 1 hour
 
   /// Maximum tolerable epoch divergence between local state and server messages.
   /// Beyond this threshold, the group is considered irrecoverably diverged and

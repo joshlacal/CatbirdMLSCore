@@ -2492,8 +2492,58 @@ public extension MLSConversationManager {
       return []
     }
 
+    // Fix B: Filter pre-reset messages (epoch < joinEpoch) BEFORE feeding into
+    // the processor. After a group reset the server may still hand us
+    // ciphertexts encrypted under the destroyed pre-reset keys; attempting to
+    // decrypt them fails with TooDistantInThePast and pollutes the cache with
+    // error placeholders. We require BOTH:
+    //   - `joinEpoch > 0` — a freshly-bootstrapped group at epoch 0 has no
+    //     "before" to filter, so this guards against filtering legitimate
+    //     epoch-0 messages from a brand-new group.
+    //   - `message.epoch < joinEpoch` — strictly older than the epoch at which
+    //     this device became a member of the current cryptographic history.
+    // Note: MessageView from the server does NOT carry a resetGeneration field
+    // (only the conversation row does), so we fall back to the epoch-only
+    // check per the conservative threshold described in the fix spec.
+    let filteredMessages: [BlueCatbirdMlsChatDefs.MessageView]
+    do {
+      if let convo = try await storage.fetchConversation(
+        conversationID: conversationID, currentUserDID: userDid, database: database),
+         convo.joinEpoch > 0
+      {
+        let joinEpoch = convo.joinEpoch
+        var kept: [BlueCatbirdMlsChatDefs.MessageView] = []
+        kept.reserveCapacity(messages.count)
+        var droppedIDs: [String] = []
+        for message in messages {
+          if Int64(message.epoch) < joinEpoch {
+            droppedIDs.append(message.id)
+          } else {
+            kept.append(message)
+          }
+        }
+        if !droppedIDs.isEmpty {
+          let preview = droppedIDs.prefix(5).joined(separator: ", ")
+          logger.warning(
+            "🧹 [SEQ-ORDER] Skipping \(droppedIDs.count) pre-reset message(s) in \(conversationID.prefix(16)) (joinEpoch=\(joinEpoch)). IDs (first 5): \(preview)"
+          )
+        }
+        filteredMessages = kept
+      } else {
+        filteredMessages = messages
+      }
+    } catch {
+      logger.warning(
+        "⚠️ [SEQ-ORDER] joinEpoch lookup failed for \(conversationID.prefix(16)): \(error.localizedDescription) — processing all messages")
+      filteredMessages = messages
+    }
+
+    guard !filteredMessages.isEmpty else {
+      return []
+    }
+
     var messagesByEpoch: [Int: [BlueCatbirdMlsChatDefs.MessageView]] = [:]
-    for message in messages {
+    for message in filteredMessages {
       messagesByEpoch[message.epoch, default: []].append(message)
     }
 
@@ -5685,6 +5735,50 @@ public extension MLSConversationManager {
       )
 
       let errorMessage = error.localizedDescription.lowercased()
+
+      // Fix C: Honor 429 retry-after. The MLSClient surfaces 429s as
+      // `MLSError.rateLimited(retryAfterSeconds:)` rather than failing the
+      // join outright. We schedule a delayed re-attempt (up to
+      // `maxExternalCommit429Retries` per convo per session) and return
+      // success-of-scheduling without recording a recovery failure — the
+      // server is asking us to wait, not telling us we cannot join.
+      if let rateLimitErr = error as? MLSError,
+        case .rateLimited(let retryAfterSeconds) = rateLimitErr
+      {
+        let currentCount = self.externalCommit429RetryCounts.withLock { counts -> Int in
+          let next = (counts[convoId] ?? 0) + 1
+          counts[convoId] = next
+          return next
+        }
+        if currentCount > Self.maxExternalCommit429Retries {
+          logger.warning(
+            "🛑 [External Commit Fallback] 429 retries exhausted for \(convoId.prefix(16)) (\(currentCount)/\(Self.maxExternalCommit429Retries)) — surfacing rate-limit error to caller"
+          )
+          throw rateLimitErr
+        }
+        logger.warning(
+          "⏳ [External Commit Fallback] 429 received — scheduling retry #\(currentCount)/\(Self.maxExternalCommit429Retries) for \(convoId.prefix(16)) in \(retryAfterSeconds + 1)s"
+        )
+        Task { [weak self] in
+          let sleepNs = UInt64(max(1, retryAfterSeconds + 1)) * 1_000_000_000
+          try? await Task.sleep(nanoseconds: sleepNs)
+          guard let self = self else { return }
+          do {
+            _ = try await self.attemptExternalCommitFallback(
+              convoId: convoId, userDid: userDid, reason: "429 retry \(currentCount)")
+            self.logger.info(
+              "✅ [External Commit Fallback] 429-delayed retry #\(currentCount) succeeded for \(convoId.prefix(16))")
+          } catch {
+            self.logger.warning(
+              "⚠️ [External Commit Fallback] 429-delayed retry #\(currentCount) failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+            )
+          }
+        }
+        // Propagate up so the immediate caller knows this attempt yielded no
+        // group state yet; the scheduled retry is responsible for the eventual
+        // success path.
+        throw rateLimitErr
+      }
 
       if let apiError = error as? MLSAPIError,
         case .httpError(let statusCode, _) = apiError,

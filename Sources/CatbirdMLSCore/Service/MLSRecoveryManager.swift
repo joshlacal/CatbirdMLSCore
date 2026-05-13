@@ -138,6 +138,55 @@ public actor MLSRecoveryManager {
   /// which would be misclassified as a failed attempt by the caller.
   private var lastGlobalRejoinAttemptAt: Date?
 
+  /// Extract a `retryAfter` hint (in milliseconds) from an MLSAPIError or its
+  /// localized description. The Petrel-generated client does not currently
+  /// expose response headers, so we look in two places:
+  ///   1. `MLSAPIError.rateLimited(retryAfter:)` — when the upstream decoder
+  ///      stamped one (rare today, but future-proofed).
+  ///   2. The error's `localizedDescription` for `retryAfterSeconds=N`,
+  ///      `retryAfterSeconds: N`, or `Retry-After: N` patterns — covers cases
+  ///      where Petrel surfaces the JSON body verbatim in an
+  ///      `MLSAPIError.httpError(_, message:)`.
+  /// Returns `nil` if no hint was found.
+  internal static func extractRetryAfterMs(_ error: Error) -> Int? {
+    if let apiError = error as? MLSAPIError,
+       case .rateLimited(let retryAfter) = apiError,
+       let seconds = retryAfter
+    {
+      return Int(seconds * 1000)
+    }
+    let description = (error as? LocalizedError)?.errorDescription
+      ?? (error as NSError).localizedDescription
+    if let seconds = extractRetryAfterNumber(in: description, keys: ["retryAfterSeconds", "Retry-After"]) {
+      return seconds * 1000
+    }
+    return nil
+  }
+
+  /// Find the first numeric value following any of `keys` separated by an
+  /// optional run of whitespace and a `:` or `=`. Used by
+  /// `extractRetryAfterMs` to read retry hints out of plain-text error
+  /// descriptions where regex literals would be overkill.
+  private static func extractRetryAfterNumber(in haystack: String, keys: [String]) -> Int? {
+    let lowered = haystack.lowercased()
+    for key in keys {
+      let keyLower = key.lowercased()
+      guard let keyRange = lowered.range(of: keyLower) else { continue }
+      var idx = keyRange.upperBound
+      while idx < lowered.endIndex, lowered[idx].isWhitespace { idx = lowered.index(after: idx) }
+      guard idx < lowered.endIndex, lowered[idx] == ":" || lowered[idx] == "=" else { continue }
+      idx = lowered.index(after: idx)
+      while idx < lowered.endIndex, lowered[idx].isWhitespace { idx = lowered.index(after: idx) }
+      var digits = ""
+      while idx < lowered.endIndex, lowered[idx].isASCII, lowered[idx].isNumber {
+        digits.append(lowered[idx])
+        idx = lowered.index(after: idx)
+      }
+      if let value = Int(digits) { return value }
+    }
+    return nil
+  }
+
   /// Calculate exponential backoff cooldown based on attempt count
   /// - Parameter attempts: Number of failed attempts so far
   /// - Returns: Cooldown duration in seconds

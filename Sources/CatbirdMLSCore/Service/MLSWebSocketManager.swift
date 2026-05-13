@@ -66,9 +66,9 @@ public actor MLSWebSocketManager {
     public var onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
     public var onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)?
     public var onGroupInfoRefreshRequested:
-      ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
+      ((BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void)?
     public var onReadditionRequested:
-      ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
+      ((BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void)?
     public var onMembershipChanged: ((String, DID, MembershipAction) async -> Void)?
     public var onKickedFromConversation: ((String, DID, String?) async -> Void)?
     public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
@@ -93,10 +93,10 @@ public actor MLSWebSocketManager {
       onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
       onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)? = nil,
       onGroupInfoRefreshRequested: (
-        (BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void
+        (BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void
       )? = nil,
       onReadditionRequested: (
-        (BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void
+        (BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void
       )? = nil,
       onMembershipChanged: ((String, DID, MembershipAction) async -> Void)? = nil,
       onKickedFromConversation: ((String, DID, String?) async -> Void)? = nil,
@@ -444,10 +444,12 @@ public actor MLSWebSocketManager {
     case .groupInfoRefreshRequestedEvent(let refreshEvent):
       logger.info("🔌 WS: GROUP INFO REFRESH REQUESTED - convo: \(refreshEvent.convoId.prefix(16))")
       saveCursor(refreshEvent.cursor, for: convoId)
+      await handler.onGroupInfoRefreshRequested?(refreshEvent)
 
     case .readditionRequestedEvent(let readditionEvent):
       logger.info("🔌 WS: READDITION REQUESTED - convo: \(readditionEvent.convoId.prefix(16))")
       saveCursor(readditionEvent.cursor, for: convoId)
+      await handler.onReadditionRequested?(readditionEvent)
 
     case .membershipChangeEvent(let membershipEvent):
       logger.info("🔌 WS: MEMBERSHIP CHANGE - convo: \(membershipEvent.convoId.prefix(16)), did: \(membershipEvent.did)")
