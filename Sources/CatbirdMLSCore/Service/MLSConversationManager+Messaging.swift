@@ -3002,18 +3002,33 @@ public extension MLSConversationManager {
         if messages.count < 100 || pages >= pageLimit { break }
       }
 
-      // After catchup completes, flush any remaining buffered messages for this conversation
-      logger.debug("[SEQ-ORDER] Flushing buffered messages after catchup for \(convo.conversationId)")
+      // After catchup completes, drain any remaining buffered messages for this conversation
+      //
+      // Phase D-Swift D-S.2: use the atomic drain (read + delete in one
+      // transaction) rather than flushBufferedMessages (read only). The
+      // previous pattern was: fetch all pending → iterate → call
+      // processServerMessage → that internally calls recordMessageProcessed →
+      // recordMessageProcessed calls storage.removePendingMessage. If
+      // processServerMessage returned early (e.g. .bufferForFutureEpoch,
+      // .nonApplication, swallowed errors via `try?`), the pending row stayed
+      // in the table, the next catch-up pass re-fetched the message from
+      // the server, and the SEQ-ORDER tight loop ran.
+      //
+      // drainBufferedMessages removes the rows up-front. If a particular
+      // message fails to process, the failure is logged but the row is gone
+      // — a successor message must arrive (with a successor seq) for the
+      // catch-up to re-attempt, which is the correct behavior.
+      logger.debug("[SEQ-ORDER] Draining buffered messages after catchup for \(convo.conversationId)")
       do {
         // Use self.database directly - it's already the correct database for this user
-        let buffered = try await messageOrderingCoordinator.flushBufferedMessages(
+        let buffered = try await messageOrderingCoordinator.drainBufferedMessages(
           conversationID: convo.conversationId,
           currentUserDID: userDid,
           database: database
         )
 
         if !buffered.isEmpty {
-          logger.info("[SEQ-ORDER] Processing \(buffered.count) buffered messages after catchup")
+          logger.info("[SEQ-ORDER] Processing \(buffered.count) drained messages after catchup")
           var flushedApplicationCount = 0
           for pending in buffered {
             if let msg = deserializeMessageView(pending.messageViewJSON) {
@@ -3031,7 +3046,7 @@ public extension MLSConversationManager {
           }
         }
       } catch {
-        logger.error("[SEQ-ORDER] Failed to flush buffered messages: \(error.localizedDescription)")
+        logger.error("[SEQ-ORDER] Failed to drain buffered messages: \(error.localizedDescription)")
       }
     } catch {
       logger.error("❌ Catch-up failed for \(convo.conversationId): \(error.localizedDescription)")
@@ -4006,6 +4021,38 @@ public extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
+    // Phase D-Swift D-S.2: in-process commit dedup. Check the tracker BEFORE
+    // invoking the FFI; if this commit hash is already known to have merged
+    // during the current process lifetime, short-circuit. We DO NOT mark the
+    // hash on entry — only after the FFI returns success — so a transient
+    // FFI error doesn't poison the tracker against a legitimate retry.
+    //
+    // This complements the existing `commit.epoch <= currentEpoch` skip in
+    // `fetchAndProcessMissingCommits`: that skip handles restart-time
+    // idempotency (OpenMLS persists epoch across launches), but can't catch
+    // in-process double-merges (same epoch reached via two commits, or
+    // redelivery before the post-merge epoch read propagates to the loop
+    // variable). The May 2026 "FFI now at 1 after processing commit for
+    // epoch=2" log signature matches that second case — by the time we
+    // re-read the epoch, the FFI is reporting the already-merged state,
+    // not the freshly-merged state we expected.
+    //
+    // Eviction is opportunistic on every call (cheap; map is bounded by
+    // memory). TTL of 10 minutes is generous because:
+    //   - Commit hashes are 256 bits; collisions are not a concern.
+    //   - Memory cost is ~64 bytes per entry; even a chatty group at 1
+    //     commit/sec only consumes 36KB before TTL evicts.
+    //   - Spurious re-fetches by the EPOCH-RECOVERY loop typically complete
+    //     within seconds of the original merge, well under TTL.
+    mergedCommitTracker.evictOlderThan(ttl: 600)
+    let commitHash = MergedCommitTracker.commitHash(for: commitData)
+    if mergedCommitTracker.contains(commitHash: commitHash) {
+      logger.info(
+        "⏭️ [MERGED-DEDUP] Commit \(commitHash.prefix(16)) for group \(groupId.prefix(16)) already merged this session — short-circuit"
+      )
+      return
+    }
+
     // Get epoch before processing to detect advancement
     let epochBefore =
       (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
@@ -4125,6 +4172,13 @@ public extension MLSConversationManager {
     }
     let mergedEpoch = result.newEpoch
     logger.debug("Processed commit: epoch \(epochBefore) -> \(mergedEpoch)")
+
+    // Phase D-Swift D-S.2: FFI processCommit succeeded. Record the commit
+    // hash so subsequent re-feeds of the same ciphertext (re-fetch by
+    // EPOCH-RECOVERY, SSE redelivery, sequencer hiccup) short-circuit at
+    // the entry check above rather than re-traversing the OpenMLS state
+    // machine.
+    _ = mergedCommitTracker.markMergedIfNew(commitHash: commitHash)
 
     // Detect own-commit no-op: epoch didn't advance from where we started
     if mergedEpoch == epochBefore {
