@@ -4021,6 +4021,34 @@ public extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
+    // Phase D-Swift D-S.3: own-commit short-circuit. If the server has fanned
+    // back a commit we produced locally (External Commit, addMembers, etc.),
+    // skip the FFI call entirely. Our local OpenMLS state already reflects
+    // this commit (it was applied at send time), and re-feeding it would
+    // either:
+    //   - return a no-op (idempotent FFI) with a confusing trace, OR
+    //   - emit `CannotDecryptOwnMessage` from OpenMLS (forward secrecy:
+    //     senders can't decrypt their own ciphertext after the ratchet
+    //     advances).
+    //
+    // The `ownCommits` map is populated by the four producer sites:
+    //   - createConvo (MLSConversationManager.swift:760)
+    //   - addMembers / removeMembers (Members.swift:235)
+    //   - group setup (Groups.swift:418)
+    //   - External Commit / rejoin via `MLSClient.joinByExternalCommit`,
+    //     wired in D-S.3 via OwnCommitObserver (was the missing producer).
+    //
+    // Bug A from D-S.0 orientation: `isOwnCommit` existed but had ZERO
+    // callers — the dedup data structure was recording but never being
+    // consulted. After D-S.3 this check IS the consumer.
+    if isOwnCommit(commitData) {
+      let commitHash = MergedCommitTracker.commitHash(for: commitData)
+      logger.info(
+        "⏭️ [OWN-COMMIT-DEDUP] Commit \(commitHash.prefix(16)) for group \(groupId.prefix(16)) was produced locally — short-circuit"
+      )
+      return
+    }
+
     // Phase D-Swift D-S.2: in-process commit dedup. Check the tracker BEFORE
     // invoking the FFI; if this commit hash is already known to have merged
     // during the current process lifetime, short-circuit. We DO NOT mark the
