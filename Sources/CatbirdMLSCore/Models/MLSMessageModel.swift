@@ -56,23 +56,55 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
 
   // MARK: - Computed Properties
 
-  /// Parse full payload from JSON
+  /// Parse full payload from JSON.
+  ///
+  /// **Legacy column only.** Returns `nil` for rows written after the v31
+  /// field-encryption migration — those rows only have `payloadEncrypted`
+  /// populated and require an `MlsContext` to decrypt. Use
+  /// `decryptedPayload(context:)` at every call site that consumes message
+  /// content; this property is retained for the migration-window read
+  /// fallback and for code paths that already have a decoded payload in
+  /// hand.
   public var parsedPayload: MLSMessagePayload? {
     guard let json = payloadJSON else { return nil }
     return try? MLSMessagePayload.decodeFromJSON(json)
   }
 
-  /// Get plaintext from payload (convenience)
+  /// Decrypt the row's payload using the per-DID `MlsContext`'s content
+  /// root key, falling back to the legacy `payloadJSON` column for rows
+  /// written before the v31 field-encryption migration. Pure in-memory
+  /// work — no DB roundtrip — so safe to call inside tight loops over
+  /// fetched models.
+  public func decryptedPayload(context: MlsContext) -> MLSMessagePayload? {
+    if let encrypted = payloadEncrypted {
+      guard
+        let plain = try? MLSFieldEncryption.decrypt(
+          context: context,
+          conversationID: conversationID,
+          wire: encrypted
+        )
+      else { return nil }
+      return try? MLSMessagePayload.decodeFromJSON(plain)
+    }
+    return parsedPayload
+  }
+
+  /// Convenience: plaintext text from the legacy payload column only.
+  /// **For new field-encrypted rows, prefer
+  /// `decryptedPayload(context:)?.text`** — this property silently returns
+  /// `nil` when only `payloadEncrypted` is populated.
   public var plaintext: String? {
     parsedPayload?.text
   }
 
-  /// Get embed from payload (convenience)
+  /// Convenience: embed from the legacy payload column only. Same caveat
+  /// as `plaintext`.
   public var parsedEmbed: MLSEmbedData? {
     parsedPayload?.embed
   }
 
-  /// Message type from payload
+  /// Convenience: message type from the legacy payload column only. Same
+  /// caveat as `plaintext`.
   public var messageType: MLSMessageType? {
     parsedPayload?.messageType
   }
