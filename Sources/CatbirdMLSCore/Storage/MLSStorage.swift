@@ -2819,6 +2819,47 @@ public final class MLSStorage: @unchecked Sendable {
     }
   }
 
+  /// Atomic drain: fetch all pending messages for the conversation/user pair
+  /// AND delete them from the pending table within a single write transaction.
+  ///
+  /// This is Phase D-Swift's idempotency fix for the catch-up buffer (Task
+  /// D-S.2). The previous flow (`flushBufferedMessages` -> caller iterates ->
+  /// caller calls `processServerMessage` which eventually calls
+  /// `recordMessageProcessed` which calls `removePendingMessage`) leaves rows
+  /// in the pending table when intermediate steps fail or return early, so
+  /// the next sync pass re-fetches the same messages and re-buffers them,
+  /// creating a tight loop.
+  ///
+  /// `drainPendingMessages` returns the same list `getAllPendingMessages`
+  /// would, but is guaranteed to leave the pending table empty for that
+  /// (conversation, user) pair on return. Caller failures during processing
+  /// of returned messages now produce typed errors rather than re-population
+  /// of the buffer.
+  public func drainPendingMessages(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> [MLSPendingMessageModel] {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+
+    return try await database.write { db in
+      let pending = try MLSPendingMessageModel
+        .filter(MLSPendingMessageModel.Columns.conversationID == conversationID)
+        .filter(MLSPendingMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .order(MLSPendingMessageModel.Columns.sequenceNumber)
+        .fetchAll(db)
+
+      if !pending.isEmpty {
+        _ = try MLSPendingMessageModel
+          .filter(MLSPendingMessageModel.Columns.conversationID == conversationID)
+          .filter(MLSPendingMessageModel.Columns.currentUserDID == normalizedUserDID)
+          .deleteAll(db)
+      }
+
+      return pending
+    }
+  }
+
   /// Clean up old pending messages (older than timeout)
   /// Should be called periodically to prevent unbounded growth
   public func cleanupOldPendingMessages(
