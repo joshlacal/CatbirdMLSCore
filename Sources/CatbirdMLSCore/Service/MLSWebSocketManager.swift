@@ -462,6 +462,10 @@ public actor MLSWebSocketManager {
       logger.warning("🔌 WS: CIRCUIT BREAKER TRIPPED - convo: \(cbEvent.convoId.prefix(16)), resetCount: \(cbEvent.resetCount)")
       saveCursor(cbEvent.cursor, for: convoId)
 
+    @unknown default:
+      // Forward-compat: future subscribeEvents union additions (e.g. welcomeReissueRequestedEvent
+      // landing with Phase A) are silently dropped here until a named case is added.
+      break
     }
   }
 
