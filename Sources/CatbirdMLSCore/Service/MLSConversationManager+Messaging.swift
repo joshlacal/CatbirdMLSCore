@@ -2284,6 +2284,28 @@ public extension MLSConversationManager {
       }
     } catch let error as MLSError {
       if case .ignoredOldEpochMessage = error {
+        // Phase D-Swift D-S.4: the "ignored old epoch" path was the exact
+        // May 2026 symptom — `saveErrorPlaceholder` writes a row with
+        // `processingError: "Message from old epoch"` which the UI then
+        // renders as a failed-decrypt error bubble. The message itself is
+        // not actionable (the ratchet key has been thrown away), so the
+        // correct behavior is to skip persistence entirely. Routed
+        // through `PersistDecisionPolicy.decide(...)` (a pure function) so
+        // the decision is testable independent of this site.
+        let decision = decidePersistAction(
+          for: message,
+          decryptSucceeded: false,
+          isCommit: false
+        )
+        if case .skipPersist(let reason) = decision {
+          logger.info(
+            "⏭️ [PERSIST-DECISION] Skipping wrong-epoch message \(message.id.prefix(16)): \(String(describing: reason))"
+          )
+          return .nonApplication
+        }
+        // Fallback: if the policy disagrees (e.g., reclassified at the
+        // policy level), keep the old behavior so we don't silently drop
+        // a row the policy thinks is meaningful.
         return try await saveErrorPlaceholder(
           message: message,
           error: "Message from old epoch",
@@ -2358,6 +2380,57 @@ public extension MLSConversationManager {
       return .application(payload: placeholderPayload, sender: "unknown")
     }
     return .nonApplication
+  }
+
+  /// Phase D-Swift D-S.4: compute the persistence decision for a message
+  /// processing attempt. The pure-function policy in
+  /// `PersistDecisionPolicy.decide(...)` is fully tested in isolation;
+  /// this method is a thin adapter that constructs the policy's input
+  /// from the actor's mutable state (current group epoch, local device
+  /// DID) and the message metadata.
+  ///
+  /// `MessageView` does not carry a sender DID (sender is extracted from
+  /// MLS AAD after a successful decrypt). For wrong-epoch / failed-
+  /// decrypt sites, the caller passes `senderDeviceDid: nil` and the
+  /// adapter wires an empty string so the policy's own-message rule
+  /// can't match — the wrong-epoch rule fires instead, which is the
+  /// behavior we want.
+  ///
+  /// Callers MUST check the returned decision before invoking any
+  /// persistence side effects. The atomic block (`persistProcessedPayload`)
+  /// remains the persistence implementation; this method exists to choose
+  /// which behavior to take, not to perform it.
+  ///
+  /// Future work (Phase E.iOS): extend `SkipReason` with `awaitingReissue`
+  /// / `surrenderedAtRecipient` and wire them through here.
+  internal func decidePersistAction(
+    for message: BlueCatbirdMlsChatDefs.MessageView,
+    decryptSucceeded: Bool,
+    isCommit: Bool,
+    senderDeviceDid: String? = nil
+  ) -> PersistDecision {
+    // Look up the group's current FFI epoch (best-effort; if unavailable,
+    // fall back to the cached conversation epoch). This is the policy's
+    // "groupEpoch" input.
+    let convo = conversations[message.convoId]
+    let groupEpoch: UInt64
+    if let convo {
+      groupEpoch = UInt64(max(0, convo.epoch))
+    } else {
+      groupEpoch = 0
+    }
+
+    let input = PersistDecisionInput(
+      senderDeviceDid: senderDeviceDid ?? "",
+      localDeviceDid: userDid ?? "",
+      messageEpoch: UInt64(message.epoch),
+      groupEpoch: groupEpoch,
+      decryptSucceeded: decryptSucceeded,
+      isCommit: isCommit,
+      hasPlaceholderPayload: false
+    )
+
+    return PersistDecisionPolicy.decide(input)
   }
 
   private func placeholderPayload(
