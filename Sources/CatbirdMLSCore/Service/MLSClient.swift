@@ -100,6 +100,20 @@ public actor MLSClient {
   /// Optional app-provided coordinator for storage maintenance flows.
   private var storageMaintenanceCoordinator: MLSStorageMaintenanceCoordinating?
 
+  /// Phase D-Swift D-S.3: observer notified when this client produces a
+  /// commit (specifically the External Commit path in `joinByExternalCommit`).
+  /// `MLSConversationManager` conforms to `OwnCommitObserver` and forwards
+  /// the callback into its existing `trackOwnCommit(_:)` map so the
+  /// receive-side dedup at `processCommit(groupId:commitData:)` can
+  /// short-circuit when the server fans this commit back to us.
+  ///
+  /// Held weakly to avoid a circular ownership graph between the singleton
+  /// `MLSClient.shared` and the per-user `MLSConversationManager` instances.
+  /// `MLSConversationManager` retains the `MLSClient` reference; if the
+  /// manager is deallocated, this slot goes nil and the observer call
+  /// becomes a no-op.
+  private weak var ownCommitObserver: (any OwnCommitObserver)?
+
   private let logger = Logger(
     subsystem: Bundle.main.bundleIdentifier ?? "blue.catbird", category: "MLSClient")
   private var cancellables = Set<AnyCancellable>()
@@ -162,6 +176,24 @@ public actor MLSClient {
   /// Provide an app-level storage maintenance coordinator (optional).
   public func setStorageMaintenanceCoordinator(_ coordinator: MLSStorageMaintenanceCoordinating?) {
     storageMaintenanceCoordinator = coordinator
+  }
+
+  /// Register an observer to receive commits produced by this client.
+  /// Phase D-Swift D-S.3 — `MLSConversationManager` registers itself at
+  /// init time so its `trackOwnCommit(_:)` map sees the External Commit
+  /// path's outputs. Pass `nil` to unregister.
+  public func setOwnCommitObserver(_ observer: (any OwnCommitObserver)?) {
+    ownCommitObserver = observer
+  }
+
+  /// Internal helper: notify the observer of a commit this client just
+  /// produced and that the server has accepted. Called from
+  /// `joinByExternalCommit` after a successful `processExternalCommit`
+  /// XRPC response. Safe to call when no observer is registered (no-op).
+  internal func notifyOwnCommitProduced(commitBytes: Data) async {
+    if let observer = ownCommitObserver {
+      await observer.ownCommitProduced(commitBytes: commitBytes)
+    }
   }
 
   /// Get the recovery manager for error handling
@@ -1020,6 +1052,24 @@ public actor MLSClient {
             confirmationTag: tagB64
           )
           serverEpochAfterCommit = UInt64(serverNewEpoch)
+
+          // Phase D-Swift D-S.3: notify the own-commit observer that the
+          // External Commit has been accepted by the server. The observer
+          // (typically `MLSConversationManager`) records the SHA-256 of
+          // `result.commitData` so that when the server fans the same
+          // commit back to us via WebSocket / SSE, the receive path can
+          // short-circuit at `isOwnCommit(_:)` instead of trying to merge
+          // our own commit (which the existing
+          // `commit.epoch <= currentEpoch` skip in
+          // fetchAndProcessMissingCommits handles already, but only after
+          // a wasted FFI roundtrip and a misleading log line).
+          //
+          // This is the iOS analog of the Rust orchestrator's own_commits
+          // insert at recovery.rs / messaging.rs. The three other Swift
+          // producers (create-group at Manager.swift:760, addMembers at
+          // Members.swift:235, group setup at Groups.swift:418) already
+          // record. This was the missing fourth.
+          await notifyOwnCommitProduced(commitBytes: result.commitData)
         } catch let apiError as MLSAPIError {
           if case .httpError(let statusCode, _) = apiError {
             if statusCode == 409 {

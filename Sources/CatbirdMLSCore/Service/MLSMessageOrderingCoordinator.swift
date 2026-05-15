@@ -341,6 +341,47 @@ public actor MLSMessageOrderingCoordinator {
     return allPending
   }
 
+  /// Atomically drain all buffered messages for a conversation: return them
+  /// AND remove them from the pending table in a single write transaction.
+  ///
+  /// Phase D-Swift, Task D-S.2 — idempotency fix. The previous
+  /// `flushBufferedMessages` returns rows but leaves them in the table; the
+  /// caller is responsible for removing each row only after successful
+  /// processing. When intermediate processing returns early (e.g.,
+  /// `.bufferForFutureEpoch`, `.nonApplication`), the rows stay in the table
+  /// and the next sync pass re-fetches the same messages from the server
+  /// and re-buffers them, producing the SEQ-ORDER tight loop observed in
+  /// the May 2026 iOS reproduction.
+  ///
+  /// `drainBufferedMessages` decouples removal from processing success: the
+  /// caller iterates the returned list and handles each message. If a
+  /// particular message fails to process, the caller may choose to log a
+  /// typed error or re-buffer with explicit retry semantics, but it can
+  /// never accidentally leave a row in the buffer that triggers another
+  /// drain on the next pass.
+  public func drainBufferedMessages(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> [MLSPendingMessageModel] {
+
+    let drained = try await storage.drainPendingMessages(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      database: database
+    )
+
+    if !drained.isEmpty {
+      logger.info(
+        "[SEQ-ORDER] Drained \(drained.count) buffered messages atomically for conversation \(conversationID.prefix(16))"
+      )
+      let seqs = drained.map { $0.sequenceNumber }
+      logger.debug("[SEQ-ORDER] Drained sequences: \(seqs)")
+    }
+
+    return drained
+  }
+
   /// Cleanup old pending messages that exceeded the timeout
   /// Returns the number of messages cleaned up
   public func cleanupStaleMessages(

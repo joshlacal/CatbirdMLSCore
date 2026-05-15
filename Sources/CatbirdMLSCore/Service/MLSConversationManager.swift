@@ -201,6 +201,23 @@ public final class MLSConversationManager {
   public let ownCommitsLock = NSLock()
   private let ownCommitTimeout: TimeInterval = 600  // 10 minutes
 
+  /// Tracks commits the FFI has already applied during this process lifetime.
+  /// Phase D-Swift Task D-S.2 — used to short-circuit duplicate
+  /// processCommit calls that the existing `commit.epoch <= currentEpoch`
+  /// skip can't see (fork resolution, redelivery before the post-merge
+  /// epoch read propagates, etc.). Distinct from `ownCommits` above:
+  /// `ownCommits` is the SEND side ("we created this commit ourselves"),
+  /// `mergedCommitTracker` is the RECEIVE side ("we already merged this
+  /// commit hash"). The two can refer to the same commit at different
+  /// stages of its life. Entries TTL out at 10 minutes.
+  public let mergedCommitTracker = MergedCommitTracker()
+
+  /// Phase D-Swift D-S.3 — strong reference to the observer registered with
+  /// `MLSClient.shared`. `MLSClient` holds it weakly to avoid a circular
+  /// retain; we keep the strong reference here so the observer outlives
+  /// the closure-creation site at init.
+  internal var ownCommitObserver: OwnCommitClosureObserver?
+
   /// Sliding-window tracker for the operationally-unrecoverable rejoin
   /// trifecta (spec §8.6 / ADR-008 D1, Phase 2 Stage 3 — see
   /// `docs/superpowers/specs/2026-04-26-mls-auto-reset-phase2-design.md`).
@@ -436,6 +453,21 @@ public final class MLSConversationManager {
           await dbManager.isActiveUser(userDid)
         }
       }
+
+    // Phase D-Swift D-S.3: register an own-commit observer so the External
+    // Commit producer in `MLSClient.joinByExternalCommit` (the only
+    // producer that didn't previously call `trackOwnCommit`) tracks its
+    // commits the way the other three producers do. We use a stand-alone
+    // observer object — not `self` directly — to avoid coupling the
+    // manager's Sendable / @Observable shape to the protocol requirements.
+    let trackCommit: @Sendable (Data) -> Void = { [weak self] bytes in
+      self?.trackOwnCommit(bytes)
+    }
+    let observer = OwnCommitClosureObserver(handler: trackCommit)
+    self.ownCommitObserver = observer
+    Task { [observer] in
+      await MLSClient.shared.setOwnCommitObserver(observer)
+    }
 
     // Initialize device sync manager for multi-device support
     self.deviceSyncManager = MLSDeviceSyncManager(apiClient: apiClient, mlsClient: mlsClient)
