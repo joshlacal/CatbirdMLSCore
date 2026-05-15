@@ -1920,6 +1920,85 @@ public final class MLSAPIClient {
 
   // MARK: - Recovery Operations
 
+  public struct ReissueWelcomeResponse: Sendable, Equatable {
+    public let requested: Bool
+    public let requestId: String?
+    public let message: String?
+
+    public init(requested: Bool, requestId: String? = nil, message: String? = nil) {
+      self.requested = requested
+      self.requestId = requestId
+      self.message = message
+    }
+  }
+
+  public struct ReconcileResponse: Sendable, Equatable {
+    public let serverOnly: [String]
+    public let localOnly: [String]
+    public let confirmed: [String]
+
+    public init(serverOnly: [String], localOnly: [String], confirmed: [String]) {
+      self.serverOnly = serverOnly
+      self.localOnly = localOnly
+      self.confirmed = confirmed
+    }
+  }
+
+  public enum InvalidationReason: String, Sendable, Equatable {
+    case noMatchingKeyPackage
+    case corruptInvitee
+    case unowned
+  }
+
+  public func requestWelcomeReissue(
+    convoId: String,
+    inviterDid: String?
+  ) async throws -> ReissueWelcomeResponse {
+    logger.info(
+      "📤 [requestWelcomeReissue] START - convoId: \(convoId.prefix(16)), inviterDid: \(inviterDid ?? "nil")"
+    )
+
+    // Phase A generated `blue.catbird.mlsChat.reissueWelcome` is not present
+    // in this checkout. Keep the call surface in CatbirdMLSCore so client
+    // wiring compiles, and fail explicitly until Petrel regeneration lands.
+    throw MLSAPIError.invalidResponse(
+      message: "blue.catbird.mlsChat.reissueWelcome generated Petrel type is unavailable"
+    )
+  }
+
+  public func reconcileKeyPackages(
+    deviceId: String,
+    localHashes: [String]
+  ) async throws -> ReconcileResponse {
+    logger.info(
+      "🔄 [reconcileKeyPackages] START - localHashes: \(localHashes.count), deviceId: \(deviceId)"
+    )
+
+    // Phase A generated `blue.catbird.mlsChat.reconcileKeyPackages` is not
+    // present yet. Do not call the legacy sync endpoint here: that endpoint
+    // can mutate/delete orphaned packages, while reconciliation must be a
+    // non-destructive bidirectional diff.
+    throw MLSAPIError.invalidResponse(
+      message: "blue.catbird.mlsChat.reconcileKeyPackages generated Petrel type is unavailable"
+    )
+  }
+
+  public func invalidateKeyPackage(
+    deviceDid: String,
+    hash: String,
+    reason: InvalidationReason
+  ) async throws {
+    logger.info(
+      "🗑️ [invalidateKeyPackage] START - deviceDid: \(deviceDid.prefix(20)), hash: \(hash.prefix(16)), reason: \(reason.rawValue)"
+    )
+
+    // Phase A generated `blue.catbird.mlsChat.invalidateKeyPackage` is not
+    // present in this checkout. Do not pretend to invalidate server state.
+    throw MLSAPIError.invalidResponse(
+      message: "blue.catbird.mlsChat.invalidateKeyPackage generated Petrel type is unavailable"
+    )
+  }
+
   /// Invalidate a Welcome message that cannot be processed
   /// - Parameters:
   ///   - convoId: Conversation identifier

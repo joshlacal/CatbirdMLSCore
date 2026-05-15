@@ -5631,16 +5631,25 @@ public extension MLSConversationManager {
       if case .httpError(let statusCode, _) = error, statusCode == 410 {
         logger.info(
           "📭 [HTTP 410 GONE] Welcome expired for \(convo.conversationId) - KeyPackage consumed/expired")
-        logger.info("🔄 Skipping Welcome, attempting External Commit directly...")
-
-        groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.conversationId,
-          userDid: userDid,
-          reason: "Welcome expired (HTTP 410)"
-        )
-
-        try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
-        return
+        switch await decideWelcomeRecovery(for: convo, failure: .welcomeExpired) {
+        case .externalCommitWithHistoryGap:
+          logger.info("🔄 [WELCOME-RECOVERY] Welcome expired; External Commit authorized with history gap")
+          groupIdHex = try await attemptExternalCommitFallback(
+            convoId: convo.conversationId,
+            userDid: userDid,
+            reason: "Welcome expired (HTTP 410)"
+          )
+          try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
+          return
+        case .surrender(let reason, _):
+          await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
+          throw MLSConversationError.operationFailed(reason)
+        case .requestReissue(let reason, let nextAttempt):
+          try await requestWelcomeReissueAndWait(convo: convo, reason: reason, nextAttempt: nextAttempt)
+          throw MLSConversationError.operationFailed("Welcome reissue requested")
+        case .accept:
+          throw error
+        }
       }
       
       // ⭐ FIX: Also handle HTTP 404 (Welcome not found) by trying External Commit
@@ -5648,16 +5657,25 @@ public extension MLSConversationManager {
       if case .httpError(let statusCode, _) = error, statusCode == 404 {
         logger.info(
           "📭 [HTTP 404 NOT FOUND] Welcome not found for \(convo.conversationId) - may be race condition or deleted")
-        logger.info("🔄 Skipping Welcome, attempting External Commit directly...")
-
-        groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.conversationId,
-          userDid: userDid,
-          reason: "Welcome not found (HTTP 404)"
-        )
-
-        try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
-        return
+        switch await decideWelcomeRecovery(for: convo, failure: .welcomeUnavailable) {
+        case .externalCommitWithHistoryGap:
+          logger.info("🔄 [WELCOME-RECOVERY] Welcome unavailable; External Commit authorized with history gap")
+          groupIdHex = try await attemptExternalCommitFallback(
+            convoId: convo.conversationId,
+            userDid: userDid,
+            reason: "Welcome not found (HTTP 404)"
+          )
+          try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
+          return
+        case .surrender(let reason, _):
+          await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
+          throw MLSConversationError.operationFailed(reason)
+        case .requestReissue(let reason, let nextAttempt):
+          try await requestWelcomeReissueAndWait(convo: convo, reason: reason, nextAttempt: nextAttempt)
+          throw MLSConversationError.operationFailed("Welcome reissue requested")
+        case .accept:
+          throw error
+        }
       }
       
       throw error
@@ -5666,16 +5684,26 @@ public extension MLSConversationManager {
       if case .responseError(let statusCode) = error, statusCode == 404 || statusCode == 410 {
         logger.info(
           "📭 [NetworkError \(statusCode)] Welcome not found/expired for \(convo.conversationId)")
-        logger.info("🔄 Skipping Welcome, attempting External Commit directly...")
-
-        groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.conversationId,
-          userDid: userDid,
-          reason: "Welcome not available (NetworkError \(statusCode))"
-        )
-
-        try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
-        return
+        let failure: WelcomeRecoveryFailure = statusCode == 410 ? .welcomeExpired : .welcomeUnavailable
+        switch await decideWelcomeRecovery(for: convo, failure: failure) {
+        case .externalCommitWithHistoryGap:
+          logger.info("🔄 [WELCOME-RECOVERY] Welcome unavailable; External Commit authorized with history gap")
+          groupIdHex = try await attemptExternalCommitFallback(
+            convoId: convo.conversationId,
+            userDid: userDid,
+            reason: "Welcome not available (NetworkError \(statusCode))"
+          )
+          try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
+          return
+        case .surrender(let reason, _):
+          await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
+          throw MLSConversationError.operationFailed(reason)
+        case .requestReissue(let reason, let nextAttempt):
+          try await requestWelcomeReissueAndWait(convo: convo, reason: reason, nextAttempt: nextAttempt)
+          throw MLSConversationError.operationFailed("Welcome reissue requested")
+        case .accept:
+          throw error
+        }
       }
       
       throw error
@@ -5728,16 +5756,31 @@ public extension MLSConversationManager {
           }
         }
 
-        logger.info("🔄 Attempting fallback to External Commit for conversation \(convo.conversationId)...")
-
-        groupIdHex = try await attemptExternalCommitFallback(
-          convoId: convo.conversationId,
-          userDid: userDid,
-          reason: "NoMatchingKeyPackage"
-        )
-
-        try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
-        return
+        switch await decideWelcomeRecovery(for: convo, failure: .noMatchingKeyPackage) {
+        case .requestReissue(let reason, let nextAttempt):
+          try await requestWelcomeReissueAndWait(
+            convo: convo,
+            reason: reason,
+            nextAttempt: nextAttempt
+          )
+          throw MLSConversationError.operationFailed("Welcome reissue requested")
+        case .externalCommitWithHistoryGap(let lastSeenEpoch):
+          logger.info(
+            "🔄 [WELCOME-RECOVERY] Reissue exhausted/unavailable at epoch \(lastSeenEpoch); attempting External Commit with history gap"
+          )
+          groupIdHex = try await attemptExternalCommitFallback(
+            convoId: convo.conversationId,
+            userDid: userDid,
+            reason: "NoMatchingKeyPackage reissue exhausted"
+          )
+          try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
+          return
+        case .surrender(let reason, _):
+          await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
+          throw MLSConversationError.operationFailed(reason)
+        case .accept:
+          throw error
+        }
       } else {
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
           let recovered = await recoveryManager.attemptRecoveryIfNeeded(
