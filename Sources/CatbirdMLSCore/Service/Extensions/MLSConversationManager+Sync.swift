@@ -448,23 +448,32 @@ public extension MLSConversationManager {
             } catch let mlsApiError as MLSAPIError {
               // Check if Welcome is unavailable (device-sync scenario)
               if case .httpError(let code, _) = mlsApiError, code == 404 {
-                // 404: No Welcome found - this is a true device-sync scenario
-                // (Welcome was already consumed by another device, or creator)
-                logger.info("📭 [SYNC] No Welcome available (HTTP 404) - this is device-sync, using External Commit")
-
-                do {
-                  let _ = try await mlsClient.joinByExternalCommit(
-                    for: userDid, convoId: convo.conversationId)
-                  logger.info("✅ [SYNC] Device successfully joined via External Commit")
-                } catch {
-                  logger.error(
-                    "❌ [SYNC] External Commit failed for device-sync: \(error.localizedDescription)"
+                logger.info("📭 [SYNC] No Welcome available (HTTP 404) - routing through WelcomeRecoveryPolicy")
+                switch await decideWelcomeRecovery(for: convo, failure: .welcomeUnavailable) {
+                case .externalCommitWithHistoryGap:
+                  do {
+                    let _ = try await mlsClient.joinByExternalCommit(
+                      for: userDid, convoId: convo.conversationId)
+                    logger.info("✅ [SYNC] Device successfully joined via External Commit")
+                  } catch {
+                    logger.error(
+                      "❌ [SYNC] External Commit failed for device-sync: \(error.localizedDescription)"
+                    )
+                    logger.error(
+                      "   Conversation \(convo.conversationId.prefix(16))... will be unavailable")
+                    continue
+                  }
+                case .requestReissue(let reason, let nextAttempt):
+                  try await requestWelcomeReissueAndWait(
+                    convo: convo,
+                    reason: reason,
+                    nextAttempt: nextAttempt
                   )
-                  logger.error(
-                    "   Conversation \(convo.conversationId.prefix(16))... will be unavailable")
-
-                  // Non-fatal: conversation will retry on next sync
-                  continue  // Skip this conversation
+                case .surrender(let reason, _):
+                  await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
+                  continue
+                case .accept:
+                  continue
                 }
               } else {
                 // Other API error - log and skip

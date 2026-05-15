@@ -3617,6 +3617,42 @@ public actor MLSClient {
       logger.info("   - Orphaned packages detected: \(result.orphanedCount)")
       logger.info("   - Orphaned packages deleted: \(result.deletedCount)")
       logger.info("   - Remaining available on server: \(result.remainingAvailable)")
+
+      do {
+        let reconcile = try await apiClient.reconcileKeyPackages(
+          deviceId: deviceId,
+          localHashes: localHashes
+        )
+        logger.info("📊 [ReconcileKeyPackages] Server authoritative diff:")
+        logger.info("   - Confirmed: \(reconcile.confirmed.count)")
+        logger.info("   - Server only: \(reconcile.serverOnly.count)")
+        logger.info("   - Local only: \(reconcile.localOnly.count)")
+
+        for hash in reconcile.serverOnly {
+          do {
+            try await apiClient.invalidateKeyPackage(
+              deviceDid: deviceInfo.mlsDid,
+              hash: hash,
+              reason: .unowned
+            )
+            logger.info("🗑️ [ReconcileKeyPackages] Invalidated unowned server KP \(hash.prefix(16))")
+          } catch {
+            logger.warning(
+              "⚠️ [ReconcileKeyPackages] Could not invalidate server-only KP \(hash.prefix(16)): \(error.localizedDescription)"
+            )
+          }
+        }
+
+        if !reconcile.localOnly.isEmpty {
+          logger.warning(
+            "⚠️ [ReconcileKeyPackages] \(reconcile.localOnly.count) local-only KP hash(es) found, but this FFI surface cannot export a bundle by hash for re-publish yet"
+          )
+        }
+      } catch {
+        logger.warning(
+          "⚠️ [ReconcileKeyPackages] Server-authoritative diff unavailable; preserving legacy sync result: \(error.localizedDescription)"
+        )
+      }
     } catch {
       logger.error("❌ [SyncKeyPackages] Server sync failed: \(error.localizedDescription)")
       throw error
