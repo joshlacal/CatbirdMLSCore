@@ -31,14 +31,21 @@ extension MLSConversationManager {
       throw MLSConversationError.noAuthentication
     }
 
-    let inviterDid = convo.members.first(where: { $0.isAdmin })?.did.description
+    let recipientDeviceDid: String
+    if let deviceInfo = await mlsClient.getDeviceInfo(for: userDid) {
+      recipientDeviceDid = deviceInfo.mlsDid
+    } else {
+      recipientDeviceDid = try await mlsClient.ensureDeviceRegistered(userDid: userDid)
+    }
+
     let response = try await apiClient.requestWelcomeReissue(
       convoId: convo.conversationId,
-      inviterDid: inviterDid
+      recipientDeviceDid: recipientDeviceDid,
+      reason: reason
     )
     await recordWelcomeReissueAttempt(convoId: convo.conversationId, attempt: nextAttempt)
     logger.info(
-      "📨 [WELCOME-RECOVERY] Requested Welcome reissue for \(convo.conversationId.prefix(16)) attempt \(nextAttempt): requested=\(response.requested)"
+      "📨 [WELCOME-RECOVERY] Requested Welcome reissue for \(convo.conversationId.prefix(16)) attempt \(nextAttempt): requested=\(response.requested), recipientDeviceDid=\(recipientDeviceDid.prefix(32))"
     )
 
     Task.detached(priority: .utility) { [mlsClient, logger, userDid] in
@@ -68,6 +75,7 @@ extension MLSConversationManager {
     guard let userDid else { return }
 
     do {
+      let now = Date()
       try await database.write { db in
         try db.execute(
           sql: """
@@ -79,7 +87,7 @@ extension MLSConversationManager {
             WHERE conversationID = ?
               AND currentUserDID = ?
             """,
-          arguments: [Date(), Date(), convoId, userDid]
+          arguments: [now, now, convoId, userDid]
         )
       }
       logger.warning(

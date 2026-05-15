@@ -464,11 +464,18 @@ public extension MLSConversationManager {
                     continue
                   }
                 case .requestReissue(let reason, let nextAttempt):
-                  try await requestWelcomeReissueAndWait(
-                    convo: convo,
-                    reason: reason,
-                    nextAttempt: nextAttempt
-                  )
+                  do {
+                    try await requestWelcomeReissueAndWait(
+                      convo: convo,
+                      reason: reason,
+                      nextAttempt: nextAttempt
+                    )
+                  } catch {
+                    logger.warning(
+                      "⚠️ [WELCOME-RECOVERY] Welcome reissue request failed during sync for \(convo.conversationId.prefix(16)); skipping conversation without tripping sync circuit breaker: \(error.localizedDescription)"
+                    )
+                    continue
+                  }
                 case .surrender(let reason, _):
                   await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
                   continue
