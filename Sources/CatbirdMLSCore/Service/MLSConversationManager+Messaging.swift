@@ -2295,7 +2295,8 @@ public extension MLSConversationManager {
         let decision = decidePersistAction(
           for: message,
           decryptSucceeded: false,
-          isCommit: false
+          isCommit: false,
+          localEpoch: localEpoch > 0 ? UInt64(localEpoch) : nil
         )
         if case .skipPersist(let reason) = decision {
           logger.info(
@@ -2407,14 +2408,16 @@ public extension MLSConversationManager {
     for message: BlueCatbirdMlsChatDefs.MessageView,
     decryptSucceeded: Bool,
     isCommit: Bool,
-    senderDeviceDid: String? = nil
+    senderDeviceDid: String? = nil,
+    localEpoch: UInt64? = nil
   ) -> PersistDecision {
-    // Look up the group's current FFI epoch (best-effort; if unavailable,
-    // fall back to the cached conversation epoch). This is the policy's
-    // "groupEpoch" input.
+    // Prefer the caller's just-read FFI epoch. If unavailable, fall back to
+    // the cached conversation epoch as a last-resort policy input.
     let convo = conversations[message.convoId]
     let groupEpoch: UInt64
-    if let convo {
+    if let localEpoch, localEpoch > 0 {
+      groupEpoch = localEpoch
+    } else if let convo {
       groupEpoch = UInt64(max(0, convo.epoch))
     } else {
       groupEpoch = 0
@@ -3423,14 +3426,17 @@ public extension MLSConversationManager {
   }
 
   internal func trackOwnCommit(_ commitData: Data) {
-    let commitHash = SHA256.hash(data: commitData).compactMap { String(format: "%02x", $0) }.joined()
+    let commitHash = MergedCommitTracker.commitHash(for: commitData)
     ownCommitsLock.lock()
     defer { ownCommitsLock.unlock() }
     ownCommits[commitHash] = Date()
   }
 
   internal func isOwnCommit(_ commitData: Data) -> Bool {
-    let commitHash = SHA256.hash(data: commitData).compactMap { String(format: "%02x", $0) }.joined()
+    isOwnCommitHash(MergedCommitTracker.commitHash(for: commitData))
+  }
+
+  internal func isOwnCommitHash(_ commitHash: String) -> Bool {
     ownCommitsLock.lock()
     defer { ownCommitsLock.unlock() }
     let now = Date()
@@ -4093,6 +4099,7 @@ public extension MLSConversationManager {
     guard let groupIdData = Data(hexEncoded: groupId) else {
       throw MLSConversationError.invalidGroupId
     }
+    let commitHash = MergedCommitTracker.commitHash(for: commitData)
 
     // Phase D-Swift D-S.3: own-commit short-circuit. If the server has fanned
     // back a commit we produced locally (External Commit, addMembers, etc.),
@@ -4114,8 +4121,7 @@ public extension MLSConversationManager {
     // Bug A from D-S.0 orientation: `isOwnCommit` existed but had ZERO
     // callers — the dedup data structure was recording but never being
     // consulted. After D-S.3 this check IS the consumer.
-    if isOwnCommit(commitData) {
-      let commitHash = MergedCommitTracker.commitHash(for: commitData)
+    if isOwnCommitHash(commitHash) {
       logger.info(
         "⏭️ [OWN-COMMIT-DEDUP] Commit \(commitHash.prefix(16)) for group \(groupId.prefix(16)) was produced locally — short-circuit"
       )
@@ -4146,7 +4152,6 @@ public extension MLSConversationManager {
     //   - Spurious re-fetches by the EPOCH-RECOVERY loop typically complete
     //     within seconds of the original merge, well under TTL.
     mergedCommitTracker.evictOlderThan(ttl: 600)
-    let commitHash = MergedCommitTracker.commitHash(for: commitData)
     if mergedCommitTracker.contains(commitHash: commitHash) {
       logger.info(
         "⏭️ [MERGED-DEDUP] Commit \(commitHash.prefix(16)) for group \(groupId.prefix(16)) already merged this session — short-circuit"

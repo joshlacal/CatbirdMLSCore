@@ -1952,18 +1952,55 @@ public final class MLSAPIClient {
 
   public func requestWelcomeReissue(
     convoId: String,
-    inviterDid: String?
+    recipientDeviceDid: String,
+    reason: String
   ) async throws -> ReissueWelcomeResponse {
     logger.info(
-      "📤 [requestWelcomeReissue] START - convoId: \(convoId.prefix(16)), inviterDid: \(inviterDid ?? "nil")"
+      "📤 [requestWelcomeReissue] START - convoId: \(convoId.prefix(16)), recipientDeviceDid: \(recipientDeviceDid.prefix(32)), reason: \(reason)"
     )
 
-    // Phase A generated `blue.catbird.mlsChat.reissueWelcome` is not present
-    // in this checkout. Keep the call surface in CatbirdMLSCore so client
-    // wiring compiles, and fail explicitly until Petrel regeneration lands.
-    throw MLSAPIError.invalidResponse(
-      message: "blue.catbird.mlsChat.reissueWelcome generated Petrel type is unavailable"
+    let input = BlueCatbirdMlsChatReissueWelcome.Input(
+      convoId: convoId,
+      recipientDeviceDid: try DID(didString: recipientDeviceDid),
+      reason: reason
     )
+
+    do {
+      let (responseCode, output) = try await client.blue.catbird.mlschat.reissueWelcome(input: input)
+
+      guard (200...299).contains(responseCode), let output else {
+        logger.error("❌ [requestWelcomeReissue] HTTP \(responseCode)")
+        throw MLSAPIError.httpError(
+          statusCode: responseCode,
+          message: "requestWelcomeReissue failed"
+        )
+      }
+
+      logger.info(
+        "✅ [requestWelcomeReissue] SUCCESS - requested=\(output.welcomeRequested), requestedAt=\(output.requestedAt.iso8601String), inviterDevice=\(output.inviterDevice?.description ?? "nil")"
+      )
+
+      return ReissueWelcomeResponse(
+        requested: output.welcomeRequested,
+        requestId: nil,
+        message: "requestedAt=\(output.requestedAt.iso8601String)"
+      )
+    } catch let error as ATProtoError<BlueCatbirdMlsChatReissueWelcome.Error> {
+      logger.error(
+        "❌ [requestWelcomeReissue] Lexicon error: \(error.error.errorName) - \(error.message ?? "no details")"
+      )
+      switch error.error {
+      case .convoNotFound:
+        throw MLSAPIError.conversationNotFound(detail: error.message)
+      case .noAdminToReissue:
+        throw MLSAPIError.httpError(
+          statusCode: 409,
+          message: error.message ?? "No admin/inviter is available to reissue Welcome"
+        )
+      case .rateLimited:
+        throw MLSAPIError.rateLimited(retryAfter: nil)
+      }
+    }
   }
 
   public func reconcileKeyPackages(
@@ -1974,13 +2011,47 @@ public final class MLSAPIClient {
       "🔄 [reconcileKeyPackages] START - localHashes: \(localHashes.count), deviceId: \(deviceId)"
     )
 
-    // Phase A generated `blue.catbird.mlsChat.reconcileKeyPackages` is not
-    // present yet. Do not call the legacy sync endpoint here: that endpoint
-    // can mutate/delete orphaned packages, while reconciliation must be a
-    // non-destructive bidirectional diff.
-    throw MLSAPIError.invalidResponse(
-      message: "blue.catbird.mlsChat.reconcileKeyPackages generated Petrel type is unavailable"
+    let input = BlueCatbirdMlsChatReconcileKeyPackages.Input(
+      deviceId: deviceId,
+      localHashes: localHashes,
+      schemaVersion: 1
     )
+
+    do {
+      let (responseCode, output) = try await client.blue.catbird.mlschat.reconcileKeyPackages(
+        input: input
+      )
+
+      guard (200...299).contains(responseCode), let output else {
+        logger.error("❌ [reconcileKeyPackages] HTTP \(responseCode)")
+        throw MLSAPIError.httpError(
+          statusCode: responseCode,
+          message: "reconcileKeyPackages failed"
+        )
+      }
+
+      let localOnly = Set(output.localOnly)
+      let confirmed = localHashes.filter { !localOnly.contains($0) }
+      logger.info(
+        "✅ [reconcileKeyPackages] SUCCESS - confirmed=\(confirmed.count), serverOnly=\(output.serverOnly.count), localOnly=\(output.localOnly.count), deviceVerified=\(output.deviceVerified)"
+      )
+
+      return ReconcileResponse(
+        serverOnly: output.serverOnly,
+        localOnly: output.localOnly,
+        confirmed: confirmed
+      )
+    } catch let error as ATProtoError<BlueCatbirdMlsChatReconcileKeyPackages.Error> {
+      logger.error(
+        "❌ [reconcileKeyPackages] Lexicon error: \(error.error.errorName) - \(error.message ?? "no details")"
+      )
+      switch error.error {
+      case .deviceNotFound:
+        throw MLSAPIError.httpError(statusCode: 404, message: error.message ?? "Device not found")
+      case .unauthorized:
+        throw MLSAPIError.httpError(statusCode: 403, message: error.message ?? "Unauthorized")
+      }
+    }
   }
 
   public func invalidateKeyPackage(
@@ -1992,11 +2063,39 @@ public final class MLSAPIClient {
       "🗑️ [invalidateKeyPackage] START - deviceDid: \(deviceDid.prefix(20)), hash: \(hash.prefix(16)), reason: \(reason.rawValue)"
     )
 
-    // Phase A generated `blue.catbird.mlsChat.invalidateKeyPackage` is not
-    // present in this checkout. Do not pretend to invalidate server state.
-    throw MLSAPIError.invalidResponse(
-      message: "blue.catbird.mlsChat.invalidateKeyPackage generated Petrel type is unavailable"
+    let input = BlueCatbirdMlsChatInvalidateKeyPackage.Input(
+      deviceDid: try DID(didString: deviceDid),
+      keyPackageHash: hash,
+      reason: reason.rawValue
     )
+
+    do {
+      let (responseCode, output) = try await client.blue.catbird.mlschat.invalidateKeyPackage(
+        input: input
+      )
+
+      guard (200...299).contains(responseCode), let output else {
+        logger.error("❌ [invalidateKeyPackage] HTTP \(responseCode)")
+        throw MLSAPIError.httpError(
+          statusCode: responseCode,
+          message: "invalidateKeyPackage failed"
+        )
+      }
+
+      logger.info(
+        "✅ [invalidateKeyPackage] SUCCESS - marked=\(output.marked), alreadyDead=\(output.alreadyDead)"
+      )
+    } catch let error as ATProtoError<BlueCatbirdMlsChatInvalidateKeyPackage.Error> {
+      logger.error(
+        "❌ [invalidateKeyPackage] Lexicon error: \(error.error.errorName) - \(error.message ?? "no details")"
+      )
+      switch error.error {
+      case .keyPackageNotFound:
+        throw MLSAPIError.keyPackageNotFound(detail: error.message)
+      case .unauthorized:
+        throw MLSAPIError.httpError(statusCode: 403, message: error.message ?? "Unauthorized")
+      }
+    }
   }
 
   /// Invalidate a Welcome message that cannot be processed
@@ -2011,28 +2110,42 @@ public final class MLSAPIClient {
   ) async throws -> (invalidated: Bool, welcomeId: String?) {
     logger.info("📤 [invalidateWelcome] START - convoId: \(convoId), reason: \(reason)")
 
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+    let input = BlueCatbirdMlsChatInvalidateWelcome.Input(
       convoId: convoId,
-      action: "invalidateWelcome"
+      reason: reason
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
-
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ [invalidateWelcome] Failed with HTTP \(responseCode)")
-      throw MLSAPIError.httpError(
-        statusCode: responseCode, message: "invalidateWelcome failed with HTTP \(responseCode)")
-    }
-
-    if output.success {
-      logger.info(
-        "✅ [invalidateWelcome] SUCCESS - Welcome invalidated"
+    do {
+      let (responseCode, output) = try await client.blue.catbird.mlschat.invalidateWelcome(
+        input: input
       )
-    } else {
-      logger.warning("⚠️ [invalidateWelcome] No Welcome found to invalidate")
-    }
 
-    return (output.success, nil)
+      guard (200...299).contains(responseCode), let output else {
+        logger.error("❌ [invalidateWelcome] Failed with HTTP \(responseCode)")
+        throw MLSAPIError.httpError(
+          statusCode: responseCode, message: "invalidateWelcome failed with HTTP \(responseCode)")
+      }
+
+      if output.invalidated {
+        logger.info(
+          "✅ [invalidateWelcome] SUCCESS - Welcome invalidated, welcomeId=\(output.welcomeId ?? "nil")"
+        )
+      } else {
+        logger.warning("⚠️ [invalidateWelcome] No Welcome found to invalidate")
+      }
+
+      return (output.invalidated, output.welcomeId)
+    } catch let error as ATProtoError<BlueCatbirdMlsChatInvalidateWelcome.Error> {
+      logger.error(
+        "❌ [invalidateWelcome] Lexicon error: \(error.error.errorName) - \(error.message ?? "no details")"
+      )
+      switch error.error {
+      case .notFound:
+        throw MLSAPIError.httpError(statusCode: 404, message: error.message ?? "Welcome not found")
+      case .unauthorized:
+        throw MLSAPIError.httpError(statusCode: 403, message: error.message ?? "Unauthorized")
+      }
+    }
   }
 
   /// Request re-addition to a conversation when both Welcome and External Commit have failed

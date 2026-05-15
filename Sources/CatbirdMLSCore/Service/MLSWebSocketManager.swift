@@ -451,6 +451,11 @@ public actor MLSWebSocketManager {
       saveCursor(readditionEvent.cursor, for: convoId)
       await handler.onReadditionRequested?(readditionEvent)
 
+    case .welcomeReissueRequestedEvent(let reissueEvent):
+      logger.info(
+        "🔌 WS: WELCOME REISSUE REQUESTED - convo: \(reissueEvent.convoId.prefix(16)), recipient: \(reissueEvent.recipientDeviceDid.description.prefix(32)), requestId: \(reissueEvent.requestId.prefix(16))")
+      saveCursor(reissueEvent.cursor, for: convoId)
+
     case .membershipChangeEvent(let membershipEvent):
       logger.info("🔌 WS: MEMBERSHIP CHANGE - convo: \(membershipEvent.convoId.prefix(16)), did: \(membershipEvent.did)")
       saveCursor(membershipEvent.cursor, for: convoId)
@@ -463,10 +468,29 @@ public actor MLSWebSocketManager {
       saveCursor(cbEvent.cursor, for: convoId)
 
     @unknown default:
-      // Forward-compat: future subscribeEvents union additions (e.g. welcomeReissueRequestedEvent
-      // landing with Phase A) are silently dropped here until a named case is added.
-      break
+      let summary = encodedEventSummary(message)
+      if let cursor = summary.cursor {
+        saveCursor(cursor, for: convoId)
+      }
+      logger.warning(
+        "🔌 WS: Unknown subscribeEvents case for convoId=\(convoId.prefix(16)), type=\(summary.type ?? "unavailable"), cursorSaved=\(summary.cursor != nil), event=\(String(describing: message))"
+      )
     }
+  }
+
+  private func encodedEventSummary(
+    _ message: BlueCatbirdMlsChatSubscribeEvents.Message
+  ) -> (type: String?, cursor: String?) {
+    guard let data = try? JSONEncoder().encode(message),
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      return (nil, nil)
+    }
+
+    return (
+      object["$type"] as? String,
+      object["cursor"] as? String
+    )
   }
 
   /// Save cursor to both in-memory cache and persistent storage
