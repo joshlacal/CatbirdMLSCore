@@ -467,6 +467,10 @@ public actor MLSEventStreamManager {
             logger.warning("Circuit breaker tripped: convo=\(cbEvent.convoId), resetCount=\(cbEvent.resetCount), at=\(cbEvent.trippedAt.iso8601String)")
             saveCursor(cbEvent.cursor, for: convoId)
 
+        @unknown default:
+            // Forward-compat: future subscribeEvents union additions (e.g. welcomeReissueRequestedEvent
+            // landing with Phase A) are silently dropped here until a named case is added.
+            break
         }
     }
     
