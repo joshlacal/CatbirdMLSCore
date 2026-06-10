@@ -158,4 +158,51 @@ final class MLSRecoveryPersistenceTests: XCTestCase {
       "successful clear should persist the global rejoin floor"
     )
   }
+
+  func testClearRejoinTrackingAfterCeilingErasesPersistedBiasAcrossRestart() async throws {
+    // N20 contract: rejoin paths that succeed (e.g. the
+    // detectAndRejoinMissingConversations missing-convo loop) map success to
+    // clearRejoinTracking. That clear must erase the *persisted* failure
+    // counters and quarantine too — otherwise the next launch rehydrates the
+    // stale bias and shouldSkipRejoin keeps gating a conversation that
+    // already healed.
+    let store = InMemoryRecoveryStateStore()
+    let manager = MLSRecoveryManager(persistence: store)
+
+    for _ in 0..<MLSRecoveryManager.rejoinAttemptCeiling {
+      await manager.recordFailedRejoin(convoId: "convo-n20")
+    }
+    await manager.flushPersistence()
+
+    let skipsAtCeiling = await manager.shouldSkipRejoin(convoId: "convo-n20")
+    XCTAssertTrue(
+      skipsAtCeiling,
+      "ceiling-tripped conversation must be gated before the successful rejoin"
+    )
+
+    // Successful rejoin outcome.
+    await manager.clearRejoinTracking(convoId: "convo-n20")
+    await manager.flushPersistence()
+
+    let restarted = MLSRecoveryManager(persistence: store)
+    await restarted.hydrateFromDatabase()
+
+    let persistedEntry = await store.entry(for: "convo-n20")
+    XCTAssertNil(
+      persistedEntry,
+      "successful rejoin must delete the persisted failure counters (N20)"
+    )
+
+    // shouldSkipRejoin is deliberately NOT asserted false here: clearRejoinTracking
+    // stamps the global 30s rejoin floor (spec §8.4 / §10), which gates every
+    // conversation immediately after a clear. Per-conversation bias is what N20
+    // is about, so compare remaining attempts against a never-touched convo.
+    let remainingCleared = await restarted.remainingRejoinAttempts(convoId: "convo-n20")
+    let remainingFresh = await restarted.remainingRejoinAttempts(convoId: "convo-never-seen")
+    XCTAssertEqual(
+      remainingCleared, remainingFresh,
+      "after a successful rejoin + restart, the conversation must look indistinguishable from a fresh one"
+    )
+    XCTAssertGreaterThan(remainingCleared, 0)
+  }
 }

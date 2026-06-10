@@ -1136,6 +1136,14 @@ extension MLSConversationManager {
 
         if joined {
           successCount += 1
+          // N20: mirror the other attemptRejoinWithWelcomeFallback callers
+          // (Sync.swift deferred recovery + the needsRejoin loop above) — a
+          // successful rejoin must clear the persisted failure counters,
+          // otherwise they survive the rejoin and keep biasing
+          // shouldSkipRejoin backoff/skip decisions on this path.
+          if let recoveryManager = await mlsClient.recovery(for: userDid) {
+            await recoveryManager.clearRejoinTracking(convoId: convo.conversationId)
+          }
         } else {
           failureCount += 1
         }

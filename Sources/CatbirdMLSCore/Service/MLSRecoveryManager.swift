@@ -564,14 +564,21 @@ public actor MLSRecoveryManager {
 
   /// Check if a conversation should be skipped during rejoin (max attempts exceeded or on cooldown).
   ///
-  /// **Pure read — no side effects.** This must be safe to call multiple
-  /// times for the same logical rejoin attempt (e.g. nested External Commit
-  /// fallback re-entering the gate) without flipping its own answer.
-  /// Outcome stamping (`lastGlobalRejoinAttemptAt`) lives in
-  /// `recordFailedRejoin` / `clearRejoinTracking` — matches the Rust
-  /// orchestrator contract in `catbird-mls/src/orchestrator/recovery.rs`
-  /// (`should_skip` is a pure read; `record_failure` / `clear` stamp the
-  /// global timestamp).
+  /// **Read-mostly, with one lazy-expiry side effect.** When a quarantine
+  /// horizon (`quarantinedUntil`) has already expired, this method removes
+  /// the stale entry and enqueues a persistence write-through so the cleared
+  /// quarantine survives restart. That mutation is idempotent and can only
+  /// flip the answer from "skip" to "don't skip" (never the reverse), so the
+  /// method remains safe to call multiple times for the same logical rejoin
+  /// attempt (e.g. nested External Commit fallback re-entering the gate).
+  /// It never stamps attempt outcomes: `lastGlobalRejoinAttemptAt` and the
+  /// failure counters are mutated only in `recordFailedRejoin` /
+  /// `clearRejoinTracking`, matching the Rust orchestrator contract in
+  /// `catbird-mls/src/orchestrator/recovery.rs` (`should_skip` does not
+  /// stamp the global timestamp; `record_failure` / `clear` do). Note the
+  /// quarantine lazy-expiry cleanup is a deliberate divergence from the Rust
+  /// twin's strictly-pure `should_skip` — account for it when holding the
+  /// two implementations to parity.
   ///
   /// Layered gates (each can short-circuit to skip):
   /// 1. Per-conversation max attempts (spec §8.2 — MAX_REJOIN_ATTEMPTS = 3)

@@ -150,7 +150,13 @@ public extension MLSConversationManager {
 
     // Mark for deferred rejoin — the sync loop will handle recovery with backoff.
     // Do NOT launch an immediate External Commit here.
-    try? await markConversationNeedsRejoin(conversationID)
+    do {
+      try await markConversationNeedsRejoin(conversationID)
+    } catch {
+      logger.error(
+        "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, self-decrypt-failure) for \(conversationID.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+      )
+    }
   }
 
   private func clearSelfDecryptFailures(conversationID: String) {
@@ -186,7 +192,13 @@ public extension MLSConversationManager {
 
       // Mark for deferred rejoin — the sync loop will handle recovery with backoff.
       // Do NOT launch an immediate External Commit here.
-      try? await markConversationNeedsRejoin(conversationID)
+      do {
+        try await markConversationNeedsRejoin(conversationID)
+      } catch {
+        logger.error(
+          "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, persistent-decrypt-failure) for \(conversationID.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+        )
+      }
 
       return true
     }
@@ -476,8 +488,16 @@ public extension MLSConversationManager {
       // membership commit (epoch advance) to race with a message send.
       // We hold the per-group lock across: epoch read → encrypt → server send.
       let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
-        // Spec §5.1: Pre-send sync — catch up on missed commits before encrypting
-        _ = try? await preSendSync(convoId: convoId, groupIdData: groupIdData)
+        // Spec §5.1: Pre-send sync — catch up on missed commits before encrypting.
+        // Surfacing only: a failed pre-send sync must NOT block the send, but it
+        // must not be silent either (a stale epoch here is how sends land on 409).
+        do {
+          _ = try await preSendSync(convoId: convoId, groupIdData: groupIdData)
+        } catch {
+          logger.error(
+            "❌ [SEND] preSendSync failed for \(convoId.prefix(16)): \(error.localizedDescription) — proceeding with send at current local epoch (may 409 if commits were missed)"
+          )
+        }
 
         // Ground-truth epoch (inside the lock so it can't race with addMembers/merge)
         let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
@@ -637,7 +657,13 @@ public extension MLSConversationManager {
             } catch let retryError as MLSAPIError {
               // Second 409 or commit processing failed — flag needsRejoin (NOT needsReset)
               logger.error("🚨 [SEND] Retry failed after commit catch-up for \(convoId.prefix(16)) — flagging needsRejoin")
-              try? await markConversationNeedsRejoin(convoId)
+              do {
+                try await markConversationNeedsRejoin(convoId)
+              } catch {
+                logger.error(
+                  "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, 409-retry-failed) for \(convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                )
+              }
               throw retryError
             }
           }
@@ -795,16 +821,25 @@ public extension MLSConversationManager {
       let localMsgId = result.0
       let sendResult = result.1
 
-      // Update metadata with server-confirmed values
-      try? await storage.updateMessageMetadata(
-        messageID: localMsgId,
-        currentUserDID: userDid,
-        epoch: sendResult.epoch,
-        sequenceNumber: sendResult.sequenceNumber,
-        timestamp: sendResult.receivedAt.date,
-        database: database,
-        newMessageID: sendResult.messageId
-      )
+      // Update metadata with server-confirmed values.
+      // Surfacing only: the message was already accepted by the server, so the
+      // send still succeeds — but a dropped write here loses the server-confirmed
+      // seq/epoch/timestamp locally and must be visible.
+      do {
+        try await storage.updateMessageMetadata(
+          messageID: localMsgId,
+          currentUserDID: userDid,
+          epoch: sendResult.epoch,
+          sequenceNumber: sendResult.sequenceNumber,
+          timestamp: sendResult.receivedAt.date,
+          database: database,
+          newMessageID: sendResult.messageId
+        )
+      } catch {
+        logger.error(
+          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata after send) for \(convoId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally"
+        )
+      }
 
       return (
         messageId: sendResult.messageId,
@@ -1051,7 +1086,13 @@ public extension MLSConversationManager {
           // Don't recursively call here - let the caller retry
         case .needsDeferredRejoin(_, let reason):
           logger.warning("[SEQ-ORDER] Epoch catch-up needs deferred rejoin for \(message.convoId.prefix(16))...: \(reason)")
-          try? await markConversationNeedsRejoin(message.convoId)
+          do {
+            try await markConversationNeedsRejoin(message.convoId)
+          } catch {
+            logger.error(
+              "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, seq-order-catch-up) for \(message.convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+            )
+          }
         case .serverDataGap:
           // Bootstrap commit was never written to wire — standard catch-up
           // can never bridge this gap. Track strikes; trigger Mode B reset
@@ -1301,7 +1342,13 @@ public extension MLSConversationManager {
                     logger.info("✅ [EPOCH-RECOVERY] Commits fetched successfully - retrying message processing")
                   case .needsDeferredRejoin(_, let reason):
                     logger.warning("⚠️ [EPOCH-RECOVERY] Deferred rejoin needed for \(message.convoId.prefix(16))...: \(reason)")
-                    try? await markConversationNeedsRejoin(message.convoId)
+                    do {
+                      try await markConversationNeedsRejoin(message.convoId)
+                    } catch {
+                      logger.error(
+                        "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, epoch-recovery-catch-up) for \(message.convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                      )
+                    }
                   case .serverDataGap:
                     let auth = await mlsClient.epochAuthenticatorHex(
                       for: userDid, groupId: groupIdData)
@@ -3859,7 +3906,13 @@ public extension MLSConversationManager {
     // Mark for deferred rejoin — the sync loop's recoverDeferredRejoins will handle it
     // with backoff. Do NOT launch an immediate External Commit from here, as concurrent
     // auto-rejoins across devices are the primary cause of epoch inflation.
-    try? await markConversationNeedsRejoin(conversationID)
+    do {
+      try await markConversationNeedsRejoin(conversationID)
+    } catch {
+      logger.error(
+        "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, ratchet-desync) for \(conversationID.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+      )
+    }
   }
 
   // MARK: - Epoch Management
@@ -4230,13 +4283,25 @@ public extension MLSConversationManager {
                 logger.error(
                   "🛡️ [CLIENT G] Server's groupId matches our local groupId for \(convoId.prefix(16)) — WrongGroupId from a stale wire frame? Falling back to needsRejoin"
                 )
-                try? await markConversationNeedsRejoin(convoId)
+                do {
+                  try await markConversationNeedsRejoin(convoId)
+                } catch {
+                  logger.error(
+                    "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, client-g-stale-wire-frame) for \(convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                  )
+                }
               }
             } else {
               logger.error(
                 "🛡️ [CLIENT G] getConversation returned nil for \(convoId.prefix(16)) — cannot stage recipient rejoin; falling back to needsRejoin"
               )
-              try? await markConversationNeedsRejoin(convoId)
+              do {
+                try await markConversationNeedsRejoin(convoId)
+              } catch {
+                logger.error(
+                  "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, client-g-nil-conversation) for \(convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                )
+              }
             }
           } catch {
             // 410-shaped failure means the server's active crypto_session
@@ -4265,7 +4330,13 @@ public extension MLSConversationManager {
               logger.error(
                 "🛡️ [CLIENT G] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription) — falling back to needsRejoin"
               )
-              try? await markConversationNeedsRejoin(convoId)
+              do {
+                try await markConversationNeedsRejoin(convoId)
+              } catch {
+                logger.error(
+                  "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, client-g-getConversation-failed) for \(convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                )
+              }
             }
           }
         } else {
