@@ -5374,6 +5374,28 @@ public actor MLSGRDBManager {
       try db.execute(sql: "DELETE FROM MLSMessageModel")
     }
 
+    // MARK: v32 — persisted recovery counters (WS-6.4, E7, resolves N21)
+    // Swift twin of the Rust orchestrator's persisted RecoveryTracker.
+    // Per-conversation {failedRejoinCount, lastAttemptAtMs, quarantinedUntilMs}
+    // + per-user global {lastGlobalRejoinAttemptAtMs}. Timestamps are unix
+    // epoch milliseconds; hydration ignores entries older than 24h
+    // (MLSRecoveryManager.persistedStateTTL) so a row can never permanently
+    // wedge a conversation.
+    migrator.registerMigration("v32_recovery_attempt_state") { db in
+      try db.create(table: "MLSRecoveryAttemptStateModel", ifNotExists: true) { t in
+        t.column("conversationID", .text).notNull()
+        t.column("currentUserDID", .text).notNull()
+        t.column("failedRejoinCount", .integer).notNull().defaults(to: 0)
+        t.column("lastAttemptAtMs", .integer).notNull()
+        t.column("quarantinedUntilMs", .integer)
+        t.primaryKey(["conversationID", "currentUserDID"])
+      }
+      try db.create(table: "MLSRecoveryGlobalStateModel", ifNotExists: true) { t in
+        t.column("currentUserDID", .text).notNull().primaryKey()
+        t.column("lastGlobalRejoinAttemptAtMs", .integer).notNull()
+      }
+    }
+
     // Execute all migrations
     try migrator.migrate(db)
   }

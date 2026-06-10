@@ -20,8 +20,12 @@ public actor MLSRecoveryManager {
 
   // MARK: - Properties
 
-  private let mlsClient: MLSClient
-  private let mlsAPIClient: MLSAPIClient
+  /// Optional so the rejoin-tracking core stays constructible in tests
+  /// (restart-persistence tests recreate the manager on the same DB without
+  /// a live MLSClient/MLSAPIClient). Production paths always pass both via
+  /// the public initializer; reporting/recovery methods guard loudly.
+  private let mlsClient: MLSClient?
+  private let mlsAPIClient: MLSAPIClient?
   private let logger = Logger(subsystem: "blue.catbird", category: "MLSRecoveryManager")
 
   /// Tracks users currently undergoing recovery to prevent concurrent operations
@@ -136,7 +140,49 @@ public actor MLSRecoveryManager {
   /// call within the same logical rejoin attempt (e.g. nested EC fallback
   /// re-entering the gate) would observe the floor it just set and skip,
   /// which would be misclassified as a failed attempt by the caller.
+  ///
+  /// WS-6.4 (E7, N21): no longer in-memory-only — write-through persisted via
+  /// `persistence` on every outcome stamp and rehydrated at startup, so a
+  /// restart cannot reset the global rejoin floor.
   private var lastGlobalRejoinAttemptAt: Date?
+
+  // MARK: - Persisted Recovery Counters (WS-6.4 / E7 / N21)
+
+  /// TTL for persisted recovery-counter entries. E7 coordinated semantics
+  /// with the Rust `RecoveryTracker` twin: entries whose `last_attempt_at`
+  /// is older than this are IGNORED at hydration, so persisted state can
+  /// suppress automated rejoin for at most 24h — it can never permanently
+  /// wedge a conversation.
+  public static let persistedStateTTL: TimeInterval = 24 * 60 * 60
+
+  /// Hard ceiling on accumulated failed-rejoin attempts (circuit breaker).
+  /// Chosen as `maxRejoinAttempts + 5` so it stays strictly below the
+  /// server-corrupted marker band (`markConversationServerCorrupted` stamps
+  /// `maxRejoinAttempts + 10`; `isConversationServerCorrupted` tests
+  /// `> maxRejoinAttempts + 5`). At or beyond the ceiling, automated rejoin
+  /// is disabled for the conversation (loud `.error` surfacing) and a 24h
+  /// quarantine horizon is persisted; the existing recovery-state mechanism
+  /// (`remainingRejoinAttempts == 0` → callers persist UNRECOVERABLE_LOCAL)
+  /// carries it to the UI. The 24h TTL guarantees the breaker self-resets.
+  public static let rejoinAttemptCeiling = 8
+
+  /// Persistence seam (GRDB-backed in production via
+  /// `MLSRecoveryStateStore`). Wired by the single startup caller
+  /// (`MLSConversationManager.initialize()`); nil in contexts that never run
+  /// the rejoin loop (e.g. NSE).
+  private var persistence: MLSRecoveryStatePersisting?
+
+  /// Explicit per-conversation quarantine horizon (ceiling trips,
+  /// server-corruption marks). Checked by `shouldSkipRejoin` in addition to
+  /// the attempts-derived backoff. Hydration honors a persisted horizon but
+  /// never extends it.
+  private var quarantinedUntil: [String: Date] = [:]
+
+  /// Tail of the write-through chain. Each persistence op is appended here
+  /// so writes apply in the order the state changes happened. Failures are
+  /// logged at `.error` (never silent) and do not affect in-memory state,
+  /// which stays authoritative for the current process.
+  private var persistTail: Task<Void, Never>?
 
   /// Extract a `retryAfter` hint (in milliseconds) from an MLSAPIError or its
   /// localized description. The Petrel-generated client does not currently
@@ -223,8 +269,93 @@ public actor MLSRecoveryManager {
     self.mlsAPIClient = mlsAPIClient
   }
 
+  /// Test-only initializer: rejoin tracking + persistence without live
+  /// MLS/API clients. Server-reporting and silent-recovery paths guard the
+  /// nil dependencies loudly. Used by the restart-persistence tests, which
+  /// recreate the manager on the same DB to mirror the Rust twin's
+  /// kill-orchestrator-mid-backoff tests.
+  internal init(persistence: MLSRecoveryStatePersisting?) {
+    self.mlsClient = nil
+    self.mlsAPIClient = nil
+    self.persistence = persistence
+  }
+
   public func setDeferredRejoinHandler(_ handler: DeferredRejoinHandler?) {
     deferredRejoinHandler = handler
+  }
+
+  // MARK: - Persistence Plumbing (WS-6.4 / E7)
+
+  /// Wire the persistence seam. Called once at startup by
+  /// `MLSConversationManager.initialize()` (the single startup caller),
+  /// immediately before `hydrateFromDatabase()`.
+  public func setPersistence(_ store: MLSRecoveryStatePersisting?) {
+    persistence = store
+  }
+
+  /// Await completion of all enqueued write-through operations. Primarily
+  /// for tests and orderly shutdown; production callers don't need to wait.
+  public func flushPersistence() async {
+    await persistTail?.value
+  }
+
+  /// Append a persistence op to the ordered write-through chain. LOUD on
+  /// failure (E7: persistence failures in recovery paths must be observable,
+  /// never silent) — but in-memory state stays authoritative either way.
+  private func enqueuePersist(
+    _ label: String,
+    _ op: @escaping @Sendable () async throws -> Void
+  ) {
+    let previous = persistTail
+    let log = logger
+    persistTail = Task {
+      await previous?.value
+      do {
+        try await op()
+      } catch {
+        log.error(
+          "❌ [MLSRecoveryManager] PERSISTENCE FAILURE (\(label)): \(error.localizedDescription) — recovery counters may not survive restart (E7 write-through violated for this change)"
+        )
+      }
+    }
+  }
+
+  /// Write-through the current in-memory entry for a conversation.
+  private func persistConversationEntry(convoId: String) {
+    guard let persistence else { return }
+    guard let record = failedRejoins[convoId] else { return }
+    let attempts = record.attempts
+    let lastMs = Int64(record.lastAttempt.timeIntervalSince1970 * 1000)
+    let quarantineMs = quarantinedUntil[convoId].map { Int64($0.timeIntervalSince1970 * 1000) }
+    enqueuePersist("upsert \(convoId.prefix(16))") {
+      try await persistence.upsertConversationState(
+        conversationID: convoId,
+        failedRejoinCount: attempts,
+        lastAttemptAtMs: lastMs,
+        quarantinedUntilMs: quarantineMs
+      )
+    }
+  }
+
+  /// Write-through deletion of a conversation's persisted entry (success path).
+  private func persistClearConversationEntry(convoId: String) {
+    guard let persistence else { return }
+    enqueuePersist("clear \(convoId.prefix(16))") {
+      try await persistence.clearConversationState(conversationID: convoId)
+    }
+  }
+
+  /// Write-through the global rejoin-floor timestamp.
+  private func persistGlobalStamp(_ date: Date) {
+    guard let persistence else { return }
+    let ms = Int64(date.timeIntervalSince1970 * 1000)
+    enqueuePersist("global stamp") {
+      try await persistence.setGlobalLastRejoinAttempt(atMs: ms)
+    }
+  }
+
+  private static func date(fromEpochMs ms: Int64) -> Date {
+    Date(timeIntervalSince1970: Double(ms) / 1000.0)
   }
 
   // MARK: - ConversationRecoveryState (Spec §8.1 / Invariants S1, S1.1)
@@ -449,7 +580,35 @@ public actor MLSRecoveryManager {
   ///    applies across all conversations, mirrors Rust
   ///    `RecoveryTracker.last_global_rejoin_at`)
   public func shouldSkipRejoin(convoId: String) -> Bool {
+    // WS-6.4 circuit breaker: explicit quarantine horizon (ceiling trip or
+    // server-corruption mark, possibly hydrated from a prior session).
+    // Honored while active; expires naturally — never extended here.
+    if let quarantine = quarantinedUntil[convoId] {
+      if Date() < quarantine {
+        logger.error(
+          "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - quarantined until \(quarantine) (circuit breaker)"
+        )
+        return true
+      }
+      quarantinedUntil.removeValue(forKey: convoId)
+      if failedRejoins[convoId] != nil {
+        persistConversationEntry(convoId: convoId)
+      } else {
+        persistClearConversationEntry(convoId: convoId)
+      }
+    }
+
     if let record = failedRejoins[convoId] {
+      // WS-6.4 circuit breaker: persisted attempts at/beyond the ceiling
+      // disable automated rejoin outright (loud, .error — surfaced to the
+      // existing recovery-state path via remainingRejoinAttempts == 0).
+      if record.attempts >= Self.rejoinAttemptCeiling {
+        logger.error(
+          "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - rejoin attempt ceiling (\(Self.rejoinAttemptCeiling)) reached (\(record.attempts) accumulated failures) — automated rejoin disabled (circuit breaker)"
+        )
+        return true
+      }
+
       // Skip if max attempts exceeded
       if record.attempts >= maxRejoinAttempts {
         logger.info(
@@ -524,15 +683,31 @@ public actor MLSRecoveryManager {
     failureType: String = "external_commit_exhausted"
   ) {
     let existing = failedRejoins[convoId] ?? (attempts: 0, lastAttempt: Date.distantPast)
-    failedRejoins[convoId] = (attempts: existing.attempts + 1, lastAttempt: Date())
+    let now = Date()
+    let newAttempts = existing.attempts + 1
+    failedRejoins[convoId] = (attempts: newAttempts, lastAttempt: now)
     // Stamp the global rejoin floor on the failure outcome (spec §8.4 / §10,
     // mirrors Rust `RecoveryTracker::record_failure`). Any completed attempt
     // — success or failure — counts as the most recent global attempt for
     // cross-conversation cooldown.
-    lastGlobalRejoinAttemptAt = Date()
+    lastGlobalRejoinAttemptAt = now
     logger.warning(
-      "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(existing.attempts + 1)/\(self.maxRejoinAttempts) failureType=\(failureType)"
+      "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(newAttempts)/\(self.maxRejoinAttempts) failureType=\(failureType)"
     )
+
+    // WS-6.4 circuit breaker: at/beyond the ceiling, disable automated
+    // rejoin and persist an explicit 24h quarantine horizon (the TTL ensures
+    // this cannot permanently wedge the conversation).
+    if newAttempts >= Self.rejoinAttemptCeiling, quarantinedUntil[convoId] == nil {
+      quarantinedUntil[convoId] = now.addingTimeInterval(Self.persistedStateTTL)
+      logger.error(
+        "⛔️ [MLSRecoveryManager] Rejoin attempt ceiling (\(Self.rejoinAttemptCeiling)) reached for \(convoId.prefix(16)) — automated rejoin disabled, quarantined for 24h (circuit breaker)"
+      )
+    }
+
+    // WS-6.4 / E7: write-through on every state change.
+    persistConversationEntry(convoId: convoId)
+    persistGlobalStamp(now)
 
     // Spec §8.6: Report to server when transitioning to UNRECOVERABLE_LOCAL
     if existing.attempts + 1 >= maxRejoinAttempts {
@@ -565,6 +740,12 @@ public actor MLSRecoveryManager {
         failureMode = nil
       }
       let resolvedFailureType = failureType
+      guard let apiClient = mlsAPIClient else {
+        logger.error(
+          "❌ [MLSRecoveryManager] Cannot report recovery failure for \(convoId.prefix(16)) — no API client configured (test/headless context)"
+        )
+        return
+      }
       Task {
         do {
           let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
@@ -573,7 +754,7 @@ public actor MLSRecoveryManager {
             failureMode: failureMode,  // ADR-008 D1
             epochAuthenticator: authenticator
           )
-          let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
+          let (code, output) = try await apiClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
           self.logger.info(
             "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil") failureType=\(resolvedFailureType) failureMode=\(failureMode ?? "nil")"
           )
@@ -653,6 +834,9 @@ public actor MLSRecoveryManager {
         max(0, remainingSec - Self.minGlobalRejoinIntervalSec)
       )
       lastGlobalRejoinAttemptAt = projected
+      // WS-6.4 / E7: write-through the projected global stamp so a restart
+      // mid-gate doesn't forget the Rust-side cooldown projection.
+      persistGlobalStamp(projected)
       logger.debug(
         "⏸️ [MLSRecoveryManager] Rust rejoin gate active for \(convoId.prefix(16)) (\(Int(remainingSec))s remaining); projecting local gate, NOT stamping recordFailedRejoin (no real attempt happened)"
       )
@@ -683,11 +867,15 @@ public actor MLSRecoveryManager {
       nextAttempts = min(existing.attempts + 1, maxRejoinAttempts - 1)
     }
 
-    failedRejoins[convoId] = (attempts: nextAttempts, lastAttempt: Date())
-    lastGlobalRejoinAttemptAt = Date()
+    let now = Date()
+    failedRejoins[convoId] = (attempts: nextAttempts, lastAttempt: now)
+    lastGlobalRejoinAttemptAt = now
     logger.warning(
       "⏳ [MLSRecoveryManager] Waiting for peer key packages for \(convoId.prefix(16)) - cooldown attempt \(nextAttempts)/\(self.maxRejoinAttempts - 1)"
     )
+    // WS-6.4 / E7: write-through on every state change.
+    persistConversationEntry(convoId: convoId)
+    persistGlobalStamp(now)
   }
 
   /// Record an unbridgeable epoch gap (`fetchAndProcessMissingCommits`
@@ -734,6 +922,12 @@ public actor MLSRecoveryManager {
       )
     }
     let authenticator = epochAuthenticatorHex
+    guard let apiClient = mlsAPIClient else {
+      logger.error(
+        "❌ [MLSRecoveryManager] Cannot report unbridgeable epoch gap for \(convoId.prefix(16)) — no API client configured (test/headless context)"
+      )
+      return
+    }
     Task {
       do {
         let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
@@ -742,7 +936,7 @@ public actor MLSRecoveryManager {
           failureMode: "group_state_unrecoverable",
           epochAuthenticator: authenticator
         )
-        let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat
+        let (code, output) = try await apiClient.client.blue.catbird.mlschat
           .reportRecoveryFailure(input: input)
         self.logger.info(
           "📡 [MLSRecoveryManager] Reported unbridgeable epoch gap for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) reason=\(output?.reason ?? "nil")"
@@ -772,6 +966,7 @@ public actor MLSRecoveryManager {
   /// successful External Commit).
   public func clearRejoinTracking(convoId: String) {
     let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
+    quarantinedUntil.removeValue(forKey: convoId)
     transientStates.removeValue(forKey: convoId)
     commitFailureCounts.removeValue(forKey: convoId)
     decryptionFailureCounts.removeValue(forKey: convoId)
@@ -783,7 +978,10 @@ public actor MLSRecoveryManager {
     // rejoins even when they succeed"). Stamped regardless of whether prior
     // failure tracking existed, so a clean rejoin success still enforces the
     // 30s floor against subsequent EC bursts on other conversations.
-    lastGlobalRejoinAttemptAt = Date()
+    let now = Date()
+    lastGlobalRejoinAttemptAt = now
+    persistClearConversationEntry(convoId: convoId)
+    persistGlobalStamp(now)
     if hadTracking {
       logger.info("✅ [MLSRecoveryManager] Cleared rejoin tracking for \(convoId.prefix(16))")
     }
@@ -838,6 +1036,12 @@ public actor MLSRecoveryManager {
         "📡 [MLSRecoveryManager] Re-firing recovery escalation on hydrate for \(convoId.prefix(16))"
       )
       let authenticator = epochAuthenticatorsByConvoId?[convoId]
+      guard let apiClient = mlsAPIClient else {
+        logger.error(
+          "❌ [MLSRecoveryManager] Cannot re-fire recovery escalation for \(convoId.prefix(16)) — no API client configured (test/headless context)"
+        )
+        continue
+      }
       if authenticator == nil {
         logger.warning(
           "⚠️ [MLSRecoveryManager] hydrate re-fire missing epochAuthenticator for \(convoId.prefix(16)) — server will short-circuit vote (reason: missing_authenticator). Caller should pass MLSContext.epochAuthenticator(groupId:) hex in epochAuthenticatorsByConvoId."
@@ -850,7 +1054,7 @@ public actor MLSRecoveryManager {
             failureType: "external_commit_exhausted",  // Spec §8.6
             epochAuthenticator: authenticator
           )
-          let (code, output) = try await self.mlsAPIClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
+          let (code, output) = try await apiClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
           self.logger.info(
             "📡 [MLSRecoveryManager] Re-fired recovery escalation for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil")"
           )
@@ -860,6 +1064,63 @@ public actor MLSRecoveryManager {
           )
         }
       }
+    }
+  }
+
+  /// Load persisted recovery counters and global cooldown state.
+  ///
+  /// This is the WS-6.4/N21 startup contract: call after `setPersistence(_:)`
+  /// and before any deferred rejoin loop runs. Entries older than the 24h TTL
+  /// are ignored and cleared so persisted state cannot permanently wedge a
+  /// conversation.
+  public func hydrateFromDatabase() async {
+    guard let persistence else {
+      logger.debug("📥 [MLSRecoveryManager] No recovery persistence store configured")
+      return
+    }
+
+    do {
+      let snapshot = try await persistence.loadSnapshot()
+      let now = Date()
+
+      for entry in snapshot.conversations {
+        let lastAttempt = Self.date(fromEpochMs: entry.lastAttemptAtMs)
+        guard now.timeIntervalSince(lastAttempt) <= Self.persistedStateTTL else {
+          logger.info(
+            "🧹 [MLSRecoveryManager] Ignoring expired persisted recovery state for \(entry.conversationID.prefix(16))"
+          )
+          try await persistence.clearConversationState(conversationID: entry.conversationID)
+          continue
+        }
+
+        failedRejoins[entry.conversationID] = (
+          attempts: entry.failedRejoinCount,
+          lastAttempt: lastAttempt
+        )
+
+        if let quarantineMs = entry.quarantinedUntilMs {
+          let quarantine = Self.date(fromEpochMs: quarantineMs)
+          if quarantine > now {
+            quarantinedUntil[entry.conversationID] = quarantine
+          }
+        }
+
+        logger.info(
+          "📥 [MLSRecoveryManager] Hydrated recovery state for \(entry.conversationID.prefix(16)) attempts=\(entry.failedRejoinCount)"
+        )
+      }
+
+      if let globalMs = snapshot.lastGlobalRejoinAttemptAtMs {
+        let global = Self.date(fromEpochMs: globalMs)
+        if now.timeIntervalSince(global) <= Self.persistedStateTTL || global > now {
+          lastGlobalRejoinAttemptAt = global
+          logger.info("📥 [MLSRecoveryManager] Hydrated global rejoin floor")
+        }
+      }
+    } catch {
+      logger.error(
+        "❌ [MLSRecoveryManager] Failed to hydrate persisted recovery state: \(error.localizedDescription)"
+      )
     }
   }
 
@@ -874,6 +1135,13 @@ public actor MLSRecoveryManager {
     -> DesyncSeverity
   {
     logger.info("🔍 [MLSRecoveryManager] Checking desync severity for \(userDid.prefix(20))...")
+    guard let mlsClient else {
+      logger.error(
+        "❌ [MLSRecoveryManager] Cannot check desync severity — no MLS client configured (test/headless context)"
+      )
+      let serverCount = serverBundleCount ?? 0
+      return .severe(localCount: 0, serverCount: serverCount, difference: serverCount)
+    }
 
     do {
       // Get local bundle count
@@ -939,6 +1207,12 @@ public actor MLSRecoveryManager {
   /// This is the main entry point for automatic recovery
   public func performSilentRecovery(for userDid: String, conversationIds: [String] = []) async throws {
     logger.info("🔄 [MLSRecoveryManager] Starting silent recovery for \(userDid.prefix(20))...")
+    guard let mlsClient else {
+      logger.error(
+        "❌ [MLSRecoveryManager] Cannot perform silent recovery — no MLS client configured (test/headless context)"
+      )
+      throw MLSRecoveryError.recoveryFailed(underlying: MLSRecoveryError.deviceDeletionFailed)
+    }
 
     // Prevent concurrent recovery for same user
     guard !recoveryInProgress.contains(userDid) else {
@@ -1163,7 +1437,10 @@ public actor MLSRecoveryManager {
     logger.error("   This conversation cannot be joined until server data is repaired")
 
     // Record max failures immediately to prevent any retry attempts
-    failedRejoins[convoId] = (attempts: maxRejoinAttempts + 10, lastAttempt: Date())
+    let now = Date()
+    failedRejoins[convoId] = (attempts: maxRejoinAttempts + 10, lastAttempt: now)
+    quarantinedUntil[convoId] = now.addingTimeInterval(Self.persistedStateTTL)
+    persistConversationEntry(convoId: convoId)
   }
 
   /// Check if a conversation is marked as having server-side corruption
@@ -1193,11 +1470,17 @@ public actor MLSRecoveryManager {
     logger.info(
       "🔍 [MLSRecoveryManager.verifyGroupInfoHealth] Checking GroupInfo for \(convoId.prefix(16))..."
     )
+    guard let apiClient = mlsAPIClient else {
+      logger.error(
+        "❌ [MLSRecoveryManager.verifyGroupInfoHealth] Cannot verify GroupInfo — no API client configured (test/headless context)"
+      )
+      return false
+    }
 
     for attempt in 1...maxRetries {
       do {
         // Fetch stored GroupInfo
-        let (storedData, epoch, _) = try await mlsAPIClient.getGroupInfo(convoId: convoId)
+        let (storedData, epoch, _) = try await apiClient.getGroupInfo(convoId: convoId)
 
         // Check size
         if storedData.count < 100 {
@@ -1208,7 +1491,7 @@ public actor MLSRecoveryManager {
           if attempt < maxRetries {
             // Request republish from active members
             logger.info("🔄 [verifyGroupInfoHealth] Requesting GroupInfo refresh...")
-            _ = try await mlsAPIClient.groupInfoRefresh(convoId: convoId)
+            _ = try await apiClient.groupInfoRefresh(convoId: convoId)
             try await Task.sleep(for: .seconds(2))
             continue
           }
