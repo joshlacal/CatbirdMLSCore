@@ -654,6 +654,10 @@ extension MLSConversationManager {
         for: userDid, apiClient: apiClient, atProtoClient: atProtoClient)
 
       if let recoveryManager = await MLSClient.shared.recovery(for: userDid) {
+        let recoveryStore = MLSRecoveryStateStore(database: database, currentUserDID: userDid)
+        await recoveryManager.setPersistence(recoveryStore)
+        await recoveryManager.hydrateFromDatabase()
+
         await recoveryManager.setDeferredRejoinHandler { [weak self] handlerUserDid, conversationIds in
           guard let self, self.userDid == handlerUserDid else { return }
           await self.persistDeferredRejoinRequests(
