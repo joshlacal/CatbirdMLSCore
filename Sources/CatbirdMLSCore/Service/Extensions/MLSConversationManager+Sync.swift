@@ -1699,7 +1699,13 @@ public extension MLSConversationManager {
         )
         var welcomeForUs: Bool = false
         do {
-          _ = try await apiClient.getWelcome(convoId: convoId)
+          let localHashes = (try? await mlsClient.getLocalKeyPackageHashes(for: userDid)) ?? []
+          let deviceId = await mlsClient.getDeviceInfo(for: userDid)?.deviceId
+          _ = try await apiClient.getWelcome(
+            convoId: convoId,
+            keyPackageHashes: localHashes,
+            deviceId: deviceId
+          )
           welcomeForUs = true
         } catch let mlsErr as MLSAPIError {
           if case .invalidResponse = mlsErr {

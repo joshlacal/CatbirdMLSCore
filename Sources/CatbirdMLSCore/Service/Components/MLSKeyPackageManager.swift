@@ -178,12 +178,14 @@ public actor MLSKeyPackageManager {
     do {
       // Server requires an explicit future expiration; default to 30 days if not provided
       let expiry = expiresAt ?? Date(timeIntervalSinceNow: 30 * 24 * 60 * 60)
+      let deviceInfo = await splitClient.getDeviceInfo(for: userDid)
 
       // Send raw TLS bytes directly to server
       try await apiClient.publishKeyPackage(
         keyPackage: keyPackageData,
         cipherSuite: defaultCipherSuite,
-        expiresAt: ATProtocolDate(date: expiry)
+        expiresAt: ATProtocolDate(date: expiry),
+        deviceId: deviceInfo?.deviceId
       )
 
       // Create a local reference

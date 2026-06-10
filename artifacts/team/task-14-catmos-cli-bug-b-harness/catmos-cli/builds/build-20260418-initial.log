@@ -1,0 +1,50 @@
+   Compiling catbird_mls v0.1.0 (/Users/joshlacalamito/Developer/Catbird+Petrel/catbird-mls)
+   Compiling catbird-atproto v0.1.0 (/Users/joshlacalamito/Developer/Catbird+Petrel/catbird-atproto)
+   Compiling catmos-core v0.1.0 (/Users/joshlacalamito/Developer/Catbird+Petrel/catmos-cli/catmos-core)
+warning: unused imports: `Engine` and `engine::general_purpose::STANDARD as BASE64`
+   --> catmos-core/src/chat/service.rs:645:22
+    |
+645 |         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `message_type` is never read
+   --> catmos-core/src/chat/messages.rs:150:9
+    |
+142 | pub(crate) struct MessageViewResp {
+    |                   --------------- field in this struct
+...
+150 |     pub message_type: Option<String>,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `last_seq` is never read
+   --> catmos-core/src/chat/messages.rs:159:9
+    |
+156 | pub(crate) struct GetMessagesResp {
+    |                   --------------- field in this struct
+...
+159 |     pub last_seq: Option<i64>,
+    |         ^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> catmos-core/src/chat/messages.rs:883:13
+    |
+883 |             ctx.delete_group(gid_bytes.clone());
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+883 |             let _ = ctx.delete_group(gid_bytes.clone());
+    |             +++++++
+
+   Compiling catmos-tui v0.1.0 (/Users/joshlacalamito/Developer/Catbird+Petrel/catmos-cli/catmos-tui)
+warning: `catmos-core` (lib) generated 4 warnings (run `cargo fix --lib -p catmos-core` to apply 1 suggestion)
+   Compiling catmos v0.1.0 (/Users/joshlacalamito/Developer/Catbird+Petrel/catmos-cli/catmos)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.98s
+warning: the following packages contain code that will be rejected by a future version of Rust: buf_redux v0.8.4, multipart v0.18.0
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

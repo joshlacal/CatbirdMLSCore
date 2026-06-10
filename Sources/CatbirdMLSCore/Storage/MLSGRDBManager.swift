@@ -67,6 +67,13 @@ public enum CheckpointResult: Sendable {
   }
 }
 
+public enum PeriodicCheckpointOutcome: Equatable, Sendable {
+  case checkpointed
+  case skippedSuspended
+  case skippedNoActiveDatabase
+  case deferred
+}
+
 /// Manages encrypted GRDB DatabasePool instances with per-user isolation.
 /// Actor provides thread-safe access and automatic isolation.
 /// Uses DatabasePool for better read concurrency (multiple concurrent readers, single writer).
@@ -802,6 +809,42 @@ public actor MLSGRDBManager {
     initialState: CheckpointBudgetState()
   )
 
+  private struct PeriodicCheckpointLifecycleState: Sendable {
+    var suspended = false
+    var reason = "initial"
+  }
+
+  /// Synchronous lifecycle flag for opportunistic checkpoints.
+  ///
+  /// `scenePhase` can move to inactive/background before actor-scheduled work runs.
+  /// Keeping this outside actor isolation lets the app block periodic WAL checkpoint
+  /// attempts immediately, before GRDB posts suspension notifications.
+  private nonisolated(unsafe) static var periodicCheckpointLifecycleLock =
+    OSAllocatedUnfairLock(initialState: PeriodicCheckpointLifecycleState())
+
+  public nonisolated static func setPeriodicCheckpointingSuspended(
+    _ suspended: Bool,
+    reason: String
+  ) {
+    let changed = periodicCheckpointLifecycleLock.withLock { state -> Bool in
+      let changed = state.suspended != suspended || state.reason != reason
+      state.suspended = suspended
+      state.reason = reason
+      return changed
+    }
+
+    if changed {
+      let state = suspended ? "suspended" : "resumed"
+      staticLogger.debug(
+        "⏸️ [Checkpoint] Periodic checkpointing \(state, privacy: .public): \(reason, privacy: .public)"
+      )
+    }
+  }
+
+  private nonisolated static var isPeriodicCheckpointingSuspended: Bool {
+    periodicCheckpointLifecycleLock.withLock { $0.suspended }
+  }
+
   /// Called after every successful write operation to decrement the checkpoint budget
   /// and trigger a PASSIVE checkpoint when the budget reaches zero.
   ///
@@ -812,6 +855,13 @@ public actor MLSGRDBManager {
   /// TRUNCATE mode is reserved for suspension (emergencyCloseAllDatabases) where we MUST
   /// release WAL file handles to avoid 0xdead10cc termination.
   private nonisolated func didCompleteWrite(for userDID: String) {
+    guard !Self.isPeriodicCheckpointingSuspended,
+      !MLSClient.isSuspensionInProgress,
+      !MLSCoreContext.isSuspensionInProgress
+    else {
+      return
+    }
+
     let shouldCheckpoint = Self.checkpointBudgetLock.withLock { state -> Bool in
       state.budget -= 1
       if state.budget <= 0 && !state.checkpointInProgress {
@@ -847,6 +897,16 @@ public actor MLSGRDBManager {
   private func performPassiveCheckpoint(for userDID: String) async {
     defer {
       Self.checkpointBudgetLock.withLock { $0.checkpointInProgress = false }
+    }
+
+    guard !Self.isPeriodicCheckpointingSuspended,
+      !MLSClient.isSuspensionInProgress,
+      !MLSCoreContext.isSuspensionInProgress
+    else {
+      Self.checkpointBudgetLock.withLock { state in
+        state.budget = CheckpointBudgetState.normalBudget
+      }
+      return
     }
 
     guard let pool = databases[userDID] else {
@@ -2144,20 +2204,36 @@ public actor MLSGRDBManager {
   }
 
   private func startPeriodicCheckpointingIfNeeded() {
+    guard !Self.isPeriodicCheckpointingSuspended else { return }
     guard periodicCheckpointTask == nil else { return }
 
     periodicCheckpointTask = Task { [weak self] in
-      while let self {
-        try? await Task.sleep(nanoseconds: UInt64(self.periodicCheckpointInterval * 1_000_000_000))
-        await self.performPeriodicCheckpoint()
+      while let self, !Task.isCancelled {
+        do {
+          try await Task.sleep(nanoseconds: UInt64(self.periodicCheckpointInterval * 1_000_000_000))
+        } catch {
+          break
+        }
+        guard !Task.isCancelled else { break }
+        _ = await self.performPeriodicCheckpoint()
       }
     }
   }
 
-  private func performPeriodicCheckpoint() async {
+  @discardableResult
+  private func performPeriodicCheckpoint() async -> PeriodicCheckpointOutcome {
+    guard !Self.isPeriodicCheckpointingSuspended,
+      !MLSClient.isSuspensionInProgress,
+      !MLSCoreContext.isSuspensionInProgress
+    else {
+      return .skippedSuspended
+    }
+
     // Best-effort optimization to keep WAL small so switch-time drain is fast.
     let didToCheckpoint = activeUserDID ?? databases.keys.first
-    guard let didToCheckpoint, let db = databases[didToCheckpoint] else { return }
+    guard let didToCheckpoint, let db = databases[didToCheckpoint] else {
+      return .skippedNoActiveDatabase
+    }
 
     // No advisory lock needed - SQLite WAL PASSIVE checkpoint is safe for concurrent access
     // PASSIVE mode won't block readers/writers and won't be blocked by them
@@ -2168,9 +2244,15 @@ public actor MLSGRDBManager {
         try db.execute(sql: "PRAGMA wal_checkpoint(PASSIVE);")
       }
       logger.debug("✅ Periodic WAL checkpoint(PASSIVE) for \(didToCheckpoint.prefix(20), privacy: .private)")
+      return .checkpointed
     } catch {
       logger.debug("⏭️ Periodic checkpoint skipped: \(error.localizedDescription)")
+      return .deferred
     }
+  }
+
+  func performPeriodicCheckpointForTesting() async -> PeriodicCheckpointOutcome {
+    await performPeriodicCheckpoint()
   }
 
   /// Close database for a user

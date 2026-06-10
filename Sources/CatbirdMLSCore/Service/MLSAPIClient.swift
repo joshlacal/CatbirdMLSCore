@@ -1112,7 +1112,8 @@ public final class MLSAPIClient {
     keyPackage: Data,
     cipherSuite: String,
     expiresAt: ATProtocolDate? = nil,
-    idempotencyKey: String? = nil
+    idempotencyKey: String? = nil,
+    deviceId: String? = nil
   ) async throws {
     // Generate idempotency key if not provided
     let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
@@ -1126,7 +1127,8 @@ public final class MLSAPIClient {
         keyPackage: Bytes(data: keyPackage),
         cipherSuite: cipherSuite,
         expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
-      )]
+      )],
+      deviceId: deviceId
     )
 
     let (responseCode, _) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
@@ -1705,10 +1707,19 @@ public final class MLSAPIClient {
   /// Get Welcome message for joining a conversation
   /// - Parameter convoId: Conversation identifier
   /// - Returns: Welcome message data
-  public func getWelcome(convoId: String) async throws -> Data {
+  public func getWelcome(
+    convoId: String,
+    keyPackageHashes: [String]? = nil,
+    deviceId: String? = nil
+  ) async throws -> Data {
     logger.debug("Fetching Welcome message for conversation: \(convoId)")
 
-    let input = BlueCatbirdMlsChatGetGroupState.Parameters(convoId: convoId, include: "welcome")
+    let input = BlueCatbirdMlsChatGetGroupState.Parameters(
+      convoId: convoId,
+      include: "welcome",
+      keyPackageHashes: keyPackageHashes,
+      deviceId: deviceId
+    )
 
     let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupState(input: input)
 

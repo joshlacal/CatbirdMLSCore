@@ -139,4 +139,21 @@ final class MLSStorageSuspensionTests: XCTestCase {
 
     try await manager.deleteDatabase(for: userDID)
   }
+
+  func testPeriodicCheckpointSkipsWhileLifecycleSuspended() async throws {
+    let userDID = "did:plc:periodic-checkpoint-suspended-\(UUID().uuidString)"
+    await manager.setActiveUser(userDID)
+    _ = try await manager.getDatabasePool(for: userDID)
+
+    MLSGRDBManager.setPeriodicCheckpointingSuspended(true, reason: "unit-test")
+    defer {
+      MLSGRDBManager.setPeriodicCheckpointingSuspended(false, reason: "unit-test cleanup")
+    }
+
+    let outcome = await manager.performPeriodicCheckpointForTesting()
+
+    XCTAssertEqual(outcome, .skippedSuspended)
+
+    try await manager.deleteDatabase(for: userDID)
+  }
 }

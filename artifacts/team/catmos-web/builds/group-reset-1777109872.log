@@ -1,0 +1,20 @@
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `remove_members`, `discard_incoming_commit`, and `discard_pending_external_join` are never used
+   --> src/wasm_mls_context.rs:412:19
+    |
+313 | impl WasmMLSContext {
+    | ------------------- methods in this implementation
+...
+412 |     pub(crate) fn remove_members(
+    |                   ^^^^^^^^^^^^^^
+...
+564 |     pub(crate) fn discard_incoming_commit(&self, group_id: Vec<u8>) -> Result<(), MLSError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+733 |     pub(crate) fn discard_pending_external_join(&self, group_id: Vec<u8>) -> Result<(), MLSError> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `catbird-mls-web` (lib) generated 3 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s

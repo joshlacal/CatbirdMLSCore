@@ -5630,7 +5630,13 @@ public extension MLSConversationManager {
 
     let welcomeData: Data
     do {
-      welcomeData = try await apiClient.getWelcome(convoId: convo.conversationId)
+      let localHashes = (try? await mlsClient.getLocalKeyPackageHashes(for: userDid)) ?? []
+      let deviceId = await mlsClient.getDeviceInfo(for: userDid)?.deviceId
+      welcomeData = try await apiClient.getWelcome(
+        convoId: convo.conversationId,
+        keyPackageHashes: localHashes,
+        deviceId: deviceId
+      )
       logger.debug("Received Welcome message: \(welcomeData.count) bytes")
     } catch let error as MLSAPIError {
       if case .httpError(let statusCode, _) = error, statusCode == 410 {
