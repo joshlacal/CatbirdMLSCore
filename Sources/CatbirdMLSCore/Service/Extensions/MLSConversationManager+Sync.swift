@@ -255,7 +255,13 @@ public extension MLSConversationManager {
                   logger.warning("⚠️ Epoch catch-up failed (new group) - deferring rejoin for \(convo.conversationId.prefix(16))...")
                   logger.warning("   Local epoch \(failedEpoch) cannot process commits to reach server epoch \(serverEpoch)")
                   logger.warning("   Reason: \(reason)")
-                  try? await markConversationNeedsRejoin(convo.conversationId)
+                  do {
+                    try await markConversationNeedsRejoin(convo.conversationId)
+                  } catch {
+                    logger.error(
+                      "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, sync-catch-up-new-group) for \(convo.conversationId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                    )
+                  }
                 case .serverDataGap:
                   logger.warning("⚠️ Server data gap (new group) for \(convo.conversationId.prefix(16))... - epoch \(ffiEpoch) unbridgeable to \(serverEpoch)")
                   let auth = await mlsClient.epochAuthenticatorHex(
@@ -326,7 +332,13 @@ public extension MLSConversationManager {
                     logger.warning("⚠️ Epoch catch-up failed (update) - deferring rejoin for \(convo.conversationId.prefix(16))...")
                     logger.warning("   Local epoch \(failedEpoch) cannot process commits to reach server epoch \(serverEpoch)")
                     logger.warning("   Reason: \(reason)")
-                    try? await markConversationNeedsRejoin(convo.conversationId)
+                    do {
+                      try await markConversationNeedsRejoin(convo.conversationId)
+                    } catch {
+                      logger.error(
+                        "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsRejoin, sync-catch-up-update) for \(convo.conversationId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                      )
+                    }
                   case .serverDataGap:
                     logger.warning("⚠️ Server data gap (update) for \(convo.conversationId.prefix(16))... - epoch \(ffiEpoch) unbridgeable to \(serverEpoch)")
                     let auth = await mlsClient.epochAuthenticatorHex(
@@ -674,6 +686,19 @@ public extension MLSConversationManager {
             "⏭️ [EPOCH-RESET] Skipping \(convo.conversationID.prefix(16))... — backoff active")
           continue
         }
+        // Spec §10 SUCCESSFUL_REJOIN_COOLDOWN (E7 twin of Rust
+        // `should_attempt_sync_rejoin`): SYNC-TRIGGERED recovery on a
+        // conversation that successfully rejoined moments ago is the
+        // epoch-inflation spiral fingerprint — suppress it. Decrypt-triggered
+        // and user-initiated recovery are NOT gated by this.
+        if let remaining = await recoveryManager.successCooldownRemaining(
+          convoId: convo.conversationID
+        ) {
+          logger.info(
+            "⏭️ [EPOCH-RESET] Skipping \(convo.conversationID.prefix(16))... — successful-rejoin cooldown active (\(Int(remaining))s remaining, spiral protection)"
+          )
+          continue
+        }
       }
 
       // Branch: recipient path (SSE GroupResetEvent staged newGroupId) vs
@@ -791,6 +816,21 @@ public extension MLSConversationManager {
         if shouldSkip {
           logger.info(
             "⏭️ [DEFERRED-RECOVERY] Skipping \(convo.conversationID.prefix(16))... - backoff active"
+          )
+          continue
+        }
+        // Spec §10 SUCCESSFUL_REJOIN_COOLDOWN (E7 twin of Rust
+        // `should_attempt_sync_rejoin`): if we SUCCESSFULLY rejoined this
+        // conversation recently and sync still thinks it needs rejoin,
+        // something is dropping local MLS state after success — each
+        // re-rejoin advances the server epoch and 409s every sibling device.
+        // Suppress sync-path rejoins until the cooldown elapses.
+        // Decrypt-triggered and user-initiated recovery are NOT gated.
+        if let remaining = await recoveryManager.successCooldownRemaining(
+          convoId: convo.conversationID
+        ) {
+          logger.info(
+            "⏭️ [DEFERRED-RECOVERY] Skipping \(convo.conversationID.prefix(16))... - successful-rejoin cooldown active (\(Int(remaining))s remaining, spiral protection)"
           )
           continue
         }
@@ -1086,9 +1126,12 @@ public extension MLSConversationManager {
           )
         }
         // Clear backoff so admin path can fire on the next tick instead of
-        // sitting in cooldown from the failed recipient attempt.
+        // sitting in cooldown from the failed recipient attempt. NON-ARMING
+        // variant (E7): no rejoin succeeded here — the success-path clear
+        // would stamp the 30s global floor and the 300s success cooldown,
+        // gating the very admin-path recovery this escalation is queueing.
         if let recoveryManager = await mlsClient.recovery(for: userDid) {
-          await recoveryManager.clearRejoinTracking(convoId: convoId)
+          await recoveryManager.clearRejoinTrackingForFreshReset(convoId: convoId)
         }
         return
       }
@@ -1783,8 +1826,12 @@ public extension MLSConversationManager {
                 try? await mlsClient.deleteGroup(
                   for: userDid, groupId: pendingGroupIdData)
               }
+              // NON-ARMING variant (E7): we LOST the bootstrap race — no
+              // rejoin succeeded. The success-path clear would arm the 300s
+              // success cooldown and gate the loser-path Welcome/External
+              // Commit join the next sync tick needs to perform.
               if let recoveryManager = await mlsClient.recovery(for: userDid) {
-                await recoveryManager.clearRejoinTracking(convoId: convoId)
+                await recoveryManager.clearRejoinTrackingForFreshReset(convoId: convoId)
               }
               return
             }
@@ -1824,8 +1871,11 @@ public extension MLSConversationManager {
               if let recoveryManager = await mlsClient.recovery(for: userDid) {
                 // Don't increment failure counter — this is an in-band
                 // recovery, not a true failure. Just clear so next sync sees
-                // it as eligible for External Commit join.
-                await recoveryManager.clearRejoinTracking(convoId: convoId)
+                // it as eligible for External Commit join. NON-ARMING variant
+                // (E7): no rejoin succeeded — the success-path clear would
+                // arm the 30s global floor and the 300s success cooldown,
+                // gating the very External Commit join being queued here.
+                await recoveryManager.clearRejoinTrackingForFreshReset(convoId: convoId)
               }
               return
             }
@@ -1870,10 +1920,12 @@ public extension MLSConversationManager {
             // local group; recovery will re-discover via Welcome (loser
             // path) or External Commit on the next sync. Do NOT call
             // markConversationNeedsReset here — that path is owned by
-            // CLIENT G's WrongGroupId handler.
+            // CLIENT G's WrongGroupId handler. NON-ARMING variant (E7): no
+            // verified rejoin happened — the success-path clear would arm
+            // the 300s success cooldown and gate that next-sync recovery.
             try? await mlsClient.deleteGroup(for: userDid, groupId: pendingGroupIdData)
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
-              await recoveryManager.clearRejoinTracking(convoId: convoId)
+              await recoveryManager.clearRejoinTrackingForFreshReset(convoId: convoId)
             }
             return
           }

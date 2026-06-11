@@ -205,4 +205,181 @@ final class MLSRecoveryPersistenceTests: XCTestCase {
     )
     XCTAssertGreaterThan(remainingCleared, 0)
   }
+
+  // MARK: - E7 parity fix set (P-1..P-6)
+
+  func testFreshResetClearRemovesEntryAndRowWithoutTouchingGlobalFloor() async throws {
+    let store = InMemoryRecoveryStateStore()
+    let manager = MLSRecoveryManager(persistence: store)
+
+    await manager.recordFailedRejoin(convoId: "convo-fresh")
+    await manager.flushPersistence()
+    let entryBefore = await store.entry(for: "convo-fresh")
+    XCTAssertNotNil(entryBefore)
+    let persistedStampBefore = await store.globalStamp()
+    XCTAssertNotNil(persistedStampBefore, "failure outcome must persist the global stamp")
+    let inMemoryFloorBefore = await manager.lastGlobalRejoinAttemptForTesting()
+    XCTAssertNotNil(inMemoryFloorBefore)
+
+    await manager.clearRejoinTrackingForFreshReset(convoId: "convo-fresh")
+    await manager.flushPersistence()
+
+    let entryAfter = await store.entry(for: "convo-fresh")
+    XCTAssertNil(entryAfter, "fresh-reset clear must write-through-DELETE the persisted row")
+
+    let persistedStampAfter = await store.globalStamp()
+    XCTAssertEqual(
+      persistedStampAfter, persistedStampBefore,
+      "fresh-reset clear must NOT re-persist the global rejoin stamp"
+    )
+    let inMemoryFloorAfter = await manager.lastGlobalRejoinAttemptForTesting()
+    XCTAssertEqual(
+      inMemoryFloorAfter, inMemoryFloorBefore,
+      "fresh-reset clear must not touch lastGlobalRejoinAttemptAt in either direction"
+    )
+
+    let remainingCleared = await manager.remainingRejoinAttempts(convoId: "convo-fresh")
+    let remainingFresh = await manager.remainingRejoinAttempts(convoId: "convo-never-seen")
+    XCTAssertEqual(remainingCleared, remainingFresh, "failure history must be wiped")
+
+    let cooldown = await manager.successCooldownRemaining(convoId: "convo-fresh")
+    XCTAssertNil(cooldown, "fresh-reset clear must NOT arm the successful-rejoin cooldown")
+  }
+
+  func testRuntimeLockoutExpiryClampsToMaxMinusOneAndReopensOneAttempt() async throws {
+    let store = InMemoryRecoveryStateStore()
+    let manager = MLSRecoveryManager(persistence: store)
+    let now = Date()
+
+    // Maxed-out entry (attempts == maxRejoinAttempts == 3) whose explicit
+    // quarantine horizon lapsed one second ago.
+    await manager.overrideRejoinTracking(
+      convoId: "convo-lockout",
+      attempts: 3,
+      lastAttempt: now.addingTimeInterval(-3600),
+      quarantinedUntil: now.addingTimeInterval(-1)
+    )
+
+    let skips = await manager.shouldSkipRejoin(convoId: "convo-lockout")
+    XCTAssertFalse(skips, "lapsed lockout must clamp the count and re-open the gate")
+
+    let remaining = await manager.remainingRejoinAttempts(convoId: "convo-lockout")
+    XCTAssertEqual(remaining, 1, "runtime expiry re-opens EXACTLY one attempt")
+
+    await manager.flushPersistence()
+    let persisted = await store.entry(for: "convo-lockout")
+    XCTAssertEqual(
+      persisted?.failedRejoinCount, 2,
+      "the clamped count must be written through so the clamp survives restart"
+    )
+
+    // The single re-opened attempt failing re-arms the maxed-out gate.
+    await manager.recordFailedRejoin(convoId: "convo-lockout")
+    let skipsAfterFailure = await manager.shouldSkipRejoin(convoId: "convo-lockout")
+    XCTAssertTrue(skipsAfterFailure, "one failure after the clamp must re-arm the maxed-out gate")
+  }
+
+  func testHydrationClampsMaxedEntryWithExpiredOrAbsentQuarantine() async throws {
+    let now = Date()
+    let store = InMemoryRecoveryStateStore()
+    try await store.upsertConversationState(
+      conversationID: "convo-expired-quarantine",
+      failedRejoinCount: 3,
+      lastAttemptAtMs: epochMs(now.addingTimeInterval(-3600)),
+      quarantinedUntilMs: epochMs(now.addingTimeInterval(-60))
+    )
+    try await store.upsertConversationState(
+      conversationID: "convo-nil-quarantine",
+      failedRejoinCount: 5,
+      lastAttemptAtMs: epochMs(now.addingTimeInterval(-3600)),
+      quarantinedUntilMs: nil
+    )
+    try await store.upsertConversationState(
+      conversationID: "convo-active-quarantine",
+      failedRejoinCount: 3,
+      lastAttemptAtMs: epochMs(now.addingTimeInterval(-3600)),
+      quarantinedUntilMs: epochMs(now.addingTimeInterval(3600))
+    )
+
+    let manager = MLSRecoveryManager(persistence: store)
+    await manager.hydrateFromDatabase()
+
+    let skipsExpired = await manager.shouldSkipRejoin(convoId: "convo-expired-quarantine")
+    XCTAssertFalse(skipsExpired, "expired quarantine must clamp at hydration and re-open the gate")
+    let remainingExpired = await manager.remainingRejoinAttempts(convoId: "convo-expired-quarantine")
+    XCTAssertEqual(remainingExpired, 1, "hydration clamp re-opens exactly one attempt")
+
+    let skipsNil = await manager.shouldSkipRejoin(convoId: "convo-nil-quarantine")
+    XCTAssertFalse(skipsNil, "maxed entry with no quarantine horizon must clamp at hydration")
+    let remainingNil = await manager.remainingRejoinAttempts(convoId: "convo-nil-quarantine")
+    XCTAssertEqual(remainingNil, 1)
+
+    let skipsActive = await manager.shouldSkipRejoin(convoId: "convo-active-quarantine")
+    XCTAssertTrue(skipsActive, "an ACTIVE quarantine must still gate (honored, never clamped)")
+  }
+
+  func testSuccessCooldownArmsOnSuccessExpiresAndIsNotArmedByFreshReset() async throws {
+    let manager = MLSRecoveryManager(persistence: nil)
+
+    // Success-outcome clear arms the cooldown (sync-triggered rejoins gated).
+    await manager.clearRejoinTracking(convoId: "convo-success")
+    let remaining = await manager.successCooldownRemaining(convoId: "convo-success")
+    XCTAssertNotNil(remaining, "successful rejoin must arm the sync-path cooldown")
+    XCTAssertGreaterThan(
+      remaining ?? 0,
+      MLSRecoveryManager.successfulRejoinCooldownSec - 30,
+      "freshly armed cooldown should be close to the full window"
+    )
+
+    // After the window elapses the cooldown stops gating.
+    await manager.overrideSuccessfulRejoinTimestamp(
+      convoId: "convo-success",
+      to: Date().addingTimeInterval(-(MLSRecoveryManager.successfulRejoinCooldownSec + 1))
+    )
+    let expired = await manager.successCooldownRemaining(convoId: "convo-success")
+    XCTAssertNil(expired, "cooldown must expire after successfulRejoinCooldownSec")
+
+    // Fresh-reset clear is a non-attempt bookkeeping event — it must NOT arm.
+    await manager.clearRejoinTrackingForFreshReset(convoId: "convo-reset")
+    let resetCooldown = await manager.successCooldownRemaining(convoId: "convo-reset")
+    XCTAssertNil(resetCooldown, "fresh-reset clear must NOT arm the success cooldown")
+  }
+
+  func testHydrationDropsFutureDatedEntryAndDeletesRow() async throws {
+    let now = Date()
+    let store = InMemoryRecoveryStateStore()
+    try await store.upsertConversationState(
+      conversationID: "convo-future",
+      failedRejoinCount: 2,
+      lastAttemptAtMs: epochMs(now.addingTimeInterval(6 * 3600)),
+      quarantinedUntilMs: nil
+    )
+
+    let manager = MLSRecoveryManager(persistence: store)
+    await manager.hydrateFromDatabase()
+
+    let skips = await manager.shouldSkipRejoin(convoId: "convo-future")
+    XCTAssertFalse(skips, "future-dated entry must be ignored (under-gating never extends backoff)")
+    let row = await store.entry(for: "convo-future")
+    XCTAssertNil(row, "future-dated row must be DELETED at hydration (Rust drop+delete parity)")
+  }
+
+  func testHydrationBoundsFutureDatedGlobalStampSkew() async throws {
+    let now = Date()
+    let store = InMemoryRecoveryStateStore()
+    try await store.setGlobalLastRejoinAttempt(atMs: epochMs(now.addingTimeInterval(7 * 24 * 3600)))
+
+    let manager = MLSRecoveryManager(persistence: store)
+    await manager.hydrateFromDatabase()
+
+    let floor = await manager.lastGlobalRejoinAttemptForTesting()
+    XCTAssertNotNil(floor, "future-dated global stamp is deliberate (Rust-gate projection) — keep it")
+    XCTAssertLessThanOrEqual(
+      floor?.timeIntervalSince(now) ?? .infinity,
+      MLSRecoveryManager.maxHydratedGlobalStampSkew + 5,
+      "forward clock skew in the persisted stamp must be bounded so it cannot wedge the global gate"
+    )
+    let skips = await manager.shouldSkipRejoin(convoId: "any-convo")
+    XCTAssertTrue(skips, "a bounded future-projected global stamp must still gate right now")
+  }
 }

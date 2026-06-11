@@ -1299,14 +1299,20 @@ public extension MLSConversationManager {
             }
 
             // Fix ordering: update NSE-cached metadata with server values
-            try? await storage.updateMessageMetadata(
-              messageID: message.id,
-              currentUserDID: userDid,
-              epoch: Int64(message.epoch),
-              sequenceNumber: Int64(message.seq),
-              timestamp: message.createdAt.date,
-              database: database
-            )
+            do {
+              try await storage.updateMessageMetadata(
+                messageID: message.id,
+                currentUserDID: userDid,
+                epoch: Int64(message.epoch),
+                sequenceNumber: Int64(message.seq),
+                timestamp: message.createdAt.date,
+                database: database
+              )
+            } catch {
+              logger.error(
+                "❌ [MLS-RETRY] PERSISTENCE FAILURE (updateMessageMetadata, nse-cache-reconcile) for \(message.convoId.prefix(16)) msgId=\(message.id.prefix(16)): \(error.localizedDescription) — server seq/epoch/timestamp NOT persisted; message ordering may be wrong after restart (E7 write-through violated)"
+              )
+            }
 
             return .application(payload: cachedPayload, sender: cachedMessage.senderID)
           }
@@ -1427,14 +1433,20 @@ public extension MLSConversationManager {
               }
 
               // Fix ordering: update NSE-cached metadata with server values
-              try? await storage.updateMessageMetadata(
-                messageID: message.id,
-                currentUserDID: userDid,
-                epoch: Int64(message.epoch),
-                sequenceNumber: Int64(message.seq),
-                timestamp: message.createdAt.date,
-                database: database
-              )
+              do {
+                try await storage.updateMessageMetadata(
+                  messageID: message.id,
+                  currentUserDID: userDid,
+                  epoch: Int64(message.epoch),
+                  sequenceNumber: Int64(message.seq),
+                  timestamp: message.createdAt.date,
+                  database: database
+                )
+              } catch {
+                logger.error(
+                  "❌ [MLS-RETRY] PERSISTENCE FAILURE (updateMessageMetadata, nse-cache-reconcile-retry) for \(message.convoId.prefix(16)) msgId=\(message.id.prefix(16)): \(error.localizedDescription) — server seq/epoch/timestamp NOT persisted; message ordering may be wrong after restart (E7 write-through violated)"
+                )
+              }
 
               return .application(payload: cachedPayload, sender: cachedMessage.senderID)
             }
@@ -3618,9 +3630,14 @@ public extension MLSConversationManager {
     }
 
     // Clear any existing recovery backoff so the reset handler isn't blocked
-    // by prior failed rejoin attempts.
+    // by prior failed rejoin attempts. NON-ARMING variant (E7, twin of Rust
+    // `persist_reset_pending_state` → `clear_for_fresh_reset`): a server
+    // reset is not a rejoin attempt by THIS client — routing it through
+    // `clearRejoinTracking` would stamp the 30s global rejoin floor and the
+    // 300s success cooldown, gating the imminent first-responder bootstrap
+    // (the 2026-05-02 reset-bootstrap deadlock class).
     if let recoveryManager = await mlsClient.recovery(for: userDID) {
-      await recoveryManager.clearRejoinTracking(convoId: convoId)
+      await recoveryManager.clearRejoinTrackingForFreshReset(convoId: convoId)
     }
 
     if let newGroup = pendingNewGroupId {
@@ -3721,7 +3738,14 @@ public extension MLSConversationManager {
                 WHERE conversationID = ? AND currentUserDID = ?;
             """, arguments: [Date(), convoId, userDID])
       }
-    } catch {}
+    } catch {
+      // Keep behavior (best-effort clear, no rethrow) but never swallow:
+      // a stuck needsRejoin flag means deferred recovery keeps re-attempting
+      // a conversation that already healed (E7 write-through violated).
+      logger.error(
+        "❌ [MLS-REJOIN] PERSISTENCE FAILURE (clearConversationRejoinFlag) for \(convoId.prefix(16)): \(error.localizedDescription) — needsRejoin flag NOT cleared; deferred recovery will keep re-attempting this conversation (E7 write-through violated)"
+      )
+    }
   }
 
   internal func conversationNeedsRejoin(_ convoId: String) async -> Bool {
@@ -4271,14 +4295,20 @@ public extension MLSConversationManager {
               if !serverGroupIdHex.isEmpty
                 && serverGroupIdHex.lowercased() != groupId.lowercased()
               {
-                try? await markConversationNeedsReset(
-                  convoId,
-                  pendingNewGroupId: serverGroupIdHex,
-                  pendingResetGeneration: serverGeneration
-                )
-                logger.warning(
-                  "🛡️ [CLIENT G] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration.map(String.init) ?? "nil")"
-                )
+                do {
+                  try await markConversationNeedsReset(
+                    convoId,
+                    pendingNewGroupId: serverGroupIdHex,
+                    pendingResetGeneration: serverGeneration
+                  )
+                  logger.warning(
+                    "🛡️ [CLIENT G] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration.map(String.init) ?? "nil")"
+                  )
+                } catch {
+                  logger.error(
+                    "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsReset, client-g-recipient-stage) for \(convoId.prefix(16)): \(error.localizedDescription) — needsReset flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                  )
+                }
               } else {
                 logger.error(
                   "🛡️ [CLIENT G] Server's groupId matches our local groupId for \(convoId.prefix(16)) — WrongGroupId from a stale wire frame? Falling back to needsRejoin"
@@ -4325,7 +4355,13 @@ public extension MLSConversationManager {
               logger.warning(
                 "🛡️ [CLIENT G] getConversation surfaced 410/groupReset for \(convoId.prefix(16)) — server mid-reset; falling back to admin reset path"
               )
-              try? await markConversationNeedsReset(convoId)
+              do {
+                try await markConversationNeedsReset(convoId)
+              } catch {
+                logger.error(
+                  "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsReset, client-g-410-admin-fallback) for \(convoId.prefix(16)): \(error.localizedDescription) — needsReset flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+                )
+              }
             } else {
               logger.error(
                 "🛡️ [CLIENT G] getConversation failed for \(convoId.prefix(16)): \(error.localizedDescription) — falling back to needsRejoin"

@@ -146,6 +146,31 @@ public actor MLSRecoveryManager {
   /// restart cannot reset the global rejoin floor.
   private var lastGlobalRejoinAttemptAt: Date?
 
+  // MARK: - Successful-Rejoin Cooldown (Spec §10 SUCCESSFUL_REJOIN_COOLDOWN)
+
+  /// Suppress SYNC-TRIGGERED rejoin attempts on a conversation for this
+  /// duration after a SUCCESSFUL rejoin. E7 twin of Rust
+  /// `SUCCESSFUL_REJOIN_COOLDOWN` (`catbird-mls/src/orchestrator/constants.rs`)
+  /// — breaks the rejoin-loop/epoch-inflation spiral where a client
+  /// successfully rejoins, then loses local MLS state, then sync re-detects
+  /// the missing group and rejoins again, 409-ing every sibling device.
+  /// Decrypt-triggered and user-initiated recovery are NOT gated by this.
+  public static let successfulRejoinCooldownSec: TimeInterval = 300
+
+  /// Per-conversation timestamp of the most recent SUCCESSFUL rejoin.
+  /// Recorded by `clearRejoinTracking` (the success-outcome path) but NOT by
+  /// `clearRejoinTrackingForFreshReset` (non-attempt bookkeeping). In-memory
+  /// only, matching the Rust twin (`RecoveryTracker.successful_rejoins` is
+  /// not persisted either).
+  private var successfulRejoins: [String: Date] = [:]
+
+  /// Upper bound applied to a hydrated FUTURE-dated global rejoin stamp:
+  /// 30s global floor + 300s maximum Rust-gate backoff projection window
+  /// (`recordRejoinOutcome` deliberately writes future stamps to mirror the
+  /// Rust gate). Bounding here means unbounded forward clock skew in a
+  /// persisted stamp cannot wedge the global gate. E7 contract.
+  internal static let maxHydratedGlobalStampSkew: TimeInterval = 330
+
   // MARK: - Persisted Recovery Counters (WS-6.4 / E7 / N21)
 
   /// TTL for persisted recovery-counter entries. E7 coordinated semantics
@@ -320,9 +345,33 @@ public actor MLSRecoveryManager {
     }
   }
 
+  /// One-time-per-process flag for the persistence==nil misconfiguration log
+  /// (P-7 / E7): the nil guards below are intentional for the NSE (which
+  /// never runs the rejoin loop) but otherwise indistinguishable from a
+  /// missed `setPersistence(_:)` call. Log loudly exactly once.
+  private var loggedMissingPersistence = false
+
+  /// True when running inside an app extension (e.g. the NSE), where a nil
+  /// persistence store is intentional.
+  private static let isAppExtension = Bundle.main.bundlePath.hasSuffix(".appex")
+
+  /// Surface a missing persistence store at `.error` once per process —
+  /// outside the NSE this means recovery counters will NOT survive restart
+  /// (E7 write-through silently skipped). Keep behavior identical otherwise.
+  private func notePersistenceUnavailable(_ label: String) {
+    guard !Self.isAppExtension, !loggedMissingPersistence else { return }
+    loggedMissingPersistence = true
+    logger.error(
+      "❌ [MLSRecoveryManager] PERSISTENCE UNAVAILABLE (\(label)): no recovery persistence store wired in this process (setPersistence(_:) never called?). Intentional only in the NSE — in the main app recovery counters will NOT survive restart (E7 write-through skipped). Logged once per process."
+    )
+  }
+
   /// Write-through the current in-memory entry for a conversation.
   private func persistConversationEntry(convoId: String) {
-    guard let persistence else { return }
+    guard let persistence else {
+      notePersistenceUnavailable("upsert \(convoId.prefix(16))")
+      return
+    }
     guard let record = failedRejoins[convoId] else { return }
     let attempts = record.attempts
     let lastMs = Int64(record.lastAttempt.timeIntervalSince1970 * 1000)
@@ -339,7 +388,10 @@ public actor MLSRecoveryManager {
 
   /// Write-through deletion of a conversation's persisted entry (success path).
   private func persistClearConversationEntry(convoId: String) {
-    guard let persistence else { return }
+    guard let persistence else {
+      notePersistenceUnavailable("clear \(convoId.prefix(16))")
+      return
+    }
     enqueuePersist("clear \(convoId.prefix(16))") {
       try await persistence.clearConversationState(conversationID: convoId)
     }
@@ -347,7 +399,10 @@ public actor MLSRecoveryManager {
 
   /// Write-through the global rejoin-floor timestamp.
   private func persistGlobalStamp(_ date: Date) {
-    guard let persistence else { return }
+    guard let persistence else {
+      notePersistenceUnavailable("global stamp")
+      return
+    }
     let ms = Int64(date.timeIntervalSince1970 * 1000)
     enqueuePersist("global stamp") {
       try await persistence.setGlobalLastRejoinAttempt(atMs: ms)
@@ -564,21 +619,22 @@ public actor MLSRecoveryManager {
 
   /// Check if a conversation should be skipped during rejoin (max attempts exceeded or on cooldown).
   ///
-  /// **Read-mostly, with one lazy-expiry side effect.** When a quarantine
-  /// horizon (`quarantinedUntil`) has already expired, this method removes
-  /// the stale entry and enqueues a persistence write-through so the cleared
-  /// quarantine survives restart. That mutation is idempotent and can only
-  /// flip the answer from "skip" to "don't skip" (never the reverse), so the
-  /// method remains safe to call multiple times for the same logical rejoin
-  /// attempt (e.g. nested External Commit fallback re-entering the gate).
-  /// It never stamps attempt outcomes: `lastGlobalRejoinAttemptAt` and the
-  /// failure counters are mutated only in `recordFailedRejoin` /
-  /// `clearRejoinTracking`, matching the Rust orchestrator contract in
-  /// `catbird-mls/src/orchestrator/recovery.rs` (`should_skip` does not
-  /// stamp the global timestamp; `record_failure` / `clear` do). Note the
-  /// quarantine lazy-expiry cleanup is a deliberate divergence from the Rust
-  /// twin's strictly-pure `should_skip` — account for it when holding the
-  /// two implementations to parity.
+  /// **Read-mostly, with one lazy-expiry side effect.** When the lockout
+  /// horizon of a maxed-out entry has lapsed (explicit `quarantinedUntil`,
+  /// else the implicit `lastAttempt + persistedStateTTL`), this method clamps
+  /// the failed-rejoin count to `maxRejoinAttempts - 1` — re-opening exactly
+  /// one attempt — and enqueues a persistence write-through so the clamp
+  /// survives restart (E7 runtime lockout expiry; Swift twin of Rust
+  /// `RecoveryTracker::expire_lapsed_lockout`). That mutation is idempotent
+  /// and can only flip the answer from "skip" to "don't skip" (never the
+  /// reverse), so the method remains safe to call multiple times for the
+  /// same logical rejoin attempt (e.g. nested External Commit fallback
+  /// re-entering the gate). It never stamps attempt outcomes:
+  /// `lastGlobalRejoinAttemptAt` and the failure counters are mutated only
+  /// in `recordFailedRejoin` / `clearRejoinTracking`, matching the Rust
+  /// orchestrator contract in `catbird-mls/src/orchestrator/recovery.rs`
+  /// (`should_skip` does not stamp the global timestamp; `record_failure` /
+  /// `clear` do).
   ///
   /// Layered gates (each can short-circuit to skip):
   /// 1. Per-conversation max attempts (spec §8.2 — MAX_REJOIN_ATTEMPTS = 3)
@@ -590,20 +646,19 @@ public actor MLSRecoveryManager {
     // WS-6.4 circuit breaker: explicit quarantine horizon (ceiling trip or
     // server-corruption mark, possibly hydrated from a prior session).
     // Honored while active; expires naturally — never extended here.
-    if let quarantine = quarantinedUntil[convoId] {
-      if Date() < quarantine {
-        logger.error(
-          "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - quarantined until \(quarantine) (circuit breaker)"
-        )
-        return true
-      }
-      quarantinedUntil.removeValue(forKey: convoId)
-      if failedRejoins[convoId] != nil {
-        persistConversationEntry(convoId: convoId)
-      } else {
-        persistClearConversationEntry(convoId: convoId)
-      }
+    if let quarantine = quarantinedUntil[convoId], Date() < quarantine {
+      logger.error(
+        "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - quarantined until \(quarantine) (circuit breaker)"
+      )
+      return true
     }
+
+    // E7 runtime lockout expiry: a maxed-out entry whose lockout horizon
+    // lapsed clamps to maxRejoinAttempts - 1 so exactly one attempt
+    // re-opens. Without this, removing the expired quarantine was cosmetic —
+    // the attempts-derived ceiling/max gates below still blocked, wedging a
+    // long-lived process past the 24h lockout.
+    expireLapsedLockoutIfNeeded(convoId: convoId, now: Date())
 
     if let record = failedRejoins[convoId] {
       // WS-6.4 circuit breaker: persisted attempts at/beyond the ceiling
@@ -662,6 +717,57 @@ public actor MLSRecoveryManager {
     // would make this method non-idempotent and self-skip nested re-entries
     // within the same logical rejoin attempt.
     return false
+  }
+
+  /// E7 runtime lockout expiry — Swift twin of Rust
+  /// `RecoveryTracker::expire_lapsed_lockout`
+  /// (`catbird-mls/src/orchestrator/recovery.rs`). A maxed-out entry's
+  /// lockout horizon is the explicit `quarantinedUntil` when set, else the
+  /// implicit `lastAttempt + persistedStateTTL` (the same 24h value
+  /// `recordFailedRejoin` persists at the ceiling). Once that horizon
+  /// lapses, the failed-rejoin count clamps to `maxRejoinAttempts - 1`,
+  /// re-opening exactly one attempt, and the clamped entry is written
+  /// through. Mutations here are idempotent and only ever LOOSEN the gate.
+  private func expireLapsedLockoutIfNeeded(convoId: String, now: Date) {
+    guard let record = failedRejoins[convoId] else {
+      // Stale quarantine with no failure entry: drop it and clear the
+      // persisted row (pre-existing lazy-expiry behavior).
+      if let quarantine = quarantinedUntil[convoId], now >= quarantine {
+        quarantinedUntil.removeValue(forKey: convoId)
+        persistClearConversationEntry(convoId: convoId)
+      }
+      return
+    }
+
+    guard record.attempts >= maxRejoinAttempts else {
+      // Below the maxed-out band the attempts-derived backoff governs; an
+      // expired explicit quarantine simply falls away.
+      if let quarantine = quarantinedUntil[convoId], now >= quarantine {
+        quarantinedUntil.removeValue(forKey: convoId)
+        persistConversationEntry(convoId: convoId)
+      }
+      return
+    }
+
+    let lockout =
+      quarantinedUntil[convoId]
+      ?? record.lastAttempt.addingTimeInterval(Self.persistedStateTTL)
+    guard now >= lockout else { return }
+
+    quarantinedUntil.removeValue(forKey: convoId)
+    let clamped = maxRejoinAttempts - 1
+    if clamped <= 0 {
+      // maxRejoinAttempts == 1: mirroring hydration, a zero count is not
+      // tracked at all.
+      failedRejoins.removeValue(forKey: convoId)
+      persistClearConversationEntry(convoId: convoId)
+    } else {
+      failedRejoins[convoId] = (attempts: clamped, lastAttempt: record.lastAttempt)
+      persistConversationEntry(convoId: convoId)
+    }
+    logger.warning(
+      "⏰ [MLSRecoveryManager] Rejoin lockout lapsed for \(convoId.prefix(16)) — clamping failed-rejoin count \(record.attempts) → \(clamped) (one attempt re-opens; E7 runtime expiry)"
+    )
   }
 
   /// Record a failed rejoin attempt for a conversation.
@@ -876,13 +982,17 @@ public actor MLSRecoveryManager {
 
     let now = Date()
     failedRejoins[convoId] = (attempts: nextAttempts, lastAttempt: now)
-    lastGlobalRejoinAttemptAt = now
+    // E7 parity: do NOT arm `lastGlobalRejoinAttemptAt` here. A key-package
+    // stall is not an External Commit attempt — arming the cross-conversation
+    // 30s floor from it would gate UNRELATED conversations' rejoins off a
+    // non-attempt event (the same non-arming contract as
+    // `clearRejoinTrackingForFreshReset`). The per-conversation cooldown
+    // above is the intended throttle for the reset-pending loop.
     logger.warning(
       "⏳ [MLSRecoveryManager] Waiting for peer key packages for \(convoId.prefix(16)) - cooldown attempt \(nextAttempts)/\(self.maxRejoinAttempts - 1)"
     )
     // WS-6.4 / E7: write-through on every state change.
     persistConversationEntry(convoId: convoId)
-    persistGlobalStamp(now)
   }
 
   /// Record an unbridgeable epoch gap (`fetchAndProcessMissingCommits`
@@ -971,6 +1081,14 @@ public actor MLSRecoveryManager {
   /// Also clears transient state and failure counters so the conversation
   /// is fully returned to `.healthy` (spec §8.2: NEEDS_REJOIN → HEALTHY on
   /// successful External Commit).
+  ///
+  /// This is the SUCCESS-OUTCOME path: it stamps the global rejoin floor and
+  /// records the per-conversation successful-rejoin cooldown (spec §10
+  /// `SUCCESSFUL_REJOIN_COOLDOWN`, mirrors Rust `RecoveryTracker::clear`).
+  /// For non-attempt bookkeeping (server resets, stale-flag clears, race
+  /// rollbacks) use `clearRejoinTrackingForFreshReset` instead — routing
+  /// those through here re-arms the 30s global gate from events that are not
+  /// attempts (the 2026-05-02 reset-bootstrap deadlock class).
   public func clearRejoinTracking(convoId: String) {
     let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
     quarantinedUntil.removeValue(forKey: convoId)
@@ -987,11 +1105,89 @@ public actor MLSRecoveryManager {
     // 30s floor against subsequent EC bursts on other conversations.
     let now = Date()
     lastGlobalRejoinAttemptAt = now
+    // Spec §10 SUCCESSFUL_REJOIN_COOLDOWN: record the success so
+    // sync-triggered rejoins on this conversation are suppressed for 300s
+    // (spiral protection — see `successCooldownRemaining(convoId:)`).
+    successfulRejoins[convoId] = now
     persistClearConversationEntry(convoId: convoId)
     persistGlobalStamp(now)
     if hadTracking {
       logger.info("✅ [MLSRecoveryManager] Cleared rejoin tracking for \(convoId.prefix(16))")
     }
+  }
+
+  /// Clear per-conversation rejoin tracking for a server-initiated reset or
+  /// other NON-ATTEMPT bookkeeping event. E7 twin of Rust
+  /// `RecoveryTracker::clear_for_fresh_reset` / `clear_stale_flag`
+  /// (`catbird-mls/src/orchestrator/recovery.rs`).
+  ///
+  /// Unlike `clearRejoinTracking` (the success-outcome path), this:
+  /// - does NOT touch or persist `lastGlobalRejoinAttemptAt` — a
+  ///   server-pushed reset is not an attempt by THIS client and must not
+  ///   gate the imminent first-responder bootstrap that follows (the
+  ///   2026-05-02 prod deadlock: two clients sat behind their own global
+  ///   gates waiting for the other to bootstrap, sometimes for 24+ minutes);
+  /// - does NOT record a successful rejoin — no rejoin happened, so the
+  ///   `SUCCESSFUL_REJOIN_COOLDOWN` sync suppression must not arm.
+  ///
+  /// It still wipes the per-conversation failure history (server reset
+  /// trumps client retry counters), quarantine, transient state, and
+  /// counters, and write-through-DELETEs the persisted row.
+  public func clearRejoinTrackingForFreshReset(convoId: String) {
+    let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
+    quarantinedUntil.removeValue(forKey: convoId)
+    transientStates.removeValue(forKey: convoId)
+    commitFailureCounts.removeValue(forKey: convoId)
+    decryptionFailureCounts.removeValue(forKey: convoId)
+    serverDataGapCounts.removeValue(forKey: convoId)
+    // Intentionally do NOT touch `lastGlobalRejoinAttemptAt` or
+    // `successfulRejoins` — see doc comment above.
+    persistClearConversationEntry(convoId: convoId)
+    if hadTracking {
+      logger.info(
+        "🧹 [MLSRecoveryManager] Cleared rejoin tracking for \(convoId.prefix(16)) (fresh reset / bookkeeping — global floor NOT armed)"
+      )
+    }
+  }
+
+  /// Remaining `SUCCESSFUL_REJOIN_COOLDOWN` imposed by a recent SUCCESSFUL
+  /// rejoin on this conversation, or `nil` when none is active. Applies to
+  /// SYNC-TRIGGERED rejoin attempts only — callers on decrypt-triggered or
+  /// user-initiated recovery paths must not consult this. E7 twin of Rust
+  /// `RecoveryTracker::success_cooldown_remaining`.
+  public func successCooldownRemaining(convoId: String) -> TimeInterval? {
+    guard let last = successfulRejoins[convoId] else { return nil }
+    let elapsed = Date().timeIntervalSince(last)
+    guard elapsed < Self.successfulRejoinCooldownSec else { return nil }
+    return Self.successfulRejoinCooldownSec - elapsed
+  }
+
+  /// Test seam: backdate (or otherwise override) a successful-rejoin
+  /// timestamp so cooldown expiry is testable without waiting 300s.
+  internal func overrideSuccessfulRejoinTimestamp(convoId: String, to date: Date) {
+    successfulRejoins[convoId] = date
+  }
+
+  /// Test seam: install raw rejoin-tracking state so runtime lockout expiry
+  /// is testable without waiting out real 24h horizons.
+  internal func overrideRejoinTracking(
+    convoId: String,
+    attempts: Int,
+    lastAttempt: Date,
+    quarantinedUntil quarantine: Date?
+  ) {
+    failedRejoins[convoId] = (attempts: attempts, lastAttempt: lastAttempt)
+    if let quarantine {
+      quarantinedUntil[convoId] = quarantine
+    } else {
+      quarantinedUntil.removeValue(forKey: convoId)
+    }
+  }
+
+  /// Test seam: read the in-memory global rejoin floor (no public getter —
+  /// production callers must route through `shouldSkipRejoin`).
+  internal func lastGlobalRejoinAttemptForTesting() -> Date? {
+    lastGlobalRejoinAttemptAt
   }
 
   /// Get the number of remaining rejoin attempts for a conversation
@@ -1077,9 +1273,23 @@ public actor MLSRecoveryManager {
   /// Load persisted recovery counters and global cooldown state.
   ///
   /// This is the WS-6.4/N21 startup contract: call after `setPersistence(_:)`
-  /// and before any deferred rejoin loop runs. Entries older than the 24h TTL
-  /// are ignored and cleared so persisted state cannot permanently wedge a
-  /// conversation.
+  /// and before any deferred rejoin loop runs. E7 coordinated semantics with
+  /// the Rust twin (`RecoveryTracker::hydrate_from_persisted`,
+  /// `catbird-mls/src/orchestrator/recovery.rs`):
+  /// - entries older than the 24h TTL are ignored AND deleted;
+  /// - future-dated entries (wall clock moved backwards since the write) are
+  ///   ignored AND deleted — a kept row would dodge the TTL gate and pin a
+  ///   quarantine far past 24h of real time, and would re-log its drop
+  ///   warning on every restart;
+  /// - zero-count entries are dead rows — ignored AND deleted;
+  /// - a maxed-out entry whose quarantine is nil-or-expired clamps to
+  ///   `maxRejoinAttempts - 1` (honor the lockout, never extend it — exactly
+  ///   one attempt re-opens after the normal per-attempt cooldown);
+  /// - the global stamp re-arms `MIN_REJOIN_INTERVAL` for whatever window
+  ///   remains; a future-dated global stamp is honored (it is a deliberate
+  ///   Rust-gate projection from `recordRejoinOutcome`) but bounded by
+  ///   `maxHydratedGlobalStampSkew` so forward clock skew cannot wedge the
+  ///   global gate.
   public func hydrateFromDatabase() async {
     guard let persistence else {
       logger.debug("📥 [MLSRecoveryManager] No recovery persistence store configured")
@@ -1092,6 +1302,17 @@ public actor MLSRecoveryManager {
 
       for entry in snapshot.conversations {
         let lastAttempt = Self.date(fromEpochMs: entry.lastAttemptAtMs)
+
+        // Future-dated entry: drop + delete (Rust parity — under-gating
+        // never extends backoff; the next real attempt rewrites the row).
+        if lastAttempt > now {
+          logger.warning(
+            "⚠️ [MLSRecoveryManager] Persisted rejoin backoff for \(entry.conversationID.prefix(16)) is future-dated (wall clock moved backwards) — dropping entry and deleting row"
+          )
+          try await persistence.clearConversationState(conversationID: entry.conversationID)
+          continue
+        }
+
         guard now.timeIntervalSince(lastAttempt) <= Self.persistedStateTTL else {
           logger.info(
             "🧹 [MLSRecoveryManager] Ignoring expired persisted recovery state for \(entry.conversationID.prefix(16))"
@@ -1100,26 +1321,70 @@ public actor MLSRecoveryManager {
           continue
         }
 
-        failedRejoins[entry.conversationID] = (
-          attempts: entry.failedRejoinCount,
-          lastAttempt: lastAttempt
-        )
+        var attempts = entry.failedRejoinCount
+        if attempts <= 0 {
+          // Dead row (no failure state to carry) — Rust parity: reject and
+          // delete rather than hydrating a meaningless zero-count entry.
+          try await persistence.clearConversationState(conversationID: entry.conversationID)
+          continue
+        }
 
+        var quarantine: Date?
         if let quarantineMs = entry.quarantinedUntilMs {
-          let quarantine = Self.date(fromEpochMs: quarantineMs)
-          if quarantine > now {
-            quarantinedUntil[entry.conversationID] = quarantine
+          let candidate = Self.date(fromEpochMs: quarantineMs)
+          if candidate > now {
+            quarantine = candidate
           }
         }
 
+        if attempts >= maxRejoinAttempts, quarantine == nil {
+          // E7 hydration clamp (Rust twin: `hydrate_from_persisted`): the
+          // lockout expired (or was never recorded) — honor it, don't
+          // extend. Clamping below maxRejoinAttempts re-opens exactly one
+          // attempt (after the normal per-attempt cooldown) instead of
+          // re-arming the indefinite maxed-out gate.
+          let clamped = maxRejoinAttempts - 1
+          logger.warning(
+            "⏰ [MLSRecoveryManager] Hydrating \(entry.conversationID.prefix(16)) with lapsed lockout — clamping failed-rejoin count \(attempts) → \(clamped) (one attempt re-opens; E7 hydration clamp)"
+          )
+          attempts = clamped
+          if attempts <= 0 {
+            // maxRejoinAttempts == 1: a zero count is not tracked at all;
+            // delete the row so it cannot resurrect on a later restart.
+            try await persistence.clearConversationState(conversationID: entry.conversationID)
+            continue
+          }
+        }
+
+        failedRejoins[entry.conversationID] = (
+          attempts: attempts,
+          lastAttempt: lastAttempt
+        )
+        if let quarantine {
+          quarantinedUntil[entry.conversationID] = quarantine
+        }
+
         logger.info(
-          "📥 [MLSRecoveryManager] Hydrated recovery state for \(entry.conversationID.prefix(16)) attempts=\(entry.failedRejoinCount)"
+          "📥 [MLSRecoveryManager] Hydrated recovery state for \(entry.conversationID.prefix(16)) attempts=\(attempts)"
         )
       }
 
       if let globalMs = snapshot.lastGlobalRejoinAttemptAtMs {
         let global = Self.date(fromEpochMs: globalMs)
-        if now.timeIntervalSince(global) <= Self.persistedStateTTL || global > now {
+        if global > now {
+          // Deliberate: `recordRejoinOutcome` writes future-dated stamps to
+          // project the Rust orchestrator's gate. Honor the projection, but
+          // bound the forward skew (E7: persisted state can never wedge the
+          // global gate beyond the largest legitimate projection window).
+          let bound = now.addingTimeInterval(Self.maxHydratedGlobalStampSkew)
+          if global > bound {
+            logger.warning(
+              "⚠️ [MLSRecoveryManager] Hydrated global rejoin stamp is \(Int(global.timeIntervalSince(now)))s in the future — clamping to +\(Int(Self.maxHydratedGlobalStampSkew))s (E7 skew bound)"
+            )
+          }
+          lastGlobalRejoinAttemptAt = min(global, bound)
+          logger.info("📥 [MLSRecoveryManager] Hydrated global rejoin floor (future-projected)")
+        } else if now.timeIntervalSince(global) <= Self.persistedStateTTL {
           lastGlobalRejoinAttemptAt = global
           logger.info("📥 [MLSRecoveryManager] Hydrated global rejoin floor")
         }
