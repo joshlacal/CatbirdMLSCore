@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 internal actor MLSDeviceRecordService {
   private let logger = Logger(subsystem: "blue.catbird", category: "MLSDeviceRecordService")

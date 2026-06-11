@@ -1,5 +1,6 @@
 import Foundation
 import Petrel
+import PetrelCatbird
 
 /// Represents a decrypted MLS message with sender information.
 public struct DecryptedMLSMessage: Identifiable, Sendable {

@@ -17,7 +17,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
-        .package(path: "../Petrel")
+        .package(path: "../Petrel"),
+        .package(path: "../PetrelCatbird")
     ],
     targets: [
         .target(
@@ -26,7 +27,8 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 "CatbirdMLS",
                 "CatbirdMLSFFI",
-                "Petrel"
+                "Petrel",
+                .product(name: "PetrelCatbird", package: "PetrelCatbird")
             ],
             swiftSettings: [
                 // Keep Swift 5 mode for UniFFI bindings compatibility

@@ -3,6 +3,7 @@ import CatbirdMLS
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Manages MLS key packages: creation, persistence, and server synchronization
 public actor MLSKeyPackageManager {

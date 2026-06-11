@@ -3,6 +3,7 @@ import CatbirdMLS
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 import Synchronization
 
 /// Modern MLS wrapper using UniFFI bindings

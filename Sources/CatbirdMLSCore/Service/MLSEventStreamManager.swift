@@ -1,5 +1,6 @@
 import Foundation
 import Petrel
+import PetrelCatbird
 import OSLog
 import Combine
 

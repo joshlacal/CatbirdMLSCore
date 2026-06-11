@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Environment configuration for MLS API
 public enum MLSEnvironment {
@@ -229,7 +230,7 @@ public final class MLSAPIClient {
     )
 
     logger.debug("📍 [MLSAPIClient.getConversations] Calling API...")
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getConvos(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.getConversations] HTTP \(responseCode)")
@@ -289,7 +290,7 @@ public final class MLSAPIClient {
     // 1. Try Primary Endpoint (dedicated count)
     do {
       let input = BlueCatbirdMlsChatGetConvos.Parameters(limit: 1)
-      let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(input: input)
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.getConvos(input: input)
 
       // Graceful Handling for 404/501 (Method Not Found / Not Implemented)
       if responseCode == 404 || responseCode == 501 {
@@ -318,7 +319,7 @@ public final class MLSAPIClient {
       do {
         // Fetch up to 100 pending requests to estimate the count
         let input = BlueCatbirdMlsChatGetConvos.Parameters(limit: 100)
-        let (responseCode, data) = try await client.blue.catbird.mlschat.getConvos(input: input)
+        let (responseCode, data) = try await client.blue.catbird.mlsChat.getConvos(input: input)
 
         guard (200...299).contains(responseCode), let data else {
           throw MLSAPIError.httpError(
@@ -352,7 +353,7 @@ public final class MLSAPIClient {
       cursor: cursor
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getConvos(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.listChatRequests] HTTP \(responseCode)")
@@ -377,7 +378,7 @@ public final class MLSAPIClient {
       dids: [try DID(didString: requestId)]
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.acceptChatRequest] HTTP \(responseCode)")
@@ -402,7 +403,7 @@ public final class MLSAPIClient {
       dids: [try DID(didString: requestId)]
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.declineChatRequest] HTTP \(responseCode)")
@@ -422,7 +423,7 @@ public final class MLSAPIClient {
     logger.info("🌐 [MLSAPIClient.getChatRequestSettings] START")
 
     let input = BlueCatbirdMlsChatOptIn.Input(action: "getSettings")
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.getChatRequestSettings] HTTP \(responseCode)")
@@ -455,7 +456,7 @@ public final class MLSAPIClient {
       action: "updateSettings"
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.updateChatRequestSettings] HTTP \(responseCode)")
@@ -482,24 +483,14 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.blockChatSender] START - senderDid: \(senderDid), requestId: \(requestId ?? "nil"), reason: \(reason ?? "nil")"
     )
 
-    let input = BlueCatbirdMlsChatBlockChatSender.Input(
-      senderDid: senderDid.didString(),
-      requestId: requestId,
-      reason: reason
-    )
-
-    let (responseCode, output) = try await client.blue.catbird.mlschat.blockChatSender(input: input)
-
-    guard (200...299).contains(responseCode), let output else {
-      logger.error("❌ [MLSAPIClient.blockChatSender] HTTP \(responseCode)")
-      throw MLSAPIError.httpError(
-        statusCode: responseCode, message: "Failed to block chat sender")
-    }
-
-    logger.info(
-      "✅ [MLSAPIClient.blockChatSender] SUCCESS - blockedCount: \(output.blockedCount)"
-    )
-    return (output.success, output.blockedCount)
+    // The blue.catbird.mlsChat.blockChatSender lexicon and server endpoint were
+    // retired (the chat-request flow was removed). The previous implementation
+    // called the dead NSID and failed at runtime; surface that explicitly until
+    // this flow is migrated to the current blocking surface (checkBlocks /
+    // getBlockStatus + app-level blocks).
+    logger.error("❌ [MLSAPIClient.blockChatSender] Endpoint retired server-side")
+    throw MLSAPIError.httpError(
+      statusCode: 410, message: "blockChatSender endpoint has been retired")
   }
 
   // MARK: - Opt In/Out
@@ -510,7 +501,7 @@ public final class MLSAPIClient {
     logger.info("🌐 [MLSAPIClient.optOut] START")
 
     let input = BlueCatbirdMlsChatOptIn.Input(action: "optOut")
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.optOut] HTTP \(responseCode)")
@@ -531,7 +522,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatOptIn.Input(action: "getStatus", dids: dids)
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard (200...299).contains(responseCode), let output else {
       logger.error("❌ [MLSAPIClient.getOptInStatus] HTTP \(responseCode)")
@@ -600,7 +591,7 @@ public final class MLSAPIClient {
 
     logger.debug("📍 [MLSAPIClient.createConversation] Calling API...")
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.createConvo(input: input)
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.createConvo(input: input)
 
       guard responseCode == 200, let output = output else {
         logger.error(
@@ -682,7 +673,7 @@ public final class MLSAPIClient {
     )
 
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.bootstrapResetGroup(
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.bootstrapResetGroup(
         input: input)
 
       guard responseCode == 200, let output = output else {
@@ -792,7 +783,7 @@ public final class MLSAPIClient {
       epochAuthenticator: epochAuthenticator
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.reportRecoveryFailure(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.reportRecoveryFailure(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -817,7 +808,7 @@ public final class MLSAPIClient {
     logger.debug("Leaving conversation: \(convoId)")
 
     let input = BlueCatbirdMlsChatLeaveConvo.Input(convoId: convoId)
-    let (responseCode, output) = try await client.blue.catbird.mlschat.leaveConvo(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.leaveConvo(input: input)
 
     guard responseCode == 200, let output = output else {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to leave conversation")
@@ -858,7 +849,7 @@ public final class MLSAPIClient {
       reason: reason
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.resetGroup(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.resetGroup(input: input)
 
     guard responseCode == 200, let output = output else {
       throw MLSAPIError.httpError(
@@ -917,7 +908,7 @@ public final class MLSAPIClient {
     )
 
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
       guard responseCode == 200, let output = output else {
         throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to add members")
@@ -959,7 +950,7 @@ public final class MLSAPIClient {
       sinceSeq: sinceSeq
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getMessages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getMessages(input: input)
 
     guard responseCode == 200, let output = output else {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch messages")
@@ -1008,7 +999,7 @@ public final class MLSAPIClient {
     )
 
     logger.debug("📍 [MLSAPIClient.sendMessage] Calling API...")
-    let (responseCode, output) = try await client.blue.catbird.mlschat.sendMessage(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.sendMessage(input: input)
 
     guard responseCode == 200, let output = output else {
       let ms = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -1037,7 +1028,7 @@ public final class MLSAPIClient {
       cursor: cursor
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.updateCursor(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.updateCursor(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to update cursor for \(convoId): HTTP \(responseCode)")
@@ -1061,7 +1052,7 @@ public final class MLSAPIClient {
       cursor: cursor
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.updateCursor(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.updateCursor(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to sync private read cursor for \(convoId): HTTP \(responseCode)")
@@ -1090,7 +1081,7 @@ public final class MLSAPIClient {
       delivery: "ephemeral"
     )
 
-    let (responseCode, _) = try await client.blue.catbird.mlschat.sendMessage(input: input)
+    let (responseCode, _) = try await client.blue.catbird.mlsChat.sendMessage(input: input)
     guard responseCode == 200 else {
       logger.error("❌ Failed to send typing indicator for \(convoId): HTTP \(responseCode)")
       throw MLSAPIError.httpError(
@@ -1131,7 +1122,7 @@ public final class MLSAPIClient {
       deviceId: deviceId
     )
 
-    let (responseCode, _) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
+    let (responseCode, _) = try await client.blue.catbird.mlsChat.publishKeyPackages(input: input)
 
     guard responseCode == 200 else {
       throw MLSAPIError.httpError(
@@ -1171,7 +1162,7 @@ public final class MLSAPIClient {
     }
 
     logger.debug("📍 [MLSAPIClient.getKeyPackages] Calling API...")
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getKeyPackages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getKeyPackages(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.getKeyPackages] HTTP \(responseCode)")
@@ -1254,7 +1245,7 @@ public final class MLSAPIClient {
 
     for attempt in 1...maxRetries {
       do {
-        let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupState(input: input)
+        let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupState(input: input)
 
         // Check for transient server errors that warrant retry
         let isTransient = [502, 503, 504].contains(responseCode)
@@ -1516,7 +1507,7 @@ public final class MLSAPIClient {
 
     for attempt in 1...maxRetries {
       do {
-        let (responseCode, _) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+        let (responseCode, _) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
         if responseCode == 200 {
           logger.info(
@@ -1680,7 +1671,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatGetGroupState.Parameters(convoId: convoId, include: "epoch")
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupState(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupState(input: input)
 
     guard responseCode == 200, let output = output else {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch epoch")
@@ -1720,7 +1711,7 @@ public final class MLSAPIClient {
       toEpoch: toEpoch
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getMessages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getMessages(input: input)
 
     guard responseCode == 200, let output = output else {
       throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch commits")
@@ -1747,7 +1738,7 @@ public final class MLSAPIClient {
       deviceId: deviceId
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupState(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupState(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to fetch Welcome message for \(convoId): HTTP \(responseCode)")
@@ -1794,7 +1785,7 @@ public final class MLSAPIClient {
       logger.debug("📡 [confirmWelcome] Attempt \(attempt)/\(maxRetries) - calling server...")
 
       do {
-        let (responseCode, _) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+        let (responseCode, _) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
         logger.debug("📡 [confirmWelcome] Server response: HTTP \(responseCode)")
 
@@ -1912,7 +1903,7 @@ public final class MLSAPIClient {
       idempotencyKey: idemKey
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -1941,7 +1932,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatGetConvos.Parameters()
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getConvos(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getConvos(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -2003,7 +1994,7 @@ public final class MLSAPIClient {
     )
 
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.reissueWelcome(input: input)
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.reissueWelcome(input: input)
 
       guard (200...299).contains(responseCode), let output else {
         logger.error("❌ [requestWelcomeReissue] HTTP \(responseCode)")
@@ -2055,7 +2046,7 @@ public final class MLSAPIClient {
     )
 
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.reconcileKeyPackages(
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.reconcileKeyPackages(
         input: input
       )
 
@@ -2107,7 +2098,7 @@ public final class MLSAPIClient {
     )
 
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.invalidateKeyPackage(
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.invalidateKeyPackage(
         input: input
       )
 
@@ -2147,42 +2138,28 @@ public final class MLSAPIClient {
   ) async throws -> (invalidated: Bool, welcomeId: String?) {
     logger.info("📤 [invalidateWelcome] START - convoId: \(convoId), reason: \(reason)")
 
-    let input = BlueCatbirdMlsChatInvalidateWelcome.Input(
+    // The standalone invalidateWelcome endpoint was folded into
+    // commitGroupChange (action: "invalidateWelcome") server-side.
+    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
       convoId: convoId,
-      reason: reason
+      action: "invalidateWelcome"
     )
 
-    do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.invalidateWelcome(
-        input: input
-      )
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
-      guard (200...299).contains(responseCode), let output else {
-        logger.error("❌ [invalidateWelcome] Failed with HTTP \(responseCode)")
-        throw MLSAPIError.httpError(
-          statusCode: responseCode, message: "invalidateWelcome failed with HTTP \(responseCode)")
-      }
-
-      if output.invalidated {
-        logger.info(
-          "✅ [invalidateWelcome] SUCCESS - Welcome invalidated, welcomeId=\(output.welcomeId ?? "nil")"
-        )
-      } else {
-        logger.warning("⚠️ [invalidateWelcome] No Welcome found to invalidate")
-      }
-
-      return (output.invalidated, output.welcomeId)
-    } catch let error as ATProtoError<BlueCatbirdMlsChatInvalidateWelcome.Error> {
-      logger.error(
-        "❌ [invalidateWelcome] Lexicon error: \(error.error.errorName) - \(error.message ?? "no details")"
-      )
-      switch error.error {
-      case .notFound:
-        throw MLSAPIError.httpError(statusCode: 404, message: error.message ?? "Welcome not found")
-      case .unauthorized:
-        throw MLSAPIError.httpError(statusCode: 403, message: error.message ?? "Unauthorized")
-      }
+    guard (200...299).contains(responseCode), let output else {
+      logger.error("❌ [invalidateWelcome] Failed with HTTP \(responseCode)")
+      throw MLSAPIError.httpError(
+        statusCode: responseCode, message: "invalidateWelcome failed with HTTP \(responseCode)")
     }
+
+    if output.success {
+      logger.info("✅ [invalidateWelcome] SUCCESS - Welcome invalidated")
+    } else {
+      logger.warning("⚠️ [invalidateWelcome] No Welcome found to invalidate")
+    }
+
+    return (output.success, nil)
   }
 
   /// Request re-addition to a conversation when both Welcome and External Commit have failed
@@ -2196,7 +2173,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(convoId: convoId, action: "readdition")
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [readdition] Failed with HTTP \(responseCode)")
@@ -2225,7 +2202,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatCommitGroupChange.Input(convoId: convoId, action: "refreshGroupInfo")
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [groupInfoRefresh] Failed with HTTP \(responseCode)")
@@ -2291,7 +2268,7 @@ public final class MLSAPIClient {
       idempotencyKey: idemKey
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.removeMember] HTTP \(responseCode)")
@@ -2329,7 +2306,7 @@ public final class MLSAPIClient {
     )
 
     do {
-      let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(input: input)
+      let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
 
       guard responseCode == 200, let output = output else {
         throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to send commit")
@@ -2367,7 +2344,7 @@ public final class MLSAPIClient {
       targetDid: targetDid
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.updateConvo(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.updateConvo(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.promoteAdmin] HTTP \(responseCode)")
@@ -2400,7 +2377,7 @@ public final class MLSAPIClient {
       targetDid: targetDid
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.updateConvo(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.updateConvo(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.demoteAdmin] HTTP \(responseCode)")
@@ -2434,7 +2411,7 @@ public final class MLSAPIClient {
       reason: reason
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.reportSpam(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.reportSpam(input: input)
 
     if let output = output {
       logger.info("✅ [MLSAPIClient.reportSpam] SUCCESS - id: \(output.id)")
@@ -2456,7 +2433,7 @@ public final class MLSAPIClient {
     logger.info("🌐 [MLSAPIClient.checkBlocks] START - dids: \(dids.count)")
 
     let input = BlueCatbirdMlsChatCheckBlocks.Input(dids: dids)
-    let (responseCode, output) = try await client.blue.catbird.mlschat.checkBlocks(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.checkBlocks(input: input)
 
     if let output {
       logger.info("✅ [MLSAPIClient.checkBlocks] SUCCESS - \(output.blocks.count) blocks found")
@@ -2475,7 +2452,7 @@ public final class MLSAPIClient {
     logger.info("🌐 [MLSAPIClient.getBlockStatus] START - convoId: \(convoId)")
 
     let input = BlueCatbirdMlsChatGetBlockStatus.Input(convoId: convoId)
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getBlockStatus(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getBlockStatus(input: input)
 
     if let output {
       logger.info("✅ [MLSAPIClient.getBlockStatus] SUCCESS - \(output.blocks.count) blocks")
@@ -2504,29 +2481,27 @@ public final class MLSAPIClient {
       "🌐 [MLSAPIClient.registerDeviceToken] START - deviceId: \(deviceId), platform: \(platform), deviceName: \(deviceName)"
     )
 
-    let input = BlueCatbirdMlsChatRegisterDeviceToken.Input(
-      deviceId: deviceId,
-      pushToken: pushToken,
+    // registerDeviceToken was folded into registerDevice server-side; sending
+    // registerDevice with a pushToken updates the token on the existing device
+    // row (same consolidation already used by unregisterDeviceToken below).
+    let input = BlueCatbirdMlsChatRegisterDevice.Input(
       deviceName: deviceName,
-      platform: platform
+      deviceUUID: deviceId,
+      keyPackages: [],
+      signaturePublicKey: Bytes(data: Data()),
+      pushToken: pushToken
     )
 
-    if let jsonData = try? JSONEncoder().encode(input),
-      let jsonString = String(data: jsonData, encoding: .utf8)
-    {
-      logger.debug("📝 [MLSAPIClient.registerDeviceToken] Payload: \(jsonString)")
-    }
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.registerDevice(input: input)
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.registerDeviceToken(input: input)
-
-    guard responseCode == 200, let output = output else {
+    guard responseCode == 200, output != nil else {
       logger.error("❌ [MLSAPIClient.registerDeviceToken] HTTP \(responseCode)")
       throw MLSAPIError.httpError(
         statusCode: responseCode, message: "Failed to register device token")
     }
 
     logger.info("✅ [MLSAPIClient.registerDeviceToken] SUCCESS")
-    return output.success
+    return true
   }
 
   /// Remove a device push token
@@ -2542,7 +2517,7 @@ public final class MLSAPIClient {
       signaturePublicKey: Bytes(data: Data())
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.registerDevice(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.registerDevice(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -2564,7 +2539,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(action: "stats")
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.publishKeyPackages(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.getKeyPackageStats] HTTP \(responseCode)")
@@ -2592,7 +2567,7 @@ public final class MLSAPIClient {
 
     let input = BlueCatbirdMlsChatPublishKeyPackages.Input(action: "stats")
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.publishKeyPackages(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.getKeyPackageStatus] HTTP \(responseCode)")
@@ -2645,7 +2620,7 @@ public final class MLSAPIClient {
       deviceId: deviceId
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.publishKeyPackages(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.syncKeyPackages] HTTP \(responseCode)")
@@ -2751,7 +2726,7 @@ public final class MLSAPIClient {
       deviceId: deviceId
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.publishKeyPackages(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.publishKeyPackages(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.publishKeyPackagesBatchDirect] HTTP \(responseCode)")
@@ -2848,7 +2823,7 @@ public final class MLSAPIClient {
       action: "getAdminStats"
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.updateConvo(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.updateConvo(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.getAdminStats] HTTP \(responseCode)")
@@ -2868,7 +2843,7 @@ public final class MLSAPIClient {
     logger.info("🌐 [MLSAPIClient.optIn] START")
 
     let input = BlueCatbirdMlsChatOptIn.Input(action: "optIn", deviceId: deviceId)
-    let (responseCode, output) = try await client.blue.catbird.mlschat.optIn(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.optIn(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.optIn] HTTP \(responseCode)")
@@ -2899,7 +2874,7 @@ public final class MLSAPIClient {
       action: "listPending"
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -2931,7 +2906,7 @@ public final class MLSAPIClient {
       pendingAdditionId: pendingAdditionId
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -2965,7 +2940,7 @@ public final class MLSAPIClient {
       pendingAdditionId: pendingAdditionId
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.commitGroupChange(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.commitGroupChange(
       input: input)
 
     guard responseCode == 200, let output = output else {
@@ -3027,7 +3002,7 @@ public final class MLSAPIClient {
       delivery: "persistent"  // Reactions persist for offline sync
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.sendMessage(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.sendMessage(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to send encrypted reaction: HTTP \(responseCode)")
@@ -3232,7 +3207,7 @@ public extension MLSAPIClient {
     let input = BlueCatbirdMlsChatSubscribeEvents.Parameters(ticket: nil, cursor: cursor)
 
     // Petrel subscription uses DAG-CBOR framing and $type-based unions
-    return try await self.client.blue.catbird.mlschat.subscribeEvents(input: input)
+    return try await self.client.blue.catbird.mlsChat.subscribeEvents(input: input)
   }
 }
 
@@ -3250,7 +3225,7 @@ public extension MLSAPIClient {
 
     let input = BlueCatbirdMlsChatGetSubscriptionTicket.Input(convoIds: convoId.map { [$0] })
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getSubscriptionTicket(input: input)
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getSubscriptionTicket(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ [MLSAPIClient.getSubscriptionTicket] HTTP \(responseCode)")
@@ -3286,7 +3261,7 @@ public extension MLSAPIClient {
       "📤 [MLSAPIClient.putGroupMetadataBlob] START - locator: \(blobLocator.prefix(8))..., group: \(groupId.prefix(16))..., size: \(encryptedBlob.count) bytes"
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.putGroupMetadataBlob(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.putGroupMetadataBlob(
       data: encryptedBlob,
       mimeType: "application/octet-stream",
       stripMetadata: false,
@@ -3345,7 +3320,7 @@ public extension MLSAPIClient {
       kind: kind
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupMetadataBlob(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupMetadataBlob(
       input: input
     )
 
@@ -3403,7 +3378,7 @@ public extension MLSAPIClient {
       kind: kind
     )
 
-    let (responseCode, output) = try await client.blue.catbird.mlschat.getGroupMetadataBlob(
+    let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupMetadataBlob(
       input: input
     )
 

@@ -4,6 +4,7 @@ import GRDB
 import Observation
 import OSLog
 import Petrel
+import PetrelCatbird
 import Synchronization
 // MLSConversationError moved to MLSTypes.swift
 
@@ -925,7 +926,7 @@ public final class MLSConversationManager {
         convoId: convoId,
         action: "refreshGroupInfo"
       )
-      let (responseCode, output) = try await apiClient.client.blue.catbird.mlschat.commitGroupChange(
+      let (responseCode, output) = try await apiClient.client.blue.catbird.mlsChat.commitGroupChange(
         input: input)
 
       if responseCode == 200, let output = output {

@@ -14,6 +14,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Decision result for whether a message can be processed now
 public enum MessageOrderingDecision: Sendable {

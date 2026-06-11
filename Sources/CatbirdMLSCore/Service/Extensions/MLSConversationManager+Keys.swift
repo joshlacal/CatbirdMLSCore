@@ -2,6 +2,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 public extension MLSConversationManager {
 

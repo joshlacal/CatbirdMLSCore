@@ -3,6 +3,7 @@ import Foundation
 import GRDB
 import OSLog
 import Petrel
+import PetrelCatbird
 import Synchronization
 
 extension MLSConversationManager {
@@ -1109,7 +1110,7 @@ extension MLSConversationManager {
     let responseCode: Int
     let output: BlueCatbirdMlsChatCommitGroupChange.Output?
     do {
-      (responseCode, output) = try await apiClient.client.blue.catbird.mlschat.commitGroupChange(
+      (responseCode, output) = try await apiClient.client.blue.catbird.mlsChat.commitGroupChange(
         input: input
       )
     } catch {

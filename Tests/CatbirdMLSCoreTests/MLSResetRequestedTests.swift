@@ -1,6 +1,7 @@
 import XCTest
 import GRDB
 import Petrel
+import PetrelCatbird
 @testable import CatbirdMLSCore
 
 /// Unit tests for the Phase 2.5 indirect-trigger `resetRequestedEvent` path.

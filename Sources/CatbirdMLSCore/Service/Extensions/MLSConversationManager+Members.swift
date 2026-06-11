@@ -3,6 +3,7 @@ import Foundation
 import GRDB
 import OSLog
 import Petrel
+import PetrelCatbird
 import Synchronization
 
 public extension MLSConversationManager {

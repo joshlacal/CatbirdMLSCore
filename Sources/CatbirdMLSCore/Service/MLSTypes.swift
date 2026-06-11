@@ -1,5 +1,6 @@
 import Foundation
 import Petrel
+import PetrelCatbird
 
 /// Errors specific to MLS conversation operations
 public enum MLSConversationError: Error, LocalizedError {

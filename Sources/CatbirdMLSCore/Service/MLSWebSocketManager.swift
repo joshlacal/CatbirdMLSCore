@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Manages WebSocket subscriptions for MLS conversations
 /// Provides real-time message delivery using WebSocket with DAG-CBOR encoding
@@ -302,7 +303,7 @@ public actor MLSWebSocketManager {
         // Get authentication ticket
         logger.info("🔌 WS: Requesting subscription ticket for \(key)...")
         let ticketInput = BlueCatbirdMlsChatGetSubscriptionTicket.Input(convoIds: convoId.map { [$0] })
-        let ticketResponse = try await apiClient.client.blue.catbird.mlschat.getSubscriptionTicket(
+        let ticketResponse = try await apiClient.client.blue.catbird.mlsChat.getSubscriptionTicket(
           input: ticketInput)
         guard let ticket = ticketResponse.data?.ticket else {
           logger.error("🔌 WS: Failed to get ticket - no data in response")
@@ -310,7 +311,7 @@ public actor MLSWebSocketManager {
         }
         logger.info("🔌 WS: Got ticket, connecting...")
 
-        let stream = try await apiClient.client.blue.catbird.mlschat.subscribeEvents(
+        let stream = try await apiClient.client.blue.catbird.mlsChat.subscribeEvents(
           ticket: ticket,
           cursor: cursorToUse
         )

@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Manages silent auto-recovery from MLS desync situations
 ///
@@ -920,7 +921,7 @@ public actor MLSRecoveryManager {
             failureMode: failureMode,  // ADR-008 D1
             epochAuthenticator: authenticator
           )
-          let (code, output) = try await apiClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
+          let (code, output) = try await apiClient.client.blue.catbird.mlsChat.reportRecoveryFailure(input: input)
           self.logger.info(
             "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil") failureType=\(resolvedFailureType) failureMode=\(failureMode ?? "nil")"
           )
@@ -1106,7 +1107,7 @@ public actor MLSRecoveryManager {
           failureMode: "group_state_unrecoverable",
           epochAuthenticator: authenticator
         )
-        let (code, output) = try await apiClient.client.blue.catbird.mlschat
+        let (code, output) = try await apiClient.client.blue.catbird.mlsChat
           .reportRecoveryFailure(input: input)
         self.logger.info(
           "📡 [MLSRecoveryManager] Reported unbridgeable epoch gap for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) reason=\(output?.reason ?? "nil")"

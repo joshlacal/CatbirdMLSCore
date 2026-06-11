@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import Petrel
+import PetrelCatbird
 
 extension MLSConversationManager {
   internal func decideWelcomeRecovery(

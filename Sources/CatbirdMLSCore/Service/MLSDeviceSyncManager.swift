@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Manages automatic synchronization of new devices to MLS conversations.
 /// When a user registers a new device, this manager coordinates adding that device

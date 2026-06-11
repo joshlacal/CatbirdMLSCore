@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 #if os(iOS)
   import UIKit
@@ -394,7 +395,7 @@ public actor MLSDeviceManager {
       do {
         logger.info("📡 Attempting server registration (attempt \(attempt)/\(maxRetries))...")
 
-        let (responseCode, output) = try await apiClient.blue.catbird.mlschat.registerDevice(
+        let (responseCode, output) = try await apiClient.blue.catbird.mlsChat.registerDevice(
           input: input)
 
         guard responseCode == 200, let output = output else {
@@ -525,10 +526,12 @@ public actor MLSDeviceManager {
     logger.info(
       "🗑️ Deleting device \(deviceInfo.deviceId) for user \(normalizedUserDid.prefix(20))...")
 
-    let input = BlueCatbirdMlsChatDeleteDevice.Input(
+    // deleteDevice was retired server-side; removeDevice is the replacement
+    // with the same input/output shape.
+    let input = BlueCatbirdMlsChatRemoveDevice.Input(
       deviceId: deviceInfo.deviceId
     )
-    let (responseCode, output) = try await apiClient.blue.catbird.mlschat.deleteDevice(input: input)
+    let (responseCode, output) = try await apiClient.blue.catbird.mlsChat.removeDevice(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to delete device: HTTP \(responseCode)")
@@ -536,7 +539,7 @@ public actor MLSDeviceManager {
     }
 
     logger.info("✅ Device deleted successfully")
-    logger.info("   - Deleted: \(output.deleted), keyPackagesDeleted: \(output.keyPackagesDeleted)")
+    logger.info("   - Deleted: \(output.deleted), keyPackagesDeleted: \(output.keyPackagesDeleted ?? 0)")
 
     return 0
   }

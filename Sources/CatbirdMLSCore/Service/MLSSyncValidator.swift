@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import Petrel
+import PetrelCatbird
 
 /// Actor responsible for periodic validation of MLS device state and sync status
 /// Runs validation checks every 6 hours and triggers recovery actions when safe
@@ -61,7 +62,7 @@ public final class MLSSyncValidator {
         do {
             // Use listDevices to check device validity
             let input = BlueCatbirdMlsChatListDevices.Parameters()
-            let (responseCode, output) = try await client.blue.catbird.mlschat.listDevices(input: input)
+            let (responseCode, output) = try await client.blue.catbird.mlsChat.listDevices(input: input)
 
             guard responseCode == 200, let output = output else {
                 logger.error("Validation failed with HTTP \(responseCode)")

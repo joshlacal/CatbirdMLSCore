@@ -1,5 +1,6 @@
 import XCTest
 import Petrel
+import PetrelCatbird
 @testable import CatbirdMLSCore
 
 final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {

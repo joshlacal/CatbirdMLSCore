@@ -1,5 +1,6 @@
 import Foundation
 import Petrel
+import PetrelCatbird
 
 /// State change events
 public enum MLSStateEvent {

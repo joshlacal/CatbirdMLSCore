@@ -1,5 +1,6 @@
 import Foundation
 import Petrel
+import PetrelCatbird
 
 public extension MLSConversationModel {
   /// Convert local database model to API ConvoView
