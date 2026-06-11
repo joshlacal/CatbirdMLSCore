@@ -111,28 +111,40 @@ final class MLSRecoveryPersistenceTests: XCTestCase {
     )
   }
 
-  func testAttemptCeilingPersistsQuarantineAcrossRestart() async throws {
+  // N39 (3-band collapse): the quarantine horizon arms when the failure
+  // counter reaches MAX_REJOIN_ATTEMPTS (3) — the Rust contract
+  // (`RecoveryTracker::record_failure` arms `lockout_until` at
+  // `count >= max_attempts`, persisted as `quarantined_until_ms`;
+  // catbird-mls/src/orchestrator/recovery.rs). The retired
+  // `rejoinAttemptCeiling = 8` band this test used to pin had no Rust twin.
+  func testMaxAttemptsPersistsQuarantineAcrossRestart() async throws {
     let store = InMemoryRecoveryStateStore()
     let manager = MLSRecoveryManager(persistence: store)
 
-    for _ in 0..<MLSRecoveryManager.rejoinAttemptCeiling {
-      await manager.recordFailedRejoin(convoId: "convo-ceiling")
+    for _ in 0..<MLSRecoveryManager.maxRejoinAttempts {
+      await manager.recordFailedRejoin(convoId: "convo-maxed")
     }
     await manager.flushPersistence()
 
-    let persisted = await store.entry(for: "convo-ceiling")
-    XCTAssertEqual(persisted?.failedRejoinCount, MLSRecoveryManager.rejoinAttemptCeiling)
-    XCTAssertNotNil(persisted?.quarantinedUntilMs)
+    let persisted = await store.entry(for: "convo-maxed")
+    XCTAssertEqual(
+      persisted?.failedRejoinCount, MLSRecoveryManager.maxRejoinAttempts,
+      "counter must persist at the real attempt count — never inflated past it (N39)"
+    )
+    XCTAssertNotNil(
+      persisted?.quarantinedUntilMs,
+      "reaching MAX_REJOIN_ATTEMPTS must arm the persisted quarantine horizon (Rust record_failure parity)"
+    )
 
     let restarted = MLSRecoveryManager(persistence: store)
     await restarted.hydrateFromDatabase()
 
-    let skipsCeiling = await restarted.shouldSkipRejoin(convoId: "convo-ceiling")
-    let remaining = await restarted.remainingRejoinAttempts(convoId: "convo-ceiling")
+    let skipsMaxed = await restarted.shouldSkipRejoin(convoId: "convo-maxed")
+    let remaining = await restarted.remainingRejoinAttempts(convoId: "convo-maxed")
 
     XCTAssertTrue(
-      skipsCeiling,
-      "ceiling quarantine must survive restart until the TTL horizon expires"
+      skipsMaxed,
+      "maxed-out quarantine must survive restart until the TTL horizon expires"
     )
     XCTAssertEqual(remaining, 0)
   }
@@ -159,25 +171,27 @@ final class MLSRecoveryPersistenceTests: XCTestCase {
     )
   }
 
-  func testClearRejoinTrackingAfterCeilingErasesPersistedBiasAcrossRestart() async throws {
+  func testClearRejoinTrackingAfterMaxAttemptsErasesPersistedBiasAcrossRestart() async throws {
     // N20 contract: rejoin paths that succeed (e.g. the
     // detectAndRejoinMissingConversations missing-convo loop) map success to
     // clearRejoinTracking. That clear must erase the *persisted* failure
     // counters and quarantine too — otherwise the next launch rehydrates the
     // stale bias and shouldSkipRejoin keeps gating a conversation that
     // already healed.
+    // N39: the gate now arms at MAX_REJOIN_ATTEMPTS (3) — the single Rust
+    // band — instead of the retired ceiling (8).
     let store = InMemoryRecoveryStateStore()
     let manager = MLSRecoveryManager(persistence: store)
 
-    for _ in 0..<MLSRecoveryManager.rejoinAttemptCeiling {
+    for _ in 0..<MLSRecoveryManager.maxRejoinAttempts {
       await manager.recordFailedRejoin(convoId: "convo-n20")
     }
     await manager.flushPersistence()
 
-    let skipsAtCeiling = await manager.shouldSkipRejoin(convoId: "convo-n20")
+    let skipsAtMax = await manager.shouldSkipRejoin(convoId: "convo-n20")
     XCTAssertTrue(
-      skipsAtCeiling,
-      "ceiling-tripped conversation must be gated before the successful rejoin"
+      skipsAtMax,
+      "maxed-out conversation must be gated before the successful rejoin"
     )
 
     // Successful rejoin outcome.

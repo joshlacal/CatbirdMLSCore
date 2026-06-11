@@ -66,7 +66,20 @@ public actor MLSRecoveryManager {
 
   /// Maximum rejoin attempts per conversation before giving up. Spec §8.2:
   /// "attempts >= MAX_REJOIN_ATTEMPTS → UNRECOVERABLE_LOCAL".
-  private let maxRejoinAttempts = 3
+  ///
+  /// N39 (3-band collapse): this is the SINGLE arming threshold — reaching it
+  /// arms the persisted 24h `quarantinedUntil` horizon, exactly like the Rust
+  /// twin (`RecoveryTracker::record_failure` arms `lockout_until` at
+  /// `count >= max_attempts`, persisted as `quarantined_until_ms`;
+  /// `catbird-mls/src/orchestrator/constants.rs` `MAX_REJOIN_ATTEMPTS = 3`).
+  /// The old Swift-only 8 (ceiling) and 13 (server-corrupted) bands are
+  /// retired; server corruption is now quarantine STATE (`markQuarantined`),
+  /// not counter inflation.
+  public static let maxRejoinAttempts = 3
+
+  /// Instance alias for `Self.maxRejoinAttempts` (keeps existing call sites
+  /// unchanged).
+  private var maxRejoinAttempts: Int { Self.maxRejoinAttempts }
 
   /// Threshold for transitioning `.healthy → .needsRejoin` on repeated commit
   /// failures. Spec §8.2: "5 consecutive commit failures".
@@ -180,28 +193,51 @@ public actor MLSRecoveryManager {
   /// wedge a conversation.
   public static let persistedStateTTL: TimeInterval = 24 * 60 * 60
 
-  /// Hard ceiling on accumulated failed-rejoin attempts (circuit breaker).
-  /// Chosen as `maxRejoinAttempts + 5` so it stays strictly below the
-  /// server-corrupted marker band (`markConversationServerCorrupted` stamps
-  /// `maxRejoinAttempts + 10`; `isConversationServerCorrupted` tests
-  /// `> maxRejoinAttempts + 5`). At or beyond the ceiling, automated rejoin
-  /// is disabled for the conversation (loud `.error` surfacing) and a 24h
-  /// quarantine horizon is persisted; the existing recovery-state mechanism
-  /// (`remainingRejoinAttempts == 0` → callers persist UNRECOVERABLE_LOCAL)
-  /// carries it to the UI. The 24h TTL guarantees the breaker self-resets.
-  public static let rejoinAttemptCeiling = 8
-
   /// Persistence seam (GRDB-backed in production via
   /// `MLSRecoveryStateStore`). Wired by the single startup caller
   /// (`MLSConversationManager.initialize()`); nil in contexts that never run
   /// the rejoin loop (e.g. NSE).
   private var persistence: MLSRecoveryStatePersisting?
 
-  /// Explicit per-conversation quarantine horizon (ceiling trips,
+  /// Explicit per-conversation quarantine horizon (max-attempts lockout,
   /// server-corruption marks). Checked by `shouldSkipRejoin` in addition to
   /// the attempts-derived backoff. Hydration honors a persisted horizon but
-  /// never extends it.
+  /// never extends it. N39: armed when `failedRejoinCount` reaches
+  /// `maxRejoinAttempts` (3) — the single 3-band Rust convention
+  /// (`FailedRejoinEntry.lockout_until` / persisted `quarantined_until_ms`).
   private var quarantinedUntil: [String: Date] = [:]
+
+  // MARK: - Layer-3 Quarantine State (N40, Rust `RecoveryTracker.quarantined` twin)
+
+  /// Per-conversation Layer-3 quarantine state. Swift twin of the Rust
+  /// orchestrator's `RecoveryTracker.quarantined` map
+  /// (`catbird-mls/src/orchestrator/recovery.rs`): the STRONGEST recovery
+  /// gate — `shouldSkipRejoin` checks it before every other band, and an
+  /// indefinite entry exits only via `clearQuarantine` (event-driven:
+  /// server reset, healthy peer commit, user-confirmed reset — Rust
+  /// `QuarantineExitReason`).
+  ///
+  /// Entry convention (E7, coordinated with Rust `mark_quarantined`):
+  /// entering quarantine CLEARS the failed-rejoin counter — quarantine
+  /// replaces the counter as the gate; corruption/peer-badness is tracked as
+  /// STATE, never as count inflation (the old `maxRejoinAttempts + 10` band
+  /// is retired, N39/N40).
+  ///
+  /// Trigger status (2026-06-11): the Rust N38 typed decrypt-error classes
+  /// that drive `record_peer_bad_commit` classification are NOT yet exported
+  /// through the iOS xcframework, and the DS pushes no quarantine events, so
+  /// the only production entry path today is `markConversationServerCorrupted`
+  /// (`.serverDataCorruption`, 24h horizon). The peer-bad reasons land with
+  /// the next FFI rebuild after N38.
+  ///
+  /// In-memory only for the quarantine REASON; the gating effect of a
+  /// horizon-carrying entry survives restart via the Rust-portable persisted
+  /// row (`failedRejoinCount == maxRejoinAttempts` + `quarantinedUntilMs`).
+  /// Indefinite entries are deliberately NOT persisted: iOS has no
+  /// event-driven exit signal wired yet, and a persisted indefinite
+  /// quarantine could permanently wedge a conversation (violating the E7
+  /// "persisted state can never permanently wedge" contract).
+  private var quarantineStates: [String: MLSQuarantineState] = [:]
 
   /// Tail of the write-through chain. Each persistence op is appended here
   /// so writes apply in the order the state changes happened. Failures are
@@ -637,14 +673,31 @@ public actor MLSRecoveryManager {
   /// `clear` do).
   ///
   /// Layered gates (each can short-circuit to skip):
-  /// 1. Per-conversation max attempts (spec §8.2 — MAX_REJOIN_ATTEMPTS = 3)
+  /// 0. Layer-3 quarantine state (N40 — strongest gate, Rust
+  ///    `RecoveryTracker::should_skip` checks `quarantined` first; exit is
+  ///    event-driven via `clearQuarantine`, or lazy horizon expiry)
+  /// 1. Per-conversation max attempts (spec §8.2 — MAX_REJOIN_ATTEMPTS = 3;
+  ///    N39: reaching it arms the 24h `quarantinedUntil` lockout horizon)
   /// 2. Per-conversation exponential backoff (30s/2m/10m/1h)
   /// 3. **Global** rejoin floor (spec §8.4 / §10 — MIN_REJOIN_INTERVAL_SEC = 30,
   ///    applies across all conversations, mirrors Rust
   ///    `RecoveryTracker.last_global_rejoin_at`)
   public func shouldSkipRejoin(convoId: String) -> Bool {
-    // WS-6.4 circuit breaker: explicit quarantine horizon (ceiling trip or
-    // server-corruption mark, possibly hydrated from a prior session).
+    // Layer 3 (N40): quarantine state is the strongest gate — never
+    // auto-rejoin a quarantined conversation (Rust parity: quarantine is
+    // checked before every other band in `should_skip`). Horizon-carrying
+    // states (server corruption) expire lazily inside
+    // `activeQuarantineState`; indefinite states exit only via
+    // `clearQuarantine`.
+    if let state = activeQuarantineState(convoId: convoId) {
+      logger.error(
+        "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - quarantined (reason=\(state.reason.rawValue), since=\(state.since)) — automated rejoin disabled"
+      )
+      return true
+    }
+
+    // N39 maxed-out lockout horizon: armed when the failure counter reaches
+    // maxRejoinAttempts (possibly hydrated from a prior session).
     // Honored while active; expires naturally — never extended here.
     if let quarantine = quarantinedUntil[convoId], Date() < quarantine {
       logger.error(
@@ -661,16 +714,6 @@ public actor MLSRecoveryManager {
     expireLapsedLockoutIfNeeded(convoId: convoId, now: Date())
 
     if let record = failedRejoins[convoId] {
-      // WS-6.4 circuit breaker: persisted attempts at/beyond the ceiling
-      // disable automated rejoin outright (loud, .error — surfaced to the
-      // existing recovery-state path via remainingRejoinAttempts == 0).
-      if record.attempts >= Self.rejoinAttemptCeiling {
-        logger.error(
-          "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - rejoin attempt ceiling (\(Self.rejoinAttemptCeiling)) reached (\(record.attempts) accumulated failures) — automated rejoin disabled (circuit breaker)"
-        )
-        return true
-      }
-
       // Skip if max attempts exceeded
       if record.attempts >= maxRejoinAttempts {
         logger.info(
@@ -808,13 +851,19 @@ public actor MLSRecoveryManager {
       "📝 [MLSRecoveryManager] Recorded failed rejoin for \(convoId.prefix(16)) - attempt \(newAttempts)/\(self.maxRejoinAttempts) failureType=\(failureType)"
     )
 
-    // WS-6.4 circuit breaker: at/beyond the ceiling, disable automated
-    // rejoin and persist an explicit 24h quarantine horizon (the TTL ensures
-    // this cannot permanently wedge the conversation).
-    if newAttempts >= Self.rejoinAttemptCeiling, quarantinedUntil[convoId] == nil {
+    // N39 (3-band collapse, Rust `record_failure` parity): reaching
+    // MAX_REJOIN_ATTEMPTS arms the 24h lockout horizon — Rust sets
+    // `lockout_until = now + RECOVERY_BACKOFF_TTL` whenever
+    // `count >= max_attempts`, persisted as `quarantined_until_ms`. Like the
+    // Rust twin this RE-ARMS on every maxed failure OUTCOME (a real new
+    // attempt extends the lockout); hydration still honors-never-extends —
+    // that contract applies to persisted state at startup, not runtime
+    // outcomes. The TTL guarantees the breaker self-resets (runtime clamp /
+    // hydration clamp re-open exactly one attempt after expiry).
+    if newAttempts >= maxRejoinAttempts {
       quarantinedUntil[convoId] = now.addingTimeInterval(Self.persistedStateTTL)
       logger.error(
-        "⛔️ [MLSRecoveryManager] Rejoin attempt ceiling (\(Self.rejoinAttemptCeiling)) reached for \(convoId.prefix(16)) — automated rejoin disabled, quarantined for 24h (circuit breaker)"
+        "⛔️ [MLSRecoveryManager] Max rejoin attempts (\(self.maxRejoinAttempts)) reached for \(convoId.prefix(16)) — automated rejoin disabled, quarantined for 24h (circuit breaker)"
       )
     }
 
@@ -822,8 +871,12 @@ public actor MLSRecoveryManager {
     persistConversationEntry(convoId: convoId)
     persistGlobalStamp(now)
 
-    // Spec §8.6: Report to server when transitioning to UNRECOVERABLE_LOCAL
-    if existing.attempts + 1 >= maxRejoinAttempts {
+    // Spec §8.6: Report to server when transitioning to UNRECOVERABLE_LOCAL.
+    // N39: vote-once-at-3 — fire only on the TRANSITION into the maxed band
+    // (existing < max, new >= max), once per exhaustion cycle. A runtime/
+    // hydration clamp re-opening one attempt that then fails re-crosses the
+    // boundary and legitimately re-fires (same as pre-collapse behavior).
+    if existing.attempts < maxRejoinAttempts, newAttempts >= maxRejoinAttempts {
       logger.error(
         "🚨 [MLSRecoveryManager] Max rejoin attempts reached for \(convoId.prefix(16)) — reporting to server (failureType=\(failureType))"
       )
@@ -1092,6 +1145,10 @@ public actor MLSRecoveryManager {
   public func clearRejoinTracking(convoId: String) {
     let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
     quarantinedUntil.removeValue(forKey: convoId)
+    // N40 quarantine exit: a successful rejoin / user-confirmed recovery is
+    // an event-driven exit (Rust `QuarantineExitReason::PeerCommitSucceeded`
+    // / `UserConfirmedReset` analog).
+    quarantineStates.removeValue(forKey: convoId)
     transientStates.removeValue(forKey: convoId)
     commitFailureCounts.removeValue(forKey: convoId)
     decryptionFailureCounts.removeValue(forKey: convoId)
@@ -1136,6 +1193,10 @@ public actor MLSRecoveryManager {
   public func clearRejoinTrackingForFreshReset(convoId: String) {
     let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
     quarantinedUntil.removeValue(forKey: convoId)
+    // N40 quarantine exit: a server-pushed reset is an event-driven exit
+    // (Rust `QuarantineExitReason::ServerReset` — the server has declared the
+    // old, possibly-poisoned group dead).
+    quarantineStates.removeValue(forKey: convoId)
     transientStates.removeValue(forKey: convoId)
     commitFailureCounts.removeValue(forKey: convoId)
     decryptionFailureCounts.removeValue(forKey: convoId)
@@ -1198,79 +1259,20 @@ public actor MLSRecoveryManager {
     return max(0, maxRejoinAttempts - record.attempts)
   }
 
-  /// Load persisted unrecoverable state from database on startup.
-  /// This prevents retry loops after app restart for conversations that
-  /// already exhausted all rejoin attempts.
-  ///
-  /// ADR-002 A7 escalation retry: because hydrate sets attempts past
-  /// maxRejoinAttempts, `recordFailedRejoin` will never fire again for these
-  /// convos, which means the initial `reportRecoveryFailure` dispatch (also
-  /// fire-and-forget) is the ONLY shot at getting the server a vote. If that
-  /// first attempt failed (network blip, server down at the moment), the
-  /// escalation is lost forever — until quorum can't form and the convo is
-  /// permanently dead client-side.
-  ///
-  /// Mitigation: re-fire the escalation on each hydrate (once per app launch
-  /// per convo). Server-side is idempotent via 24h per-DID rate limit +
-  /// ON CONFLICT DO NOTHING, so duplicates are cheap. Still fire-and-forget
-  /// here; a durable pending-escalation queue remains backlog task.
-  ///
-  /// - Parameters:
-  ///   - unrecoverableConvoIds: Convo IDs that crossed MAX_REJOIN_ATTEMPTS in
-  ///     a prior session and are persisted as UNRECOVERABLE_LOCAL.
-  ///   - epochAuthenticatorsByConvoId: Optional per-convo hex-encoded RFC
-  ///     9420 §8.7 `epoch_authenticator`. When non-nil for a convo, the
-  ///     server's A7 reset-vote pyramid will count this client's vote toward
-  ///     quorum; when nil (or not provided), the call succeeds but the
-  ///     server short-circuits as `reason: "missing_authenticator"`. Callers
-  ///     should compute via `MLSContext.epochAuthenticator(groupId:)` +
-  ///     hex-encode when the group is still present locally.
-  public func hydrateFromDatabase(
-    unrecoverableConvoIds: [String],
-    epochAuthenticatorsByConvoId: [String: String]? = nil
-  ) {
-    for convoId in unrecoverableConvoIds {
-      failedRejoins[convoId] = (attempts: maxRejoinAttempts + 1, lastAttempt: Date.distantPast)
-      logger.info("📥 [MLSRecoveryManager] Hydrated unrecoverable state for \(convoId.prefix(16))")
-
-      // Re-fire escalation on every hydrate. Cheap server-side (rate-limited)
-      // and ensures a missed first dispatch eventually reaches the server.
-      logger.warning(
-        "📡 [MLSRecoveryManager] Re-firing recovery escalation on hydrate for \(convoId.prefix(16))"
-      )
-      let authenticator = epochAuthenticatorsByConvoId?[convoId]
-      guard let apiClient = mlsAPIClient else {
-        logger.error(
-          "❌ [MLSRecoveryManager] Cannot re-fire recovery escalation for \(convoId.prefix(16)) — no API client configured (test/headless context)"
-        )
-        continue
-      }
-      if authenticator == nil {
-        logger.warning(
-          "⚠️ [MLSRecoveryManager] hydrate re-fire missing epochAuthenticator for \(convoId.prefix(16)) — server will short-circuit vote (reason: missing_authenticator). Caller should pass MLSContext.epochAuthenticator(groupId:) hex in epochAuthenticatorsByConvoId."
-        )
-      }
-      Task {
-        do {
-          let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
-            convoId: convoId,
-            failureType: "external_commit_exhausted",  // Spec §8.6
-            epochAuthenticator: authenticator
-          )
-          let (code, output) = try await apiClient.client.blue.catbird.mlschat.reportRecoveryFailure(input: input)
-          self.logger.info(
-            "📡 [MLSRecoveryManager] Re-fired recovery escalation for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil")"
-          )
-        } catch {
-          self.logger.error(
-            "❌ [MLSRecoveryManager] Failed to re-fire recovery escalation for \(convoId.prefix(16)): \(error.localizedDescription)"
-          )
-        }
-      }
-    }
-  }
-
   /// Load persisted recovery counters and global cooldown state.
+  ///
+  /// N35 note: a legacy
+  /// `hydrateFromDatabase(unrecoverableConvoIds:epochAuthenticatorsByConvoId:)`
+  /// overload used to live here. It stamped attempts past `maxRejoinAttempts`
+  /// at hydration and re-fired the ADR-002 A7 `reportRecoveryFailure`
+  /// escalation once per launch (so a network blip at the moment of the
+  /// original 3rd-failure dispatch could not orphan the server-side reset
+  /// vote forever). It was deleted with zero callers: this method is the
+  /// startup contract now, the 24h TTL + hydration/runtime clamps re-open
+  /// exactly one attempt after a lapsed lockout (whose failure re-fires the
+  /// §8.6 vote via `recordFailedRejoin` — covering the A7 re-fire intent),
+  /// and N39 tracks server corruption as quarantine state instead of count
+  /// inflation. A durable pending-escalation queue remains a backlog task.
   ///
   /// This is the WS-6.4/N21 startup contract: call after `setPersistence(_:)`
   /// and before any deferred rejoin loop runs. E7 coordinated semantics with
@@ -1697,29 +1699,163 @@ public actor MLSRecoveryManager {
     }
   }
 
+  // MARK: - Layer-3 Quarantine (N40, Rust `RecoveryTracker` Layer-3 twin)
+
+  /// Resolve the active quarantine state for a conversation, lazily dropping
+  /// a horizon-carrying state whose `until` has lapsed (mirrors the lazy
+  /// expiry pattern used for `quarantinedUntil`). Indefinite states
+  /// (`until == nil`) never expire here — they exit only via
+  /// `clearQuarantine`.
+  private func activeQuarantineState(convoId: String, now: Date = Date()) -> MLSQuarantineState? {
+    guard let state = quarantineStates[convoId] else { return nil }
+    if let until = state.until, now >= until {
+      quarantineStates.removeValue(forKey: convoId)
+      logger.warning(
+        "⏰ [MLSRecoveryManager] Quarantine horizon lapsed for \(convoId.prefix(16)) (reason=\(state.reason.rawValue)) — state dropped"
+      )
+      return nil
+    }
+    return state
+  }
+
+  /// Enter Layer-3 quarantine for a conversation. Swift twin of Rust
+  /// `RecoveryTracker::mark_quarantined`
+  /// (`catbird-mls/src/orchestrator/recovery.rs`).
+  ///
+  /// Entry convention (E7): entering quarantine CLEARS the failed-rejoin
+  /// counter — quarantine replaces the counter as the gate (Rust:
+  /// `self.failed_rejoins.remove(convo_id)` on entry). Corruption/peer
+  /// badness is tracked as STATE, never as count inflation.
+  ///
+  /// Persistence:
+  /// - `until != nil` (horizon-bounded, e.g. server corruption): persists
+  ///   the Rust-portable representation — `failedRejoinCount ==
+  ///   maxRejoinAttempts` + `quarantinedUntilMs` — so the GATING effect
+  ///   survives restart (hydration treats it as a maxed entry with an active
+  ///   lockout). The quarantine REASON is in-memory only.
+  /// - `until == nil` (indefinite, peer-bad classes): NOT persisted; the
+  ///   persisted backoff row is write-through-DELETED (the enter-clears-
+  ///   counter write-through). iOS has no event-driven exit signal wired
+  ///   yet, so persisting an indefinite hold could permanently wedge a
+  ///   conversation across restarts — the in-memory hold protects the
+  ///   current process, which is where an epoch-storm actually unfolds.
+  ///
+  /// Trigger status (2026-06-11): no caller can classify peer-bad commits
+  /// yet (Rust N38 typed decrypt errors are not in the iOS xcframework);
+  /// production entry is `markConversationServerCorrupted` only.
+  public func markQuarantined(
+    convoId: String,
+    reason: MLSQuarantineReason,
+    suspectedDIDs: [String] = [],
+    until: Date? = nil
+  ) {
+    let now = Date()
+    // Enter-clears-counter (Rust parity).
+    failedRejoins.removeValue(forKey: convoId)
+    quarantineStates[convoId] = MLSQuarantineState(
+      reason: reason,
+      since: now,
+      suspectedDIDs: suspectedDIDs,
+      until: until
+    )
+    logger.error(
+      "⛔️ [MLSRecoveryManager] QUARANTINED \(convoId.prefix(16)) — reason=\(reason.rawValue) horizon=\(until.map { "\($0)" } ?? "indefinite (event-driven exit)") suspectedDIDs=\(suspectedDIDs.count)"
+    )
+
+    if let until {
+      quarantinedUntil[convoId] = until
+      // Persist the Rust-portable maxed-entry representation so the gate
+      // survives restart (count >= max + quarantined_until_ms is exactly
+      // what the Rust twin's `record_rejoin_failure` persists when maxed).
+      guard let persistence else {
+        notePersistenceUnavailable("quarantine \(convoId.prefix(16))")
+        return
+      }
+      let lastMs = Int64(now.timeIntervalSince1970 * 1000)
+      let untilMs = Int64(until.timeIntervalSince1970 * 1000)
+      let attempts = Self.maxRejoinAttempts
+      enqueuePersist("quarantine \(convoId.prefix(16))") {
+        try await persistence.upsertConversationState(
+          conversationID: convoId,
+          failedRejoinCount: attempts,
+          lastAttemptAtMs: lastMs,
+          quarantinedUntilMs: untilMs
+        )
+      }
+    } else {
+      quarantinedUntil.removeValue(forKey: convoId)
+      // Indefinite quarantine: in-memory only (see doc comment). The
+      // enter-clears-counter convention still writes through — the persisted
+      // backoff row no longer reflects live state.
+      persistClearConversationEntry(convoId: convoId)
+    }
+  }
+
+  /// Event-driven quarantine exit (Rust `RecoveryTracker::clear_quarantine`).
+  /// Call on server reset, healthy peer commit, or user-confirmed manual
+  /// reset (`QuarantineExitReason` analogs). The bulk clears
+  /// (`clearRejoinTracking`, `clearRejoinTrackingForFreshReset`) already
+  /// perform this exit as part of their wipe.
+  ///
+  /// - Returns: `true` when a quarantine state was actually cleared.
+  @discardableResult
+  public func clearQuarantine(convoId: String) -> Bool {
+    guard quarantineStates.removeValue(forKey: convoId) != nil else { return false }
+    quarantinedUntil.removeValue(forKey: convoId)
+    persistClearConversationEntry(convoId: convoId)
+    logger.info(
+      "✅ [MLSRecoveryManager] Quarantine cleared for \(convoId.prefix(16)) (event-driven exit)"
+    )
+    return true
+  }
+
+  /// Whether the conversation is currently Layer-3 quarantined (lazy horizon
+  /// expiry applies). Rust `RecoveryTracker::is_quarantined` twin.
+  public func isQuarantined(convoId: String) -> Bool {
+    activeQuarantineState(convoId: convoId) != nil
+  }
+
+  /// Snapshot of the current quarantine state, if any (lazy horizon expiry
+  /// applies). Rust `RecoveryTracker::quarantine_snapshot` twin.
+  public func quarantineState(for convoId: String) -> MLSQuarantineState? {
+    activeQuarantineState(convoId: convoId)
+  }
+
   // MARK: - Server Data Corruption Handling
 
-  /// Mark a conversation as having corrupted server data
-  /// This prevents retry loops when the server is serving bad GroupInfo
-  /// The conversation will remain inaccessible until server data is fixed
+  /// Mark a conversation as having corrupted server data.
+  /// This prevents retry loops when the server is serving bad GroupInfo;
+  /// the conversation remains gated until server data is fixed or the 24h
+  /// horizon lapses.
+  ///
+  /// N39 rework: this used to inflate the failure counter to
+  /// `maxRejoinAttempts + 10` (the retired 13-band). It now enters Layer-3
+  /// quarantine with `.serverDataCorruption` and a 24h horizon — the same
+  /// enter-clears-counter convention the Rust twin uses (corruption is
+  /// STATE, not count inflation). Gating across restart is preserved via
+  /// the Rust-portable persisted row (`markQuarantined` horizon path).
   public func markConversationServerCorrupted(convoId: String, errorMessage: String) {
     logger.error(
       "🚫 [MLSRecoveryManager] Marking conversation \(convoId.prefix(16)) as SERVER-CORRUPTED")
     logger.error("   Error: \(errorMessage)")
     logger.error("   This conversation cannot be joined until server data is repaired")
 
-    // Record max failures immediately to prevent any retry attempts
-    let now = Date()
-    failedRejoins[convoId] = (attempts: maxRejoinAttempts + 10, lastAttempt: now)
-    quarantinedUntil[convoId] = now.addingTimeInterval(Self.persistedStateTTL)
-    persistConversationEntry(convoId: convoId)
+    markQuarantined(
+      convoId: convoId,
+      reason: .serverDataCorruption,
+      until: Date().addingTimeInterval(Self.persistedStateTTL)
+    )
   }
 
-  /// Check if a conversation is marked as having server-side corruption
+  /// Check if a conversation is marked as having server-side corruption.
+  ///
+  /// N39: reads the Layer-3 quarantine state (reason ==
+  /// `.serverDataCorruption`) instead of the retired `attempts > max + 5`
+  /// count band. The reason is in-memory only — after a restart this returns
+  /// `false` while the persisted horizon keeps gating rejoins (the gate is
+  /// what matters; no production caller consumed the reason across restarts).
   public func isConversationServerCorrupted(convoId: String) -> Bool {
-    guard let record = failedRejoins[convoId] else { return false }
-    // Conversations with more than maxRejoinAttempts + 5 are considered server-corrupted
-    return record.attempts > maxRejoinAttempts + 5
+    activeQuarantineState(convoId: convoId)?.reason == .serverDataCorruption
   }
 
   // MARK: - GroupInfo Health Check (Fix #4)
@@ -1811,6 +1947,52 @@ public actor MLSRecoveryManager {
 }
 
 // MARK: - Supporting Types
+
+/// Why a conversation entered Layer-3 quarantine. Mirrors the Rust
+/// `QuarantineReason` (`catbird-mls/src/orchestrator/types.rs:267`, same
+/// snake_case wire tags) plus the iOS-only `serverDataCorruption` case that
+/// replaces the retired count-inflation band in
+/// `markConversationServerCorrupted` (N39).
+public enum MLSQuarantineReason: String, Sendable, Equatable {
+  /// One peer produced 3+ classified peer-bad failures (Rust Signal C).
+  /// Trigger gap: requires the N38 typed decrypt-error classes, not yet in
+  /// the iOS xcframework.
+  case peerBadCommit = "peer_bad_commit"
+  /// 2+ distinct peers produced peer-bad failures within 60s (Rust Signal C
+  /// multi-peer). Same N38 trigger gap.
+  case multiPeerBadCommits = "multi_peer_bad_commits"
+  /// 3+ distinct message IDs failed framing within 120s (Rust Signal D).
+  /// Same N38 trigger gap.
+  case repeatedFramingFailures = "repeated_framing_failures"
+  /// Server served corrupt/truncated group data (GroupInfo deserialization
+  /// failures etc.). iOS-only reason; carries a 24h horizon rather than an
+  /// indefinite hold.
+  case serverDataCorruption = "server_data_corruption"
+}
+
+/// Snapshot of a conversation's Layer-3 quarantine state. Swift twin of the
+/// Rust `QuarantineState` (`catbird-mls/src/orchestrator/types.rs:310`),
+/// extended with an optional `until` horizon for the iOS
+/// `serverDataCorruption` case.
+public struct MLSQuarantineState: Sendable, Equatable {
+  public let reason: MLSQuarantineReason
+  /// When the quarantine was entered.
+  public let since: Date
+  /// DIDs the classifier attributed the bad commits to. Empty when only the
+  /// framing signal tripped, or for server-corruption entries.
+  public let suspectedDIDs: [String]
+  /// Expiry horizon. `nil` means indefinite — exit is event-driven only
+  /// (`clearQuarantine`: server reset, healthy peer commit, user-confirmed
+  /// reset), matching the Rust Layer-3 convention.
+  public let until: Date?
+
+  public init(reason: MLSQuarantineReason, since: Date, suspectedDIDs: [String], until: Date?) {
+    self.reason = reason
+    self.since = since
+    self.suspectedDIDs = suspectedDIDs
+    self.until = until
+  }
+}
 
 /// Severity level of key package desync
 public enum DesyncSeverity {

@@ -19,6 +19,13 @@ public actor MLSClient {
   private struct EmergencyState: @unchecked Sendable {
     var cacheInvalidated = false
     var suspensionInProgress = false
+    /// WS-6.2 suspension handshake: number of FFI operations currently
+    /// executing on background threads. Incremented atomically WITH the
+    /// suspension check inside the `runFFI` dispatch block (admit-or-reject
+    /// under one lock), decremented when the operation returns. While the
+    /// suspension flag is set no new operation can be admitted, so
+    /// `drainInFlightFFIOperations` observing 0 means quiescence.
+    var inFlightFFIOperations = 0
   }
 
   private static let emergencyState = Mutex(EmergencyState())
@@ -79,6 +86,95 @@ public actor MLSClient {
       details: "MLSClient emergencyCloseAllContexts: delegated close complete",
       process: "app"
     )
+  }
+
+  // MARK: - Suspension Handshake (WS-6.2)
+
+  /// Current number of in-flight FFI operations (diagnostics + tests).
+  public nonisolated static var inFlightFFIOperationCount: Int {
+    emergencyState.withLock { $0.inFlightFFIOperations }
+  }
+
+  /// WS-6.2 suspension handshake, step 2: wait (bounded) for all in-flight
+  /// FFI operations to complete. Call AFTER `markSuspensionInProgress` —
+  /// the suspension flag stops new admissions (atomically with the in-flight
+  /// counter, see `runFFI`), so a drained counter is a true quiescence proof
+  /// and `emergencyCloseAllContexts()` cannot race an in-flight send/commit/
+  /// key-package write.
+  ///
+  /// - Parameters:
+  ///   - timeout: Maximum wall-clock wait. The plan budget is ≤5s; callers
+  ///     holding a `UIBackgroundTask` assertion should stay well inside its
+  ///     ~30s window.
+  ///   - pollIntervalMs: Counter poll cadence (default 25ms).
+  /// - Returns: `true` when quiescent; `false` on timeout (callers should
+  ///   fall back to `interruptAllContexts()` so the stragglers abort and
+  ///   roll back at the SQLite layer instead of being closed underneath).
+  public nonisolated static func drainInFlightFFIOperations(
+    timeout: TimeInterval = 5.0,
+    pollIntervalMs: UInt64 = 25
+  ) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while emergencyState.withLock({ $0.inFlightFFIOperations }) > 0 {
+      if Date() >= deadline {
+        return emergencyState.withLock { $0.inFlightFFIOperations } == 0
+      }
+      try? await Task.sleep(nanoseconds: pollIntervalMs * 1_000_000)
+    }
+    return true
+  }
+
+  /// WS-6.2 suspension handshake, one-call form: block new FFI work, drain
+  /// in-flight operations (bounded), and — only if the drain times out —
+  /// interrupt the stragglers so they abort-and-rollback at the SQLite layer.
+  /// The caller then proceeds to `emergencyCloseAllContexts()` knowing no
+  /// in-flight MLS write can race the close.
+  ///
+  /// Intended call site: the app's scenePhase background transition Task
+  /// (inside its background-task assertion), REPLACING the unconditional
+  /// synchronous `interruptAllContexts()` + immediate close pair for the
+  /// common path. The synchronous interrupt remains the right move in
+  /// expiration handlers where iOS is reclaiming time NOW.
+  ///
+  /// - Returns: `true` when all in-flight operations completed cleanly;
+  ///   `false` when the timeout elapsed and the interrupt fallback fired.
+  @discardableResult
+  public nonisolated static func suspendAndDrain(
+    reason: String,
+    timeout: TimeInterval = 5.0
+  ) async -> Bool {
+    markSuspensionInProgress(reason: "suspendAndDrain: \(reason)")
+    let drained = await drainInFlightFFIOperations(timeout: timeout)
+    if drained {
+      MLSSuspensionFlightRecorder.shared.record(
+        .suspensionPrepare,
+        details: "MLSClient suspendAndDrain(\(reason)): in-flight FFI drained cleanly",
+        process: "app"
+      )
+    } else {
+      MLSSuspensionFlightRecorder.shared.record(
+        .suspensionPrepare,
+        details:
+          "MLSClient suspendAndDrain(\(reason)): drain TIMED OUT with \(inFlightFFIOperationCount) in flight — interrupting",
+        process: "app"
+      )
+      // Complete-or-rollback: stragglers get sqlite3_interrupt, so the
+      // in-flight statement aborts and the enclosing transaction rolls back
+      // instead of being closed underneath mid-write.
+      interruptAllContexts()
+      MLSCoreContext.interruptAllContexts()
+    }
+    return drained
+  }
+
+  /// Test seams for the in-flight counter (the production increment lives
+  /// inside `runFFI`, which requires a live FFI context).
+  internal nonisolated static func _beginTrackedFFIOperationForTesting() {
+    emergencyState.withLock { $0.inFlightFFIOperations += 1 }
+  }
+
+  internal nonisolated static func _endTrackedFFIOperationForTesting() {
+    emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
   }
 
   /// Per-user generation token.
@@ -259,14 +355,25 @@ public actor MLSClient {
     }
     return try await withCheckedThrowingContinuation { continuation in
       DispatchQueue.global(qos: .userInitiated).async {
-        // Double-check suspension flag INSIDE the dispatch block, right before executing.
-        // This catches the race where suspension is signaled after the pre-dispatch check
-        // but before the actual SQLCipher operation starts on this background thread.
-        guard !Self.isSuspensionInProgress else {
+        // WS-6.2 suspension handshake: re-check the suspension flag AND
+        // register this operation as in-flight under ONE lock acquisition.
+        // The atomic admit-or-reject closes the race where suspension is
+        // signaled between a separate flag check and the counter increment —
+        // a drain observing inFlightFFIOperations == 0 after
+        // markSuspensionInProgress() is therefore a true quiescence proof.
+        let admitted = Self.emergencyState.withLock { state -> Bool in
+          guard !state.suspensionInProgress else { return false }
+          state.inFlightFFIOperations += 1
+          return true
+        }
+        guard admitted else {
           continuation.resume(
             throwing: MLSError.contextCreationBlocked(
               reason: "App is transitioning to background - MLS operations suspended"))
           return
+        }
+        defer {
+          Self.emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
         }
         do {
           let result = try operation()

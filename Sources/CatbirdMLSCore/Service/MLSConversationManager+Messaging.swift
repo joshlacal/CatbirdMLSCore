@@ -5621,6 +5621,21 @@ public extension MLSConversationManager {
         throw MLSConversationError.groupNotInitialized
       }
       defer { endRejoinAttempt(conversationID: convoId) }
+
+      // N39 gate routing: this automated EC previously bypassed the recovery
+      // gate entirely — every conversation open could fire an External Commit
+      // into a quarantined/backed-off group. Route through shouldSkipRejoin
+      // (Layer-3 quarantine, maxed lockout, backoff, global floor), same as
+      // attemptExternalCommitFallback.
+      if let recoveryManager = await mlsClient.recovery(for: userDid),
+        await recoveryManager.shouldSkipRejoin(convoId: convoId)
+      {
+        logger.warning(
+          "⏭️ [ensureGroupInitialized] Skipping creator External Commit for \(convoId.prefix(16))... - recovery tracking says skip"
+        )
+        throw MLSConversationError.groupNotInitialized
+      }
+
       logger.info("🔄 [ensureGroupInitialized] Attempting External Commit for creator rejoin...")
 
       do {
@@ -5687,7 +5702,19 @@ public extension MLSConversationManager {
       } catch MLSConversationError.keyPackageDesyncRecoveryInitiated {
         logger.warning("🔄 Key package desync during Welcome init - automatically failing over to External Commit")
         logger.info("   This is expected if our key package was rotated on the server but we don't have the private key anymore.")
-        
+
+        // N39 gate routing: automated EC failover must respect the recovery
+        // gate (Layer-3 quarantine, maxed lockout, backoff, global floor) —
+        // this path previously bypassed it.
+        if let recoveryManager = await mlsClient.recovery(for: userDid),
+          await recoveryManager.shouldSkipRejoin(convoId: convoId)
+        {
+          logger.warning(
+            "⏭️ [ensureGroupInitialized] Skipping desync-failover External Commit for \(convoId.prefix(16))... - recovery tracking says skip"
+          )
+          throw MLSConversationError.groupNotInitialized
+        }
+
         do {
           _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: convo.conversationId)
           logger.info("✅ Successfully recovered via External Commit")

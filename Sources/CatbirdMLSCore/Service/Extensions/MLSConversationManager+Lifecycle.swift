@@ -166,6 +166,22 @@ extension MLSConversationManager {
       throw MLSConversationError.operationFailed("MLS storage reset in progress")
     }
 
+    // WS-6.2 suspension handshake: also abort when the app is transitioning
+    // to background. Previously this only checked shutdown, so a pipeline
+    // step that re-validated mid-send (e.g. sendMessage's preCache check)
+    // would proceed into GRDB writes while the emergency close / GRDB
+    // suspension was racing it (SQLite error 21). Consult the FFI-level flag
+    // (`MLSClient.isSuspensionInProgress`) rather than the manager's
+    // `isSuspending`: BGTask runners (`MLSBackgroundRefreshManager`) clear
+    // the FFI flag before doing background MLS work, so this stays
+    // BGTask-safe while still failing fast during a real suspension.
+    if MLSClient.isSuspensionInProgress {
+      logger.warning(
+        "⏸️ [MLSConversationManager] \(operation) aborted - app suspension in progress")
+      throw MLSConversationError.operationFailed(
+        "MLS operations suspended (app transitioning to background)")
+    }
+
     // Stop-The-World: Verify coordination generation hasn't moved
     // This catches "zombie" tasks from a previous user context after an account switch
     do {
