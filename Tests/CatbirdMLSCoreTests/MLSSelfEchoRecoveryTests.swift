@@ -10,10 +10,11 @@ final class MLSSelfEchoRecoveryTests: XCTestCase {
     try await super.setUp()
     dbQueue = try DatabaseQueue()
 
-    try await dbQueue.write { db in
-      try Self.createMessageTable(in: db)
-      try Self.createReactionTable(in: db)
-    }
+    // N37: run the full production migration chain (v1…v32) instead of a
+    // hand-rolled schema — the hand-rolled tables drifted from the v31
+    // field-encryption columns (`payloadEncrypted` et al.) and broke every
+    // query that references them.
+    try MLSGRDBManager.makeMigrator().migrate(dbQueue)
   }
 
   override func tearDown() async throws {
@@ -135,6 +136,17 @@ final class MLSSelfEchoRecoveryTests: XCTestCase {
   ) async throws {
     let payloadData = try MLSMessagePayload.text(text, embed: nil).encodeToJSON()
     try await dbQueue.write { db in
+      // The production schema (unlike the old hand-rolled one) enforces
+      // MLSMessageModel.conversationID → MLSConversationModel, so the parent
+      // conversation row must exist before the message insert.
+      try db.execute(
+        sql: """
+          INSERT OR IGNORE INTO MLSConversationModel (
+            conversationID, currentUserDID, groupID, createdAt, updatedAt
+          ) VALUES (?, ?, ?, ?, ?)
+          """,
+        arguments: [conversationID, currentUserDID, Data(), timestamp, timestamp]
+      )
       try db.execute(
         sql: """
           INSERT INTO MLSMessageModel (
@@ -165,44 +177,4 @@ final class MLSSelfEchoRecoveryTests: XCTestCase {
     return Dictionary(uniqueKeysWithValues: rows.map { ($0.messageID, $0) })
   }
 
-  private static func createMessageTable(in db: Database) throws {
-    try db.create(table: "MLSMessageModel") { t in
-      t.primaryKey("messageID", .text).notNull()
-      t.column("currentUserDID", .text).notNull()
-      t.column("conversationID", .text).notNull()
-      t.column("senderID", .text).notNull()
-      t.column("payloadJSON", .blob)
-      t.column("wireFormat", .blob)
-      t.column("contentType", .text).notNull()
-      t.column("timestamp", .datetime).notNull()
-      t.column("epoch", .integer).notNull()
-      t.column("sequenceNumber", .integer).notNull()
-      t.column("authenticatedData", .blob)
-      t.column("signature", .blob)
-      t.column("isDelivered", .boolean).notNull().defaults(to: false)
-      t.column("isRead", .boolean).notNull().defaults(to: false)
-      t.column("isSent", .boolean).notNull().defaults(to: false)
-      t.column("sendAttempts", .integer).notNull().defaults(to: 0)
-      t.column("error", .text)
-      t.column("processingState", .text).notNull()
-      t.column("gapBefore", .boolean).notNull().defaults(to: false)
-      t.column("payloadExpired", .boolean).notNull().defaults(to: false)
-      t.column("processingError", .text)
-      t.column("processingAttempts", .integer).notNull().defaults(to: 0)
-      t.column("validationFailureReason", .text)
-    }
-  }
-
-  private static func createReactionTable(in db: Database) throws {
-    try db.create(table: "MLSMessageReactionModel") { t in
-      t.primaryKey("reactionID", .text).notNull()
-      t.column("messageID", .text).notNull().references("MLSMessageModel", onDelete: .cascade)
-      t.column("conversationID", .text).notNull()
-      t.column("currentUserDID", .text).notNull()
-      t.column("actorDID", .text).notNull()
-      t.column("emoji", .text).notNull()
-      t.column("action", .text).notNull()
-      t.column("timestamp", .datetime).notNull()
-    }
-  }
 }

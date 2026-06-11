@@ -4496,6 +4496,16 @@ public actor MLSGRDBManager {
 
   /// Run database migrations using DatabaseMigrator
   private func runMigrations(_ db: DatabasePool) throws {
+    try Self.makeMigrator().migrate(db)
+  }
+
+  /// Build the full production migration chain (v1…v32).
+  ///
+  /// Extracted from `runMigrations` so the test substrate can run the exact
+  /// same chain against an in-memory `DatabaseQueue` (N37: hand-rolled test
+  /// schemas drifted from the v31 field-encryption columns). The migration
+  /// content is unchanged — this is construction-only refactoring.
+  nonisolated static func makeMigrator() -> DatabaseMigrator {
     var migrator = DatabaseMigrator()
 
     // MARK: v1 - Initial schema
@@ -5396,8 +5406,7 @@ public actor MLSGRDBManager {
       }
     }
 
-    // Execute all migrations
-    try migrator.migrate(db)
+    return migrator
   }
 
   /// Set iOS Data Protection on database file

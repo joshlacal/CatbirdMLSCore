@@ -1640,7 +1640,13 @@ public extension MLSConversationManager {
         // Check if recovery pushed us too far ahead
         if currentEpoch > localEpoch + maxEpochDivergence {
           logger.error("🚨 [EPOCH-RECOVERY] Recovery advanced epoch from \(localEpoch) to \(currentEpoch) — exceeds divergence threshold, marking for reset")
-          try? await markConversationNeedsReset(conversationID)
+          do {
+            try await markConversationNeedsReset(conversationID)
+          } catch {
+            logger.error(
+              "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsReset, epoch-recovery-divergence-exceeded) for \(conversationID.prefix(16)): \(error.localizedDescription) — needsReset flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+            )
+          }
           return .needsDeferredRejoin(failedEpoch: currentEpoch, reason: "Epoch recovery exceeded divergence threshold")
         }
         logger.info("🎉 [EPOCH-RECOVERY] Processed \(processedCount) commits")
@@ -3900,7 +3906,13 @@ public extension MLSConversationManager {
       // what External Commit can repair. Escalate to full group reset.
       if newCount >= 5 {
         logger.error("🚨 [CONSECUTIVE-FAILURES] \(conversationID.prefix(16)) has \(newCount) consecutive failures — marking for reset")
-        try? await markConversationNeedsReset(conversationID)
+        do {
+          try await markConversationNeedsReset(conversationID)
+        } catch {
+          logger.error(
+            "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsReset, consecutive-failures-escalation) for \(conversationID.prefix(16)): \(error.localizedDescription) — needsReset flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+          )
+        }
       }
     } catch {}
   }
@@ -6034,7 +6046,13 @@ public extension MLSConversationManager {
           let serverEpoch = UInt64(convoModel?.epoch ?? 0)
           if serverEpoch > 0 && newEpoch > serverEpoch + maxEpochDivergence {
             logger.error("🚨 [EPOCH-DIVERGENCE] External Commit joined at epoch \(newEpoch) but server epoch is \(serverEpoch) — marking for reset")
-            try? await markConversationNeedsReset(convoId)
+            do {
+              try await markConversationNeedsReset(convoId)
+            } catch {
+              logger.error(
+                "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsReset, external-commit-epoch-divergence) for \(convoId.prefix(16)): \(error.localizedDescription) — needsReset flag NOT persisted; deferred recovery will silently skip this conversation (E7 write-through violated)"
+              )
+            }
           }
         }
       }

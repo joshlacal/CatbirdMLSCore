@@ -1200,6 +1200,32 @@ public final class MLSAPIClient {
       )
     }
 
+    // N44e (ADR-009 D3 iOS twin, warn-only): every returned package must be
+    // labeled for a DID that was actually requested (fragment-aware bare-DID
+    // root, case-insensitive — same rules as the Rust orchestrator's
+    // verify_fetched_key_packages step 1). Full leaf-credential verification
+    // (TLS-decode the KeyPackage, compare the BasicCredential identity's DID
+    // root against the labeled DID) is blocked on an FFI helper — see the
+    // header of MLSCredentialBinding.swift.
+    //
+    // SEAM: once catbird-mls exposes `extractKeyPackageIdentity(keyPackageData:)`
+    // via UniFFI, decode `kp.keyPackage.data` here and verify with
+    // `MLSCredentialBinding.checkIdentityClaim(expectedDID: kp.did.description,
+    // claimedIdentity: extractedIdentity)`.
+    //
+    // Warn-only: failures are logged and the operation continues unchanged.
+    let requestedRoots = Set(
+      dids.map { MLSCredentialBinding.credentialRootDID($0.description).lowercased() })
+    for kp in dedupedPackages {
+      let labeledRoot = MLSCredentialBinding.credentialRootDID(kp.did.description).lowercased()
+      if !requestedRoots.contains(labeledRoot) {
+        let hashPrefix = Data(SHA256.hash(data: kp.keyPackage.data)).prefix(8).hexEncodedString()
+        logger.error(
+          "❌ [CREDENTIAL-BINDING] mode=warn_only operation=fetch context=getKeyPackages expected_did=<one-of-\(dids.count)-requested> claimed_did=\(kp.did.description) kp_hash_prefix=\(hashPrefix) path=ios-swift reason=key package returned for a DID that was not requested — continuing unchanged (leaf-credential check pending FFI extractKeyPackageIdentity)"
+        )
+      }
+    }
+
     let requestedDIDs = Set(dids.map { $0.description.lowercased() })
     let returnedDIDs = Set(dedupedPackages.map { $0.did.description.lowercased() })
     let derivedMissing = requestedDIDs.subtracting(returnedDIDs)

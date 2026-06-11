@@ -154,15 +154,21 @@ extension MLSConversationManager {
       }
 
       let (localMsgId, sendResult) = result
-      try? await storage.updateMessageMetadata(
-        messageID: localMsgId,
-        currentUserDID: userDid,
-        epoch: sendResult.epoch,
-        sequenceNumber: sendResult.sequenceNumber,
-        timestamp: sendResult.receivedAt.date,
-        database: database,
-        newMessageID: sendResult.messageId
-      )
+      do {
+        try await storage.updateMessageMetadata(
+          messageID: localMsgId,
+          currentUserDID: userDid,
+          epoch: sendResult.epoch,
+          sequenceNumber: sendResult.sequenceNumber,
+          timestamp: sendResult.receivedAt.date,
+          database: database,
+          newMessageID: sendResult.messageId
+        )
+      } catch {
+        logger.error(
+          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, delivery-ack-send) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
+        )
+      }
     }
   }
 
@@ -275,15 +281,21 @@ extension MLSConversationManager {
       }
 
       let (localMsgId, sendResult) = result
-      try? await storage.updateMessageMetadata(
-        messageID: localMsgId,
-        currentUserDID: userDid,
-        epoch: sendResult.epoch,
-        sequenceNumber: sendResult.sequenceNumber,
-        timestamp: sendResult.receivedAt.date,
-        database: database,
-        newMessageID: sendResult.messageId
-      )
+      do {
+        try await storage.updateMessageMetadata(
+          messageID: localMsgId,
+          currentUserDID: userDid,
+          epoch: sendResult.epoch,
+          sequenceNumber: sendResult.sequenceNumber,
+          timestamp: sendResult.receivedAt.date,
+          database: database,
+          newMessageID: sendResult.messageId
+        )
+      } catch {
+        logger.error(
+          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, recovery-request-send) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
+        )
+      }
     }
   }
 
@@ -410,15 +422,21 @@ extension MLSConversationManager {
       }
 
       let (localMsgId, sendResult) = result
-      try? await storage.updateMessageMetadata(
-        messageID: localMsgId,
-        currentUserDID: userDid,
-        epoch: sendResult.epoch,
-        sequenceNumber: sendResult.sequenceNumber,
-        timestamp: sendResult.receivedAt.date,
-        database: database,
-        newMessageID: sendResult.messageId
-      )
+      do {
+        try await storage.updateMessageMetadata(
+          messageID: localMsgId,
+          currentUserDID: userDid,
+          epoch: sendResult.epoch,
+          sequenceNumber: sendResult.sequenceNumber,
+          timestamp: sendResult.receivedAt.date,
+          database: database,
+          newMessageID: sendResult.messageId
+        )
+      } catch {
+        logger.error(
+          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, recovery-resend) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
+        )
+      }
     }
   }
 }
