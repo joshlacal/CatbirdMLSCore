@@ -80,6 +80,15 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             updated_at DATETIME NOT NULL
           )
           """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_pending_local_deletes (
+            conversation_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            group_id_hex TEXT,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (conversation_id, user_did)
+          )
+          """)
       }
     } catch {
       // Non-fatal: tables may already exist or will be created on first write.
@@ -602,6 +611,152 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  // MARK: - RecoveryTracker Persistence (WS-5.4 / E7)
+
+  /// These route to the SAME v32 tables the Swift recovery twin uses
+  /// (`MLSRecoveryAttemptStateModel` + `MLSRecoveryGlobalStateModel`, created
+  /// by `MLSGRDBManager` migration `v32_recovery_attempt_state` and written
+  /// by `MLSRecoveryManager` via `MLSRecoveryStateStore`). One persisted
+  /// schema, two writers — E7 coordinated semantics; the Rust orchestrator
+  /// and the Swift recovery manager must never diverge on what survived a
+  /// restart.
+
+  /// Read the persisted RecoveryTracker state for startup hydration.
+  public func getRecoveryState() throws -> FfiPersistedRecoveryState {
+    let normalizedDID = userDID
+    return try dbPool.read { db in
+      // Defensive: v32 runs before this adapter is ever constructed, but a
+      // read-only snapshot must never throw "no such table" on a fresh DB.
+      guard try db.tableExists(MLSRecoveryAttemptStateModel.databaseTableName) else {
+        return FfiPersistedRecoveryState(entries: [], lastGlobalRejoinAttemptAtMs: nil)
+      }
+      let rows = try MLSRecoveryAttemptStateModel
+        .filter(MLSRecoveryAttemptStateModel.Columns.currentUserDID == normalizedDID)
+        .fetchAll(db)
+      let global = try MLSRecoveryGlobalStateModel
+        .filter(MLSRecoveryGlobalStateModel.Columns.currentUserDID == normalizedDID)
+        .fetchOne(db)
+      return FfiPersistedRecoveryState(
+        entries: rows.map { row in
+          FfiPersistedRecoveryBackoff(
+            conversationId: row.conversationID,
+            failedRejoinCount: UInt32(clamping: row.failedRejoinCount),
+            lastAttemptAtMs: row.lastAttemptAtMs,
+            quarantinedUntilMs: row.quarantinedUntilMs
+          )
+        },
+        lastGlobalRejoinAttemptAtMs: global?.lastGlobalRejoinAttemptAtMs
+      )
+    }
+  }
+
+  /// Write-through one conversation's rejoin-backoff snapshot.
+  public func setRecoveryBackoff(entry: FfiPersistedRecoveryBackoff) throws {
+    let model = MLSRecoveryAttemptStateModel(
+      conversationID: entry.conversationId,
+      currentUserDID: userDID,
+      failedRejoinCount: Int(entry.failedRejoinCount),
+      lastAttemptAtMs: entry.lastAttemptAtMs,
+      quarantinedUntilMs: entry.quarantinedUntilMs
+    )
+    try dbPool.write { db in
+      // Conflict policy on the model is .replace — insert acts as upsert,
+      // matching MLSRecoveryStateStore.upsertConversationState.
+      try model.insert(db)
+    }
+  }
+
+  /// Remove a conversation's persisted backoff entry.
+  public func clearRecoveryBackoff(conversationId: String) throws {
+    let normalizedDID = userDID
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          DELETE FROM MLSRecoveryAttemptStateModel
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationId, normalizedDID]
+      )
+    }
+  }
+
+  /// Persist the global last-rejoin-attempt timestamp (epoch ms).
+  public func setLastGlobalRejoinAttemptAt(atMs: Int64) throws {
+    let model = MLSRecoveryGlobalStateModel(
+      currentUserDID: userDID,
+      lastGlobalRejoinAttemptAtMs: atMs
+    )
+    try dbPool.write { db in
+      try model.insert(db)
+    }
+  }
+
+  // MARK: - Pending Local Deletes (WS-5.3 crash-safe force_delete_local)
+
+  /// Pending local-delete intents live in an adapter-owned lightweight table
+  /// (same pattern as sync cursors / group state above): the intent is
+  /// orchestrator bookkeeping, not user-visible model state, so it does not
+  /// belong on `MLSConversationModel`.
+
+  /// Record the intent to locally delete a conversation BEFORE the MLS-layer
+  /// and storage deletes run. Idempotent — re-marking updates the group id
+  /// but keeps the original intent timestamp.
+  public func markPendingLocalDelete(conversationId: String, groupIdHex: String?) throws {
+    try dbPool.write { db in
+      ensurePendingLocalDeleteTableExists(db)
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_pending_local_deletes (conversation_id, user_did, group_id_hex, created_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(conversation_id, user_did) DO UPDATE SET
+            group_id_hex = excluded.group_id_hex
+          """,
+        arguments: [conversationId, userDID, groupIdHex, Date()]
+      )
+    }
+  }
+
+  /// Clear a pending local-delete intent after all delete steps succeeded.
+  public func clearPendingLocalDelete(conversationId: String) throws {
+    try dbPool.write { db in
+      ensurePendingLocalDeleteTableExists(db)
+      try db.execute(
+        sql: """
+          DELETE FROM mls_orchestrator_pending_local_deletes
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationId, userDID]
+      )
+    }
+  }
+
+  /// List local deletes that were started but never completed (crash between
+  /// intent and completion). Consumed by the startup reconcile sweep.
+  public func listPendingLocalDeletes() throws -> [FfiPendingLocalDelete] {
+    let normalizedDID = userDID
+    return try dbPool.read { db in
+      guard try db.tableExists("mls_orchestrator_pending_local_deletes") else {
+        return []
+      }
+      let rows = try Row.fetchAll(
+        db,
+        sql: """
+          SELECT conversation_id, group_id_hex
+          FROM mls_orchestrator_pending_local_deletes
+          WHERE user_did = ?
+          ORDER BY created_at ASC
+          """,
+        arguments: [normalizedDID]
+      )
+      return rows.map { row in
+        FfiPendingLocalDelete(
+          conversationId: row["conversation_id"],
+          groupIdHex: row["group_id_hex"]
+        )
+      }
+    }
+  }
+
   // MARK: - Table Creation Helpers
 
   /// Ensure the sync cursor table exists. Uses `CREATE TABLE IF NOT EXISTS`
@@ -637,6 +792,23 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         """)
     } catch {
       logger.error("Failed to ensure group state table: \(error)")
+    }
+  }
+
+  /// Ensure the pending local-delete intent table exists (WS-5.3).
+  private func ensurePendingLocalDeleteTableExists(_ db: Database) {
+    do {
+      try db.execute(sql: """
+        CREATE TABLE IF NOT EXISTS mls_orchestrator_pending_local_deletes (
+          conversation_id TEXT NOT NULL,
+          user_did TEXT NOT NULL,
+          group_id_hex TEXT,
+          created_at DATETIME NOT NULL,
+          PRIMARY KEY (conversation_id, user_did)
+        )
+        """)
+    } catch {
+      logger.error("Failed to ensure pending local-delete table: \(error)")
     }
   }
 
