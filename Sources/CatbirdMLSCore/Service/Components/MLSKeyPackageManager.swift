@@ -535,23 +535,26 @@ public actor MLSKeyPackageManager {
 
     logger.info("📦 Generating \(generateCount) key packages")
 
-    // STEP 6: Generate key packages
+    // STEP 6: Generate key packages in ONE FFI batch (single persistence pass +
+    // single WAL checkpoint — 0xdead10cc mitigation; the old per-package loop
+    // did a manifest rewrite + fsync for every package). May return fewer than
+    // requested if the app starts suspending mid-batch; upload whatever we got.
+    try Task.checkCancellation()
     let expiry = Date(timeIntervalSinceNow: 30 * 24 * 60 * 60) // 30 days
-    var packages: [MLSKeyPackageUploadData] = []
-    
-    for _ in 0..<generateCount {
-      try Task.checkCancellation()
-      // 🔥 CRITICAL FIX: Use clientIdentity (did#deviceUUID), NOT bare DID
-      // This ensures the signer registered during device registration is reused,
-      // preventing signature key mismatch when messages are verified by recipients
-      let keyPackageBytes = try await splitClient.createKeyPackage(
-        for: normalizedUserDid,
-        identity: clientIdentity  // Fixed: was normalizedUserDid (bare DID)
-      )
 
-      // B14 normalization: store raw TLS bytes; ATProto Bytes wrapping
-      // happens at the wire boundary in publishKeyPackagesBatchDirect.
-      let packageData = MLSKeyPackageUploadData(
+    // 🔥 CRITICAL FIX: Use clientIdentity (did#deviceUUID), NOT bare DID
+    // This ensures the signer registered during device registration is reused,
+    // preventing signature key mismatch when messages are verified by recipients
+    let keyPackagesBytes = try await splitClient.batchCreateKeyPackages(
+      for: normalizedUserDid,
+      identity: clientIdentity,  // Fixed: was normalizedUserDid (bare DID)
+      count: generateCount
+    )
+
+    // B14 normalization: store raw TLS bytes; ATProto Bytes wrapping
+    // happens at the wire boundary in publishKeyPackagesBatchDirect.
+    let packages: [MLSKeyPackageUploadData] = keyPackagesBytes.map { keyPackageBytes in
+      MLSKeyPackageUploadData(
         keyPackage: keyPackageBytes,
         cipherSuite: defaultCipherSuite,
         expires: expiry,
@@ -559,11 +562,9 @@ public actor MLSKeyPackageManager {
         deviceId: deviceInfo?.deviceId,
         credentialDid: clientIdentity  // Fixed: was normalizedUserDid (bare DID)
       )
-
-      packages.append(packageData)
     }
 
-    logger.info("✅ Generated \(generateCount) key packages (Persisted via FFI)")
+    logger.info("✅ Generated \(packages.count) of \(generateCount) key packages (Persisted via FFI)")
 
     // STEP 7: Validate credential identity matches current user DID
     // This prevents DID contamination when switching accounts on the same device

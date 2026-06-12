@@ -582,28 +582,52 @@ public actor MLSClient {
   /// This prevents lock contention and race conditions during registration
   public func batchCreateKeyPackages(for userDID: String, identity: String, count: Int) async throws -> [Data] {
     logger.info("🔐 [MLSClient] Creating batch of \(count) key packages for \(identity.prefix(20))...")
-    
+
     // Validate count
     guard count > 0 else { return [] }
     let safeCount = min(count, 100) // Cap at 100 to prevent timeouts
-    
+
     let identityBytes = Data(identity.utf8)
-    
-    // Execute all creations under ONE lock acquisition
-    return try await runFFIWithRecovery(for: userDID) { ctx in
-      var packages: [Data] = []
-      for i in 0..<safeCount {
-        // Create package
-        let package = try ctx.createKeyPackage(identityBytes: identityBytes)
-        packages.append(package.keyPackageData)
+
+    // RECOVERY CHECK (once per batch, mirroring createKeyPackage(for:identity:)):
+    // a saved identity key in Keychain but not in the Rust context means a
+    // reinstall — import it so the batch reuses the original signer instead of
+    // minting a new one (signature key mismatch otherwise).
+    let identityKeyKey = "mls_identity_key_\(userDID)"
+    if let savedKeyData = try? MLSKeychainManager.shared.retrieve(forKey: identityKeyKey) {
+      do {
+        try await runFFIWithRecovery(for: userDID) { ctx in
+          try ctx.importIdentityKey(identity: identity, keyData: savedKeyData)
+        }
+      } catch {
+        logger.error("❌ Failed to restore identity key before batch: \(error.localizedDescription)")
+        // Continue - will generate new key, but this is suboptimal
       }
-      
-      // Force a database sync after the batch (checkpoint WAL)
-      // This ensures all packages are durably persisted
-      try ctx.syncDatabase()
-      
-      return packages
     }
+
+    // Single FFI batch call: the Rust side resolves the signer once, persists
+    // all bundles in one row transaction, and performs ONE WAL checkpoint at
+    // the end — no per-package manifest rewrite + fsync windows (0xdead10cc).
+    // It checks the suspension flag between packages and may return fewer than
+    // requested while the app is suspending; callers upload whatever they get.
+    let packages = try await runFFIWithRecovery(for: userDID) { ctx in
+      let results = try ctx.createKeyPackages(
+        identityBytes: identityBytes, count: UInt32(safeCount))
+      return results.map { $0.keyPackageData }
+    }
+    if packages.count < safeCount {
+      logger.warning(
+        "⚠️ [MLSClient] Batch returned \(packages.count) of \(safeCount) key packages (suspension in progress)")
+    }
+
+    // BACKUP (once per batch): export and save the identity key for future recovery
+    if let identityKeyData = try? await runFFIWithRecovery(for: userDID, operation: { ctx in
+      try ctx.exportIdentityKey(identity: identity)
+    }) {
+      try? MLSKeychainManager.shared.store(identityKeyData, forKey: identityKeyKey)
+    }
+
+    return packages
   }
 
   // MARK: - Group Management

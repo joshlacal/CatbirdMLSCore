@@ -998,6 +998,18 @@ public protocol MlsContextProtocol: AnyObject {
     func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult
 
     /**
+     * Create `count` key packages with a SINGLE persistence pass: one bundle-row
+     * transaction and one WAL checkpoint at the end of the batch, instead of a
+     * full manifest rewrite + checkpoint per package.
+     *
+     * 0xdead10cc prevention: the suspension flag is checked between packages.
+     * On suspension the batch stops early and returns the packages created so
+     * far (their bundles are persisted before returning); ContextClosed is
+     * returned only if suspension was signaled before any package was built.
+     */
+    func createKeyPackages(identityBytes: Data, count: UInt32) throws -> [KeyPackageResult]
+
+    /**
      * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
      *
      * This checks the manifest storage (KeyPackageBundle cache) which is the source of truth
@@ -1039,6 +1051,19 @@ public protocol MlsContextProtocol: AnyObject {
      */
     func debugListKeyPackageHashes() throws -> [String]
 
+    /**
+     * Decrypt an incoming MLS message (FFI surface).
+     *
+     * N38: this is a thin wrapper over [`MLSContext::decrypt_message_classified`]
+     * that RE-FLATTENS process-stage error classes to
+     * [`MLSError::DecryptionFailed`]. iOS variant-matches `.DecryptionFailed`
+     * for ratchet-desync detection (MLSClient.swift) and string-matches
+     * `"DecryptionFailed"` (Messaging.swift); catmos-cli matches it too. The
+     * typed classes (`InvalidCommit`, `WireFormatPolicyViolation`,
+     * `TlsCodec`, wrong-epoch `OpenMLS` strings) are only surfaced to the
+     * in-process orchestrator via the `MlsCryptoContext` trait impl, which
+     * calls the classified fn directly.
+     */
     func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult
 
     /**
@@ -1920,6 +1945,24 @@ open class MlsContext:
     }
 
     /**
+     * Create `count` key packages with a SINGLE persistence pass: one bundle-row
+     * transaction and one WAL checkpoint at the end of the batch, instead of a
+     * full manifest rewrite + checkpoint per package.
+     *
+     * 0xdead10cc prevention: the suspension flag is checked between packages.
+     * On suspension the batch stops early and returns the packages created so
+     * far (their bundles are persisted before returning); ContextClosed is
+     * returned only if suspension was signaled before any package was built.
+     */
+    open func createKeyPackages(identityBytes: Data, count: UInt32) throws -> [KeyPackageResult] {
+        return try FfiConverterSequenceTypeKeyPackageResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_create_key_packages(self.uniffiClonePointer(),
+                                                                        FfiConverterData.lower(identityBytes),
+                                                                        FfiConverterUInt32.lower(count), $0)
+        })
+    }
+
+    /**
      * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
      *
      * This checks the manifest storage (KeyPackageBundle cache) which is the source of truth
@@ -1975,6 +2018,19 @@ open class MlsContext:
         })
     }
 
+    /**
+     * Decrypt an incoming MLS message (FFI surface).
+     *
+     * N38: this is a thin wrapper over [`MLSContext::decrypt_message_classified`]
+     * that RE-FLATTENS process-stage error classes to
+     * [`MLSError::DecryptionFailed`]. iOS variant-matches `.DecryptionFailed`
+     * for ratchet-desync detection (MLSClient.swift) and string-matches
+     * `"DecryptionFailed"` (Messaging.swift); catmos-cli matches it too. The
+     * typed classes (`InvalidCommit`, `WireFormatPolicyViolation`,
+     * `TlsCodec`, wrong-epoch `OpenMLS` strings) are only surfaced to the
+     * in-process orchestrator via the `MlsCryptoContext` trait impl, which
+     * calls the classified fn directly.
+     */
     open func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult {
         return try FfiConverterTypeDecryptResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_mlscontext_decrypt_message(self.uniffiClonePointer(),
@@ -11372,6 +11428,24 @@ public protocol OrchestratorEventCallback: AnyObject {
      * should surface it (diagnostics, error UI) rather than ignore it.
      */
     func onRecoveryStorageWriteFailed(conversationId: String, operation: String, error: String)
+
+    /**
+     * A credential-binding check failed in warn-and-allow mode (WS-3 stage 1,
+     * ADR-009 D5). The operation continued; platforms should surface this in
+     * diagnostics/telemetry — a clean week of field data gates the enforce
+     * flip. `operation` is the ADR-009 D5 operation tag (`fetch`, `message`,
+     * ...). `convo_id` is `"<none>"` when no conversation is in scope yet
+     * (e.g. key-package fetch during group creation).
+     */
+    func onCredentialBindingWarning(convoId: String, operation: String, expectedDid: String, claimedIdentity: String, reason: String)
+
+    /**
+     * Sequencer equivocation detected (WS-3 stage 1, ADR-009 D8 / E3): two
+     * receipts for the same `(conversation, epoch)` carry different commit
+     * hashes. Stage 1 is detection-only — the triggering operation
+     * continued. Hashes are hex-encoded.
+     */
+    func onSequencerEquivocation(convoId: String, epoch: Int32, storedCommitHashHex: String, newCommitHashHex: String, sequencerDid: String)
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -11448,6 +11522,68 @@ private enum UniffiCallbackInterfaceOrchestratorEventCallback {
                     conversationId: FfiConverterString.lift(conversationId),
                     operation: FfiConverterString.lift(operation),
                     error: FfiConverterString.lift(error)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onCredentialBindingWarning: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            operation: RustBuffer,
+            expectedDid: RustBuffer,
+            claimedIdentity: RustBuffer,
+            reason: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onCredentialBindingWarning(
+                    convoId: FfiConverterString.lift(convoId),
+                    operation: FfiConverterString.lift(operation),
+                    expectedDid: FfiConverterString.lift(expectedDid),
+                    claimedIdentity: FfiConverterString.lift(claimedIdentity),
+                    reason: FfiConverterString.lift(reason)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onSequencerEquivocation: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            epoch: Int32,
+            storedCommitHashHex: RustBuffer,
+            newCommitHashHex: RustBuffer,
+            sequencerDid: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onSequencerEquivocation(
+                    convoId: FfiConverterString.lift(convoId),
+                    epoch: FfiConverterInt32.lift(epoch),
+                    storedCommitHashHex: FfiConverterString.lift(storedCommitHashHex),
+                    newCommitHashHex: FfiConverterString.lift(newCommitHashHex),
+                    sequencerDid: FfiConverterString.lift(sequencerDid)
                 )
             }
 
@@ -13148,6 +13284,31 @@ private struct FfiConverterSequenceTypeKeyPackageData: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeKeyPackageResult: FfiConverterRustBuffer {
+    typealias SwiftType = [KeyPackageResult]
+
+    static func write(_ value: [KeyPackageResult], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeKeyPackageResult.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [KeyPackageResult] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [KeyPackageResult]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeKeyPackageResult.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer {
     typealias SwiftType = [MemberCredential]
 
@@ -13791,6 +13952,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_create_key_package() != 32143 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_mlscontext_create_key_packages() != 2522 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_mlscontext_debug_check_key_package_hash() != 40218 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13800,7 +13964,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_debug_list_key_package_hashes() != 43604 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message() != 4372 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message() != 56393 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message_async() != 34380 {
@@ -14233,6 +14397,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_recovery_storage_write_failed() != 3158 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_credential_binding_warning() != 36251 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_sequencer_equivocation() != 33784 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 57265 {
