@@ -21,7 +21,10 @@ public extension MLSConversationModel {
       createdAt: ATProtocolDate(date: createdAt),
       lastMessageAt: lastMessageAt.map { ATProtocolDate(date: $0) },
       confirmationTag: nil,
-      resetGeneration: nil
+      // WS-4 rung 2: not stored in the local model; iOS consumption of
+      // sequencerDid is rung 3 (E7).
+      resetGeneration: nil,
+      sequencerDid: nil
     )
   }
 }
