@@ -1604,14 +1604,20 @@ public extension MLSConversationManager {
         logger.info("📍 [EPOCH-RECOVERY] Processing commit: epoch=\(commit.epoch), size=\(commitData.count) bytes, currentFFI=\(currentEpoch)")
 
         do {
-          // Process the commit through OpenMLS (stages + merges)
+          // Process and explicitly merge the commit through OpenMLS.
           try await processCommit(groupId: groupId, commitData: commitData)
-          processedCount += 1
-
-          // Re-read actual epoch from FFI after successful merge
           if let groupIdData = Data(hexEncoded: groupId) {
-            currentEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? currentEpoch
+            currentEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData))
+              ?? currentEpoch
           }
+
+          guard currentEpoch >= UInt64(commit.epoch) else {
+            let reason = "Recovered commit \(commit.epoch) merged without advancing FFI epoch; local epoch is \(currentEpoch)"
+            logger.warning("⚠️ [EPOCH-RECOVERY] \(reason)")
+            return .needsDeferredRejoin(failedEpoch: currentEpoch, reason: reason)
+          }
+
+          processedCount += 1
           logger.info("✅ [EPOCH-RECOVERY] Processed commit for epoch=\(commit.epoch), FFI now at \(currentEpoch)")
         } catch {
           logger.error("❌ [EPOCH-RECOVERY] Failed to process commit epoch=\(commit.epoch): \(error.localizedDescription)")
@@ -3092,16 +3098,22 @@ public extension MLSConversationManager {
       var sinceSeq = await lastStoredSequenceNumber(for: convo.conversationId)
 
       // Safety guard: if sinceSeq resolved to nil/0 but conversation already has cached messages,
-      // something is wrong with the seq tracker. Skip rather than re-fetching entire history.
+      // recover by using the cached max as the cursor. This avoids a full re-fetch without
+      // blocking forward catchup when the sequence-state row is missing or stale.
       if sinceSeq == nil || sinceSeq == 0 {
         let cachedMaxSeq = try? await storage.getMaxCachedMessageSeq(
           conversationID: convo.conversationId,
           currentUserDID: userDid,
           database: database
         )
-        if let cachedMax = cachedMaxSeq, cachedMax > 0 {
-          logger.error("🚨 [CATCHUP] sinceSeq=\(sinceSeq.map(String.init) ?? "nil") but conversation \(convo.conversationId.prefix(16)) has cached messages up to seq \(cachedMax) — skipping full re-fetch")
-          return
+        let resolvedSeq = Self.resolvedCatchupSinceSequence(
+          sequenceStateSeq: sinceSeq,
+          cachedMaxSeq: cachedMaxSeq
+        )
+        if resolvedSeq != sinceSeq {
+          logger.warning(
+            "[CATCHUP] sinceSeq=\(sinceSeq.map(String.init) ?? "nil") but conversation \(convo.conversationId.prefix(16)) has cached messages up to seq \(cachedMaxSeq ?? -1); resuming from cached max")
+          sinceSeq = resolvedSeq
         }
       }
 
@@ -4254,7 +4266,9 @@ public extension MLSConversationManager {
     let epochBefore =
       (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
 
-    // Process commit through MLS client (auto-merges the staged commit internally).
+    // Process commit through MLS client. The FFI stages incoming commits and
+    // returns the target epoch; Swift must explicitly confirm the staged commit
+    // before local epoch advancement is real.
     //
     // 🔄 [CLIENT G] Centralize WrongGroupId detection. WrongGroupId means
     // our local crypto session is SUPERSEDED — the server's active session
@@ -4397,7 +4411,25 @@ public extension MLSConversationManager {
       }
       throw error
     }
-    let mergedEpoch = result.newEpoch
+    let targetEpoch = result.newEpoch
+    let mergedEpoch: UInt64
+    do {
+      mergedEpoch = try await mlsClient.mergeIncomingCommit(
+        for: userDid,
+        groupId: groupIdData,
+        targetEpoch: targetEpoch
+      )
+    } catch {
+      logger.error(
+        "❌ [RECV] mergeIncomingCommit failed after processCommit for group \(groupId.prefix(16)) epoch=\(targetEpoch): \(error.localizedDescription)"
+      )
+      await mlsClient.discardIncomingCommit(
+        for: userDid,
+        groupId: groupIdData,
+        targetEpoch: targetEpoch
+      )
+      throw error
+    }
     logger.debug("Processed commit: epoch \(epochBefore) -> \(mergedEpoch)")
 
     // Phase D-Swift D-S.2: FFI processCommit succeeded. Record the commit
@@ -5780,9 +5812,15 @@ public extension MLSConversationManager {
     do {
       let localHashes = (try? await mlsClient.getLocalKeyPackageHashes(for: userDid)) ?? []
       let deviceId = await mlsClient.getDeviceInfo(for: userDid)?.deviceId
+      let queryHashes = MLSAPIClient.welcomeKeyPackageHashesForQuery(localHashes)
+      if !localHashes.isEmpty, queryHashes == nil {
+        logger.info(
+          "📭 [Welcome] Omitting \(localHashes.count) local key-package hashes from getWelcome query; using deviceId/recipient routing fallback"
+        )
+      }
       welcomeData = try await apiClient.getWelcome(
         convoId: convo.conversationId,
-        keyPackageHashes: localHashes,
+        keyPackageHashes: queryHashes,
         deviceId: deviceId
       )
       logger.debug("Received Welcome message: \(welcomeData.count) bytes")
@@ -6206,8 +6244,10 @@ public extension MLSConversationManager {
             if case .invalidResponse = err { return true }
             return false
           } == true
+        let isGroupReset410 = MLSAPIClient.isGroupResetResponse(error)
         let isServerDataCorruption =
           isGroupInfo404
+          || isGroupReset410
           || errorMessage.contains("invalidvectorlength") || errorMessage.contains("endofstream")
           || errorMessage.contains("malformed") || errorMessage.contains("truncat")
           || errorMessage.contains("server data corrupted")

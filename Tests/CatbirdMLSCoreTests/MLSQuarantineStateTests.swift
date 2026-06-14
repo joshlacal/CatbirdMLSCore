@@ -251,4 +251,63 @@ final class MLSQuarantineStateTests: XCTestCase {
     let afterSuccess = await manager.isQuarantined(convoId: "convo-success")
     XCTAssertFalse(afterSuccess, "successful recovery must exit quarantine")
   }
+
+  func testPeerBadCounterTriggersQuarantineWithRustConvention() async throws {
+    let manager = MLSRecoveryManager(persistence: nil)
+
+    let first = await manager.recordPeerBadCommit(
+      convoId: "convo-peer",
+      messageID: "m1",
+      suspectedDID: "did:plc:badpeer"
+    )
+    let second = await manager.recordPeerBadCommit(
+      convoId: "convo-peer",
+      messageID: "m2",
+      suspectedDID: "did:plc:badpeer"
+    )
+    XCTAssertNil(first)
+    XCTAssertNil(second)
+    let notYetQuarantined = await manager.isQuarantined(convoId: "convo-peer")
+    XCTAssertFalse(notYetQuarantined)
+
+    let third = await manager.recordPeerBadCommit(
+      convoId: "convo-peer",
+      messageID: "m3",
+      suspectedDID: "did:plc:badpeer"
+    )
+    XCTAssertEqual(third, .peerBadCommit)
+    let state = await manager.quarantineState(for: "convo-peer")
+    XCTAssertEqual(state?.reason, .peerBadCommit)
+    XCTAssertEqual(state?.suspectedDIDs, ["did:plc:badpeer"])
+
+    let manager2 = MLSRecoveryManager(persistence: nil)
+    let onePeer = await manager2.recordPeerBadCommit(
+      convoId: "convo-multi",
+      messageID: "m1",
+      suspectedDID: "did:plc:alpha"
+    )
+    let twoPeers = await manager2.recordPeerBadCommit(
+      convoId: "convo-multi",
+      messageID: "m2",
+      suspectedDID: "did:plc:beta"
+    )
+    XCTAssertNil(onePeer)
+    XCTAssertEqual(twoPeers, .multiPeerBadCommits)
+    let multiPeerState = await manager2.quarantineState(for: "convo-multi")
+    XCTAssertEqual(
+      multiPeerState?.reason,
+      .multiPeerBadCommits
+    )
+
+    let manager3 = MLSRecoveryManager(persistence: nil)
+    _ = await manager3.recordPeerBadCommit(convoId: "convo-framing", messageID: "m1")
+    _ = await manager3.recordPeerBadCommit(convoId: "convo-framing", messageID: "m2")
+    let framing = await manager3.recordPeerBadCommit(convoId: "convo-framing", messageID: "m3")
+    XCTAssertEqual(framing, .repeatedFramingFailures)
+    let framingState = await manager3.quarantineState(for: "convo-framing")
+    XCTAssertEqual(
+      framingState?.reason,
+      .repeatedFramingFailures
+    )
+  }
 }

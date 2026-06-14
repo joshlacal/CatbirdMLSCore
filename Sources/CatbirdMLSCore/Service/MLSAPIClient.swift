@@ -28,6 +28,23 @@ public enum MLSEnvironment {
   }
 }
 
+private extension MLSCredentialBinding.KeyPackageBindingStatus {
+  var logValue: String {
+    switch self {
+    case .verified:
+      return "verified"
+    case .identityMismatch:
+      return "identity_mismatch"
+    case .signingKeyMismatch:
+      return "signing_key_mismatch"
+    case .signingKeyUnavailable:
+      return "signing_key_unavailable"
+    case .unverifiable:
+      return "unverifiable"
+    }
+  }
+}
+
 /// MLS API Client using Petrel ATProto client with BlueCatbirdMls* models
 /// Properly configured with atproto-proxy header for MLS service routing
 @Observable
@@ -1192,27 +1209,36 @@ public final class MLSAPIClient {
     }
 
     // N44e (ADR-009 D3 iOS twin, warn-only): every returned package must be
-    // labeled for a DID that was actually requested (fragment-aware bare-DID
-    // root, case-insensitive — same rules as the Rust orchestrator's
-    // verify_fetched_key_packages step 1). Full leaf-credential verification
-    // (TLS-decode the KeyPackage, compare the BasicCredential identity's DID
-    // root against the labeled DID) is blocked on an FFI helper — see the
-    // header of MLSCredentialBinding.swift.
-    //
-    // SEAM: once catbird-mls exposes `extractKeyPackageIdentity(keyPackageData:)`
-    // via UniFFI, decode `kp.keyPackage.data` here and verify with
-    // `MLSCredentialBinding.checkIdentityClaim(expectedDID: kp.did.description,
-    // claimedIdentity: extractedIdentity)`.
-    //
-    // Warn-only: failures are logged and the operation continues unchanged.
-    let requestedRoots = Set(
-      dids.map { MLSCredentialBinding.credentialRootDID($0.description).lowercased() })
+    // labeled for a requested DID and its serialized leaf credential must bind
+    // to that DID root. The Rust FFI classifier decodes the KeyPackage
+    // credential and signature key. DID-doc signing-key authorization remains
+    // warn-only until we pass a resolved authorized-signing-key set here.
+    let requestedDIDDescriptions = dids.map(\.description)
     for kp in dedupedPackages {
-      let labeledRoot = MLSCredentialBinding.credentialRootDID(kp.did.description).lowercased()
-      if !requestedRoots.contains(labeledRoot) {
-        let hashPrefix = Data(SHA256.hash(data: kp.keyPackage.data)).prefix(8).hexEncodedString()
+      let classification = MLSCredentialBinding.classifyKeyPackageBinding(
+        expectedDID: kp.did.description,
+        keyPackageData: kp.keyPackage.data,
+        authorizedSignatureKeys: nil
+      )
+      let disposition = Self.keyPackageFetchBindingDisposition(
+        requestedDIDDescriptions: requestedDIDDescriptions,
+        packageDIDDescription: kp.did.description,
+        classification: classification
+      )
+      let hashPrefix = Data(SHA256.hash(data: kp.keyPackage.data)).prefix(8).hexEncodedString()
+
+      switch disposition.severity {
+      case .ok:
+        logger.debug(
+          "✅ [CREDENTIAL-BINDING] mode=warn_only operation=fetch context=getKeyPackages expected_did=\(kp.did.description) claimed_did=\(classification.claimedIdentity ?? "<none>") status=\(classification.status.logValue) kp_hash_prefix=\(hashPrefix) path=ios-swift"
+        )
+      case .warning:
+        logger.warning(
+          "⚠️ [CREDENTIAL-BINDING] mode=warn_only operation=fetch context=getKeyPackages expected_did=\(kp.did.description) claimed_did=\(classification.claimedIdentity ?? "<none>") status=\(classification.status.logValue) kp_hash_prefix=\(hashPrefix) path=ios-swift reason=\(disposition.reason)"
+        )
+      case .error:
         logger.error(
-          "❌ [CREDENTIAL-BINDING] mode=warn_only operation=fetch context=getKeyPackages expected_did=<one-of-\(dids.count)-requested> claimed_did=\(kp.did.description) kp_hash_prefix=\(hashPrefix) path=ios-swift reason=key package returned for a DID that was not requested — continuing unchanged (leaf-credential check pending FFI extractKeyPackageIdentity)"
+          "❌ [CREDENTIAL-BINDING] mode=warn_only operation=fetch context=getKeyPackages expected_did=\(kp.did.description) claimed_did=\(classification.claimedIdentity ?? "<none>") status=\(classification.status.logValue) label_requested=\(disposition.labelWasRequested) kp_hash_prefix=\(hashPrefix) path=ios-swift reason=\(disposition.reason)"
         )
       }
     }
@@ -1340,6 +1366,77 @@ public final class MLSAPIClient {
     }
 
     return .retryStaleRead(serverEpoch: storedEpoch)
+  }
+
+  internal enum KeyPackageFetchBindingSeverity: Equatable {
+    case ok
+    case warning
+    case error
+  }
+
+  internal struct KeyPackageFetchBindingDisposition: Equatable {
+    let labelWasRequested: Bool
+    let severity: KeyPackageFetchBindingSeverity
+    let reason: String
+  }
+
+  internal static func keyPackageFetchBindingDisposition(
+    requestedDIDDescriptions: [String],
+    packageDIDDescription: String,
+    classification: MLSCredentialBinding.KeyPackageBindingClassification
+  ) -> KeyPackageFetchBindingDisposition {
+    let requestedRoots = Set(
+      requestedDIDDescriptions.map {
+        MLSCredentialBinding.credentialRootDID($0).lowercased()
+      }
+    )
+    let packageRoot = MLSCredentialBinding.credentialRootDID(packageDIDDescription).lowercased()
+    let labelWasRequested = requestedRoots.contains(packageRoot)
+
+    var reasons: [String] = []
+    if !labelWasRequested {
+      reasons.append("key package returned for a DID that was not requested")
+    }
+
+    switch classification.status {
+    case .verified:
+      break
+    case .signingKeyUnavailable:
+      reasons.append("DID signing-key authorization unavailable")
+    case .identityMismatch, .signingKeyMismatch, .unverifiable:
+      reasons.append(classification.reason ?? "key package binding verification failed")
+    }
+
+    let severity: KeyPackageFetchBindingSeverity
+    if !labelWasRequested {
+      severity = .error
+    } else {
+      switch classification.status {
+      case .verified:
+        severity = .ok
+      case .signingKeyUnavailable:
+        severity = .warning
+      case .identityMismatch, .signingKeyMismatch, .unverifiable:
+        severity = .error
+      }
+    }
+
+    return KeyPackageFetchBindingDisposition(
+      labelWasRequested: labelWasRequested,
+      severity: severity,
+      reason: reasons.joined(separator: "; ")
+    )
+  }
+
+  internal static func buildReconcileKeyPackagesInput(
+    deviceId: String,
+    localHashes: [String]
+  ) -> BlueCatbirdMlsChatReconcileKeyPackages.Input {
+    BlueCatbirdMlsChatReconcileKeyPackages.Input(
+      deviceId: deviceId,
+      localHashes: localHashes,
+      schemaVersion: 2
+    )
   }
 
   /// Pure builder for the `BlueCatbirdMlsChatCommitGroupChange.Input` payload
@@ -1724,6 +1821,84 @@ public final class MLSAPIClient {
   /// Get Welcome message for joining a conversation
   /// - Parameter convoId: Conversation identifier
   /// - Returns: Welcome message data
+  internal static func missingWelcomeError(convoId: String) -> MLSAPIError {
+    MLSAPIError.httpError(
+      statusCode: 404,
+      message: "No welcome message in response for \(convoId)"
+    )
+  }
+
+  internal static func welcomeData(
+    responseCode: Int,
+    output: BlueCatbirdMlsChatGetGroupState.Output?,
+    convoId: String
+  ) throws -> Data {
+    guard responseCode == 200, let output = output else {
+      throw MLSAPIError.httpError(
+        statusCode: responseCode,
+        message: "Failed to fetch Welcome message"
+      )
+    }
+
+    guard let welcomeBytes = output.welcome, !welcomeBytes.data.isEmpty else {
+      throw Self.missingWelcomeError(convoId: convoId)
+    }
+
+    return welcomeBytes.data
+  }
+
+  internal static let maxWelcomeKeyPackageHashesForQuery = 20
+
+  internal static func welcomeKeyPackageHashesForQuery(_ localHashes: [String]) -> [String]? {
+    var seen = Set<String>()
+    var uniqueHashes: [String] = []
+
+    for rawHash in localHashes {
+      let hash = rawHash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      guard isHexKeyPackageHash(hash), seen.insert(hash).inserted else {
+        continue
+      }
+      uniqueHashes.append(hash)
+    }
+
+    guard !uniqueHashes.isEmpty else {
+      return nil
+    }
+
+    guard uniqueHashes.count <= maxWelcomeKeyPackageHashesForQuery else {
+      return nil
+    }
+
+    return uniqueHashes
+  }
+
+  private static func isHexKeyPackageHash(_ value: String) -> Bool {
+    value.utf8.count == 64 && value.utf8.allSatisfy { byte in
+      (byte >= 48 && byte <= 57)
+        || (byte >= 97 && byte <= 102)
+    }
+  }
+
+  internal static func isGroupResetResponse(_ error: Error) -> Bool {
+    if let apiError = error as? MLSAPIError {
+      switch apiError {
+      case .httpError(let statusCode, let message):
+        return statusCode == 410 || message.localizedCaseInsensitiveContains("groupReset")
+      default:
+        break
+      }
+    }
+
+    let description = error.localizedDescription.lowercased()
+    return description.contains("groupreset")
+      || description.contains("http 410")
+      || description.contains("http status 410")
+      || description.contains("status code: 410")
+      || description.contains("status code 410")
+      || description.contains("statuscode: 410")
+      || description.contains("statuscode 410")
+  }
+
   public func getWelcome(
     convoId: String,
     keyPackageHashes: [String]? = nil,
@@ -1740,18 +1915,22 @@ public final class MLSAPIClient {
 
     let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupState(input: input)
 
-    guard responseCode == 200, let output = output else {
-      logger.error("❌ Failed to fetch Welcome message for \(convoId): HTTP \(responseCode)")
-      throw MLSAPIError.httpError(
-        statusCode: responseCode, message: "Failed to fetch Welcome message")
+    let welcomeData: Data
+    do {
+      welcomeData = try Self.welcomeData(
+        responseCode: responseCode,
+        output: output,
+        convoId: convoId
+      )
+    } catch {
+      if case .httpError(let statusCode, _) = error as? MLSAPIError, statusCode == 404 {
+        logger.error("❌ No Welcome message available for \(convoId)")
+      } else {
+        logger.error("❌ Failed to fetch Welcome message for \(convoId): HTTP \(responseCode)")
+      }
+      throw error
     }
 
-    guard let welcomeBytes = output.welcome, !welcomeBytes.data.isEmpty else {
-      logger.error("❌ No Welcome message available for \(convoId)")
-      throw MLSAPIError.invalidResponse(message: "No welcome message in response")
-    }
-
-    let welcomeData = welcomeBytes.data
     logger.debug("Fetched Welcome message for \(convoId), \(welcomeData.count) bytes")
     return welcomeData
   }
@@ -1964,11 +2143,18 @@ public final class MLSAPIClient {
     public let serverOnly: [String]
     public let localOnly: [String]
     public let confirmed: [String]
+    public let deviceVerified: Bool
 
-    public init(serverOnly: [String], localOnly: [String], confirmed: [String]) {
+    public init(
+      serverOnly: [String],
+      localOnly: [String],
+      confirmed: [String],
+      deviceVerified: Bool = true
+    ) {
       self.serverOnly = serverOnly
       self.localOnly = localOnly
       self.confirmed = confirmed
+      self.deviceVerified = deviceVerified
     }
   }
 
@@ -2039,10 +2225,9 @@ public final class MLSAPIClient {
       "🔄 [reconcileKeyPackages] START - localHashes: \(localHashes.count), deviceId: \(deviceId)"
     )
 
-    let input = BlueCatbirdMlsChatReconcileKeyPackages.Input(
+    let input = Self.buildReconcileKeyPackagesInput(
       deviceId: deviceId,
-      localHashes: localHashes,
-      schemaVersion: 1
+      localHashes: localHashes
     )
 
     do {
@@ -2067,7 +2252,8 @@ public final class MLSAPIClient {
       return ReconcileResponse(
         serverOnly: output.serverOnly,
         localOnly: output.localOnly,
-        confirmed: confirmed
+        confirmed: confirmed,
+        deviceVerified: output.deviceVerified
       )
     } catch let error as ATProtoError<BlueCatbirdMlsChatReconcileKeyPackages.Error> {
       logger.error(

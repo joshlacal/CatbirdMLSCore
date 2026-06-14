@@ -11,36 +11,39 @@
 //
 //  ## Verification depth (honest scope)
 //
-//  The Rust check has three steps per fetched key package:
-//    1. the DS-labeled DID is one of the DIDs the caller requested;
-//    2. the package's leaf credential decodes structurally
-//       (`extract_key_package_identity`: TLS-decode `KeyPackageIn`, read the
-//       BasicCredential identity as UTF-8 — the identity is the bare DID or
-//       `did:...#device-id`);
-//    3. the credential's DID root equals the labeled DID.
-//
-//  From Swift, only step 1 is currently checkable: the UniFFI surface
-//  (`Sources/CatbirdMLS/CatbirdMLS.swift`) exposes no decoder for a
-//  standalone serialized KeyPackage's credential (`computeKeyPackageHash`
-//  hashes opaquely; `debugGroupMembers` only inspects already-joined group
-//  members), and there is no maintained Swift MLS TLS codec to decode the
-//  bytes locally — hand-rolling one would be an unmaintained fork of the
-//  wire format.
-//
-//  **FFI helper needed for steps 2–3**: export catbird-mls's
-//  `orchestrator::credential_binding::extract_key_package_identity` through
-//  UniFFI (e.g. a module-level `extractKeyPackageIdentity(keyPackageData:
-//  Data) throws -> String`). Once exposed, plug it into the marked seam in
-//  `MLSAPIClient.getKeyPackages` and compare via
-//  `MLSCredentialBinding.checkIdentityClaim`.
+//  The Rust FFI classifier now checks the DS-labeled DID against the serialized
+//  KeyPackage's leaf credential identity and extracts the leaf signature key.
+//  Full signing-key authorization still requires passing a DID-resolved set of
+//  valid MLS signing keys into `classifyKeyPackageBinding`.
 //
 
 import Foundation
+import CatbirdMLS
 
 /// Pure helpers for binding MLS credentials / DS labels to ATProto DIDs.
 /// Function-for-function twin of the Rust `credential_binding` module so the
 /// two implementations cannot drift on root extraction or comparison rules.
 public enum MLSCredentialBinding {
+
+  public enum KeyPackageBindingStatus: Equatable, Sendable {
+    case verified
+    case identityMismatch
+    case signingKeyMismatch
+    case signingKeyUnavailable
+    case unverifiable
+  }
+
+  public struct KeyPackageBindingClassification: Equatable, Sendable {
+    public let status: KeyPackageBindingStatus
+    public let identityMatches: Bool
+    public let signingKeyMatches: Bool?
+    public let expectedRootDID: String
+    public let claimedIdentity: String?
+    public let claimedRootDID: String?
+    public let signaturePublicKey: Data?
+    public let signatureAlgorithm: String?
+    public let reason: String?
+  }
 
   /// Outcome of an identity-claim consistency check (twin of the Rust
   /// `CredentialVerification` enum, structural subset).
@@ -76,5 +79,45 @@ public enum MLSCredentialBinding {
       claimedIdentity: claimedIdentity,
       claimedRootDID: claimedRoot
     )
+  }
+
+  public static func classifyKeyPackageBinding(
+    expectedDID: String,
+    keyPackageData: Data,
+    authorizedSignatureKeys: [Data]?
+  ) -> KeyPackageBindingClassification {
+    let ffi = mlsClassifyKeyPackageBinding(
+      expectedDid: expectedDID,
+      keyPackageBytes: keyPackageData,
+      authorizedSignatureKeys: authorizedSignatureKeys
+    )
+    return KeyPackageBindingClassification(
+      status: KeyPackageBindingStatus(ffi.status),
+      identityMatches: ffi.identityMatches,
+      signingKeyMatches: ffi.signingKeyMatches,
+      expectedRootDID: ffi.expectedRootDid,
+      claimedIdentity: ffi.claimedIdentity,
+      claimedRootDID: ffi.claimedRootDid,
+      signaturePublicKey: ffi.signaturePublicKey,
+      signatureAlgorithm: ffi.signatureAlgorithm,
+      reason: ffi.reason
+    )
+  }
+}
+
+private extension MLSCredentialBinding.KeyPackageBindingStatus {
+  init(_ ffi: FfiKeyPackageBindingStatus) {
+    switch ffi {
+    case .verified:
+      self = .verified
+    case .identityMismatch:
+      self = .identityMismatch
+    case .signingKeyMismatch:
+      self = .signingKeyMismatch
+    case .signingKeyUnavailable:
+      self = .signingKeyUnavailable
+    case .unverifiable:
+      self = .unverifiable
+    }
   }
 }

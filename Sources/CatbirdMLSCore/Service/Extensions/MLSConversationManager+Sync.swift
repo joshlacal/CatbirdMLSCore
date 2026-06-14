@@ -6,6 +6,55 @@ import Petrel
 import PetrelCatbird
 import Synchronization
 
+extension MLSConversationManager {
+  static func shouldCatchUpMessagesDuringSync(
+    needsGroupInit: Bool,
+    fullSync: Bool,
+    serverLastMessageAt: Date?,
+    localLastMessageAt: Date?
+  ) -> Bool {
+    if needsGroupInit || fullSync {
+      return true
+    }
+
+    guard let serverLastMessageAt else {
+      return true
+    }
+
+    guard let localLastMessageAt else {
+      return true
+    }
+
+    return serverLastMessageAt > localLastMessageAt
+  }
+
+  static func resolvedCatchupSinceSequence(
+    sequenceStateSeq: Int?,
+    cachedMaxSeq: Int64?
+  ) -> Int? {
+    guard sequenceStateSeq == nil || sequenceStateSeq == 0 else {
+      return sequenceStateSeq
+    }
+
+    guard let cachedMaxSeq, cachedMaxSeq > 0 else {
+      return sequenceStateSeq
+    }
+
+    return Int(exactly: cachedMaxSeq) ?? Int.max
+  }
+
+  static func isMissingWelcomeForBootstrapDisambiguation(_ error: MLSAPIError) -> Bool {
+    switch error {
+    case .invalidResponse:
+      return true
+    case .httpError(let statusCode, let message):
+      return statusCode == 404 && message.localizedCaseInsensitiveContains("welcome")
+    default:
+      return false
+    }
+  }
+}
+
 public extension MLSConversationManager {
 
   // MARK: - Server Synchronization
@@ -547,7 +596,12 @@ public extension MLSConversationManager {
           }
         }
 
-        if needsGroupInit || fullSync {
+        if Self.shouldCatchUpMessagesDuringSync(
+          needsGroupInit: needsGroupInit,
+          fullSync: fullSync,
+          serverLastMessageAt: convo.lastMessageAt?.date,
+          localLastMessageAt: existingConvo?.lastMessageAt?.date
+        ) {
           await catchUpMessagesIfNeeded(for: convo, force: needsGroupInit)
         }
 
@@ -1745,14 +1799,20 @@ public extension MLSConversationManager {
         do {
           let localHashes = (try? await mlsClient.getLocalKeyPackageHashes(for: userDid)) ?? []
           let deviceId = await mlsClient.getDeviceInfo(for: userDid)?.deviceId
+          let queryHashes = MLSAPIClient.welcomeKeyPackageHashesForQuery(localHashes)
+          if !localHashes.isEmpty, queryHashes == nil {
+            logger.info(
+              "📭 [BOOTSTRAP] Omitting \(localHashes.count) local key-package hashes from getWelcome query; using deviceId/recipient routing fallback"
+            )
+          }
           _ = try await apiClient.getWelcome(
             convoId: convoId,
-            keyPackageHashes: localHashes,
+            keyPackageHashes: queryHashes,
             deviceId: deviceId
           )
           welcomeForUs = true
         } catch let mlsErr as MLSAPIError {
-          if case .invalidResponse = mlsErr {
+          if Self.isMissingWelcomeForBootstrapDisambiguation(mlsErr) {
             welcomeForUs = false
           } else {
             // Treat unknown errors as "loser" (the safer default — we won't

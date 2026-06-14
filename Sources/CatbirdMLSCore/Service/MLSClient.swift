@@ -31,6 +31,25 @@ public actor MLSClient {
 
   private static let emergencyState = Mutex(EmergencyState())
 
+  internal nonisolated static func localKeyPackageHashesToEvict(
+    localHashes: [String],
+    legacyServerHashes: [String],
+    reconcileLocalOnly: [String]?,
+    reconcileDeviceVerified: Bool? = nil
+  ) -> [String] {
+    guard reconcileDeviceVerified != false else {
+      return []
+    }
+
+    if let reconcileLocalOnly {
+      let localOnlySet = Set(reconcileLocalOnly.map { $0.lowercased() })
+      return localHashes.filter { localOnlySet.contains($0.lowercased()) }
+    }
+
+    let serverHashSet = Set(legacyServerHashes.map { $0.lowercased() })
+    return localHashes.filter { !serverHashSet.contains($0.lowercased()) }
+  }
+
   public nonisolated static var isSuspensionInProgress: Bool {
     emergencyState.withLock { $0.suspensionInProgress }
   }
@@ -3792,6 +3811,8 @@ public actor MLSClient {
         serverHashes: [String], orphanedCount: Int, deletedCount: Int, orphanedHashes: [String],
         remainingAvailable: Int
       )
+    var reconcileLocalOnly: [String]?
+    var reconcileDeviceVerified: Bool?
     do {
       result = try await apiClient.syncKeyPackages(localHashes: localHashes, deviceId: deviceId)
       logger.info("📊 [SyncKeyPackages] Server response:")
@@ -3805,29 +3826,42 @@ public actor MLSClient {
           deviceId: deviceId,
           localHashes: localHashes
         )
+        reconcileDeviceVerified = reconcile.deviceVerified
+        reconcileLocalOnly = reconcile.localOnly
         logger.info("📊 [ReconcileKeyPackages] Server authoritative diff:")
         logger.info("   - Confirmed: \(reconcile.confirmed.count)")
         logger.info("   - Server only: \(reconcile.serverOnly.count)")
         logger.info("   - Local only: \(reconcile.localOnly.count)")
+        logger.info("   - Device verified: \(reconcile.deviceVerified)")
 
-        for hash in reconcile.serverOnly {
-          do {
-            try await apiClient.invalidateKeyPackage(
-              deviceDid: deviceInfo.mlsDid,
-              hash: hash,
-              reason: .unowned
-            )
-            logger.info("🗑️ [ReconcileKeyPackages] Invalidated unowned server KP \(hash.prefix(16))")
-          } catch {
-            logger.warning(
-              "⚠️ [ReconcileKeyPackages] Could not invalidate server-only KP \(hash.prefix(16)): \(error.localizedDescription)"
-            )
+        if reconcile.deviceVerified {
+          for hash in reconcile.serverOnly {
+            do {
+              try await apiClient.invalidateKeyPackage(
+                deviceDid: deviceInfo.mlsDid,
+                hash: hash,
+                reason: .unowned
+              )
+              logger.info("🗑️ [ReconcileKeyPackages] Invalidated unowned server KP \(hash.prefix(16))")
+            } catch {
+              logger.warning(
+                "⚠️ [ReconcileKeyPackages] Could not invalidate server-only KP \(hash.prefix(16)): \(error.localizedDescription)"
+              )
+            }
           }
+        } else if !reconcile.serverOnly.isEmpty {
+          logger.warning(
+            "⚠️ [ReconcileKeyPackages] Device was not verified; preserving server-only KP rows until registration is repaired"
+          )
         }
 
-        if !reconcile.localOnly.isEmpty {
+        if !reconcile.localOnly.isEmpty && reconcile.deviceVerified {
           logger.warning(
             "⚠️ [ReconcileKeyPackages] \(reconcile.localOnly.count) local-only KP hash(es) found, but this FFI surface cannot export a bundle by hash for re-publish yet"
+          )
+        } else if !reconcile.localOnly.isEmpty {
+          logger.warning(
+            "⚠️ [ReconcileKeyPackages] Device was not verified; preserving \(reconcile.localOnly.count) local KP hash(es) instead of evicting them"
           )
         }
       } catch {
@@ -3873,10 +3907,12 @@ public actor MLSClient {
     // `localHashes` that is not in `serverHashes` is local-only and
     // should be deleted from local FFI storage.
     do {
-      let serverHashSet = Set(result.serverHashes.map { $0.lowercased() })
-      let staleLocalHashes = localHashes.filter {
-        !serverHashSet.contains($0.lowercased())
-      }
+      let staleLocalHashes = Self.localKeyPackageHashesToEvict(
+        localHashes: localHashes,
+        legacyServerHashes: result.serverHashes,
+        reconcileLocalOnly: reconcileLocalOnly,
+        reconcileDeviceVerified: reconcileDeviceVerified
+      )
 
       // Cap evictions per cycle so we don't stall the FFI on a runaway
       // desync (e.g. 6500 stale entries) while still making forward

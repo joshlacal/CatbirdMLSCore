@@ -3,6 +3,10 @@ import Petrel
 import PetrelCatbird
 @testable import CatbirdMLSCore
 
+private struct MLSAPIClientTestError: LocalizedError {
+  let errorDescription: String?
+}
+
 final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
 
   func testDispositionVerifiesBytesWhenEpochsMatch() {
@@ -60,6 +64,193 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
         groupId: "group-id"
       )
     )
+  }
+
+  func testMissingWelcomeMapsToUnavailableRecoveryPath() {
+    let error = MLSAPIClient.missingWelcomeError(convoId: "convo-1")
+
+    guard case .httpError(let statusCode, let message) = error else {
+      return XCTFail("Expected HTTP error for missing Welcome")
+    }
+
+    XCTAssertEqual(statusCode, 404)
+    XCTAssertTrue(message.contains("No welcome message"))
+  }
+
+  func testWelcomeDataMapsHTTP200NilWelcomeToUnavailableRecoveryPath() {
+    let output = BlueCatbirdMlsChatGetGroupState.Output(welcome: nil)
+
+    XCTAssertThrowsError(
+      try MLSAPIClient.welcomeData(responseCode: 200, output: output, convoId: "convo-1")
+    ) { error in
+      guard case .httpError(let statusCode, let message) = error as? MLSAPIError else {
+        return XCTFail("Expected HTTP error for missing Welcome")
+      }
+
+      XCTAssertEqual(statusCode, 404)
+      XCTAssertTrue(message.contains("No welcome message"))
+    }
+  }
+
+  func testWelcomeDataMapsHTTP200EmptyWelcomeToUnavailableRecoveryPath() {
+    let output = BlueCatbirdMlsChatGetGroupState.Output(welcome: Bytes(data: Data()))
+
+    XCTAssertThrowsError(
+      try MLSAPIClient.welcomeData(responseCode: 200, output: output, convoId: "convo-1")
+    ) { error in
+      guard case .httpError(let statusCode, let message) = error as? MLSAPIError else {
+        return XCTFail("Expected HTTP error for missing Welcome")
+      }
+
+      XCTAssertEqual(statusCode, 404)
+      XCTAssertTrue(message.contains("No welcome message"))
+    }
+  }
+
+  func testWelcomeDataReturnsNonEmptyWelcomePayload() throws {
+    let payload = Data([0xCA, 0x7B, 0x1D])
+    let output = BlueCatbirdMlsChatGetGroupState.Output(welcome: Bytes(data: payload))
+
+    let welcome = try MLSAPIClient.welcomeData(
+      responseCode: 200,
+      output: output,
+      convoId: "convo-1"
+    )
+
+    XCTAssertEqual(welcome, payload)
+  }
+
+  func testWelcomeHashQueryPreservesSmallUniqueHashList() {
+    let hashes = [
+      String(repeating: "a", count: 64),
+      String(repeating: "b", count: 64),
+      String(repeating: "a", count: 64),
+    ]
+
+    let queryHashes = MLSAPIClient.welcomeKeyPackageHashesForQuery(hashes)
+
+    XCTAssertEqual(queryHashes, [hashes[0], hashes[1]])
+  }
+
+  func testWelcomeHashQueryOmitsOversizedLocalManifest() {
+    let hashes = (0 ... MLSAPIClient.maxWelcomeKeyPackageHashesForQuery).map {
+      String(format: "%064x", $0)
+    }
+
+    XCTAssertNil(MLSAPIClient.welcomeKeyPackageHashesForQuery(hashes))
+  }
+
+  func testGroupResetDetectionAcceptsTypedHTTP410() {
+    let error = MLSAPIError.httpError(
+      statusCode: 410,
+      message: "Failed to fetch GroupInfo after 1 attempt(s)"
+    )
+
+    XCTAssertTrue(MLSAPIClient.isGroupResetResponse(error))
+  }
+
+  func testGroupResetDetectionAcceptsPetrelStatusDescription() {
+    let error = MLSAPIClientTestError(
+      errorDescription: "Received an error response from the server (Status Code: 410)."
+    )
+
+    XCTAssertTrue(MLSAPIClient.isGroupResetResponse(error))
+  }
+
+  func testGroupResetDetectionRejectsMissingWelcome404() {
+    let error = MLSAPIClient.missingWelcomeError(convoId: "convo-1")
+
+    XCTAssertFalse(MLSAPIClient.isGroupResetResponse(error))
+  }
+}
+
+final class MLSAPIClientKeyPackageFetchBindingDispositionTests: XCTestCase {
+
+  func testVerifiedRequestedPackageIsOk() {
+    let disposition = MLSAPIClient.keyPackageFetchBindingDisposition(
+      requestedDIDDescriptions: ["did:plc:alice"],
+      packageDIDDescription: "did:plc:alice",
+      classification: classification(status: .verified)
+    )
+
+    XCTAssertEqual(disposition.severity, .ok)
+    XCTAssertTrue(disposition.labelWasRequested)
+    XCTAssertEqual(disposition.reason, "")
+  }
+
+  func testMissingAuthorizedSigningKeysWarnsButKeepsIdentityBinding() {
+    let disposition = MLSAPIClient.keyPackageFetchBindingDisposition(
+      requestedDIDDescriptions: ["did:plc:alice"],
+      packageDIDDescription: "did:plc:alice",
+      classification: classification(
+        status: .signingKeyUnavailable,
+        reason: "authorized signing-key resolution unavailable"
+      )
+    )
+
+    XCTAssertEqual(disposition.severity, .warning)
+    XCTAssertTrue(disposition.labelWasRequested)
+    XCTAssertTrue(disposition.reason.contains("DID signing-key authorization unavailable"))
+  }
+
+  func testIdentityMismatchIsError() {
+    let disposition = MLSAPIClient.keyPackageFetchBindingDisposition(
+      requestedDIDDescriptions: ["did:plc:alice"],
+      packageDIDDescription: "did:plc:alice",
+      classification: classification(
+        status: .identityMismatch,
+        identityMatches: false,
+        reason: "credential root DID `did:plc:bob` does not match expected DID `did:plc:alice`"
+      )
+    )
+
+    XCTAssertEqual(disposition.severity, .error)
+    XCTAssertTrue(disposition.labelWasRequested)
+    XCTAssertTrue(disposition.reason.contains("does not match expected DID"))
+  }
+
+  func testUnrequestedLabelIsErrorEvenWhenPackageClassifies() {
+    let disposition = MLSAPIClient.keyPackageFetchBindingDisposition(
+      requestedDIDDescriptions: ["did:plc:alice"],
+      packageDIDDescription: "did:plc:bob",
+      classification: classification(status: .verified)
+    )
+
+    XCTAssertEqual(disposition.severity, .error)
+    XCTAssertFalse(disposition.labelWasRequested)
+    XCTAssertTrue(disposition.reason.contains("DID that was not requested"))
+  }
+
+  private func classification(
+    status: MLSCredentialBinding.KeyPackageBindingStatus,
+    identityMatches: Bool = true,
+    reason: String? = nil
+  ) -> MLSCredentialBinding.KeyPackageBindingClassification {
+    MLSCredentialBinding.KeyPackageBindingClassification(
+      status: status,
+      identityMatches: identityMatches,
+      signingKeyMatches: status == .verified ? true : nil,
+      expectedRootDID: "did:plc:alice",
+      claimedIdentity: identityMatches ? "did:plc:alice#device-1" : "did:plc:bob#device-1",
+      claimedRootDID: identityMatches ? "did:plc:alice" : "did:plc:bob",
+      signaturePublicKey: Data(repeating: 0x11, count: 32),
+      signatureAlgorithm: "Ed25519",
+      reason: reason
+    )
+  }
+}
+
+final class MLSAPIClientReconcileKeyPackagesInputTests: XCTestCase {
+
+  func testBuildReconcileKeyPackagesInputUsesServerSchemaVersionTwo() {
+    let input = MLSAPIClient.buildReconcileKeyPackagesInput(
+      deviceId: "device-1",
+      localHashes: ["hash-a", "hash-b"]
+    )
+
+    XCTAssertEqual(input.deviceId, "device-1")
+    XCTAssertEqual(input.localHashes, ["hash-a", "hash-b"])
+    XCTAssertEqual(input.schemaVersion, 2)
   }
 }
 

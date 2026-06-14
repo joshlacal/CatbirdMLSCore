@@ -6748,6 +6748,200 @@ public func FfiConverterTypeFFIVoicePrepareResult_lower(_ value: FfiVoicePrepare
     return FfiConverterTypeFFIVoicePrepareResult.lower(value)
 }
 
+public struct FfiKeyPackageBindingClassification {
+    public var status: FfiKeyPackageBindingStatus
+    public var identityMatches: Bool
+    public var signingKeyMatches: Bool?
+    public var expectedRootDid: String
+    public var claimedIdentity: String?
+    public var claimedRootDid: String?
+    public var signaturePublicKey: Data?
+    public var signatureAlgorithm: String?
+    public var reason: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(status: FfiKeyPackageBindingStatus, identityMatches: Bool, signingKeyMatches: Bool?, expectedRootDid: String, claimedIdentity: String?, claimedRootDid: String?, signaturePublicKey: Data?, signatureAlgorithm: String?, reason: String?) {
+        self.status = status
+        self.identityMatches = identityMatches
+        self.signingKeyMatches = signingKeyMatches
+        self.expectedRootDid = expectedRootDid
+        self.claimedIdentity = claimedIdentity
+        self.claimedRootDid = claimedRootDid
+        self.signaturePublicKey = signaturePublicKey
+        self.signatureAlgorithm = signatureAlgorithm
+        self.reason = reason
+    }
+}
+
+extension FfiKeyPackageBindingClassification: Equatable, Hashable {
+    public static func == (lhs: FfiKeyPackageBindingClassification, rhs: FfiKeyPackageBindingClassification) -> Bool {
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.identityMatches != rhs.identityMatches {
+            return false
+        }
+        if lhs.signingKeyMatches != rhs.signingKeyMatches {
+            return false
+        }
+        if lhs.expectedRootDid != rhs.expectedRootDid {
+            return false
+        }
+        if lhs.claimedIdentity != rhs.claimedIdentity {
+            return false
+        }
+        if lhs.claimedRootDid != rhs.claimedRootDid {
+            return false
+        }
+        if lhs.signaturePublicKey != rhs.signaturePublicKey {
+            return false
+        }
+        if lhs.signatureAlgorithm != rhs.signatureAlgorithm {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(status)
+        hasher.combine(identityMatches)
+        hasher.combine(signingKeyMatches)
+        hasher.combine(expectedRootDid)
+        hasher.combine(claimedIdentity)
+        hasher.combine(claimedRootDid)
+        hasher.combine(signaturePublicKey)
+        hasher.combine(signatureAlgorithm)
+        hasher.combine(reason)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiKeyPackageBindingClassification: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageBindingClassification {
+        return
+            try FfiKeyPackageBindingClassification(
+                status: FfiConverterTypeFfiKeyPackageBindingStatus.read(from: &buf),
+                identityMatches: FfiConverterBool.read(from: &buf),
+                signingKeyMatches: FfiConverterOptionBool.read(from: &buf),
+                expectedRootDid: FfiConverterString.read(from: &buf),
+                claimedIdentity: FfiConverterOptionString.read(from: &buf),
+                claimedRootDid: FfiConverterOptionString.read(from: &buf),
+                signaturePublicKey: FfiConverterOptionData.read(from: &buf),
+                signatureAlgorithm: FfiConverterOptionString.read(from: &buf),
+                reason: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiKeyPackageBindingClassification, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiKeyPackageBindingStatus.write(value.status, into: &buf)
+        FfiConverterBool.write(value.identityMatches, into: &buf)
+        FfiConverterOptionBool.write(value.signingKeyMatches, into: &buf)
+        FfiConverterString.write(value.expectedRootDid, into: &buf)
+        FfiConverterOptionString.write(value.claimedIdentity, into: &buf)
+        FfiConverterOptionString.write(value.claimedRootDid, into: &buf)
+        FfiConverterOptionData.write(value.signaturePublicKey, into: &buf)
+        FfiConverterOptionString.write(value.signatureAlgorithm, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiKeyPackageBindingClassification_lift(_ buf: RustBuffer) throws -> FfiKeyPackageBindingClassification {
+    return try FfiConverterTypeFfiKeyPackageBindingClassification.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiKeyPackageBindingClassification_lower(_ value: FfiKeyPackageBindingClassification) -> RustBuffer {
+    return FfiConverterTypeFfiKeyPackageBindingClassification.lower(value)
+}
+
+public struct FfiPeerBadErrorClassification {
+    public var peerBad: Bool
+    public var quarantineTriggerEligible: Bool
+    public var wrongEpoch: Bool
+    public var reason: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(peerBad: Bool, quarantineTriggerEligible: Bool, wrongEpoch: Bool, reason: String) {
+        self.peerBad = peerBad
+        self.quarantineTriggerEligible = quarantineTriggerEligible
+        self.wrongEpoch = wrongEpoch
+        self.reason = reason
+    }
+}
+
+extension FfiPeerBadErrorClassification: Equatable, Hashable {
+    public static func == (lhs: FfiPeerBadErrorClassification, rhs: FfiPeerBadErrorClassification) -> Bool {
+        if lhs.peerBad != rhs.peerBad {
+            return false
+        }
+        if lhs.quarantineTriggerEligible != rhs.quarantineTriggerEligible {
+            return false
+        }
+        if lhs.wrongEpoch != rhs.wrongEpoch {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(peerBad)
+        hasher.combine(quarantineTriggerEligible)
+        hasher.combine(wrongEpoch)
+        hasher.combine(reason)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPeerBadErrorClassification: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPeerBadErrorClassification {
+        return
+            try FfiPeerBadErrorClassification(
+                peerBad: FfiConverterBool.read(from: &buf),
+                quarantineTriggerEligible: FfiConverterBool.read(from: &buf),
+                wrongEpoch: FfiConverterBool.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiPeerBadErrorClassification, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.peerBad, into: &buf)
+        FfiConverterBool.write(value.quarantineTriggerEligible, into: &buf)
+        FfiConverterBool.write(value.wrongEpoch, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPeerBadErrorClassification_lift(_ buf: RustBuffer) throws -> FfiPeerBadErrorClassification {
+    return try FfiConverterTypeFfiPeerBadErrorClassification.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPeerBadErrorClassification_lower(_ value: FfiPeerBadErrorClassification) -> RustBuffer {
+    return FfiConverterTypeFfiPeerBadErrorClassification.lower(value)
+}
+
 public struct GroupConfig {
     public var maxPastEpochs: UInt32
     public var outOfOrderTolerance: UInt32
@@ -8698,6 +8892,164 @@ public func FfiConverterTypeFFIQuarantineReason_lower(_ value: FfiQuarantineReas
 }
 
 extension FfiQuarantineReason: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiKeyPackageBindingStatus {
+    case verified
+    case identityMismatch
+    case signingKeyMismatch
+    case signingKeyUnavailable
+    case unverifiable
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiKeyPackageBindingStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiKeyPackageBindingStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageBindingStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .verified
+
+        case 2: return .identityMismatch
+
+        case 3: return .signingKeyMismatch
+
+        case 4: return .signingKeyUnavailable
+
+        case 5: return .unverifiable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiKeyPackageBindingStatus, into buf: inout [UInt8]) {
+        switch value {
+        case .verified:
+            writeInt(&buf, Int32(1))
+
+        case .identityMismatch:
+            writeInt(&buf, Int32(2))
+
+        case .signingKeyMismatch:
+            writeInt(&buf, Int32(3))
+
+        case .signingKeyUnavailable:
+            writeInt(&buf, Int32(4))
+
+        case .unverifiable:
+            writeInt(&buf, Int32(5))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiKeyPackageBindingStatus_lift(_ buf: RustBuffer) throws -> FfiKeyPackageBindingStatus {
+    return try FfiConverterTypeFfiKeyPackageBindingStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiKeyPackageBindingStatus_lower(_ value: FfiKeyPackageBindingStatus) -> RustBuffer {
+    return FfiConverterTypeFfiKeyPackageBindingStatus.lower(value)
+}
+
+extension FfiKeyPackageBindingStatus: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiMlsErrorKind {
+    case invalidCommit
+    case wireFormatPolicyViolation
+    case invalidProposalRef
+    case tlsCodec
+    case commitProcessingFailed
+    case openMls
+    case decryptionFailed
+    case other
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiMlsErrorKind: FfiConverterRustBuffer {
+    typealias SwiftType = FfiMlsErrorKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMlsErrorKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .invalidCommit
+
+        case 2: return .wireFormatPolicyViolation
+
+        case 3: return .invalidProposalRef
+
+        case 4: return .tlsCodec
+
+        case 5: return .commitProcessingFailed
+
+        case 6: return .openMls
+
+        case 7: return .decryptionFailed
+
+        case 8: return .other
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiMlsErrorKind, into buf: inout [UInt8]) {
+        switch value {
+        case .invalidCommit:
+            writeInt(&buf, Int32(1))
+
+        case .wireFormatPolicyViolation:
+            writeInt(&buf, Int32(2))
+
+        case .invalidProposalRef:
+            writeInt(&buf, Int32(3))
+
+        case .tlsCodec:
+            writeInt(&buf, Int32(4))
+
+        case .commitProcessingFailed:
+            writeInt(&buf, Int32(5))
+
+        case .openMls:
+            writeInt(&buf, Int32(6))
+
+        case .decryptionFailed:
+            writeInt(&buf, Int32(7))
+
+        case .other:
+            writeInt(&buf, Int32(8))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiMlsErrorKind_lift(_ buf: RustBuffer) throws -> FfiMlsErrorKind {
+    return try FfiConverterTypeFfiMlsErrorKind.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiMlsErrorKind_lower(_ value: FfiMlsErrorKind) -> RustBuffer {
+    return FfiConverterTypeFfiMlsErrorKind.lower(value)
+}
+
+extension FfiMlsErrorKind: Equatable, Hashable {}
 
 /**
  * Dedicated error type for the sender-side three-phase commit surface on
@@ -12572,6 +12924,30 @@ private struct FfiConverterOptionInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -12876,6 +13252,30 @@ private struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceData.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -13624,6 +14024,35 @@ public func getFfiBuildInfo() -> String {
 }
 
 /**
+ * Classify a serialized KeyPackage against an expected DID and, when
+ * available, the DID-resolved set of authorized MLS signing keys.
+ */
+public func mlsClassifyKeyPackageBinding(expectedDid: String, keyPackageBytes: Data, authorizedSignatureKeys: [Data]?) -> FfiKeyPackageBindingClassification {
+    return try! FfiConverterTypeFfiKeyPackageBindingClassification.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_mls_classify_key_package_binding(
+            FfiConverterString.lower(expectedDid),
+            FfiConverterData.lower(keyPackageBytes),
+            FfiConverterOptionSequenceData.lower(authorizedSignatureKeys), $0
+        )
+    })
+}
+
+/**
+ * Classify an MLS processing error using the same Layer-3 peer-bad rules the
+ * orchestrator applies before it increments quarantine-trigger counters.
+ */
+public func mlsClassifyPeerBadError(errorKind: FfiMlsErrorKind, errorMessage: String, localEpoch: UInt64?, messageEpoch: UInt64) -> FfiPeerBadErrorClassification {
+    return try! FfiConverterTypeFfiPeerBadErrorClassification.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_mls_classify_peer_bad_error(
+            FfiConverterTypeFfiMlsErrorKind.lower(errorKind),
+            FfiConverterString.lower(errorMessage),
+            FfiConverterOptionUInt64.lower(localEpoch),
+            FfiConverterUInt64.lower(messageEpoch), $0
+        )
+    })
+}
+
+/**
  * Compute the hash reference for a serialized KeyPackage
  * Accepts either an MlsMessage-wrapped KeyPackage or raw KeyPackage bytes
  * This is useful when you need to compute a hash from KeyPackage bytes received from the server
@@ -13830,6 +14259,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_func_get_ffi_build_info() != 65091 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_mls_classify_key_package_binding() != 11276 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_mls_classify_peer_bad_error() != 55084 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_func_mls_compute_key_package_hash() != 2576 {

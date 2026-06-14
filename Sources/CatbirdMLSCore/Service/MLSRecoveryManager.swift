@@ -224,12 +224,9 @@ public actor MLSRecoveryManager {
   /// STATE, never as count inflation (the old `maxRejoinAttempts + 10` band
   /// is retired, N39/N40).
   ///
-  /// Trigger status (2026-06-11): the Rust N38 typed decrypt-error classes
-  /// that drive `record_peer_bad_commit` classification are NOT yet exported
-  /// through the iOS xcframework, and the DS pushes no quarantine events, so
-  /// the only production entry path today is `markConversationServerCorrupted`
-  /// (`.serverDataCorruption`, 24h horizon). The peer-bad reasons land with
-  /// the next FFI rebuild after N38.
+  /// Trigger path: `MLSErrorClassifier` mirrors the Rust peer-bad error class
+  /// gate, and `recordPeerBadCommit` mirrors the Rust `record_peer_bad_commit`
+  /// rolling counter convention before entering this quarantine state.
   ///
   /// In-memory only for the quarantine REASON; the gating effect of a
   /// horizon-carrying entry survives restart via the Rust-portable persisted
@@ -239,6 +236,20 @@ public actor MLSRecoveryManager {
   /// quarantine could permanently wedge a conversation (violating the E7
   /// "persisted state can never permanently wedge" contract).
   private var quarantineStates: [String: MLSQuarantineState] = [:]
+
+  private struct PeerBadObservation: Sendable {
+    let messageID: String
+    let recordedAt: Date
+    let suspectedDID: String?
+  }
+
+  private var peerBadCommits: [String: [PeerBadObservation]] = [:]
+  private static let quarantineSinglePeerHits = 3
+  private static let quarantineMultiPeerDistinct = 2
+  private static let quarantineMultiPeerWindow: TimeInterval = 60
+  private static let quarantineFramingDistinctMessages = 3
+  private static let quarantineFramingWindow: TimeInterval = 120
+  private static let quarantineRingCapacity = 16
 
   /// Tail of the write-through chain. Each persistence op is appended here
   /// so writes apply in the order the state changes happened. Failures are
@@ -1719,6 +1730,88 @@ public actor MLSRecoveryManager {
     return state
   }
 
+  /// Record one classified peer-bad MLS frame and enter Layer-3 quarantine
+  /// when the Rust counter convention trips:
+  /// - 3 hits from one suspected peer,
+  /// - 2 distinct suspected peers within 60s,
+  /// - 3 distinct failed message IDs within 120s.
+  @discardableResult
+  public func recordPeerBadCommit(
+    convoId: String,
+    messageID: String,
+    suspectedDID: String? = nil,
+    now: Date = Date()
+  ) -> MLSQuarantineReason? {
+    if activeQuarantineState(convoId: convoId, now: now) != nil {
+      return nil
+    }
+
+    let maxWindow = Self.quarantineFramingWindow
+    var buffer = peerBadCommits[convoId] ?? []
+    buffer.removeAll { now.timeIntervalSince($0.recordedAt) > maxWindow }
+    while buffer.count >= Self.quarantineRingCapacity {
+      buffer.removeFirst()
+    }
+    buffer.append(PeerBadObservation(
+      messageID: messageID,
+      recordedAt: now,
+      suspectedDID: suspectedDID
+    ))
+
+    let trigger: MLSQuarantineReason?
+    if let suspectedDID,
+       buffer.filter({ $0.suspectedDID == suspectedDID }).count >= Self.quarantineSinglePeerHits {
+      trigger = .peerBadCommit
+    } else {
+      let recentPeers = Set(
+        buffer.compactMap { observation -> String? in
+          guard now.timeIntervalSince(observation.recordedAt) <= Self.quarantineMultiPeerWindow else {
+            return nil
+          }
+          return observation.suspectedDID
+        }
+      )
+      if recentPeers.count >= Self.quarantineMultiPeerDistinct {
+        trigger = .multiPeerBadCommits
+      } else {
+        let recentMessageIDs = Set(
+          buffer.compactMap { observation -> String? in
+            guard now.timeIntervalSince(observation.recordedAt) <= Self.quarantineFramingWindow else {
+              return nil
+            }
+            return observation.messageID
+          }
+        )
+        trigger = recentMessageIDs.count >= Self.quarantineFramingDistinctMessages
+          ? .repeatedFramingFailures
+          : nil
+      }
+    }
+
+    guard let trigger else {
+      peerBadCommits[convoId] = buffer
+      return nil
+    }
+
+    let suspectedDIDs = Array(Set(buffer.compactMap(\.suspectedDID))).sorted()
+    peerBadCommits.removeValue(forKey: convoId)
+    markQuarantined(
+      convoId: convoId,
+      reason: trigger,
+      suspectedDIDs: suspectedDIDs,
+      until: nil
+    )
+    return trigger
+  }
+
+  /// A healthy peer commit merged successfully. Clears rolling peer-bad
+  /// observations and exits quarantine when present.
+  @discardableResult
+  public func recordHealthyPeerCommit(convoId: String) -> Bool {
+    peerBadCommits.removeValue(forKey: convoId)
+    return clearQuarantine(convoId: convoId)
+  }
+
   /// Enter Layer-3 quarantine for a conversation. Swift twin of Rust
   /// `RecoveryTracker::mark_quarantined`
   /// (`catbird-mls/src/orchestrator/recovery.rs`).
@@ -1753,6 +1846,7 @@ public actor MLSRecoveryManager {
     let now = Date()
     // Enter-clears-counter (Rust parity).
     failedRejoins.removeValue(forKey: convoId)
+    peerBadCommits.removeValue(forKey: convoId)
     quarantineStates[convoId] = MLSQuarantineState(
       reason: reason,
       since: now,
