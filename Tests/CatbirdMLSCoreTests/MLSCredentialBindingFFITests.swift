@@ -74,4 +74,29 @@ final class MLSCredentialBindingFFITests: XCTestCase {
     XCTAssertTrue(classification.identityMatches)
     XCTAssertEqual(classification.signingKeyMatches, false)
   }
+
+  func testDeviceRegistrationUsesKeyPackageLeafSignatureKey() throws {
+    let package = try ctx.createKeyPackage(identityBytes: Data("did:plc:alice".utf8))
+    let legacyDeviceKey = Data(repeating: 0x42, count: 32)
+
+    let selectedKey = try MLSDeviceManager.registrationSignaturePublicKey(
+      keyPackageSignatureKeys: [package.signaturePublicKey],
+      fallbackSignaturePublicKey: legacyDeviceKey
+    )
+
+    XCTAssertEqual(selectedKey, package.signaturePublicKey)
+    XCTAssertNotEqual(selectedKey, legacyDeviceKey)
+  }
+
+  func testDeviceRegistrationRejectsMixedKeyPackageLeafSignatureKeys() throws {
+    let package = try ctx.createKeyPackage(identityBytes: Data("did:plc:alice".utf8))
+    let otherKey = Data(repeating: 0x24, count: package.signaturePublicKey.count)
+
+    XCTAssertThrowsError(
+      try MLSDeviceManager.registrationSignaturePublicKey(
+        keyPackageSignatureKeys: [package.signaturePublicKey, otherKey],
+        fallbackSignaturePublicKey: Data(repeating: 0x42, count: 32)
+      )
+    )
+  }
 }

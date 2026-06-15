@@ -597,9 +597,13 @@ public actor MLSClient {
 
   // MARK: - Key Package Management
 
-  /// Create a batch of key packages in a single transaction
-  /// This prevents lock contention and race conditions during registration
-  public func batchCreateKeyPackages(for userDID: String, identity: String, count: Int) async throws -> [Data] {
+  /// Create a batch of key packages in a single transaction, preserving FFI metadata.
+  /// This prevents lock contention and race conditions during registration.
+  public func batchCreateKeyPackageResults(
+    for userDID: String,
+    identity: String,
+    count: Int
+  ) async throws -> [KeyPackageResult] {
     logger.info("🔐 [MLSClient] Creating batch of \(count) key packages for \(identity.prefix(20))...")
 
     // Validate count
@@ -630,9 +634,8 @@ public actor MLSClient {
     // It checks the suspension flag between packages and may return fewer than
     // requested while the app is suspending; callers upload whatever they get.
     let packages = try await runFFIWithRecovery(for: userDID) { ctx in
-      let results = try ctx.createKeyPackages(
+      try ctx.createKeyPackages(
         identityBytes: identityBytes, count: UInt32(safeCount))
-      return results.map { $0.keyPackageData }
     }
     if packages.count < safeCount {
       logger.warning(
@@ -647,6 +650,16 @@ public actor MLSClient {
     }
 
     return packages
+  }
+
+  /// Create a batch of serialized key package bytes in a single transaction.
+  public func batchCreateKeyPackages(for userDID: String, identity: String, count: Int) async throws -> [Data] {
+    let packages = try await batchCreateKeyPackageResults(
+      for: userDID,
+      identity: identity,
+      count: count
+    )
+    return packages.map { $0.keyPackageData }
   }
 
   // MARK: - Group Management

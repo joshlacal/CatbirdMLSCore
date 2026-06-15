@@ -96,6 +96,21 @@ public actor MLSDeviceManager {
 
   // MARK: - Device Registration
 
+  internal static func registrationSignaturePublicKey(
+    keyPackageSignatureKeys: [Data],
+    fallbackSignaturePublicKey: Data
+  ) throws -> Data {
+    guard let firstKey = keyPackageSignatureKeys.first else {
+      return fallbackSignaturePublicKey
+    }
+
+    guard keyPackageSignatureKeys.allSatisfy({ $0 == firstKey }) else {
+      throw MLSError.deviceRegistrationFailed
+    }
+
+    return firstKey
+  }
+
   /// Registers the device with the MLS service if not already registered
   /// - Parameter userDid: The user's DID for MLS context initialization
   /// - Returns: The MLS DID for this device
@@ -330,16 +345,22 @@ public actor MLSDeviceManager {
     var keyPackageItems: [BlueCatbirdMlsChatRegisterDevice.KeyPackageItem] = []
 
     // Use new batch API for atomic creation under single lock
-    let keyPackages = try await mlsClient.batchCreateKeyPackages(
+    let keyPackages = try await mlsClient.batchCreateKeyPackageResults(
       for: normalizedUserDid,  // Use normalized DID for context lookup
-      identity: mlsCredentialIdentity,  // Full DID#deviceUUID for multi-device MLS
+      identity: mlsCredentialIdentity,  // Bare DID credential identity; device scope is server-side
       count: keyPackageCount
+    )
+    let registrationSignaturePublicKey = try Self.registrationSignaturePublicKey(
+      keyPackageSignatureKeys: keyPackages.map { $0.signaturePublicKey },
+      fallbackSignaturePublicKey: signaturePublicKey
     )
 
     // Convert to API format
     let expirationDate = Date().addingTimeInterval(90 * 24 * 60 * 60)
 
-    for packageData in keyPackages {
+    for package in keyPackages {
+      let packageData = package.keyPackageData
+
       // Validate credential identity matches the current user's DID before including
       do {
         let credentialIdentity = try mlsExtractKeyPackageIdentity(keyPackageBytes: packageData)
@@ -385,7 +406,7 @@ public actor MLSDeviceManager {
       deviceName: deviceName,
       deviceUUID: deviceUUID,  // Persistent UUID for re-registration detection
       keyPackages: keyPackageItems,  // Include all created key packages
-      signaturePublicKey: Bytes(data: signaturePublicKey)
+      signaturePublicKey: Bytes(data: registrationSignaturePublicKey)
     )
 
     let maxRetries = 3
