@@ -11473,6 +11473,8 @@ public protocol OrchestratorCredentialCallback: AnyObject {
     func hasCredentials(userDid: String) throws -> Bool
 
     func clearAll(userDid: String) throws
+
+    func getAuthorizedDeviceKeys(userDid: String) throws -> [Data]?
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -11695,6 +11697,30 @@ private enum UniffiCallbackInterfaceOrchestratorCredentialCallback {
             }
 
             let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getAuthorizedDeviceKeys: { (
+            uniffiHandle: UInt64,
+            userDid: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [Data]? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getAuthorizedDeviceKeys(
+                    userDid: FfiConverterString.lift(userDid)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionSequenceData.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -14823,6 +14849,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 40070 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 51623 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantined() != 58743 {

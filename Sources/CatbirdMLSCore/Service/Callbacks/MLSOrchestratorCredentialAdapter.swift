@@ -25,6 +25,7 @@ import Security
 public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallback, @unchecked Sendable {
 
   private let keychainManager: MLSKeychainManager
+  private let authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)?
   private let logger = Logger(subsystem: "blue.catbird", category: "OrchestratorCredentialAdapter")
 
   /// Keychain key prefix for MLS DID storage (scoped by user DID).
@@ -37,8 +38,21 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
 
   /// Create an adapter that stores credentials in the iOS Keychain.
   /// - Parameter keychainManager: The keychain manager instance to use. Defaults to `.shared`.
-  public init(keychainManager: MLSKeychainManager = .shared) {
+  public init(
+    keychainManager: MLSKeychainManager = .shared,
+    authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil
+  ) {
     self.keychainManager = keychainManager
+    self.authorizedDeviceKeyResolver = authorizedDeviceKeyResolver
+  }
+
+  public convenience init(
+    authorizedDeviceKeyResolver: @escaping @Sendable (String) -> [Data]?
+  ) {
+    self.init(
+      keychainManager: .shared,
+      authorizedDeviceKeyResolver: authorizedDeviceKeyResolver
+    )
   }
 
   // MARK: - Signing Keys
@@ -150,5 +164,12 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     }
 
     logger.info("Cleared all credentials for user: \(userDid.prefix(20))...")
+  }
+
+  // MARK: - Authorized Device Keys
+
+  public func getAuthorizedDeviceKeys(userDid: String) throws -> [Data]? {
+    logger.debug("Resolving authorized device keys for user: \(userDid.prefix(20))...")
+    return authorizedDeviceKeyResolver?(userDid)
   }
 }
