@@ -138,7 +138,22 @@ public actor MLSRecoveryManager {
   /// Per-conversation cooldown (`failedRejoins` + `cooldownForAttempts`) and
   /// the one-at-a-time gating still apply on top of this floor — this is an
   /// additional cross-conversation guard, not a replacement.
+  public enum RecoveryMode: Sendable {
+    case normal
+    case batchRecovery
+  }
+
   static let minGlobalRejoinIntervalSec: TimeInterval = 30
+  static let batchRecoveryThreshold = 5
+  static let maxConcurrentRejoins = 3
+  static let batchPauseSec: TimeInterval = 5.0
+
+  static func globalRejoinFloorSeconds(for mode: RecoveryMode) -> TimeInterval {
+    switch mode {
+    case .normal, .batchRecovery:
+      return Self.minGlobalRejoinIntervalSec
+    }
+  }
 
   /// In-memory timestamp of the most recent External Commit rejoin OUTCOME
   /// (success or failure) across all conversations. Stamped only on outcome
@@ -694,7 +709,7 @@ public actor MLSRecoveryManager {
   /// 3. **Global** rejoin floor (spec §8.4 / §10 — MIN_REJOIN_INTERVAL_SEC = 30,
   ///    applies across all conversations, mirrors Rust
   ///    `RecoveryTracker.last_global_rejoin_at`)
-  public func shouldSkipRejoin(convoId: String) -> Bool {
+  public func shouldSkipRejoin(convoId: String, mode: RecoveryMode = .normal) -> Bool {
     // Layer 3 (N40): quarantine state is the strongest gate — never
     // auto-rejoin a quarantined conversation (Rust parity: quarantine is
     // checked before every other band in `should_skip`). Horizon-carrying
@@ -755,12 +770,13 @@ public actor MLSRecoveryManager {
     // Prevents two convos going NEEDS_REJOIN simultaneously from both firing
     // External Commits within milliseconds.
     let now = Date()
+    let floorSec = Self.globalRejoinFloorSeconds(for: mode)
     if let lastGlobal = lastGlobalRejoinAttemptAt {
       let elapsed = now.timeIntervalSince(lastGlobal)
-      if elapsed < Self.minGlobalRejoinIntervalSec {
-        let remaining = Int(Self.minGlobalRejoinIntervalSec - elapsed)
+      if elapsed < floorSec {
+        let remaining = Int(floorSec - elapsed)
         logger.info(
-          "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - global rejoin floor active (\(remaining)s remaining)"
+          "⏭️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - global rejoin floor active (\(remaining)s remaining, mode: \(String(describing: mode)))"
         )
         return true
       }

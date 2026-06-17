@@ -103,4 +103,12 @@ final class MLSRecoveryManagerGateTests: XCTestCase {
     let err = TestError(description: "")
     XCTAssertNil(MLSRecoveryManager.extractRustGateRemainingSec(err))
   }
+
+  func testBatchRecoveryUsesNormalGlobalFloor() {
+    XCTAssertEqual(
+      MLSRecoveryManager.globalRejoinFloorSeconds(for: .batchRecovery),
+      MLSRecoveryManager.minGlobalRejoinIntervalSec,
+      "Batch recovery must not weaken the global External Commit floor during a mass rejoin"
+    )
+  }
 }

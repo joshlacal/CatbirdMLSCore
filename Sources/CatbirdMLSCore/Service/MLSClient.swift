@@ -37,17 +37,37 @@ public actor MLSClient {
     reconcileLocalOnly: [String]?,
     reconcileDeviceVerified: Bool? = nil
   ) -> [String] {
+    let maxLocalPackages = 100
+    
     guard reconcileDeviceVerified != false else {
+      // If not verified, we don't sync with the server's list, but we MUST
+      // still cap local packages to prevent unbounded local build up (e.g. 500+).
+      if localHashes.count > maxLocalPackages {
+        let excessCount = localHashes.count - maxLocalPackages
+        return Array(localHashes.prefix(excessCount))
+      }
       return []
     }
 
+    var toEvict: [String] = []
     if let reconcileLocalOnly {
       let localOnlySet = Set(reconcileLocalOnly.map { $0.lowercased() })
-      return localHashes.filter { localOnlySet.contains($0.lowercased()) }
+      toEvict = localHashes.filter { localOnlySet.contains($0.lowercased()) }
+    } else {
+      let serverHashSet = Set(legacyServerHashes.map { $0.lowercased() })
+      toEvict = localHashes.filter { !serverHashSet.contains($0.lowercased()) }
     }
-
-    let serverHashSet = Set(legacyServerHashes.map { $0.lowercased() })
-    return localHashes.filter { !serverHashSet.contains($0.lowercased()) }
+    
+    // Also enforce the hard 100 cap for verified devices to prevent any edge case buildup
+    let remainingCount = localHashes.count - toEvict.count
+    if remainingCount > maxLocalPackages {
+      let excessCount = remainingCount - maxLocalPackages
+      let notEvictedYet = localHashes.filter { !toEvict.contains($0) }
+      let extraEvictions = Array(notEvictedYet.prefix(excessCount))
+      toEvict.append(contentsOf: extraEvictions)
+    }
+    
+    return toEvict
   }
 
   public nonisolated static var isSuspensionInProgress: Bool {

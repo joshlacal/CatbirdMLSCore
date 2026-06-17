@@ -3,103 +3,164 @@ name: Build and Release FFI
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Release version (e.g., v1.0.0)'
+      release_tag:
+        description: GitHub release tag to update
         required: true
+        default: ffi-v1
         type: string
+      catbird_mls_ref:
+        description: catbird-mls ref to build
+        required: true
+        default: main
+        type: string
+      catbird_atproto_ref:
+        description: catbird-atproto ref to build
+        required: true
+        default: main
+        type: string
+      petrel_ref:
+        description: Petrel ref for Swift package verification
+        required: true
+        default: main
+        type: string
+      petrel_catbird_ref:
+        description: PetrelCatbird ref for Swift package verification
+        required: true
+        default: main
+        type: string
+      upload_release:
+        description: Upload zip and checksum to the release
+        required: true
+        default: true
+        type: boolean
   push:
     tags:
-      - 'v*'
+      - "ffi-*"
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  ASSET_NAME: CatbirdMLSFFI.xcframework.zip
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+  CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref || 'main' }}
+  CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref || 'main' }}
+  PETREL_REF: ${{ github.event.inputs.petrel_ref || 'main' }}
+  PETREL_CATBIRD_REF: ${{ github.event.inputs.petrel_catbird_ref || 'main' }}
 
 jobs:
   build-xcframework:
-    name: Build MLSFFICore.xcframework
-    runs-on: macos-14
+    name: Build CatbirdMLSFFI.xcframework
+    runs-on: macos-15
+
     steps:
-      - name: Checkout mls-ffi
+      - name: Checkout CatbirdMLSCore
         uses: actions/checkout@v4
         with:
-          repository: joshlacal/mls-ffi
-          path: mls-ffi
+          path: CatbirdMLSCore
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout catbird-mls
+        uses: actions/checkout@v4
         with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+          repository: joshlacal/catbird-mls
+          ref: ${{ env.CATBIRD_MLS_REF }}
+          path: catbird-mls
 
-      - name: Install cargo-lipo
-        run: cargo install cargo-lipo
+      - name: Checkout catbird-atproto
+        uses: actions/checkout@v4
+        with:
+          repository: joshlacal/catbird-atproto
+          ref: ${{ env.CATBIRD_ATPROTO_REF }}
+          path: catbird-atproto
 
-      - name: Cache Rust dependencies
+      - name: Checkout Petrel
+        uses: actions/checkout@v4
+        with:
+          repository: joshlacal/Petrel
+          ref: ${{ env.PETREL_REF }}
+          path: Petrel
+
+      - name: Checkout PetrelCatbird
+        uses: actions/checkout@v4
+        with:
+          repository: joshlacal/PetrelCatbird
+          ref: ${{ env.PETREL_CATBIRD_REF }}
+          path: PetrelCatbird
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Install Rust targets
+        run: |
+          rustup target add \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios \
+            aarch64-apple-ios-macabi \
+            x86_64-apple-ios-macabi \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin
+
+      - name: Cache Cargo registry and build outputs
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            mls-ffi/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            catbird-mls/target
+          key: ${{ runner.os }}-catbird-mls-${{ hashFiles('catbird-mls/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-catbird-mls-
 
-      - name: Build XCFramework
-        working-directory: mls-ffi
+      - name: Build and copy FFI outputs
+        working-directory: CatbirdMLSCore
+        run: ./Scripts/rebuild-ffi.sh
+
+      - name: Verify Swift package consumes generated FFI
+        working-directory: CatbirdMLSCore
+        run: swift build
+
+      - name: Create release archive
+        working-directory: CatbirdMLSCore
         run: |
-          chmod +x create-xcframework.sh
-          ./create-xcframework.sh
+          test -d Sources/CatbirdMLSFFI.xcframework
+          rm -f "${ASSET_NAME}" "${ASSET_NAME}.sha256"
+          ditto -c -k --keepParent Sources/CatbirdMLSFFI.xcframework "${ASSET_NAME}"
+          shasum -a 256 "${ASSET_NAME}" > "${ASSET_NAME}.sha256"
+          cat "${ASSET_NAME}.sha256"
 
-      - name: Verify XCFramework
-        working-directory: mls-ffi
-        run: |
-          ls -lh MLSFFICore.xcframework/
-          file MLSFFICore.xcframework/*/libMLSFFICore.a
-
-      - name: Create archive
-        working-directory: mls-ffi
-        run: |
-          zip -r MLSFFICore.xcframework.zip MLSFFICore.xcframework
-
-      - name: Generate checksum
-        working-directory: mls-ffi
-        run: |
-          shasum -a 256 MLSFFICore.xcframework.zip > MLSFFICore.xcframework.zip.sha256
-          cat MLSFFICore.xcframework.zip.sha256
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: Release ${{ steps.version.outputs.version }}
-          body: |
-            ## MLSFFICore.xcframework Release
+          name: catbird-mls-ffi
+          path: |
+            CatbirdMLSCore/${{ env.ASSET_NAME }}
+            CatbirdMLSCore/${{ env.ASSET_NAME }}.sha256
+          if-no-files-found: error
 
-            Pre-built XCFramework from [joshlacal/mls-ffi](https://github.com/joshlacal/mls-ffi).
-
-            ### Installation
-
-            1. Download `MLSFFICore.xcframework.zip`
-            2. Verify checksum: `shasum -a 256 -c MLSFFICore.xcframework.zip.sha256`
-            3. Unzip to `Sources/MLSFFICore.xcframework`
-            4. Build with `swift build`
-
-            ### Checksums
-
-            ```
-            $(cat mls-ffi/MLSFFICore.xcframework.zip.sha256)
-            ```
-          files: |
-            mls-ffi/MLSFFICore.xcframework.zip
-            mls-ffi/MLSFFICore.xcframework.zip.sha256
-            mls-ffi/build/bindings/MLSFFI.swift
-          draft: false
-          prerelease: false
+      - name: Upload release assets
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upload_release == 'true' }}
+        working-directory: CatbirdMLSCore
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --latest
+          else
+            gh release create "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "CatbirdMLSFFI ${RELEASE_TAG}" \
+              --notes "Prebuilt CatbirdMLSFFI.xcframework from catbird-mls ${CATBIRD_MLS_REF}." \
+              --latest
+          fi

@@ -736,6 +736,26 @@ extension MLSConversationManager {
 
     do {
       try await database.write { db in
+        // Ensure conversation exists to satisfy the foreign key constraint
+        let conversationExists = try MLSConversationModel
+          .filter(MLSConversationModel.Columns.conversationID == conversationId)
+          .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
+          .fetchCount(db) > 0
+        
+        if !conversationExists {
+          guard let groupIdData = Data(hexEncoded: conversationId) else {
+            throw MLSConversationError.operationFailed("Invalid group ID format for history boundary")
+          }
+          let newConvo = MLSConversationModel(
+            conversationID: conversationId,
+            currentUserDID: normalizedDID,
+            groupID: groupIdData,
+            epoch: Int64(epoch)
+          )
+          try newConvo.insert(db)
+          self.logger.info("✅ Created placeholder conversation record to prevent FK violation for boundary marker")
+        }
+
         // Walk the chain tail synchronously so this marker's HMAC is sealed
         // against the most recent row in the conversation.
         let prevHMAC: Data? = try MLSMessageModel

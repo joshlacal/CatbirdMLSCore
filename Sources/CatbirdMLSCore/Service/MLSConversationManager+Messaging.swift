@@ -475,6 +475,12 @@ public extension MLSConversationManager {
         try await syncWithServer()
       }
 
+      // GUARD: Check FFI group existence BEFORE proceeding to avoid loops on preSendSync FFI errors
+      guard await mlsClient.groupExists(for: userDid, groupId: groupIdData) else {
+        logger.error("❌ Cannot send: group \(convoId) is not active in FFI. Recovery deferred.")
+        throw MLSConversationError.groupNotInitialized
+      }
+
       // 2. Duplicate send prevention (Deduplication)
       let plaintextData = (plaintext + (embed?.cid ?? "")).data(using: .utf8)!
       let idempotencyKey = generateIdempotencyKey(convoId: convoId, plaintext: plaintextData)

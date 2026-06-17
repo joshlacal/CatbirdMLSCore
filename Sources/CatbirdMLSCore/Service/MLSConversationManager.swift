@@ -140,6 +140,12 @@ public final class MLSConversationManager {
   /// during account switching as External Commit operations continued running
   public var missingConversationsTask: Task<Void, Never>?
 
+  /// Startup validation can detect a systemic local MLS-state loss where
+  /// destructive per-conversation recovery would fan out into an External Commit
+  /// storm. While this horizon is active, automatic missing-conversation recovery
+  /// is suppressed; user-driven/manual repair paths remain available.
+  internal var automaticMissingConversationRecoverySuppressedUntil: Date?
+
   /// Background task for deferred epoch recovery (conversations flagged needsRejoin during sync).
   /// Single-flight: only one recovery pass runs at a time, subsequent sync passes skip if active.
   /// Tracked for cancellation during shutdown/account switch.
