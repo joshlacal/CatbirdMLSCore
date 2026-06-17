@@ -1208,21 +1208,68 @@ public final class MLSAPIClient {
       )
     }
 
-    // N44e (ADR-009 D3 iOS twin, warn-only): every returned package must be
-    // labeled for a requested DID and its serialized leaf credential must bind
-    // to that DID root. The Rust FFI classifier decodes the KeyPackage
-    // credential and signature key. DID-doc signing-key authorization remains
-    // warn-only until we pass a resolved authorized-signing-key set here.
+    // N44 DID-doc signing-key authorization: resolve active `blue.catbird.mlsChat.device`
+    // records from each target's PDS. This implements the second half of ADR-009 credential
+    // binding. `classifyKeyPackageBinding` uses these keys to transition from warn-only
+    // to full enforcement depending on the server's enforce-mode response.
     let requestedDIDDescriptions = dids.map(\.description)
+    let requestedDIDsSet = Set(requestedDIDDescriptions)
+    var authorizedKeysByDID: [String: [Data]] = [:]
+    
+    // Batch fetch device keys for all requested DIDs
+    if let collection = try? NSID(nsidString: "blue.catbird.mlsChat.device") {
+      await withTaskGroup(of: (String, [Data]?).self) { group in
+        for didStr in requestedDIDsSet {
+          group.addTask {
+            guard let did = try? DID(didString: didStr) else { return (didStr, nil) }
+            let input = ComAtprotoRepoListRecords.Parameters(
+              repo: .did(did), collection: collection, limit: 50, cursor: nil, reverse: false
+            )
+            do {
+              let (code, data) = try await self.client.com.atproto.repo.listRecords(input: input)
+              guard (200...299).contains(code), let data else { return (didStr, []) }
+              var keys: [Data] = []
+              for record in data.records {
+                var currentVal = record.value
+                var device: BlueCatbirdMlsChatDevice? = nil
+                while true {
+                  if case .knownType(let typed) = currentVal, let typedDevice = typed as? BlueCatbirdMlsChatDevice {
+                    device = typedDevice
+                    break
+                  } else if case .unknownType(_, let nested) = currentVal {
+                    currentVal = nested
+                  } else {
+                    break
+                  }
+                }
+                if let device {
+                  keys.append(device.mlsSignaturePublicKey.data)
+                }
+              }
+              return (didStr, keys)
+            } catch {
+              return (didStr, nil) // nil signifies fetch failure (warn-only or TOFU allowed)
+            }
+          }
+        }
+        for await (didStr, keys) in group {
+          if let keys { authorizedKeysByDID[didStr] = keys }
+        }
+      }
+    }
+
     for kp in dedupedPackages {
+      let expectedDID = kp.did.description
+      let authorizedKeys = authorizedKeysByDID[expectedDID]
+
       let classification = MLSCredentialBinding.classifyKeyPackageBinding(
-        expectedDID: kp.did.description,
+        expectedDID: expectedDID,
         keyPackageData: kp.keyPackage.data,
-        authorizedSignatureKeys: nil
+        authorizedSignatureKeys: authorizedKeys
       )
       let disposition = Self.keyPackageFetchBindingDisposition(
         requestedDIDDescriptions: requestedDIDDescriptions,
-        packageDIDDescription: kp.did.description,
+        packageDIDDescription: expectedDID,
         classification: classification
       )
       let hashPrefix = Data(SHA256.hash(data: kp.keyPackage.data)).prefix(8).hexEncodedString()
