@@ -38,7 +38,7 @@ public actor MLSClient {
     reconcileDeviceVerified: Bool? = nil
   ) -> [String] {
     let maxLocalPackages = 100
-    
+
     guard reconcileDeviceVerified != false else {
       // If not verified, we don't sync with the server's list, but we MUST
       // still cap local packages to prevent unbounded local build up (e.g. 500+).
@@ -57,7 +57,7 @@ public actor MLSClient {
       let serverHashSet = Set(legacyServerHashes.map { $0.lowercased() })
       toEvict = localHashes.filter { !serverHashSet.contains($0.lowercased()) }
     }
-    
+
     // Also enforce the hard 100 cap for verified devices to prevent any edge case buildup
     let remainingCount = localHashes.count - toEvict.count
     if remainingCount > maxLocalPackages {
@@ -66,7 +66,7 @@ public actor MLSClient {
       let extraEvictions = Array(notEvictedYet.prefix(excessCount))
       toEvict.append(contentsOf: extraEvictions)
     }
-    
+
     return toEvict
   }
 
@@ -972,7 +972,7 @@ public actor MLSClient {
         } catch {
           logger.error("🔍 Failed to list local hashes: \(error)")
         }
-        
+
         // ⭐ CRITICAL FIX: Re-throw the original MlsError.NoMatchingKeyPackage
         // This allows initializeGroupFromWelcome to catch it and trigger External Commit fallback
         // Previously we wrapped this as MLSError.operationFailed, which lost the error type
@@ -1877,16 +1877,16 @@ public actor MLSClient {
       let result = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.decryptMessage(groupId: groupId, ciphertext: ciphertext)
       }
-      
+
       let gen = MLSCoordinationStore.shared.currentGeneration
       logger.info(
         "✅ Decrypted message [Gen: \(gen)] - epoch: \(result.epoch), seq: \(result.sequenceNumber), plaintext: \(result.plaintext.count) bytes")
-      
+
       // Extract sender DID for logging
       if let senderDID = String(data: result.senderCredential.identity, encoding: .utf8) {
         logger.debug("   Sender: \(senderDID.prefix(24))...")
       }
-      
+
       // ═══════════════════════════════════════════════════════════════════════════
       // Update epoch checkpoint after successful decryption (for next staleness check)
       // ═══════════════════════════════════════════════════════════════════════════
@@ -1942,7 +1942,7 @@ public actor MLSClient {
       throw MLSError.operationFailed
     }
   }
-  
+
   // MARK: - Epoch Fence Protocol
 
   /// Ensure in-memory MLS context is synced with disk before decryption
@@ -2726,7 +2726,7 @@ public actor MLSClient {
   {
     // Padding is stripped by catbird-mls process_message internally.
     let actualMessageData = messageData
-    
+
     logger.info(
       "📍 [MLSClient.processMessage] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16)), message: \(actualMessageData.count) bytes"
     )
@@ -2751,7 +2751,7 @@ public actor MLSClient {
       let content = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.processMessage(groupId: groupId, messageData: actualMessageData)
       }
-      
+
       // ═══════════════════════════════════════════════════════════════════════════
       // Update epoch checkpoint after successful processing (for next staleness check)
       // ═══════════════════════════════════════════════════════════════════════════
@@ -2798,7 +2798,7 @@ public actor MLSClient {
       // Check for "old epoch" error which is safe to ignore for new joiners
       // This happens when the server sends the Commit message that added us, but we joined via Welcome (already at new epoch)
       // Also check for OpenMLS epoch-related errors like "EpochMismatch", "WrongEpoch", "ValidationError"
-      if errorMessage.contains("Cannot decrypt message from epoch") 
+      if errorMessage.contains("Cannot decrypt message from epoch")
          || errorMessageLower.contains("epochmismatch")
          || errorMessageLower.contains("wrong epoch")
          || errorMessageLower.contains("wrongepoch")
@@ -2863,7 +2863,7 @@ public actor MLSClient {
         throw MLSError.ratchetStateDesync(
           message: "DecryptionFailed - MLS state out of sync: \(errorMessage)")
       }
-      
+
       // Check OpenMlsError case (generic, unit variant from Rust)
       if case .OpenMlsError = error {
         logger.error(
@@ -2871,7 +2871,7 @@ public actor MLSClient {
         )
         logger.error("   This may indicate protocol issues or state desync")
         // Check if it's an epoch-related or decryption error
-        if errorMessageLower.contains("decrypt") || errorMessageLower.contains("epoch") 
+        if errorMessageLower.contains("decrypt") || errorMessageLower.contains("epoch")
            || errorMessageLower.contains("ratchet") || errorMessageLower.contains("signature") {
           throw MLSError.ratchetStateDesync(
             message: "OpenMlsError - MLS state issue: \(errorMessage)")
@@ -2879,7 +2879,7 @@ public actor MLSClient {
         // For other OpenMLS errors, throw with the message
         throw MLSError.invalidContent("OpenMLS error: \(errorMessage)")
       }
-      
+
       // Check OpenMls case (detailed errors with context from Rust MLSError::OpenMLS(String))
       // This is the variant used by process_message failures with detailed error info
       if case .OpenMls = error {
@@ -2888,7 +2888,7 @@ public actor MLSClient {
         )
         logger.error("   This contains detailed error context from the Rust FFI")
         // Check if it's an epoch-related or decryption error
-        if errorMessageLower.contains("decrypt") || errorMessageLower.contains("epoch") 
+        if errorMessageLower.contains("decrypt") || errorMessageLower.contains("epoch")
            || errorMessageLower.contains("ratchet") || errorMessageLower.contains("signature")
            || errorMessageLower.contains("secrettreerror") || errorMessageLower.contains("secret_tree") {
           throw MLSError.ratchetStateDesync(
@@ -3285,7 +3285,7 @@ public actor MLSClient {
       throw MLSError.operationFailed
     }
   }
-  
+
   /// Close and release an MLS context for a specific user
   ///
   /// CRITICAL: Call this during account switching to prevent SQLite connection exhaustion.
@@ -3334,7 +3334,7 @@ public actor MLSClient {
 
     return hadContext
   }
-  
+
   /// Close all contexts except for the specified user
   ///
   /// CRITICAL: Call this during account switching to prevent SQLite connection exhaustion.
@@ -3385,7 +3385,7 @@ public actor MLSClient {
     defer {
       MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
     }
-    
+
     if let coordinator = storageMaintenanceCoordinator {
       await coordinator.beginStorageMaintenance(for: normalizedDID)
       defer {
@@ -3393,7 +3393,7 @@ public actor MLSClient {
       }
       await coordinator.prepareMLSStorageReset(for: normalizedDID)
     }
-    
+
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 2: Wait for in-flight operations to notice and cancel
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3461,7 +3461,7 @@ public actor MLSClient {
         logger.warning("⚠️ [Diagnostics] Failed to quarantine \(url.lastPathComponent): \(error.localizedDescription)")
       }
     }
-    
+
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 5: Reopen the gate for fresh operations
     // ═══════════════════════════════════════════════════════════════════════════
@@ -3709,19 +3709,19 @@ public actor MLSClient {
         logger.error("   📋 Possible Causes:")
         logger.error("      - Deserialization bug dropped bundles from local storage")
         logger.error("      - Storage corrupted after bundles were uploaded")
-        
+
         // CRITICAL FIX: Automatically sync hashes to remove orphaned server packages
         // Orphaned packages cause NoMatchingKeyPackage when others try to add us
         logger.info("   🔄 [AUTO-RECOVERY] Syncing key package hashes to remove orphaned server packages...")
-        
+
         do {
           let syncResult = try await syncKeyPackageHashes(for: userDID)
-          
+
           if syncResult.orphanedCount > 0 {
             logger.info("   ✅ [AUTO-RECOVERY] Deleted \(syncResult.deletedCount) orphaned packages from server")
             logger.info("      - Orphaned packages (on server, not local): \(syncResult.orphanedCount)")
             logger.info("      - Remaining available on server: \(syncResult.remainingAvailable)")
-            
+
             // Check if we need to replenish after orphan cleanup
             if syncResult.remainingAvailable < 20 {
               logger.info("   📦 [AUTO-RECOVERY] Replenishing key packages after orphan cleanup...")

@@ -717,7 +717,7 @@ extension MLSConversationManager {
 
           keyPackageRefreshTask = Task { [weak self] in
             guard let self = self else { return }
-            
+
             if localBundleCount == 0 {
               self.logger.warning("⚠️ [MLS Init] No local bundles found - will need replenishment")
               do {
@@ -1011,18 +1011,18 @@ extension MLSConversationManager {
           "🔄 Found \(corruptedConvos.count) locally corrupted conversation(s) needing rejoin")
 
         let mode: MLSRecoveryManager.RecoveryMode = corruptedConvos.count >= MLSRecoveryManager.batchRecoveryThreshold ? .batchRecovery : .normal
-        
+
         if mode == .batchRecovery {
           logger.info("⚡ [REJOIN] Entering BATCH recovery mode for \(corruptedConvos.count) corrupted conversations")
           let chunks = corruptedConvos.chunked(into: MLSRecoveryManager.maxConcurrentRejoins)
           for chunk in chunks {
             if isShuttingDown || Task.isCancelled { break }
-            
+
             await withTaskGroup(of: Void.self) { group in
               for convo in chunk {
                 group.addTask { [weak self] in
                   guard let self = self, let userDid = self.userDid else { return }
-                  
+
                   if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
                     let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationID, mode: .batchRecovery)
                     if shouldSkip {
@@ -1030,16 +1030,16 @@ extension MLSConversationManager {
                       return
                     }
                   }
-                  
+
                   guard self.beginRejoinAttempt(conversationID: convo.conversationID, source: "deferred-epoch-recovery") else {
                     return
                   }
-                  
+
                   let groupIdData = convo.groupID
                   let preDeleteAuthHex: String? = await self.mlsClient.groupExists(for: userDid, groupId: groupIdData)
                     ? await self.mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
                     : nil
-                    
+
                   if await self.mlsClient.groupExists(for: userDid, groupId: groupIdData) {
                     self.logger.info("🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))...")
                     do {
@@ -1049,19 +1049,19 @@ extension MLSConversationManager {
                     }
                     self.removeCachedGroupState(conversationID: convo.conversationID, groupID: groupIdData)
                   }
-                  
-                  let succeeded = await self.attemptRejoinWithWelcomeFallback(
+
+                  let rejoinResult = await self.attemptRejoinWithWelcomeFallback(
                     convoId: convo.conversationID,
                     displayName: convo.conversationID,
                     reason: "deferred epoch recovery (sync catch-up failed, batch)",
                     preDeleteAuthHex: preDeleteAuthHex
                   )
                   self.endRejoinAttempt(conversationID: convo.conversationID)
-                  
+
                   if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
-                    if succeeded {
+                    if rejoinResult.didJoin {
                       await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
-                    } else {
+                    } else if rejoinResult.shouldRecordFailure {
                       await recoveryManager.recordFailedRejoin(
                         convoId: convo.conversationID,
                         epochAuthenticatorHex: preDeleteAuthHex,
@@ -1072,7 +1072,7 @@ extension MLSConversationManager {
                 }
               }
             }
-            
+
             if chunks.last != chunk {
               logger.info("⚡ [REJOIN] Pausing \(MLSRecoveryManager.batchPauseSec)s between batch chunks...")
               try? await Task.sleep(for: .seconds(MLSRecoveryManager.batchPauseSec))
@@ -1130,7 +1130,7 @@ extension MLSConversationManager {
               removeCachedGroupState(conversationID: convo.conversationID, groupID: groupIdData)
             }
 
-            let succeeded = await attemptRejoinWithWelcomeFallback(
+            let rejoinResult = await attemptRejoinWithWelcomeFallback(
               convoId: convo.conversationID,
               displayName: convo.conversationID,
               reason: "deferred epoch recovery (sync catch-up failed)",
@@ -1140,9 +1140,9 @@ extension MLSConversationManager {
 
             // Record success/failure in MLSRecoveryManager for backoff tracking
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
-              if succeeded {
+              if rejoinResult.didJoin {
                 await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
-              } else {
+              } else if rejoinResult.shouldRecordFailure {
                 await recoveryManager.recordFailedRejoin(
                   convoId: convo.conversationID,
                   epochAuthenticatorHex: preDeleteAuthHex,
@@ -1202,25 +1202,25 @@ extension MLSConversationManager {
       }
 
       let mode: MLSRecoveryManager.RecoveryMode = convosNeedingRejoin.count >= MLSRecoveryManager.batchRecoveryThreshold ? .batchRecovery : .normal
-      
+
       if mode == .batchRecovery {
         logger.info("⚡ [REJOIN] Entering BATCH recovery mode for \(convosNeedingRejoin.count) missing conversations")
         let chunks = convosNeedingRejoin.chunked(into: MLSRecoveryManager.maxConcurrentRejoins)
         for chunk in chunks {
           if isShuttingDown || Task.isCancelled { break }
-          
+
           await withTaskGroup(of: Void.self) { group in
             for convo in chunk {
               group.addTask { [weak self] in
                 guard let self = self, let userDid = self.userDid else { return }
-                
+
                 guard let groupIdData = Data(hexEncoded: convo.groupId) else {
                   self.logger.warning("⚠️ Invalid groupId format for \(convo.conversationId) - skipping")
                   return
                 }
-                
+
                 let groupExists = await self.mlsClient.groupExists(for: userDid, groupId: groupIdData)
-                
+
                 if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
                   let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationId, mode: .batchRecovery)
                   if shouldSkip {
@@ -1228,28 +1228,28 @@ extension MLSConversationManager {
                     return
                   }
                 }
-                
+
                 guard self.beginRejoinAttempt(conversationID: convo.conversationId, source: "missing-convo") else {
                   return
                 }
-                
+
                 let preDeleteAuthHex: String? = groupExists
                   ? await self.mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
                   : nil
-                  
-                let joined = await self.attemptRejoinWithWelcomeFallback(
+
+                let rejoinResult = await self.attemptRejoinWithWelcomeFallback(
                   convoId: convo.conversationId,
                   displayName: nil,
                   reason: "server reported missing (batch)",
                   preDeleteAuthHex: preDeleteAuthHex
                 )
                 self.endRejoinAttempt(conversationID: convo.conversationId)
-                
-                if joined {
+
+                if rejoinResult.didJoin {
                   if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
                     await recoveryManager.clearRejoinTracking(convoId: convo.conversationId)
                   }
-                } else {
+                } else if rejoinResult.shouldRecordFailure {
                   if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
                     await recoveryManager.recordFailedRejoin(
                       convoId: convo.conversationId,
@@ -1261,7 +1261,7 @@ extension MLSConversationManager {
               }
             }
           }
-          
+
           if chunks.last != chunk {
             logger.info("⚡ [REJOIN] Pausing \(MLSRecoveryManager.batchPauseSec)s between batch chunks...")
             try? await Task.sleep(for: .seconds(MLSRecoveryManager.batchPauseSec))
@@ -1303,7 +1303,7 @@ extension MLSConversationManager {
             ? await mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
             : nil
 
-          let joined = await attemptRejoinWithWelcomeFallback(
+          let rejoinResult = await attemptRejoinWithWelcomeFallback(
             convoId: convo.conversationId,
             displayName: nil,
             reason: "server reported missing",
@@ -1311,12 +1311,12 @@ extension MLSConversationManager {
           )
           endRejoinAttempt(conversationID: convo.conversationId)
 
-          if joined {
+          if rejoinResult.didJoin {
             successCount += 1
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
               await recoveryManager.clearRejoinTracking(convoId: convo.conversationId)
             }
-          } else {
+          } else if rejoinResult.shouldRecordFailure {
             failureCount += 1
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
               await recoveryManager.recordFailedRejoin(
@@ -1325,6 +1325,8 @@ extension MLSConversationManager {
                 failureType: "missing_convo_rejoin_failed"
               )
             }
+          } else {
+            skippedCount += 1
           }
 
           try? await Task.sleep(nanoseconds: 100_000_000)
@@ -1355,18 +1357,18 @@ extension MLSConversationManager {
     displayName: String?,
     reason: String,
     preDeleteAuthHex: String? = nil
-  ) async -> Bool {
+  ) async -> RejoinAttemptResult {
     let label = displayName ?? convoId
     logger.info("📞 Requesting recovery for \(label) (\(reason))")
 
     guard let userDid = userDid else {
       logger.error("❌ Cannot rejoin \(label): missing user DID")
-      return false
+      return .skippedNoAttempt
     }
 
     guard await ensureActiveAccount(for: userDid, operation: "attemptRejoinWithWelcomeFallback")
     else {
-      return false
+      return .skippedNoAttempt
     }
 
     // ALWAYS try Welcome first, even for creators without local state.
@@ -1375,16 +1377,16 @@ extension MLSConversationManager {
     let welcomeResult = await attemptWelcomeRejoin(convoId: convoId, label: label)
     switch welcomeResult {
     case .joined:
-      return true
+      return .joined
     case .doNotFallback(let reason):
       logger.info("⏸️ [attemptRejoin] Skipping External Commit for \(label): \(reason)")
-      return false
+      return .failed
     case .fallbackToExternalCommit(let fallbackReason):
       // CRITICAL: Check for shutdown/cancellation BEFORE starting expensive External Commit
       // This prevents the main cause of 40+ second hangs during account switch
       if isShuttingDown || Task.isCancelled {
         logger.warning("⚠️ [attemptRejoin] Aborted before External Commit - shutdown in progress")
-        return false
+        return .skippedNoAttempt
       }
 
       logger.info(
@@ -1409,10 +1411,13 @@ extension MLSConversationManager {
         )
         logger.info("✅ Successfully rejoined \(label) via External Commit")
         await clearConversationRejoinFlag(convoId)
-        return true
+        return .joined
       } catch is CancellationError {
         logger.info("📭 [attemptRejoin] External Commit cancelled for \(label) (expected during shutdown)")
-        return false
+        return .skippedNoAttempt
+      } catch let error as RejoinSkippedNoAttemptError {
+        logger.info("⏸️ [attemptRejoin] \(error.localizedDescription) for \(label)")
+        return .skippedNoAttempt
       } catch {
         logger.error("❌ Failed to rejoin \(label) via External Commit: \(error.localizedDescription)")
 
@@ -1441,7 +1446,7 @@ extension MLSConversationManager {
               await recordTrifectaFailure(
                 convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
             }
-            return false
+            return .failed
           }
 
           logger.warning(
@@ -1460,19 +1465,19 @@ extension MLSConversationManager {
             logger.info(
               "✅ [attemptRejoin] First-responder bootstrap succeeded for \(label)")
             await clearConversationRejoinFlag(convoId)
-            return true
+            return .joined
           }
           logger.info(
             "⏳ [attemptRejoin] Bootstrap dispatched for \(label) but group not yet present locally — next sync will retry"
           )
-          return false
+          return .failed
         }
 
         if isTrifectaCandidate, Self.isTrifectaExternalCommitError(error) {
           await recordTrifectaFailure(
             convoId: convoId, epochAuthenticatorHex: preDeleteAuthHex)
         }
-        return false
+        return .failed
       }
     }
   }

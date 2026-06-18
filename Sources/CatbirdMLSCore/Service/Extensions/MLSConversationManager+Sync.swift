@@ -58,7 +58,7 @@ extension MLSConversationManager {
 public extension MLSConversationManager {
 
   // MARK: - Server Synchronization
-  
+
   /// Wait for any in-progress sync to complete, then trigger a fresh sync
   /// This is useful for E2E testing where we need to ensure fresh data
   /// - Parameter maxWait: Maximum time to wait for ongoing sync (default 30 seconds)
@@ -70,7 +70,7 @@ public extension MLSConversationManager {
 
     let startTime = Date()
     var waitCount = 0
-    
+
     // Wait for sync lock to be available
     while true {
       let elapsed = Date().timeIntervalSince(startTime)
@@ -78,21 +78,21 @@ public extension MLSConversationManager {
         logger.warning("⚠️ [waitAndSync] Timed out waiting for sync lock after \(Int(elapsed))s")
         break
       }
-      
+
       let isSyncing = syncState.withLock { $0 }
       if !isSyncing {
         // Lock is free, proceed with sync
         logger.info("🔓 [waitAndSync] Sync lock released after \(Int(elapsed))s, triggering fresh sync")
         break
       }
-      
+
       waitCount += 1
       if waitCount % 5 == 1 {
         logger.info("⏳ [waitAndSync] Waiting for sync lock (\(Int(elapsed))s elapsed)...")
       }
       try await Task.sleep(nanoseconds: 500_000_000) // 0.5 second intervals
     }
-    
+
     // Now trigger a fresh sync
     try await syncWithServer(fullSync: false)
   }
@@ -208,7 +208,7 @@ public extension MLSConversationManager {
         // CRITICAL FIX: Check shutdown state during pagination loop
         // This prevents continuing to fetch while account is switching
         try throwIfShuttingDown("syncWithServer pagination")
-        
+
         let result = try await apiClient.getConversations(limit: 100, cursor: cursor)
         allConvos.append(contentsOf: result.convos)
         cursor = result.cursor
@@ -253,7 +253,7 @@ public extension MLSConversationManager {
           logger.warning("⚠️ [SYNC] Shutdown detected during conversation processing - aborting")
           break
         }
-        
+
         let existingConvo = conversations[convo.conversationId]
         conversations[convo.conversationId] = convo
 
@@ -963,7 +963,7 @@ public extension MLSConversationManager {
         removeCachedGroupState(conversationID: convo.conversationID, groupID: groupIdData)
       }
 
-      let succeeded = await attemptRejoinWithWelcomeFallback(
+      let rejoinResult = await attemptRejoinWithWelcomeFallback(
         convoId: convo.conversationID,
         displayName: convo.conversationID,
         reason: "deferred epoch recovery (sync catch-up failed)",
@@ -973,9 +973,9 @@ public extension MLSConversationManager {
 
       // Record success/failure in MLSRecoveryManager for backoff tracking
       if let recoveryManager = await mlsClient.recovery(for: userDid) {
-        if succeeded {
+        if rejoinResult.didJoin {
           await recoveryManager.clearRejoinTracking(convoId: convo.conversationID)
-        } else {
+        } else if rejoinResult.shouldRecordFailure {
           await recoveryManager.recordFailedRejoin(
             convoId: convo.conversationID,
             epochAuthenticatorHex: preDeleteAuthHex
@@ -2170,7 +2170,7 @@ public extension MLSConversationManager {
     // Pre-check which conversations are new and need trust checking
     // We need to do trust checks outside the database write transaction (async)
     var trustCheckResults: [String: MLSRequestState] = [:]
-    
+
     for convo in convos {
       // Check if conversation already exists
       let existingConvo = try await storage.fetchConversation(

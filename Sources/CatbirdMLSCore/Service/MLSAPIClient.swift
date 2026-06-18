@@ -260,21 +260,21 @@ public final class MLSAPIClient {
     )
     return (output.conversations, output.cursor)
   }
-  
+
   /// Fetch a single conversation by ID.
   /// Searches through paginated results to find the specific conversation.
   /// - Parameter convoId: The stable conversation ID to fetch; legacy group IDs are also accepted.
   /// - Returns: The conversation view if found, nil if not found
   public func getConversation(convoId: String) async throws -> BlueCatbirdMlsChatDefs.ConvoView? {
     logger.info("🌐 [MLSAPIClient.getConversation] Fetching convo: \(convoId.prefix(16))...")
-    
+
     var cursor: String? = nil
     var pageCount = 0
-    
+
     repeat {
       pageCount += 1
       let result = try await getConversations(limit: 100, cursor: cursor)
-      
+
       // Check if target conversation is in this page. After a group reset,
       // conversationId stays stable while groupId points at the new MLS group.
       if let convo = result.convos.first(where: {
@@ -287,10 +287,10 @@ public final class MLSAPIClient {
         logger.info("✅ [MLSAPIClient.getConversation] Found convo \(convoId.prefix(16))... on page \(pageCount)")
         return convo
       }
-      
+
       cursor = result.cursor
     } while cursor != nil && pageCount < 10 // Safety limit
-    
+
     logger.info("⚠️ [MLSAPIClient.getConversation] Convo \(convoId.prefix(16))... not found after \(pageCount) pages")
     return nil
   }
@@ -560,7 +560,7 @@ public final class MLSAPIClient {
   ///   - cipherSuite: MLS cipher suite to use (e.g., "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519")
   ///   - initialMembers: DIDs of initial members to add
   ///   - welcomeMessage: Welcome message data for initial members
-  ///   - metadata: Optional conversation metadata (name, description, avatar)
+  ///   - groupInfo: Post-commit GroupInfo for server-side recovery fallback
   ///   - keyPackageHashes: Optional array of key package hashes identifying which key packages were used
   ///   - idempotencyKey: Optional client-generated UUID for idempotent retries (auto-generated if nil)
   /// - Returns: Created conversation view
@@ -569,6 +569,7 @@ public final class MLSAPIClient {
     cipherSuite: String,
     initialMembers: [DID]? = nil,
     welcomeMessage: Data? = nil,
+    groupInfo: Data? = nil,
     keyPackageHashes: [BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry]? = nil,
     idempotencyKey: String? = nil
   ) async throws -> BlueCatbirdMlsChatDefs.ConvoView {
@@ -588,6 +589,7 @@ public final class MLSAPIClient {
       cipherSuite: cipherSuite,
       initialMembers: initialMembers,
       welcomeMessage: welcomeMessage.map { Bytes(data: $0) },
+      groupInfo: groupInfo.map { Bytes(data: $0) },
       keyPackageHashes: keyPackageHashes
     )
 
@@ -596,6 +598,7 @@ public final class MLSAPIClient {
     logger.debug("  - cipherSuite: \(cipherSuite)")
     logger.debug("  - initialMembers: \(initialMembers?.map { $0 } ?? [])")
     logger.debug("  - welcomeMessage length: \(welcomeMessage?.count ?? 0) bytes")
+    logger.debug("  - groupInfo length: \(groupInfo?.count ?? 0) bytes")
     if let welcome = welcomeMessage {
       logger.debug("  - welcomeMessage prefix: \(welcome.prefix(50).base64EncodedString().prefix(50))...")
     }
@@ -1215,7 +1218,7 @@ public final class MLSAPIClient {
     let requestedDIDDescriptions = dids.map(\.description)
     let requestedDIDsSet = Set(requestedDIDDescriptions)
     var authorizedKeysByDID: [String: [Data]] = [:]
-    
+
     // Batch fetch device keys for all requested DIDs
     if let collection = try? NSID(nsidString: "blue.catbird.mlsChat.device") {
       await withTaskGroup(of: (String, [Data]?).self) { group in
@@ -2029,7 +2032,7 @@ public final class MLSAPIClient {
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             continue
           }
-          
+
           // CRITICAL FIX: Treat 404 as benign success
           // This happens if we were already active or if the welcome was already processed
           if responseCode == 404 {
@@ -2143,7 +2146,7 @@ public final class MLSAPIClient {
     if output.newEpoch == nil {
       logger.warning("⚠️ [MLSAPIClient.processExternalCommit] Server did not return epoch - using 0")
     }
-    
+
     logger.info("✅ [MLSAPIClient.processExternalCommit] SUCCESS - newEpoch: \(newEpoch)")
     return (output.success, newEpoch)
   }
@@ -3086,7 +3089,7 @@ public final class MLSAPIClient {
     logger.info("✅ [MLSAPIClient.optIn] SUCCESS")
     return (output.optedIn == true, output.optedInAt?.date ?? Date())
   }
-    
+
   // MARK: - Multi-Device Sync
 
   /// Get pending device additions for conversations where new devices need to be added

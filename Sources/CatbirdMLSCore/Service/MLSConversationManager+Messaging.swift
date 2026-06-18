@@ -48,6 +48,28 @@ public extension MLSConversationManager {
     case inProgress(activeConversationID: String?)
   }
 
+  internal enum RejoinAttemptResult: Equatable {
+    case joined
+    case failed
+    case skippedNoAttempt
+
+    var didJoin: Bool {
+      self == .joined
+    }
+
+    var shouldRecordFailure: Bool {
+      self == .failed
+    }
+  }
+
+  internal struct RejoinSkippedNoAttemptError: Error, LocalizedError {
+    let reason: String
+
+    var errorDescription: String? {
+      reason
+    }
+  }
+
   internal static func evaluateRejoinGate(
     now: Date,
     lastAttempt: Date?,
@@ -167,7 +189,7 @@ public extension MLSConversationManager {
   }
 
   // MARK: - FIX D: Persistent Decryption Failure Tracking
-  
+
   /// Record a decryption failure for a message. If threshold is exceeded, trigger nuclear rejoin.
   /// Returns true if nuclear rejoin was triggered.
   private func recordPersistentDecryptionFailure(
@@ -180,9 +202,9 @@ public extension MLSConversationManager {
       failures[messageID] = next
       return next
     }
-    
+
     logger.warning("⚠️ [MLS-DESYNC] Message \(messageID.prefix(16)) decryption failure #\(count)/\(self.nuclearRejoinThreshold)")
-    
+
     if count >= nuclearRejoinThreshold {
       logger.error("🔴 [MLS-NUCLEAR] Message \(messageID.prefix(16)) failed decryption \(count)x for \(conversationID.prefix(16)) — deferring rejoin to avoid epoch inflation")
 
@@ -203,10 +225,10 @@ public extension MLSConversationManager {
 
       return true
     }
-    
+
     return false
   }
-  
+
   /// Clear decryption failure tracking for a message (on success)
   private func clearPersistentDecryptionFailure(messageID: String) {
     persistentDecryptionFailures.withLock { failures in
@@ -419,17 +441,17 @@ public extension MLSConversationManager {
     }
 
     var convo = conversations[convoId]
-    
+
     // If conversation not found locally, try to fetch and initialize it on-demand
     // This handles the case where a sync is in progress and hasn't fetched this conversation yet
     if convo == nil {
       logger.warning("⚠️ Conversation \(convoId.prefix(16))... not found locally, attempting on-demand fetch")
-      
+
       // Try to fetch this specific conversation from server
       if let fetchedConvo = try? await apiClient.getConversation(convoId: convoId) {
         // Add to local state
         conversations[convoId] = fetchedConvo
-        
+
         // Try to initialize MLS group (Welcome or External Commit)
         do {
           try await initializeGroupFromWelcome(convo: fetchedConvo)
@@ -441,7 +463,7 @@ public extension MLSConversationManager {
         }
       }
     }
-    
+
     guard let convo = convo else {
       logger.error("Cannot send message - conversation \(convoId) not found locally")
       throw MLSConversationError.conversationNotFound
@@ -1162,7 +1184,7 @@ public extension MLSConversationManager {
         // ═══════════════════════════════════════════════════════════════════════════
         // CRITICAL: Record successful processing and process any ready buffered messages
         // ═══════════════════════════════════════════════════════════════════════════
-        
+
         // FIX D: Clear any persistent decryption failure tracking on success
         clearPersistentDecryptionFailure(messageID: message.id)
 
@@ -1254,13 +1276,13 @@ public extension MLSConversationManager {
             if cachedPayload.messageType == .reaction {
               if let reaction = cachedPayload.reaction {
                 let actorDID = cachedMessage.senderID ?? "unknown"
-                
+
                 // CRITICAL FIX: Validate actorDID prevents overwriting valid reactions with "unknown"
                 if actorDID.isEmpty || actorDID == "unknown" {
                   logger.error("❌ [MLS-RECOVERY] Cannot recover reaction for \(reaction.messageId) - sender unknown (would overwrite)")
                   return .controlMessage // Skip saving reaction, but treat as processed
                 }
-                
+
                 let reactionModel = MLSReactionModel(
                   messageID: reaction.messageId,
                   conversationID: message.convoId,
@@ -1326,13 +1348,13 @@ public extension MLSConversationManager {
 
           if attempt < maxRetries {
             logger.warning("🔄 [MLS-RETRY] [Gen: \(gen)] Detected possible NSE race/Epoch Mismatch - reloading state and retrying (attempt \(attempt + 1)/\(maxRetries))")
-            
+
             // 1. Reload Checkpoint Cache (Fastest check)
             await MLSEpochCheckpoint.shared.reloadCacheFromDisk()
-            
+
             // 2. Force state reload from disk to pick up NSE changes
             await reloadStateFromDisk()
-            
+
             // 3. KEY FIX: If this is a FutureEpoch/DecryptionFailed, try to fetch missing commits
             // This is the core fix for "Ratchet State Desync" - the state on disk may also be
             // behind if we missed a commit message. Fetching from server is the only way forward.
@@ -1341,7 +1363,7 @@ public extension MLSConversationManager {
               if let convo = conversations[message.convoId],
                  let groupIdData = Data(hexEncoded: convo.groupId) {
                 let currentLocalEpoch = (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) ?? 0
-                
+
                 if UInt64(message.epoch) > currentLocalEpoch {
                   logger.info("🔄 [EPOCH-RECOVERY] Message epoch \(message.epoch) > local \(currentLocalEpoch) - fetching missing commits")
                   let catchUpResult = await fetchAndProcessMissingCommits(
@@ -1384,14 +1406,14 @@ public extension MLSConversationManager {
             // CRITICAL FIX: After retries exhausted for SecretReuseError, check cache one final time
             // The NSE may have stored the message but cache lookup timing was off
             logger.warning("⚠️ [MLS-RETRY] Retry exhausted for message \(message.id) - attempting final cache recovery")
-            
+
             if let cachedMessage = try? await storage.fetchMessage(
               messageID: message.id,
               currentUserDID: userDid,
               database: database
             ), let cachedPayload = cachedMessage.parsedPayload {
               logger.info("✅ [MLS-RECOVERY] Found cached payload for message \(message.id) after SecretReuseError")
-              
+
               // Handle reaction payloads specially
               if cachedPayload.messageType == .reaction {
                 if let reaction = cachedPayload.reaction {
@@ -1404,7 +1426,7 @@ public extension MLSConversationManager {
                     action: reaction.action.rawValue,
                     timestamp: message.createdAt.date
                   )
-                  
+
                   do {
                     if reaction.action == .add {
                       try await withDatabaseRecovery(currentUserDID: userDid) { db in
@@ -1421,7 +1443,7 @@ public extension MLSConversationManager {
                         )
                       }
                     }
-                    
+
                     // Notify UI about recovered reaction
                     notifyObservers(.reactionReceived(
                       convoId: message.convoId,
@@ -1430,7 +1452,7 @@ public extension MLSConversationManager {
                       senderDID: cachedMessage.senderID ?? "unknown",
                       action: reaction.action.rawValue
                     ))
-                    
+
                     logger.info("✅ [MLS-RECOVERY] Recovered reaction \(reaction.emoji) on \(reaction.messageId)")
                   } catch {
                     logger.error("❌ [MLS-RECOVERY] Failed to save recovered reaction: \(error.localizedDescription)")
@@ -1459,7 +1481,7 @@ public extension MLSConversationManager {
             }
 
             logger.error("❌ [MLS-RETRY] Retry exhausted and cache empty for message \(message.id)")
-            
+
             // FIX D: Record persistent decryption failure - may trigger nuclear rejoin
             if errorDesc.contains("DecryptionFailed") || errorDesc.contains("FutureEpoch") {
               let _ = await recordPersistentDecryptionFailure(
@@ -1470,12 +1492,12 @@ public extension MLSConversationManager {
             }
           }
         }
-        
+
         // If it's not a retryable error or we're out of retries, rethrow
         throw error
       }
     }
-    
+
     if let lastError = lastError {
       throw lastError
     }
@@ -1532,7 +1554,7 @@ public extension MLSConversationManager {
   }
 
   // MARK: - Epoch Gap Recovery
-  
+
   /// Fetch and process missing commits when message epoch > local epoch
   /// This is the KEY FIX for "Ratchet State Desync" - instead of just reloading from disk,
   /// we actually fetch the missing commit(s) from the server that will advance our epoch.
@@ -1709,7 +1731,7 @@ public extension MLSConversationManager {
     }
     let limit = 50 // Limit batch size to prevent blocking lock for too long
     logger.info("🧩 [Gap Fill] Locked catch-up for \(conversationID) (Seq \(startSeq)-\(endSeq), depth=\(depth))")
-    
+
     do {
       // Fetch missing messages
       // Note: getMessages expects 'sinceSeq', so to get 'startSeq', pass 'startSeq - 1'
@@ -1719,14 +1741,14 @@ public extension MLSConversationManager {
         limit: limit,
         sinceSeq: sinceParam
       )
-      
+
       let relevantMessages = messages.filter { Int($0.seq) <= endSeq }
-      
+
       if relevantMessages.isEmpty {
         logger.warning("🧩 [Gap Fill] Server returned no messages for gap \(startSeq)-\(endSeq)")
         return
       }
-      
+
       let gen = currentCoordinationGeneration
       logger.info("🧩 [Gap Fill] [Gen: \(gen)] Processing \(relevantMessages.count) gap messages...")
 
@@ -1950,7 +1972,7 @@ public extension MLSConversationManager {
         // Without this, the message would be retried on next sync, hitting the FFI
         // and failing with CannotDecryptOwnMessage error (forward secrecy)
         logger.warning("⚠️ [SELF-ECHO] Message \(message.id) is self-sent but payload missing - saving placeholder")
-        
+
         let placeholderPayload = MLSMessagePayload.text(
           "⚠️ Message unavailable (sent from this account)",
           embed: nil
@@ -1965,7 +1987,7 @@ public extension MLSConversationManager {
         )
         logger.info("✅ [SELF-ECHO] Saved placeholder for self-sent message with missing cache")
         await recordSelfDecryptFailure(conversationID: message.convoId, source: context.source)
-        
+
         return .nonApplication
       }
     }
@@ -2005,7 +2027,7 @@ public extension MLSConversationManager {
             // Ensure reactions are written before we skip control messages.
             if let reaction = cachedPayload.reaction {
               let actorDID = cachedMessage.senderID ?? "unknown"
-              
+
               // CRITICAL FIX: Validate actorDID prevents overwriting valid reactions
               if actorDID.isEmpty || actorDID == "unknown" {
                  logger.error("❌ [CACHE-RECOVERY] Cannot recover reaction for \(reaction.messageId) - sender unknown")
@@ -2170,10 +2192,10 @@ public extension MLSConversationManager {
         case .reaction:
           logger.info("🔍 [REACTION-DEBUG] Received reaction message \(message.id) from \(senderDID)")
           logger.info("🔍 [REACTION-DEBUG] payload.reaction is \(payload.reaction == nil ? "NIL ⚠️" : "present ✅")")
-          
+
           if let reaction = payload.reaction {
             logger.info("❤️ [REACTION] Processing reaction from \(senderDID): \(reaction.emoji) on \(reaction.messageId) (action: \(reaction.action.rawValue))")
-            
+
             let reactionModel = MLSReactionModel(
               messageID: reaction.messageId,
               conversationID: message.convoId,
@@ -2202,17 +2224,17 @@ public extension MLSConversationManager {
                 }
                 logger.info("✅ [REACTION] Deleted reaction \(reaction.emoji) on \(reaction.messageId) by \(senderDID)")
               }
-              
+
               // Notify UI
               notifyObservers(.reactionReceived(
-                convoId: message.convoId, 
-                messageId: reaction.messageId, 
-                emoji: reaction.emoji, 
-                senderDID: senderDID, 
+                convoId: message.convoId,
+                messageId: reaction.messageId,
+                emoji: reaction.emoji,
+                senderDID: senderDID,
                 action: reaction.action.rawValue
               ))
               logger.info("📡 [REACTION] Notified UI observers of reaction")
-              
+
             } catch {
               logger.error("❌ [REACTION] Failed to save reaction for \(message.id): \(error.localizedDescription)")
             }
@@ -2394,7 +2416,7 @@ public extension MLSConversationManager {
       }
 
       let errorDescription = error.localizedDescription
-      
+
       if errorDescription.contains("CannotDecryptOwnMessage") {
           return try await recoverSelfSentMessage(
             message: message,
@@ -2422,7 +2444,7 @@ public extension MLSConversationManager {
        if errorDescr.contains("CannotDecryptOwnMessage") {
          return try await recoverSelfSentMessage(message: message, context: context, source: context.source ?? "unknown")
        }
-    
+
       logger.error("❌ Failed to process MLS message \(message.id): \(error.localizedDescription)")
       return try await saveErrorPlaceholder(
         message: message,
@@ -2632,7 +2654,7 @@ public extension MLSConversationManager {
       logger.warning("⚠️ [PROCESS] Shutdown in progress - aborting message processing")
       return []
     }
-    
+
     logger.debug("📊 [SEQ-ORDER] Processing \(messages.count) messages for conversation \(conversationID) source=\(source)")
     if await shouldSkipProcessingForRejoin(conversationID: conversationID, source: source) {
       return []
@@ -2722,7 +2744,7 @@ public extension MLSConversationManager {
         logger.warning("⚠️ [PROCESS] Shutdown detected during processing - stopping")
         break
       }
-      
+
       guard let epochMessages = messagesByEpoch[epoch] else { continue }
       try Task.checkCancellation()
 
@@ -3011,7 +3033,7 @@ public extension MLSConversationManager {
         // Otherwise, we get stuck in a Gap Fill loop forever.
         if error.localizedDescription.contains("SecretReuseError") {
           logger.error("❌ [RECOVERY] Persistent SecretReuseError for \(message.id) - saving placeholder to advance sequence")
-          
+
           do {
             let context = ProcessingContext(
               attemptID: nextProcessingAttemptID(),
@@ -3019,8 +3041,8 @@ public extension MLSConversationManager {
               queueIndex: 0
             )
             let _ = try await saveErrorPlaceholder(
-              message: message, 
-              error: "Decryption Failed (Secret Reuse)", 
+              message: message,
+              error: "Decryption Failed (Secret Reuse)",
               validationReason: "Persistent SecretReuseError after retries",
               context: context
             )
@@ -3050,11 +3072,11 @@ public extension MLSConversationManager {
           )
         }
       }
-      
+
       // CRITICAL FIX: Fallback for generic SecretReuseError (not castable to MLSError)
       if error.localizedDescription.contains("SecretReuseError") {
         logger.error("❌ [RECOVERY] Persistent generic SecretReuseError for \(message.id) - saving placeholder")
-        
+
         do {
           let context = ProcessingContext(
             attemptID: nextProcessingAttemptID(),
@@ -3062,8 +3084,8 @@ public extension MLSConversationManager {
             queueIndex: 0
           )
           let _ = try await saveErrorPlaceholder(
-            message: message, 
-            error: "Decryption Failed (Secret Reuse)", 
+            message: message,
+            error: "Decryption Failed (Secret Reuse)",
             validationReason: "Persistent SecretReuseError (generic)",
             context: context
           )
@@ -3074,7 +3096,7 @@ public extension MLSConversationManager {
              return .failure(error)
         }
       }
-      
+
       return .failure(error)
     }
   }
@@ -3246,7 +3268,7 @@ public extension MLSConversationManager {
       logger.warning("⚠️ [ORPHAN-Lookback] Aborted - manager is shutting down")
       return
     }
-    
+
     // Validate coordination generation hasn't changed (account switch detection)
     let currentGen = MLSCoordinationStore.shared.getState().coordinationGeneration
     if currentGen != currentCoordinationGeneration {
@@ -5099,14 +5121,14 @@ public extension MLSConversationManager {
         limit: 20,
         database: database
       )
-      
+
       guard !missingParents.isEmpty else { return }
-      
+
       logger.info("[ORPHAN] Found \(missingParents.count) missing parent messages - attempting fetch")
-      
+
       for (messageID, conversationID) in missingParents {
         guard !isShuttingDown else { break }
-        
+
         // Check if message now exists (might have arrived since last check)
         if let existing = try? await storage.fetchMessage(
           messageID: messageID,
@@ -5119,7 +5141,7 @@ public extension MLSConversationManager {
             currentUserDID: userDID,
             database: database
           )
-          
+
           // Notify UI for each adopted reaction
           for adopted in adoptedReactions {
             notifyObservers(.reactionReceived(
@@ -5131,29 +5153,29 @@ public extension MLSConversationManager {
             ))
             logger.info("[ORPHAN-ADOPT] Notified UI of adopted reaction \(adopted.emoji) on \(adopted.messageID.prefix(16))")
           }
-          
+
           if !adoptedReactions.isEmpty {
             logger.info("[ORPHAN-ADOPT] Adopted \(adoptedReactions.count) orphan(s) for now-existing message \(messageID)")
           }
           continue
         }
-        
+
         // Try to fetch the missing message from server
         logger.info("[ORPHAN-FETCH] Triggering fetch for missing parent message \(messageID) in \(conversationID.prefix(20))")
-        
+
         do {
           // Get the conversation view to use catchUpMessagesIfNeeded
           if let convo = conversations[conversationID] {
             // Fetch recent messages for this conversation with lookback to find the missing one
             await fetchMissingMessagesWithLookback(for: convo)
-            
+
             // Check if adoption happened and notify UI
             let adoptedReactions = try await storage.adoptOrphansForMessage(
               messageID,
               currentUserDID: userDID,
               database: database
             )
-            
+
             // Notify UI for each adopted reaction
             for adopted in adoptedReactions {
               notifyObservers(.reactionReceived(
@@ -5165,7 +5187,7 @@ public extension MLSConversationManager {
               ))
               logger.info("[ORPHAN-ADOPT] Notified UI of adopted reaction \(adopted.emoji) on \(adopted.messageID.prefix(16))")
             }
-            
+
             if !adoptedReactions.isEmpty {
               logger.info("[ORPHAN-ADOPT] Adopted \(adoptedReactions.count) orphan(s) after fetching message \(messageID)")
             }
@@ -5175,7 +5197,7 @@ public extension MLSConversationManager {
         } catch {
           logger.warning("[ORPHAN-FETCH] Failed to fetch parent message \(messageID): \(error.localizedDescription)")
         }
-        
+
         // Small delay between fetches to avoid hammering the server
         try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
       }
@@ -5298,7 +5320,7 @@ public extension MLSConversationManager {
       logger.error("Failed to decode hex groupId: \(groupId.prefix(20))...")
       throw MLSConversationError.invalidGroupId
     }
-    
+
     // ═══════════════════════════════════════════════════════════════════════════
     // CRITICAL FIX: Epoch Pre-Flight Check
     // ═══════════════════════════════════════════════════════════════════════════
@@ -5369,7 +5391,7 @@ public extension MLSConversationManager {
       logger.error("Invalid group ID format")
       throw MLSConversationError.invalidGroupId
     }
-    
+
     // ═══════════════════════════════════════════════════════════════════════════
     // CRITICAL FIX: Epoch Pre-Flight Check
     // ═══════════════════════════════════════════════════════════════════════════
@@ -5597,19 +5619,19 @@ public extension MLSConversationManager {
       )
       throw error
     }
-    
+
     // Process membership changes for transparency
     if let observer = membershipChangeObserver {
       do {
         // In this codebase, groupId IS the conversationID (they're the same hex string)
         let convoId = groupId
-        
+
         // Get current members from MLS group
         let debugInfo = try await mlsClient.debugGroupMembers(for: userDid, groupId: groupIdData)
         let memberDIDs = debugInfo.members.compactMap {
           String(data: $0.credentialIdentity, encoding: .utf8)
         }
-        
+
         // Process epoch transition for membership change detection
         try await observer.processEpochTransition(
           conversationID: convoId,
@@ -5854,7 +5876,7 @@ public extension MLSConversationManager {
           throw error
         }
       }
-      
+
       // ⭐ FIX: Also handle HTTP 404 (Welcome not found) by trying External Commit
       // This happens when the Welcome was never stored (race condition) or was deleted
       if case .httpError(let statusCode, _) = error, statusCode == 404 {
@@ -5880,7 +5902,7 @@ public extension MLSConversationManager {
           throw error
         }
       }
-      
+
       throw error
     } catch let error as NetworkError {
       // ⭐ FIX: Handle Petrel NetworkError for 404/410 status codes
@@ -5908,13 +5930,13 @@ public extension MLSConversationManager {
           throw error
         }
       }
-      
+
       throw error
     }
 
     do {
       groupIdHex = try await processWelcome(welcomeData: welcomeData)
-      
+
       do {
         _ = try await storage.ensureConversationExistsOrPlaceholder(
           userDID: userDid,
@@ -5991,7 +6013,7 @@ public extension MLSConversationManager {
             userDid: userDid,
             convoIds: [convo.conversationId],
             triggeringConvoId: convo.conversationId,
-            isRemoteDataError: true 
+            isRemoteDataError: true
           )
           if recovered {
             logger.info("🔄 Recovery initiated for MLS error: \(error)")
@@ -6091,8 +6113,8 @@ public extension MLSConversationManager {
         logger.warning(
           "⏭️ [External Commit Fallback] Skipping \(convoId.prefix(16))... - recovery tracking says skip"
         )
-        throw MLSConversationError.operationFailed(
-          "External Commit skipped - max attempts exceeded or on cooldown")
+        throw RejoinSkippedNoAttemptError(
+          reason: "External Commit skipped - max attempts exceeded or on cooldown")
       }
     }
 
@@ -6786,6 +6808,20 @@ public extension MLSConversationManager {
     )
     logger.info("🔄 Commit staged (NOT merged yet) - will merge after server confirmation")
 
+    let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
+      for: userDid,
+      groupId: groupId
+    )
+    if let postCommitGroupInfo {
+      logger.info(
+        "✅ [MLSConversationManager.createGroup] Exported post-commit GroupInfo for createConvo: \(postCommitGroupInfo.count) bytes"
+      )
+    } else {
+      logger.warning(
+        "⚠️ [MLSConversationManager.createGroup] Failed to export post-commit GroupInfo for createConvo"
+      )
+    }
+
     // 🔬 CRITICAL DIAGNOSTIC: Log Welcome message structure
     logger.info("📨 [WELCOME MESSAGE FORENSICS - Creator Side]")
     logger.info("   Welcome Size: \(welcomeData.count) bytes")
@@ -6800,6 +6836,7 @@ public extension MLSConversationManager {
     return PreparedInitialMembers(
       commitData: plan.commitBytes,
       welcomeData: welcomeData,
+      postCommitGroupInfo: postCommitGroupInfo,
       hashEntries: hashEntries,
       selectedPackages: selectedPackages,  // Track for rollback on failure
       stagedCommitHandle: plan.handle,
@@ -6830,7 +6867,7 @@ public extension MLSConversationManager {
         }
         logger.info("🔄 [Retry] Cleared exhausted key package cache for \(members.count) member(s)")
       }
-      
+
       var prepared: PreparedInitialMembers?
       if hasInitialMembers, let members = initialMembers {
         do {
@@ -6865,6 +6902,7 @@ public extension MLSConversationManager {
           cipherSuite: defaultCipherSuite,
           initialMembers: initialMembers,
           welcomeMessage: prepared?.welcomeData,
+          groupInfo: prepared?.postCommitGroupInfo,
           keyPackageHashes: prepared?.hashEntries
         )
 
@@ -6929,7 +6967,7 @@ public extension MLSConversationManager {
           lastError = normalizedError
           continue
         }
-        
+
         // CRITICAL FIX: Unreserve packages on final failure
         // If we're not retrying, we need to unreserve the packages so they can be used in future attempts
         if let packages = prepared?.selectedPackages {

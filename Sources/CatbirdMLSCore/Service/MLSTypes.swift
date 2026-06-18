@@ -120,6 +120,7 @@ public struct KeyPackageWithHash {
 public struct PreparedInitialMembers {
   public let commitData: Data
   public let welcomeData: Data
+  public let postCommitGroupInfo: Data?
   public let hashEntries: [BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry]
   public let selectedPackages: [KeyPackageWithHash]  // Track for rollback on failure
   /// Task #44/#62: handle to the staged sender-side commit. Set when the
@@ -176,24 +177,24 @@ public struct PendingMessage: Sendable {
 public struct MessageReorderState {
   /// Last successfully processed sequence number for this conversation
   public var lastProcessedSeq: Int64
-  
+
   /// Messages waiting for predecessors to arrive (sorted by seq)
   public var bufferedMessages: [BufferedMessage]
-  
+
   /// Timestamp when the buffer started waiting (for timeout)
   public var bufferStartTime: Date?
-  
+
   public init(lastProcessedSeq: Int64 = 0) {
     self.lastProcessedSeq = lastProcessedSeq
     self.bufferedMessages = []
     self.bufferStartTime = nil
   }
-  
+
   /// Check if we're currently waiting for messages
   public var isWaiting: Bool {
     !bufferedMessages.isEmpty
   }
-  
+
   /// Get the next expected sequence number
   public var nextExpectedSeq: Int64 {
     lastProcessedSeq + 1
@@ -204,7 +205,7 @@ public struct MessageReorderState {
 public struct BufferedMessage {
   public let message: BlueCatbirdMlsChatDefs.MessageView
   public let receivedAt: Date
-  
+
   public var seq: Int64 { Int64(message.seq) }
 }
 

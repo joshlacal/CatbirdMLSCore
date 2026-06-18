@@ -400,7 +400,7 @@ extension MLSConversationManager {
         conversationStates[groupIdHex] = .active
         return convo
       }
-      
+
       // Fallback: Server didn't process members during createConvo, so we need to call addMembers
       logger.info("🔄 Syncing \(members.count) members with server to prevent epoch mismatch...")
 
@@ -741,7 +741,7 @@ extension MLSConversationManager {
           .filter(MLSConversationModel.Columns.conversationID == conversationId)
           .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
           .fetchCount(db) > 0
-        
+
         if !conversationExists {
           guard let groupIdData = Data(hexEncoded: conversationId) else {
             throw MLSConversationError.operationFailed("Invalid group ID format for history boundary")
@@ -984,15 +984,15 @@ extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.contextNotInitialized
     }
-    
+
     logger.info("✅ Accepting chat request: \(convoId.prefix(16))...")
-    
+
     try await storage.acceptConversationRequest(
       conversationID: convoId,
       currentUserDID: userDid,
       database: database
     )
-    
+
     notifyObservers(.conversationRequestAccepted(convoId))
     logger.info("✅ Chat request accepted, moved to inbox: \(convoId.prefix(16))...")
   }
@@ -1004,11 +1004,11 @@ extension MLSConversationManager {
   /// - Throws: MLSConversationError if the operation fails
   public func declineConversationRequest(convoId: String) async throws {
     logger.info("❌ Declining chat request: \(convoId.prefix(16))...")
-    
+
     // Declining uses the same flow as leaving - we leave the MLS group on the server
     // and delete all local data. The sender will see we've left.
     try await leaveConversation(convoId: convoId)
-    
+
     logger.info("❌ Chat request declined and removed: \(convoId.prefix(16))...")
   }
 
@@ -1018,7 +1018,7 @@ extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.contextNotInitialized
     }
-    
+
     return try await storage.fetchPendingRequestConversations(
       currentUserDID: userDid,
       database: database
