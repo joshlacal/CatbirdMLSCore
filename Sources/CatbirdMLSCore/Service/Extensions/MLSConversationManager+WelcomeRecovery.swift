@@ -90,7 +90,7 @@ extension MLSConversationManager {
 
         let debugInfo = try await mlsClient.debugGroupMembers(for: userDid, groupId: groupIdData)
         let removeDids = Self.removeIdentities(
-            forRecipientUserDid: recipientUserDid,
+            forRecipientDeviceDid: recipientDeviceDid,
             from: debugInfo.members
         )
         guard !removeDids.isEmpty else {
@@ -318,11 +318,14 @@ extension MLSConversationManager {
         did.split(separator: "#", maxSplits: 1).first.map(String.init) ?? did
     }
 
-    private static func removeIdentities(
-        forRecipientUserDid recipientUserDid: String,
+    static func removeIdentities(
+        forRecipientDeviceDid recipientDeviceDid: String,
         from members: [GroupMemberDebugInfo]
     ) -> [String] {
+        let requestedLower = recipientDeviceDid.lowercased()
+        let recipientUserDid = userDid(fromDeviceQualifiedDid: requestedLower)
         let recipientLower = recipientUserDid.lowercased()
+        let isDeviceQualified = requestedLower.contains("#")
         var seen = Set<String>()
         var identities: [String] = []
 
@@ -335,6 +338,17 @@ extension MLSConversationManager {
             guard identityUser == recipientLower else { continue }
             if seen.insert(identity).inserted {
                 identities.append(identity)
+            }
+        }
+
+        if isDeviceQualified {
+            let exactDeviceMatches = identities.filter { $0.lowercased() == requestedLower }
+            if !exactDeviceMatches.isEmpty {
+                return exactDeviceMatches
+            }
+
+            return identities.filter { identity in
+                identity.lowercased() == recipientLower
             }
         }
 

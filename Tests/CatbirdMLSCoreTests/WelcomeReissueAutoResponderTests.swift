@@ -1,4 +1,5 @@
 import GRDB
+import CatbirdMLS
 import Petrel
 import PetrelCatbird
 import XCTest
@@ -43,6 +44,51 @@ final class WelcomeReissueAutoResponderTests: XCTestCase {
         XCTAssertFalse(stateAfterRetry.contains(requestID))
     }
 
+    func testRemoveIdentitiesTargetsOnlyRequestedDeviceQualifiedIdentity() {
+        let members = [
+            makeMember("did:plc:recipient#phone"),
+            makeMember("did:plc:recipient#ipad"),
+            makeMember("did:plc:other#phone"),
+        ]
+
+        let removeDids = MLSConversationManager.removeIdentities(
+            forRecipientDeviceDid: "did:plc:recipient#phone",
+            from: members
+        )
+
+        XCTAssertEqual(removeDids, ["did:plc:recipient#phone"])
+    }
+
+    func testRemoveIdentitiesFallsBackToBareDidOnlyForLegacyMemberIdentity() {
+        let members = [
+            makeMember("did:plc:recipient"),
+            makeMember("did:plc:recipient#ipad"),
+            makeMember("did:plc:other#phone"),
+        ]
+
+        let removeDids = MLSConversationManager.removeIdentities(
+            forRecipientDeviceDid: "did:plc:recipient#phone",
+            from: members
+        )
+
+        XCTAssertEqual(removeDids, ["did:plc:recipient"])
+    }
+
+    func testRemoveIdentitiesKeepsBareDidRequestLegacyUserWide() {
+        let members = [
+            makeMember("did:plc:recipient#phone"),
+            makeMember("did:plc:recipient#ipad"),
+            makeMember("did:plc:other#phone"),
+        ]
+
+        let removeDids = MLSConversationManager.removeIdentities(
+            forRecipientDeviceDid: "did:plc:recipient",
+            from: members
+        )
+
+        XCTAssertEqual(removeDids, ["did:plc:recipient#phone", "did:plc:recipient#ipad"])
+    }
+
     private func makeManager() async throws -> MLSConversationManager {
         let database = try DatabaseQueue()
         let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
@@ -64,6 +110,14 @@ final class WelcomeReissueAutoResponderTests: XCTestCase {
             recipientDeviceDid: "did:plc:recipient#device",
             requestedAt: ATProtocolDate(date: Date()),
             requestId: requestID
+        )
+    }
+
+    private func makeMember(_ identity: String) -> GroupMemberDebugInfo {
+        GroupMemberDebugInfo(
+            leafIndex: 0,
+            credentialIdentity: Data(identity.utf8),
+            credentialType: "basic"
         )
     }
 }

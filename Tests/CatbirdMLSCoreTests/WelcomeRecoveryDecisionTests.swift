@@ -7,6 +7,7 @@ final class WelcomeRecoveryDecisionTests: XCTestCase {
             welcomeFailure: .noMatchingKeyPackage,
             priorReissueAttempts: 2,
             hasCurrentAdmin: true,
+            serverListsCurrentUserAsMember: true,
             groupInfoUnrecoverable: false,
             externalCommitAlreadyFailed: false,
             lastSeenEpoch: 7
@@ -18,11 +19,12 @@ final class WelcomeRecoveryDecisionTests: XCTestCase {
         )
     }
 
-    func testMissingWelcomeRequestsReissueBeforeExternalCommitWhenAdminExists() {
+    func testMissingWelcomeRequestsReissueBeforeExternalCommitWhenCurrentUserIsServerMember() {
         let decision = WelcomeRecoveryPolicy.decide(
             welcomeFailure: .welcomeUnavailable,
             priorReissueAttempts: 0,
             hasCurrentAdmin: true,
+            serverListsCurrentUserAsMember: true,
             groupInfoUnrecoverable: false,
             externalCommitAlreadyFailed: false,
             lastSeenEpoch: 1
@@ -34,11 +36,12 @@ final class WelcomeRecoveryDecisionTests: XCTestCase {
         )
     }
 
-    func testExpiredWelcomeRequestsReissueBeforeExternalCommitWhenAdminExists() {
+    func testExpiredWelcomeRequestsReissueBeforeExternalCommitWhenCurrentUserIsServerMember() {
         let decision = WelcomeRecoveryPolicy.decide(
             welcomeFailure: .welcomeExpired,
             priorReissueAttempts: 1,
             hasCurrentAdmin: true,
+            serverListsCurrentUserAsMember: true,
             groupInfoUnrecoverable: false,
             externalCommitAlreadyFailed: false,
             lastSeenEpoch: 4
@@ -48,6 +51,20 @@ final class WelcomeRecoveryDecisionTests: XCTestCase {
             decision,
             .requestReissue(reason: "Welcome expired", nextAttempt: 2)
         )
+    }
+
+    func testMissingWelcomeDoesNotRequestReissueWhenCurrentUserIsNotServerMember() {
+        let decision = WelcomeRecoveryPolicy.decide(
+            welcomeFailure: .welcomeUnavailable,
+            priorReissueAttempts: 0,
+            hasCurrentAdmin: true,
+            serverListsCurrentUserAsMember: false,
+            groupInfoUnrecoverable: false,
+            externalCommitAlreadyFailed: false,
+            lastSeenEpoch: 16
+        )
+
+        XCTAssertEqual(decision, .externalCommitWithHistoryGap(lastSeenEpoch: 16))
     }
 
     func testNoMatchingKeyPackageEscalatesToExternalCommitAfterThreeAttempts() {

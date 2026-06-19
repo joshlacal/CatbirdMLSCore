@@ -70,7 +70,7 @@ enum WelcomeRecoveryPolicy {
 
         if canRequestReissue {
             if priorReissueAttempts < maxReissueAttempts,
-               serverListsCurrentUserAsMember || hasCurrentAdmin
+               serverListsCurrentUserAsMember
             {
                 return .requestReissue(
                     reason: welcomeFailure.reason,
