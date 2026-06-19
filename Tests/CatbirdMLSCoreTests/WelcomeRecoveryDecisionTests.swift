@@ -80,6 +80,40 @@ final class WelcomeRecoveryDecisionTests: XCTestCase {
         )
     }
 
+    func testNoMatchingKeyPackageRequestsReissueWhenServerListsCurrentUserAsMemberEvenWithoutAdmin() {
+        let decision = WelcomeRecoveryPolicy.decide(
+            welcomeFailure: .noMatchingKeyPackage,
+            priorReissueAttempts: 1,
+            hasCurrentAdmin: false,
+            serverListsCurrentUserAsMember: true,
+            groupInfoUnrecoverable: false,
+            externalCommitAlreadyFailed: false,
+            lastSeenEpoch: 8
+        )
+
+        XCTAssertEqual(
+            decision,
+            .requestReissue(reason: "NoMatchingKeyPackage", nextAttempt: 2)
+        )
+    }
+
+    func testExpiredWelcomeRequestsReissueWhenServerListsCurrentUserAsMemberEvenWithoutAdmin() {
+        let decision = WelcomeRecoveryPolicy.decide(
+            welcomeFailure: .welcomeExpired,
+            priorReissueAttempts: 2,
+            hasCurrentAdmin: false,
+            serverListsCurrentUserAsMember: true,
+            groupInfoUnrecoverable: false,
+            externalCommitAlreadyFailed: false,
+            lastSeenEpoch: 6
+        )
+
+        XCTAssertEqual(
+            decision,
+            .requestReissue(reason: "Welcome expired", nextAttempt: 3)
+        )
+    }
+
     func testMissingWelcomeDoesNotExternalCommitWhenServerListedMemberExhaustsReissues() {
         let decision = WelcomeRecoveryPolicy.decide(
             welcomeFailure: .welcomeUnavailable,
@@ -89,6 +123,40 @@ final class WelcomeRecoveryDecisionTests: XCTestCase {
             groupInfoUnrecoverable: false,
             externalCommitAlreadyFailed: false,
             lastSeenEpoch: 10
+        )
+
+        XCTAssertEqual(
+            decision,
+            .surrender(reason: "Welcome reissue attempts exhausted", retryAfter: nil)
+        )
+    }
+
+    func testNoMatchingKeyPackageDoesNotExternalCommitWhenServerListedMemberExhaustsReissues() {
+        let decision = WelcomeRecoveryPolicy.decide(
+            welcomeFailure: .noMatchingKeyPackage,
+            priorReissueAttempts: 3,
+            hasCurrentAdmin: false,
+            serverListsCurrentUserAsMember: true,
+            groupInfoUnrecoverable: false,
+            externalCommitAlreadyFailed: false,
+            lastSeenEpoch: 14
+        )
+
+        XCTAssertEqual(
+            decision,
+            .surrender(reason: "Welcome reissue attempts exhausted", retryAfter: nil)
+        )
+    }
+
+    func testExpiredWelcomeDoesNotExternalCommitWhenServerListedMemberExhaustsReissues() {
+        let decision = WelcomeRecoveryPolicy.decide(
+            welcomeFailure: .welcomeExpired,
+            priorReissueAttempts: 3,
+            hasCurrentAdmin: false,
+            serverListsCurrentUserAsMember: true,
+            groupInfoUnrecoverable: false,
+            externalCommitAlreadyFailed: false,
+            lastSeenEpoch: 15
         )
 
         XCTAssertEqual(
