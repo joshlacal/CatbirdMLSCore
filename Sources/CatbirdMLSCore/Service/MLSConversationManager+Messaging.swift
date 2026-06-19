@@ -6236,6 +6236,18 @@ public extension MLSConversationManager {
         throw MLSConversationError.operationFailed("External Commit forbidden (HTTP 403)")
       }
 
+      if Self.isExternalCommitBootstrapSignal(error) {
+        logger.warning(
+          "🚨 [External Commit Fallback] 410/groupReset for \(convoId.prefix(16)) — External Commit cannot proceed without GroupInfo; racing first-responder bootstrap"
+        )
+        if let bootstrappedGroupId = await attemptFirstResponderBootstrapAfterExternalCommitGroupReset(
+          convoId: convoId,
+          userDid: userDid
+        ) {
+          return bootstrappedGroupId
+        }
+      }
+
       // Check if this is a stale GroupInfo error - request refresh from active members
       let isStaleGroupInfo =
         errorMessage.contains("expired") || errorMessage.contains("stale")
@@ -6340,6 +6352,88 @@ public extension MLSConversationManager {
 
       throw error
     }
+  }
+
+  private func attemptFirstResponderBootstrapAfterExternalCommitGroupReset(
+    convoId: String,
+    userDid: String
+  ) async -> String? {
+    guard await isGroupInfoMissing(convoId: convoId) else {
+      logger.warning(
+        "⚠️ [External Commit Fallback] 410/groupReset signal for \(convoId.prefix(16)) but GroupInfo probe no longer reports missing; leaving normal retry handling in place"
+      )
+      return nil
+    }
+
+    guard let target = await bootstrapTargetForExternalCommitGroupReset(
+      convoId: convoId,
+      userDid: userDid
+    ) else {
+      logger.warning(
+        "⚠️ [External Commit Fallback] GroupInfo absent for \(convoId.prefix(16)) but no local conversation row is available for bootstrap"
+      )
+      do {
+        try await markConversationNeedsReset(convoId)
+      } catch {
+        logger.error(
+          "❌ [MLS-REJOIN] PERSISTENCE FAILURE (markConversationNeedsReset, external-commit-410-bootstrap-missing-target) for \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+      if let recoveryManager = await mlsClient.recovery(for: userDid) {
+        await recoveryManager.clearRejoinTrackingForFreshReset(convoId: convoId)
+      }
+      return nil
+    }
+
+    await attemptFirstResponderBootstrap(
+      convoId: convoId,
+      userDid: userDid,
+      pendingNewGroupIdHex: target.groupIdHex,
+      observedGeneration: target.observedGeneration,
+      preDeleteAuthHex: nil
+    )
+
+    guard let groupIdData = Data(hexEncoded: target.groupIdHex),
+      await mlsClient.groupExists(for: userDid, groupId: groupIdData)
+    else {
+      logger.info(
+        "⏳ [External Commit Fallback] Bootstrap dispatched for \(convoId.prefix(16)) but local group is not present yet; next sync/open will retry"
+      )
+      return nil
+    }
+
+    if let recoveryManager = await mlsClient.recovery(for: userDid) {
+      await recoveryManager.clearRejoinTracking(convoId: convoId)
+    }
+    logger.info(
+      "✅ [External Commit Fallback] First-responder bootstrap initialized \(convoId.prefix(16))"
+    )
+    return target.groupIdHex
+  }
+
+  private func bootstrapTargetForExternalCommitGroupReset(
+    convoId: String,
+    userDid: String
+  ) async -> (groupIdHex: String, observedGeneration: Int64?)? {
+    if let convo = conversations[convoId], !convo.groupId.isEmpty {
+      return (convo.groupId, convo.resetGeneration.map { Int64($0) })
+    }
+
+    do {
+      if let localConvo = try await storage.fetchConversation(
+        conversationID: convoId,
+        currentUserDID: userDid,
+        database: database
+      ) {
+        return (localConvo.groupID.hexEncodedString(), localConvo.pendingResetGeneration)
+      }
+    } catch {
+      logger.warning(
+        "⚠️ [External Commit Fallback] Failed to load bootstrap target for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+    }
+
+    return nil
   }
 
   /// Update group state after successfully joining via Welcome or External Commit.

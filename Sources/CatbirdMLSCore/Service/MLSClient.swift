@@ -37,13 +37,15 @@ public actor MLSClient {
     reconcileLocalOnly: [String]?,
     reconcileDeviceVerified: Bool? = nil
   ) -> [String] {
-    let maxLocalPackages = 100
+    let verifiedMaxLocalPackages = 100
+    let unverifiedMaxLocalPackages = 500
 
     guard reconcileDeviceVerified != false else {
       // If not verified, we don't sync with the server's list, but we MUST
-      // still cap local packages to prevent unbounded local build up (e.g. 500+).
-      if localHashes.count > maxLocalPackages {
-        let excessCount = localHashes.count - maxLocalPackages
+      // still cap extreme local buildup. Keep a larger buffer here because
+      // consumed-but-pending invite key packages may still be needed for Welcome.
+      if localHashes.count > unverifiedMaxLocalPackages {
+        let excessCount = localHashes.count - unverifiedMaxLocalPackages
         return Array(localHashes.prefix(excessCount))
       }
       return []
@@ -60,14 +62,60 @@ public actor MLSClient {
 
     // Also enforce the hard 100 cap for verified devices to prevent any edge case buildup
     let remainingCount = localHashes.count - toEvict.count
-    if remainingCount > maxLocalPackages {
-      let excessCount = remainingCount - maxLocalPackages
+    if remainingCount > verifiedMaxLocalPackages {
+      let excessCount = remainingCount - verifiedMaxLocalPackages
       let notEvictedYet = localHashes.filter { !toEvict.contains($0) }
       let extraEvictions = Array(notEvictedYet.prefix(excessCount))
       toEvict.append(contentsOf: extraEvictions)
     }
 
     return toEvict
+  }
+
+  internal nonisolated static func httpStatusCode(from error: Error) -> Int? {
+    if let apiError = error as? MLSAPIError,
+       case .httpError(let statusCode, _) = apiError
+    {
+      return statusCode
+    }
+
+    if let networkError = error as? NetworkError {
+      switch networkError {
+      case .responseError(let statusCode):
+        return statusCode
+      case .serverError(let code, _):
+        return code
+      default:
+        break
+      }
+    }
+
+    let description = (error as? LocalizedError)?.errorDescription
+      ?? (error as NSError).localizedDescription
+    return firstHTTPStatusCode(in: description)
+  }
+
+  private nonisolated static func firstHTTPStatusCode(in description: String) -> Int? {
+    let lowered = description.lowercased()
+    for marker in ["status code", "http", "server error"] {
+      guard let markerRange = lowered.range(of: marker) else { continue }
+      var idx = markerRange.upperBound
+      while idx < lowered.endIndex, !lowered[idx].isNumber {
+        idx = lowered.index(after: idx)
+      }
+
+      var digits = ""
+      while idx < lowered.endIndex, lowered[idx].isASCII, lowered[idx].isNumber {
+        digits.append(lowered[idx])
+        idx = lowered.index(after: idx)
+      }
+
+      if let code = Int(digits), (100...599).contains(code) {
+        return code
+      }
+    }
+
+    return nil
   }
 
   public nonisolated static var isSuspensionInProgress: Bool {
@@ -1444,6 +1492,64 @@ public actor MLSClient {
         throw MLSError.operationFailed
 
       } catch {
+        if let statusCode = Self.httpStatusCode(from: error) {
+          if statusCode == 409 {
+            // Petrel sometimes throws NetworkError.responseError before
+            // MLSAPIClient can wrap the response as MLSAPIError.httpError.
+            logger.warning(
+              "⚠️ [MLSClient.joinByExternalCommit] HTTP 409 epoch conflict on attempt \(attempt) — retrying with fresh GroupInfo"
+            )
+            await discardPendingIfNeeded()
+            if attempt < maxRetries {
+              let waitSeconds = 1 * attempt
+              let jitterMs = UInt64.random(in: 0...500)
+              try await Task.sleep(for: .seconds(waitSeconds))
+              try await Task.sleep(for: .milliseconds(jitterMs))
+              continue
+            }
+          } else if statusCode == 429 {
+            logger.warning(
+              "⚠️ [MLSClient.joinByExternalCommit] HTTP 429 RATE LIMITED on attempt \(attempt) — surfacing retry hint to caller"
+            )
+            await discardPendingIfNeeded()
+            let retryMs = MLSRecoveryManager.extractRetryAfterMs(error) ?? 5_000
+            let retrySeconds = max(1, Int((Double(retryMs) / 1000.0).rounded(.up)))
+            logger.warning(
+              "   Retry-after hint: \(retrySeconds)s (raw \(retryMs)ms; default applied if no hint)"
+            )
+            throw MLSError.rateLimited(retryAfterSeconds: retrySeconds)
+          } else if statusCode == 403 {
+            logger.warning(
+              "⚠️ [MLSClient.joinByExternalCommit] External Commit rejected (HTTP 403) - requesting GroupInfo refresh"
+            )
+            await discardPendingIfNeeded()
+            do {
+              let (requested, activeMembers) = try await apiClient.groupInfoRefresh(convoId: convoId)
+              if requested {
+                logger.info(
+                  "✅ [MLSClient.joinByExternalCommit] GroupInfo refresh requested - \(activeMembers ?? 0) active members notified"
+                )
+              } else {
+                logger.warning(
+                  "⚠️ [MLSClient.joinByExternalCommit] No active members to refresh GroupInfo")
+              }
+            } catch {
+              logger.warning(
+                "⚠️ [MLSClient.joinByExternalCommit] GroupInfo refresh request failed: \(error.localizedDescription)"
+              )
+            }
+
+            if attempt < maxRetries {
+              let waitSeconds = 2 * attempt
+              logger.info(
+                "🔄 [MLSClient.joinByExternalCommit] Waiting ~\(waitSeconds)s before retry after 403..."
+              )
+              try await Task.sleep(for: .seconds(waitSeconds))
+              continue
+            }
+          }
+        }
+
         // Non-MlsError - don't retry
         lastError = error
         logger.error(

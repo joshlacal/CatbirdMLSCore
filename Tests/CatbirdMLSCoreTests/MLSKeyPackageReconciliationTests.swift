@@ -33,4 +33,17 @@ final class MLSKeyPackageReconciliationTests: XCTestCase {
 
     XCTAssertEqual(toEvict, [])
   }
+
+  func testUnverifiedDevicePreservesModerateLocalBacklogForPendingWelcomes() {
+    let localHashes = (0..<141).map { "local-\($0)" }
+
+    let toEvict = MLSClient.localKeyPackageHashesToEvict(
+      localHashes: localHashes,
+      legacyServerHashes: [],
+      reconcileLocalOnly: localHashes,
+      reconcileDeviceVerified: false
+    )
+
+    XCTAssertEqual(toEvict, [])
+  }
 }

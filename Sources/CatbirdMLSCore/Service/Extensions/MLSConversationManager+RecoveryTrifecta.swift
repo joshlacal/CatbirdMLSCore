@@ -169,4 +169,13 @@ extension MLSConversationManager {
     }
     return false
   }
+
+  /// Whether an External Commit failure is the post-reset/bootstrap signal:
+  /// the server's active crypto session exists but cannot serve GroupInfo
+  /// (typically HTTP 410/groupReset), so retrying External Commit will loop.
+  ///
+  /// Pure helper; safe to unit-test without instantiating the manager.
+  static func isExternalCommitBootstrapSignal(_ error: Error) -> Bool {
+    MLSAPIClient.isGroupResetResponse(error)
+  }
 }

@@ -6,29 +6,26 @@ import OSLog
 import Petrel
 import PetrelCatbird
 import Synchronization
-// MLSConversationError moved to MLSTypes.swift
 
+// MLSConversationError moved to MLSTypes.swift
 
 // Coordinators moved to MLSCoordinators.swift
 
-/// MLS group state tracking
+// MLS group state tracking
 // MLSGroupState moved to MLSTypes.swift
-
 
 // Structs moved to MLSTypes.swift
 
-
-/// Pending operation
+// Pending operation
 // Final types moved to MLSTypes.swift
-
 
 // MARK: - Conversation Manager
 
 /// Tracks conversation initialization state to prevent race conditions
 public enum ConversationInitState: Sendable {
-  case initializing
-  case active
-  case failed(String)
+    case initializing
+    case active
+    case failed(String)
 }
 
 /// Main coordinator for MLS conversation management
@@ -36,1663 +33,1632 @@ public enum ConversationInitState: Sendable {
 /// server synchronization, key package management, and epoch updates
 @Observable
 public final class MLSConversationManager {
-  public let logger = Logger(subsystem: "blue.catbird", category: "MLSConversationManager")
+    public let logger = Logger(subsystem: "blue.catbird", category: "MLSConversationManager")
 
-  // MARK: - Dependencies
+    // MARK: - Dependencies
 
-  public let apiClient: MLSAPIClient
-  public let atProtoClient: ATProtoClient
-  public let mlsClient: MLSClient
-  public let storage: MLSStorage
-  @ObservationIgnored public var database: MLSDatabase
-  public let configuration: MLSConfiguration
+    public let apiClient: MLSAPIClient
+    public let atProtoClient: ATProtoClient
+    public let mlsClient: MLSClient
+    public let storage: MLSStorage
+    @ObservationIgnored public var database: MLSDatabase
+    public let configuration: MLSConfiguration
 
-  /// Called when the database pool is refreshed after recovery.
-  /// Allows the app layer to update its own cached pool references.
-  @ObservationIgnored public var onDatabaseRefreshed: ((any DatabaseWriter) -> Void)?
-  
-  /// Trust checker for determining if incoming conversations are from trusted senders
-  /// Used to set initial requestState when syncing new conversations
-  public let trustChecker: MLSTrustChecker
+    /// Called when the database pool is refreshed after recovery.
+    /// Allows the app layer to update its own cached pool references.
+    @ObservationIgnored public var onDatabaseRefreshed: ((any DatabaseWriter) -> Void)?
 
-  /// Database manager owned by this conversation manager (one per user session)
-  /// CRITICAL: Each conversation manager owns its database pool lifecycle
-  public let databaseManager: MLSGRDBManager
+    /// Trust checker for determining if incoming conversations are from trusted senders
+    /// Used to set initial requestState when syncing new conversations
+    public let trustChecker: MLSTrustChecker
 
-  // MARK: - State
+    /// Database manager owned by this conversation manager (one per user session)
+    /// CRITICAL: Each conversation manager owns its database pool lifecycle
+    public let databaseManager: MLSGRDBManager
 
-  /// Active conversations indexed by conversation ID
-  /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
-  public let conversations = ObservableMutexDictionary<String, BlueCatbirdMlsChatDefs.ConvoView>()
+    // MARK: - State
 
-  /// MLS group states indexed by group ID
-  /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
-  public let groupStates = ObservableMutexDictionary<String, MLSGroupState>()
+    /// Active conversations indexed by conversation ID
+    /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
+    public let conversations = ObservableMutexDictionary<String, BlueCatbirdMlsChatDefs.ConvoView>()
 
-  /// Pending operations queue
-  // Pending operations queue (MLSOperation type not defined - removed)
+    /// MLS group states indexed by group ID
+    /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
+    public let groupStates = ObservableMutexDictionary<String, MLSGroupState>()
 
-  /// Observers for state changes
-  /// Protected by Mutex for thread-safe access from any isolation context
-  public let observers = Mutex<[MLSStateObserver]>([])
+    // Pending operations queue
+    // Pending operations queue (MLSOperation type not defined - removed)
 
-  /// Current user's DID
-  public var userDid: String?
+    /// Observers for state changes
+    /// Protected by Mutex for thread-safe access from any isolation context
+    public let observers = Mutex<[MLSStateObserver]>([])
 
-  /// Public accessor for current user DID (for optimistic UI)
-  public var currentUserDID: String? {
-    userDid
-  }
+    /// Request ids currently or already handled by the automatic Welcome
+    /// reissue responder. Prevents global and per-conversation streams from
+    /// staging duplicate local commits for the same server request.
+    @ObservationIgnored let welcomeReissueResponseState = Mutex<Set<String>>([])
 
-  /// Sync state protected by Mutex (Swift 6 Synchronization)
-  /// Using Mutex<Bool> to atomically check-and-set sync status
-  public let syncState = Mutex<Bool>(false)
+    /// Current user's DID
+    public var userDid: String?
 
-  /// Processing counters for MLS message handling diagnostics
-  public let processingAttemptCounter = Mutex<Int64>(0)
-  public let processingMutationCounter = Mutex<Int64>(0)
-  public let selfDecryptFailureCounters = Mutex<[String: Int]>([:])
-  
-  /// FIX D: Track persistent decryption failures per message ID for nuclear rejoin
-  /// When a message fails decryption 3+ times, trigger forceRejoin for the conversation
-  public let persistentDecryptionFailures = Mutex<[String: Int]>([:])
-  public let nuclearRejoinThreshold = 3
-  
-  /// Rejoin throttling to prevent concurrent/rapid rejoin storms
-  public let rejoinInProgress = Mutex<Bool>(false)
-  public let rejoinInProgressConversationID = Mutex<String?>(nil)
-  public let rejoinAttemptTimestamps = Mutex<[String: Date]>([:])
-  public let rejoinCooldownSeconds: TimeInterval = 60
-
-  /// Public accessor for sync status (reads from mutex)
-  public var isSyncing: Bool {
-    get { syncState.withLock { $0 } }
-    set { syncState.withLock { $0 = newValue } }
-  }
-  
-  /// Global sync pause flag - set during account switch to reject new sync operations
-  /// Using atomic bool for thread safety
-  private let _isSyncPaused = Mutex<Bool>(false)
-
-  public var isSyncPaused: Bool {
-    get { _isSyncPaused.withLock { $0 } }
-    set { _isSyncPaused.withLock { $0 = newValue } }
-  }
-
-  /// Initialization status
-  public var isInitialized = false
-
-  /// Background cleanup task
-  public var cleanupTask: Task<Void, Never>?
-
-  /// Background periodic sync task
-  public var periodicSyncTask: Task<Void, Never>?
-
-  /// Background orphan adoption task
-  public var orphanAdoptionTask: Task<Void, Never>?
-
-  /// Background GroupInfo refresh task to keep data fresh for External Commit
-  public var groupInfoRefreshTask: Task<Void, Never>?
-
-  /// Background task for detecting and rejoining missing conversations
-  /// CRITICAL: This task MUST be tracked to ensure proper cancellation during shutdown
-  /// Previously this was a fire-and-forget Task.detached which caused 40+ second hangs
-  /// during account switching as External Commit operations continued running
-  public var missingConversationsTask: Task<Void, Never>?
-
-  /// Startup validation can detect a systemic local MLS-state loss where
-  /// destructive per-conversation recovery would fan out into an External Commit
-  /// storm. While this horizon is active, automatic missing-conversation recovery
-  /// is suppressed; user-driven/manual repair paths remain available.
-  internal var automaticMissingConversationRecoverySuppressedUntil: Date?
-
-  /// Background task for deferred epoch recovery (conversations flagged needsRejoin during sync).
-  /// Single-flight: only one recovery pass runs at a time, subsequent sync passes skip if active.
-  /// Tracked for cancellation during shutdown/account switch.
-  public var deferredEpochRecoveryTask: Task<Void, Never>?
-
-  /// Background task for initial key package refresh during startup
-  public var keyPackageRefreshTask: Task<Void, Never>?
-
-  /// Session generation ID - changes on each initialization
-  /// Used to invalidate stale operations from previous account/session
-  public let sessionGeneration = UUID()
-
-  /// Active background tasks tracked for cancellation
-  public var activeTasks: Set<UUID> = []
-  public let activeTasksLock = NSLock()
-
-  /// Key package monitor for smart replenishment
-  public var keyPackageMonitor: MLSKeyPackageMonitor? {
-    didSet {
-      if let monitor = keyPackageMonitor {
-        Task { await keyPackageManager.setMonitor(monitor) }
-      }
+    /// Public accessor for current user DID (for optimistic UI)
+    public var currentUserDID: String? {
+        userDid
     }
-  }
 
-  /// Consumption tracker for key package usage analytics
-  public var consumptionTracker: MLSConsumptionTracker?
+    /// Sync state protected by Mutex (Swift 6 Synchronization)
+    /// Using Mutex<Bool> to atomically check-and-set sync status
+    public let syncState = Mutex<Bool>(false)
 
-  /// Recently sent message tracking for deduplication (convoId -> (idempotencyKey -> timestamp))
-  public var recentlySentMessages: [String: [String: Date]] = [:]
-  private let deduplicationWindow: TimeInterval = 60  // 60 seconds
-  public var deduplicationCleanupTimer: Timer?
+    /// Processing counters for MLS message handling diagnostics
+    public let processingAttemptCounter = Mutex<Int64>(0)
+    public let processingMutationCounter = Mutex<Int64>(0)
+    public let selfDecryptFailureCounters = Mutex<[String: Int]>([:])
 
-  /// In-memory dedup gate for delivery acks: messageIds currently being sent or already confirmed.
-  /// Primary dedup check (DB check is the persistent fallback for restarts).
-  /// Protected by actor isolation of MLSConversationManager.
-  var pendingDeliveryAcks: Set<String> = []
+    /// FIX D: Track persistent decryption failures per message ID for nuclear rejoin
+    /// When a message fails decryption 3+ times, trigger forceRejoin for the conversation
+    public let persistentDecryptionFailures = Mutex<[String: Int]>([:])
+    public let nuclearRejoinThreshold = 3
 
-  /// Pending sent messages for proactive own-message identification (messageID -> PendingMessage)
-  /// Prevents re-processing own messages through FFI which would advance ratchet incorrectly
-  public var pendingMessages: [String: PendingMessage] = [:]
+    /// Rejoin throttling to prevent concurrent/rapid rejoin storms
+    public let rejoinInProgress = Mutex<Bool>(false)
+    public let rejoinInProgressConversationID = Mutex<String?>(nil)
+    public let rejoinAttemptTimestamps = Mutex<[String: Date]>([:])
+    public let rejoinCooldownSeconds: TimeInterval = 60
 
-  public let pendingMessagesLock = NSLock()
-  public let pendingMessageTimeout: TimeInterval = 300  // 5 minutes
+    /// Public accessor for sync status (reads from mutex)
+    public var isSyncing: Bool {
+        get { syncState.withLock { $0 } }
+        set { syncState.withLock { $0 = newValue } }
+    }
 
-  /// Track conversations where the current user was explicitly removed to block unauthorized rejoins
-  private var removalTombstones: Set<String> = []
-  private let removalTombstoneLock = NSLock()
-  private let removalTombstoneKeyPrefix = "mls.removal_tombstones."
+    /// Global sync pause flag - set during account switch to reject new sync operations
+    /// Using atomic bool for thread safety
+    private let _isSyncPaused = Mutex<Bool>(false)
 
-  /// CLIENT E: ensure the bootstrap-pending half-staged scan only runs
-  /// once per process per user. Cleared on account switch via session
-  /// generation rollover (this manager instance is also discarded then).
-  internal var didRunBootstrapPendingScan: Bool = false
+    public var isSyncPaused: Bool {
+        get { _isSyncPaused.withLock { $0 } }
+        set { _isSyncPaused.withLock { $0 = newValue } }
+    }
 
-  /// Track own commits to prevent re-processing them via SSE
-  /// Maps commit hash (SHA256 of commit data) -> timestamp
-  /// Commits are removed after 10 minutes to prevent unbounded growth
-  public var ownCommits: [String: Date] = [:]
-  public let ownCommitsLock = NSLock()
-  private let ownCommitTimeout: TimeInterval = 600  // 10 minutes
+    /// Initialization status
+    public var isInitialized = false
 
-  /// Tracks commits the FFI has already applied during this process lifetime.
-  /// Phase D-Swift Task D-S.2 — used to short-circuit duplicate
-  /// processCommit calls that the existing `commit.epoch <= currentEpoch`
-  /// skip can't see (fork resolution, redelivery before the post-merge
-  /// epoch read propagates, etc.). Distinct from `ownCommits` above:
-  /// `ownCommits` is the SEND side ("we created this commit ourselves"),
-  /// `mergedCommitTracker` is the RECEIVE side ("we already merged this
-  /// commit hash"). The two can refer to the same commit at different
-  /// stages of its life. Entries TTL out at 10 minutes.
-  public let mergedCommitTracker = MergedCommitTracker()
+    /// Background cleanup task
+    public var cleanupTask: Task<Void, Never>?
 
-  /// Phase D-Swift D-S.3 — strong reference to the observer registered with
-  /// `MLSClient.shared`. `MLSClient` holds it weakly to avoid a circular
-  /// retain; we keep the strong reference here so the observer outlives
-  /// the closure-creation site at init.
-  internal var ownCommitObserver: OwnCommitClosureObserver?
+    /// Background periodic sync task
+    public var periodicSyncTask: Task<Void, Never>?
 
-  /// Sliding-window tracker for the operationally-unrecoverable rejoin
-  /// trifecta (spec §8.6 / ADR-008 D1, Phase 2 Stage 3 — see
-  /// `docs/superpowers/specs/2026-04-26-mls-auto-reset-phase2-design.md`).
-  ///
-  /// A trifecta is recorded by `recordTrifectaFailure(convoId:)` when ALL
-  /// THREE of these conditions hold within a single rejoin attempt:
-  ///   1. Local FFI state is absent (`groupExists == false`) — true at the
-  ///      EC convergence point because both deferred-recovery callers
-  ///      (`MLSConversationManager+Sync.swift` runDeferredEpochRecovery and
-  ///      `MLSConversationManager+Lifecycle.swift`
-  ///      detectAndRejoinMissingConversations) delete stale local state
-  ///      before invoking the rejoin path, AND
-  ///      `attemptExternalCommitFallback` early-returns on
-  ///      `groupExists == true` (Messaging.swift:5388-5395).
-  ///   2. Welcome fetch returned a 200 with no `welcome` blob (sentinel
-  ///      `MLSAPIError.invalidResponse(message: "No welcome message in
-  ///      response")` — distinct from 404/410, which are device-sync
-  ///      signals, not a missing-Welcome bug).
-  ///   3. External Commit failed with HTTP 409 (epoch race) OR a stale
-  ///      GroupInfo error.
-  ///
-  /// When ≥ `Self.trifectaThreshold` events accumulate within
-  /// `Self.trifectaWindow` seconds for the same convoId, a Mode B
-  /// (`group_state_unrecoverable`) report is dispatched via
-  /// `MLSAPIClient.reportRecoveryFailure` and the window is cleared. Server
-  /// dedupes by `(did, convoId, failureMode)`, so a second dispatch from
-  /// the same client is harmless.
-  ///
-  /// Concurrency: writes to this dict happen across rejoin attempts on
-  /// different convos (cross-convo rejoins are not gated by the per-convo
-  /// `beginRejoinAttempt` lock); guarded by `recoveryFailureWindowLock`.
-  internal var recoveryFailureWindow: [String: [Date]] = [:]
-  internal let recoveryFailureWindowLock = NSLock()
-  internal static let trifectaThreshold = 3
-  internal static let trifectaWindow: TimeInterval = 600  // 10 min
+    /// Background orphan adoption task
+    public var orphanAdoptionTask: Task<Void, Never>?
 
-  /// Track initialization state for conversations to prevent race conditions
-  public var conversationStates: [String: ConversationInitState] = [:]
+    /// Background GroupInfo refresh task to keep data fresh for External Commit
+    public var groupInfoRefreshTask: Task<Void, Never>?
 
-  /// Track group IDs currently being created to prevent reconciliation from deleting them.
-  /// Maps group ID → creation timestamp. Entries are kept for `recentCreationWindow` seconds
-  /// after creation completes, protecting against stale sync responses deleting new conversations.
-  public let groupsBeingCreated = Mutex<[String: Date]>([:])
+    /// Background task for detecting and rejoining missing conversations
+    /// CRITICAL: This task MUST be tracked to ensure proper cancellation during shutdown
+    /// Previously this was a fire-and-forget Task.detached which caused 40+ second hangs
+    /// during account switching as External Commit operations continued running
+    public var missingConversationsTask: Task<Void, Never>?
 
-  /// B15: Per-convo dedup gate for `attemptFirstResponderBootstrap`.
-  ///
-  /// Both the deferred-epoch-recovery loop (after every sync) and the
-  /// missing-convo reconciler (after `getExpectedConversations`) can call
-  /// `attemptFirstResponderBootstrap` for the same `convoId` in parallel.
-  /// Without dedup, two callers race: one creates the group + claims success,
-  /// the other races behind, fails on missing key packages or stale state,
-  /// and calls `deleteGroup` on the SAME group — destroying the winner's
-  /// work. The user sees the convo briefly heal (External Commit lands) and
-  /// then break again seconds later.
-  ///
-  /// Mirrors the in-flight pattern around `joinByExternalCommit`
-  /// (`MLSClient.inFlightExternalCommits` →
-  /// `⏳ [MLSClient.joinByExternalCommit] Reusing in-flight External Commit`),
-  /// but bootstrap returns `Void` so a simple set + early-return suffices.
-  public let bootstrappingConvos = Mutex<Set<String>>([])
+    /// Startup validation can detect a systemic local MLS-state loss where
+    /// destructive per-conversation recovery would fan out into an External Commit
+    /// storm. While this horizon is active, automatic missing-conversation recovery
+    /// is suppressed; user-driven/manual repair paths remain available.
+    var automaticMissingConversationRecoverySuppressedUntil: Date?
 
-  /// Flag indicating the manager is preparing for shutdown/storage reset
-  public var isShuttingDown = false
+    /// Background task for deferred epoch recovery (conversations flagged needsRejoin during sync).
+    /// Single-flight: only one recovery pass runs at a time, subsequent sync passes skip if active.
+    /// Tracked for cancellation during shutdown/account switch.
+    public var deferredEpochRecoveryTask: Task<Void, Never>?
 
-  /// Fix C: Per-conversation External Commit 429 retry counter. Capped at
-  /// `maxExternalCommit429Retries` per conversation per process lifetime so a
-  /// persistently-rate-limited convo doesn't spin retries forever. In-memory
-  /// only — cleared by app restart, which is fine because the server's rate
-  /// limit also has a finite reset window.
-  internal let externalCommit429RetryCounts = Mutex<[String: Int]>([:])
-  internal static let maxExternalCommit429Retries = 2
+    /// Background task for initial key package refresh during startup
+    public var keyPackageRefreshTask: Task<Void, Never>?
 
-  // Note: isSuspending is defined in MLSConversationManager+Lifecycle.swift as a static-backed
-  // computed property for 0xdead10cc prevention (extensions can't add stored instance properties)
+    /// Session generation ID - changes on each initialization
+    /// Used to invalidate stale operations from previous account/session
+    public let sessionGeneration = UUID()
 
-  /// Serializes MLS message processing per conversation to avoid concurrent ratchet advances
-  public let messageProcessingCoordinator = ConversationProcessingCoordinator()
+    /// Active background tasks tracked for cancellation
+    public var activeTasks: Set<UUID> = []
+    public let activeTasksLock = NSLock()
 
-  /// Current coordination generation assigned at initialization
-  /// Used to detect and abort stale tasks after account switches
-  public let currentCoordinationGeneration: Int
-
-  /// Serializes MLS group operations per group ID to prevent concurrent mutations
-  public let groupOperationCoordinator = GroupOperationCoordinator()
-
-  /// Manages automatic synchronization of new devices to conversations
-  public var deviceSyncManager: MLSDeviceSyncManager?
-  
-  /// Observes and surfaces membership changes (user/device added/removed)
-  public var membershipChangeObserver: MLSMembershipChangeObserver?
-
-  /// Manager for key packages (Phase 3 architecture)
-  internal let keyPackageManager: MLSKeyPackageManager
-
-  /// Device record service for per-device key verification.
-  internal let deviceRecordService: MLSDeviceRecordService
-
-  /// Coordinates message ordering across processes (prevents out-of-order processing)
-  public let messageOrderingCoordinator = MLSMessageOrderingCoordinator()
-
-  /// Serializes message sends per conversation to ensure strict FIFO ordering
-  /// This prevents out-of-order delivery when sending rapid-fire messages
-  public let sendQueueCoordinator = SendQueueCoordinator()
-
-
-  // MARK: - Sync Circuit Breaker
-
-  /// Tracks consecutive sync failures to implement circuit breaker pattern
-  public var consecutiveSyncFailures: Int = 0
-
-  /// Maximum consecutive sync failures before stopping automatic syncing
-  public let maxConsecutiveSyncFailures: Int = 5
-
-  /// Time when sync was last paused due to failures
-  public var syncPausedAt: Date?
-
-  /// How long to pause sync after circuit breaker trips (5 minutes)
-  public let syncPauseDuration: TimeInterval = 300
-  
-  // MARK: - Foreground Sync Coordination
-  
-  /// Tracks when the app last entered foreground (for grace period coordination)
-  public var lastForegroundTime: Date?
-  
-  /// Grace period during which MLS operations should wait for state reload (2 seconds)
-  public let foregroundSyncGracePeriod: TimeInterval = 2.0
-  
-  /// Flag indicating a state reload is currently in progress
-  public var isStateReloadInProgress: Bool = false
-  
-  /// Continuation for waiters blocking on state reload completion
-  public var stateReloadWaiters: [CheckedContinuation<Void, Never>] = []
-
-  // MARK: - Message Reorder Buffer
-
-  /// Buffers out-of-order messages until predecessors arrive
-  /// Key: conversationID, Value: (lastProcessedSeq, bufferedMessages, bufferTimeout)
-  public var messageReorderBuffer: [String: MessageReorderState] = [:]
-  public let messageReorderLock = NSLock()
-
-  /// Maximum time to wait for missing predecessor messages before processing anyway
-  public let messageReorderTimeout: TimeInterval = 5.0  // 5 seconds
-
-  /// Maximum buffer size per conversation before force-flushing
-  public let messageReorderMaxBufferSize: Int = 50
-
-  // MARK: - Configuration
-
-  /// Default cipher suite for new groups
-  public let defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519"
-
-  /// Key package refresh interval (in seconds) - reduced to 4 hours for proactive monitoring
-  /// Spec §10: KEY_PACKAGE_CHECK_INTERVAL_SEC = 300
-  public let keyPackageRefreshInterval: TimeInterval = 300  // 5 minutes
-
-  /// GroupInfo refresh interval (in seconds) - 1 hour proactive refresh
-  /// Reduced from 6 hours so a stale-post-remote-merge blob has at most ~1 hour
-  /// of bad state before this proactive refresh corrects it. WebSocket
-  /// `groupInfoRefreshRequested` events and the 409-on-update fast-retry path
-  /// are the primary recovery channels; this interval is the final safety net
-  /// for cases where both of those fail (e.g. WS not connected, all retries
-  /// exhausted). GroupInfo TTL is 24 hours so this still provides 24x safety
-  /// margin for the upload-cycle.
-  public let groupInfoRefreshInterval: TimeInterval = 3600  // 1 hour
-
-  /// Maximum tolerable epoch divergence between local state and server messages.
-  /// Beyond this threshold, the group is considered irrecoverably diverged and
-  /// marked for automatic reset rather than continued decryption attempts.
-  /// A gap of even 2 means messages can't be decrypted (forward secrecy), but
-  /// small gaps (1-5) can occur normally during concurrent group operations.
-  /// Spec §10: EPOCH_DIVERGENCE_THRESHOLD = 5
-  let maxEpochDivergence: UInt64 = 5
-
-  /// Maximum retry attempts for failed operations
-  private let maxRetries = 3
-
-  // MARK: - Initialization
-
-  /// Initialize MLS Conversation Manager
-  /// - Parameters:
-  ///   - apiClient: MLS API client for server communication
-  ///   - database: GRDB database queue for MLS storage
-  ///   - userDid: Current user's DID
-  ///   - storage: MLS storage layer (defaults to shared instance)
-  ///   - configuration: MLS configuration (defaults to standard config)
-  ///   - atProtoClient: ATProtoClient for device registration
-  public init(
-    apiClient: MLSAPIClient,
-    database: MLSDatabase,
-    userDid: String? = nil,
-    storage: MLSStorage = .shared,
-    configuration: MLSConfiguration = .default,
-    atProtoClient: ATProtoClient,
-    trustChecker: MLSTrustChecker = AlwaysTrustChecker()
-  ) {
-    self.apiClient = apiClient
-    self.atProtoClient = atProtoClient
-    self.database = database
-    self.userDid = userDid
-    self.mlsClient = MLSClient.shared  // Use singleton to persist groups
-    self.storage = storage
-    self.trustChecker = trustChecker
-
-    // CRITICAL FIX: Create owned database manager (NOT shared singleton)
-    // Each conversation manager owns its database pool lifecycle
-    self.databaseManager = MLSGRDBManager()
-
-    // Initialize Key Package Manager (Phase 3)
-    self.keyPackageManager = MLSKeyPackageManager(
-      client: MLSClient.shared,
-      apiClient: apiClient,
-      monitor: nil  // Monitor set later via property observer
-    )
-
-
-    self.deviceRecordService = MLSDeviceRecordService(
-      atProtoClient: atProtoClient,
-      mlsClient: MLSClient.shared
-    )
-
-    self.configuration = configuration
-    
-      
-      
-    // Capture current coordination generation to detect stale task execution later
-    self.currentCoordinationGeneration =
-      MLSCoordinationStore.shared.getState().coordinationGeneration
-
-      // Wire up active-user check to prevent refresh spam for inactive users
-      let dbManager = self.databaseManager
-      Task { [self] in
-        await self.keyPackageManager.setActiveUserCheck { userDid in
-          await dbManager.isActiveUser(userDid)
+    /// Key package monitor for smart replenishment
+    public var keyPackageMonitor: MLSKeyPackageMonitor? {
+        didSet {
+            if let monitor = keyPackageMonitor {
+                Task { await keyPackageManager.setMonitor(monitor) }
+            }
         }
-      }
-
-    // Phase D-Swift D-S.3: register an own-commit observer so the External
-    // Commit producer in `MLSClient.joinByExternalCommit` (the only
-    // producer that didn't previously call `trackOwnCommit`) tracks its
-    // commits the way the other three producers do. We use a stand-alone
-    // observer object — not `self` directly — to avoid coupling the
-    // manager's Sendable / @Observable shape to the protocol requirements.
-    let trackCommit: @Sendable (Data) -> Void = { [weak self] bytes in
-      self?.trackOwnCommit(bytes)
-    }
-    let observer = OwnCommitClosureObserver(handler: trackCommit)
-    self.ownCommitObserver = observer
-    Task { [observer] in
-      await MLSClient.shared.setOwnCommitObserver(observer)
     }
 
-    // Initialize device sync manager for multi-device support
-    self.deviceSyncManager = MLSDeviceSyncManager(apiClient: apiClient, mlsClient: mlsClient)
-    
-    // Initialize membership change observer for transparency
-    if let userDid = userDid {
-      self.membershipChangeObserver = MLSMembershipChangeObserver(
-        database: database,
-        currentUserDID: userDid
-      )
-    } else {
-      self.membershipChangeObserver = nil
-    }
+    /// Consumption tracker for key package usage analytics
+    public var consumptionTracker: MLSConsumptionTracker?
 
-    logger.info("MLSConversationManager initialized with UniFFI client (using shared MLSClient)")
-    configuration.validate()
-  }
+    /// Recently sent message tracking for deduplication (convoId -> (idempotencyKey -> timestamp))
+    public var recentlySentMessages: [String: [String: Date]] = [:]
+    private let deduplicationWindow: TimeInterval = 60 // 60 seconds
+    public var deduplicationCleanupTimer: Timer?
 
-  /// Cleanup resources when conversation manager is deallocated
-  /// Ensures database connections are properly closed
-  deinit {
-    let userDidPrefix = self.userDid?.prefix(20) ?? "unknown"
-    logger.info("🧹 [deinit] MLSConversationManager deallocating for user: \(userDidPrefix)")
+    /// In-memory dedup gate for delivery acks: messageIds currently being sent or already confirmed.
+    /// Primary dedup check (DB check is the persistent fallback for restarts).
+    /// Protected by actor isolation of MLSConversationManager.
+    var pendingDeliveryAcks: Set<String> = []
 
-    // Close database connection synchronously
-    // Note: deinit cannot be async, but databaseManager's deinit will close connections
-    // The databaseManager actor's deinit will handle the actual database closure
+    /// Pending sent messages for proactive own-message identification (messageID -> PendingMessage)
+    /// Prevents re-processing own messages through FFI which would advance ratchet incorrectly
+    public var pendingMessages: [String: PendingMessage] = [:]
 
-    logger.info("✅ [deinit] MLSConversationManager cleanup completed")
-  }
+    public let pendingMessagesLock = NSLock()
+    public let pendingMessageTimeout: TimeInterval = 300 // 5 minutes
 
-  internal func removeCachedGroupState(
-    conversationID: String,
-    groupID: Data? = nil,
-    groupIdHex: String? = nil
-  ) {
-    groupStates.removeValue(forKey: conversationID)
+    /// Track conversations where the current user was explicitly removed to block unauthorized rejoins
+    private var removalTombstones: Set<String> = []
+    private let removalTombstoneLock = NSLock()
+    private let removalTombstoneKeyPrefix = "mls.removal_tombstones."
 
-    if let groupIdHex, !groupIdHex.isEmpty {
-      groupStates.removeValue(forKey: groupIdHex)
-    }
+    /// CLIENT E: ensure the bootstrap-pending half-staged scan only runs
+    /// once per process per user. Cleared on account switch via session
+    /// generation rollover (this manager instance is also discarded then).
+    var didRunBootstrapPendingScan: Bool = false
 
-    if let groupID {
-      groupStates.removeValue(forKey: groupID.hexEncodedString())
-    }
-  }
+    /// Track own commits to prevent re-processing them via SSE
+    /// Maps commit hash (SHA256 of commit data) -> timestamp
+    /// Commits are removed after 10 minutes to prevent unbounded growth
+    public var ownCommits: [String: Date] = [:]
+    public let ownCommitsLock = NSLock()
+    private let ownCommitTimeout: TimeInterval = 600 // 10 minutes
 
-  // MARK: - Database Pool Refresh
+    /// Tracks commits the FFI has already applied during this process lifetime.
+    /// Phase D-Swift Task D-S.2 — used to short-circuit duplicate
+    /// processCommit calls that the existing `commit.epoch <= currentEpoch`
+    /// skip can't see (fork resolution, redelivery before the post-merge
+    /// epoch read propagates, etc.). Distinct from `ownCommits` above:
+    /// `ownCommits` is the SEND side ("we created this commit ourselves"),
+    /// `mergedCommitTracker` is the RECEIVE side ("we already merged this
+    /// commit hash"). The two can refer to the same commit at different
+    /// stages of its life. Entries TTL out at 10 minutes.
+    public let mergedCommitTracker = MergedCommitTracker()
 
-  /// Checks if the current database pool has been closed (e.g., after WAL corruption
-  /// recovery or account-switch drain) and transparently reconnects via `databaseManager`.
-  ///
-  /// Call this at the top of key async entry points (`syncWithServer`, `sendMessage`,
-  /// `processServerMessage`, etc.) to prevent cascading "Connection is closed" errors
-  /// when the pool has been recycled underneath us.
-  public func refreshDatabaseIfNeeded() async throws {
-    guard let userDid = userDid else { return }
+    /// Phase D-Swift D-S.3 — strong reference to the observer registered with
+    /// `MLSClient.shared`. `MLSClient` holds it weakly to avoid a circular
+    /// retain; we keep the strong reference here so the observer outlives
+    /// the closure-creation site at init.
+    var ownCommitObserver: OwnCommitClosureObserver?
 
-    // Fast path: databaseManager still holds our pool — nothing to do.
-    if await databaseManager.isDatabaseOpen(for: userDid) { return }
+    /// Sliding-window tracker for the operationally-unrecoverable rejoin
+    /// trifecta (spec §8.6 / ADR-008 D1, Phase 2 Stage 3 — see
+    /// `docs/superpowers/specs/2026-04-26-mls-auto-reset-phase2-design.md`).
+    ///
+    /// A trifecta is recorded by `recordTrifectaFailure(convoId:)` when ALL
+    /// THREE of these conditions hold within a single rejoin attempt:
+    ///   1. Local FFI state is absent (`groupExists == false`) — true at the
+    ///      EC convergence point because both deferred-recovery callers
+    ///      (`MLSConversationManager+Sync.swift` runDeferredEpochRecovery and
+    ///      `MLSConversationManager+Lifecycle.swift`
+    ///      detectAndRejoinMissingConversations) delete stale local state
+    ///      before invoking the rejoin path, AND
+    ///      `attemptExternalCommitFallback` early-returns on
+    ///      `groupExists == true` (Messaging.swift:5388-5395).
+    ///   2. Welcome fetch returned a 200 with no `welcome` blob (sentinel
+    ///      `MLSAPIError.invalidResponse(message: "No welcome message in
+    ///      response")` — distinct from 404/410, which are device-sync
+    ///      signals, not a missing-Welcome bug).
+    ///   3. External Commit failed with HTTP 409 (epoch race) OR a stale
+    ///      GroupInfo error.
+    ///
+    /// When ≥ `Self.trifectaThreshold` events accumulate within
+    /// `Self.trifectaWindow` seconds for the same convoId, a Mode B
+    /// (`group_state_unrecoverable`) report is dispatched via
+    /// `MLSAPIClient.reportRecoveryFailure` and the window is cleared. Server
+    /// dedupes by `(did, convoId, failureMode)`, so a second dispatch from
+    /// the same client is harmless.
+    ///
+    /// Concurrency: writes to this dict happen across rejoin attempts on
+    /// different convos (cross-convo rejoins are not gated by the per-convo
+    /// `beginRejoinAttempt` lock); guarded by `recoveryFailureWindowLock`.
+    var recoveryFailureWindow: [String: [Date]] = [:]
+    let recoveryFailureWindowLock = NSLock()
+    static let trifectaThreshold = 3
+    static let trifectaWindow: TimeInterval = 600 // 10 min
 
-    // Pool was closed (recovery, corruption repair, account switch, etc.) — get a fresh one.
-    logger.warning(
-      "🔄 [DB-REFRESH] Database pool was closed for \(userDid.prefix(20))... - reconnecting"
-    )
-    let newPool = try await databaseManager.getDatabasePool(for: userDid)
-    database = newPool
-    logger.info(
-      "✅ [DB-REFRESH] Got fresh database pool for \(userDid.prefix(20))..."
-    )
-    onDatabaseRefreshed?(newPool)
-  }
+    /// Track initialization state for conversations to prevent race conditions
+    public var conversationStates: [String: ConversationInitState] = [:]
 
-  /// Stop all network streams and pause synchronization
-  /// Call this BEFORE beginning shutdown sequence
-  public func stopAllStreams() {
-    logger.info("🛑 [stopAllStreams] Pausing sync and stopping device streams")
+    /// Track group IDs currently being created to prevent reconciliation from deleting them.
+    /// Maps group ID → creation timestamp. Entries are kept for `recentCreationWindow` seconds
+    /// after creation completes, protecting against stale sync responses deleting new conversations.
+    public let groupsBeingCreated = Mutex<[String: Date]>([:])
 
-    // 1. Pause sync to reject new API processing
-    isSyncPaused = true
+    /// B15: Per-convo dedup gate for `attemptFirstResponderBootstrap`.
+    ///
+    /// Both the deferred-epoch-recovery loop (after every sync) and the
+    /// missing-convo reconciler (after `getExpectedConversations`) can call
+    /// `attemptFirstResponderBootstrap` for the same `convoId` in parallel.
+    /// Without dedup, two callers race: one creates the group + claims success,
+    /// the other races behind, fails on missing key packages or stale state,
+    /// and calls `deleteGroup` on the SAME group — destroying the winner's
+    /// work. The user sees the convo briefly heal (External Commit lands) and
+    /// then break again seconds later.
+    ///
+    /// Mirrors the in-flight pattern around `joinByExternalCommit`
+    /// (`MLSClient.inFlightExternalCommits` →
+    /// `⏳ [MLSClient.joinByExternalCommit] Reusing in-flight External Commit`),
+    /// but bootstrap returns `Void` so a simple set + early-return suffices.
+    public let bootstrappingConvos = Mutex<Set<String>>([])
 
-    // 2. Stop device sync polling
-    Task {
-      await deviceSyncManager?.stopPolling()
-    }
+    /// Flag indicating the manager is preparing for shutdown/storage reset
+    public var isShuttingDown = false
 
-    // 3. Note: SSE streams are managed by AppState/NetworkManager,
-    // but we flag here that we are no longer accepting data.
-  }
+    /// Fix C: Per-conversation External Commit 429 retry counter. Capped at
+    /// `maxExternalCommit429Retries` per conversation per process lifetime so a
+    /// persistently-rate-limited convo doesn't spin retries forever. In-memory
+    /// only — cleared by app restart, which is fine because the server's rate
+    /// limit also has a finite reset window.
+    let externalCommit429RetryCounts = Mutex<[String: Int]>([:])
+    static let maxExternalCommit429Retries = 2
 
-  // MARK: - Device Record Management
+    // Note: isSuspending is defined in MLSConversationManager+Lifecycle.swift as a static-backed
+    // computed property for 0xdead10cc prevention (extensions can't add stored instance properties)
 
-  public func publishChatPolicy(
-    whoCanMessageMe: MLSWhoCanMessageMe?,
-    allowFollowersBypass: Bool?,
-    allowFollowingBypass: Bool?,
-    autoExpireDays: Int?
-  ) async throws {
-    try throwIfShuttingDown("publishChatPolicy")
-    guard let activeDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-    try await deviceRecordService.publishChatPolicy(
-      userDid: activeDid,
-      whoCanMessageMe: whoCanMessageMe,
-      allowFollowersBypass: allowFollowersBypass,
-      allowFollowingBypass: allowFollowingBypass,
-      autoExpireDays: autoExpireDays
-    )
-  }
+    /// Serializes MLS message processing per conversation to avoid concurrent ratchet advances
+    public let messageProcessingCoordinator = ConversationProcessingCoordinator()
 
-  public func getChatPolicy() async -> MLSChatPolicy? {
-    guard let did = currentUserDID else { return nil }
-    return try? await deviceRecordService.fetchChatPolicy(for: did)
-  }
+    /// Current coordination generation assigned at initialization
+    /// Used to detect and abort stale tasks after account switches
+    public let currentCoordinationGeneration: Int
 
-  public func removeCurrentDeviceRecord() async throws {
-    try throwIfShuttingDown("removeCurrentDeviceRecord")
-    guard let activeDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-    try await deviceRecordService.removeCurrentDeviceRecord(userDid: activeDid)
-  }
+    /// Serializes MLS group operations per group ID to prevent concurrent mutations
+    public let groupOperationCoordinator = GroupOperationCoordinator()
 
-  public func ensureDeviceRecordPublished() async throws {
-    try throwIfShuttingDown("ensureDeviceRecordPublished")
-    guard let activeDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-    guard !configuration.skipDeviceRecordPublishing else {
-      logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
-      return
-    }
-    try await deviceRecordService.ensureDeviceRecordPublished(userDid: activeDid)
-  }
+    /// Manages automatic synchronization of new devices to conversations
+    public var deviceSyncManager: MLSDeviceSyncManager?
 
-  // MARK: - Task Tracking & Generation Validation
+    /// Observes and surfaces membership changes (user/device added/removed)
+    public var membershipChangeObserver: MLSMembershipChangeObserver?
 
-  /// Register a background task for tracking and cancellation
-  /// - Returns: Task ID to be used for unregistration
-  public func registerTask() -> UUID {
-    let taskId = UUID()
-    activeTasksLock.withLock {
-      activeTasks.insert(taskId)
-    }
-    return taskId
-  }
+    /// Manager for key packages (Phase 3 architecture)
+    let keyPackageManager: MLSKeyPackageManager
 
-  /// Unregister a background task
-  public func unregisterTask(_ taskId: UUID) {
-    activeTasksLock.withLock {
-      activeTasks.remove(taskId)
-    }
-  }
+    /// Device record service for per-device key verification.
+    let deviceRecordService: MLSDeviceRecordService
 
-  /// Cancel all active tracked tasks
-  /// This does NOT cancel the stored Task properties (cleanupTask, etc.)
-  /// Those are handled separately in shutdown()
-  public func cancelAllTrackedTasks() {
-    activeTasksLock.withLock {
-      activeTasks.removeAll()
-    }
-  }
+    /// Coordinates message ordering across processes (prevents out-of-order processing)
+    public let messageOrderingCoordinator = MLSMessageOrderingCoordinator()
 
-  /// Validate that this operation is still valid for the current session
-  /// Throws if the session generation has changed (account switched)
-  public func validateSessionGeneration(capturedGeneration: UUID) throws {
-    guard capturedGeneration == sessionGeneration else {
-      logger.warning("🛑 [Generation] Operation aborted - session generation mismatch")
-      throw MLSConversationError.operationFailed("Session invalidated - account switched")
-    }
-  }
+    /// Serializes message sends per conversation to ensure strict FIFO ordering
+    /// This prevents out-of-order delivery when sending rapid-fire messages
+    public let sendQueueCoordinator = SendQueueCoordinator()
 
-  // MARK: - Lifecycle Coordination
+    // MARK: - Sync Circuit Breaker
 
-  // thrownIfShuttingDown moved to Extensions/MLSConversationManager+Lifecycle.swift
+    /// Tracks consecutive sync failures to implement circuit breaker pattern
+    public var consecutiveSyncFailures: Int = 0
 
-  // prepareForStorageReset moved to Extensions/MLSConversationManager+Lifecycle.swift
+    /// Maximum consecutive sync failures before stopping automatic syncing
+    public let maxConsecutiveSyncFailures: Int = 5
 
+    /// Time when sync was last paused due to failures
+    public var syncPausedAt: Date?
 
-  // MARK: - Account Switching Lifecycle (FIX #4)
+    /// How long to pause sync after circuit breaker trips (5 minutes)
+    public let syncPauseDuration: TimeInterval = 300
 
-  /// Shutdown the conversation manager for account switching
-  ///
-  /// CRITICAL: Call this method BEFORE switching to a different user account.
-  /// This ensures:
-  /// 1. All background tasks are cancelled
-  /// 2. The database connection is properly released
-  /// 3. No stale operations from the previous user can corrupt the new user's data
-  ///
-  /// After calling shutdown(), you must create a NEW MLSConversationManager instance
-  /// for the new user - do NOT reuse the existing instance.
-  ///
-  /// Note: This method has a 5-second timeout to prevent hanging during account switch.
-  @MainActor
-  @discardableResult
-  // shutdown moved to Extensions/MLSConversationManager+Lifecycle.swift (part 1 removed)
+    // MARK: - Foreground Sync Coordination
 
-    
-  // shutdown moved to Extensions/MLSConversationManager+Lifecycle.swift (part 2 removed)
+    /// Tracks when the app last entered foreground (for grace period coordination)
+    public var lastForegroundTime: Date?
 
-  
-  // reloadStateFromDisk, ensureStateReloaded, initialize, validateGroupStates moved to Extensions/MLSConversationManager+Lifecycle.swift
+    /// Grace period during which MLS operations should wait for state reload (2 seconds)
+    public let foregroundSyncGracePeriod: TimeInterval = 2.0
 
+    /// Flag indicating a state reload is currently in progress
+    public var isStateReloadInProgress: Bool = false
 
-  // detectAndRejoinMissingConversations, attemptRejoinWithWelcomeFallback, attemptWelcomeRejoin, fetchConversationForRejoin moved to Extensions/MLSConversationManager+Lifecycle.swift
+    /// Continuation for waiters blocking on state reload completion
+    public var stateReloadWaiters: [CheckedContinuation<Void, Never>] = []
 
+    // MARK: - Message Reorder Buffer
 
-  /// Publish current GroupInfo to the server
-  /// CRITICAL: This function now throws errors - failures will propagate to callers
-  /// - Throws: Error if GroupInfo export or upload fails
-  // publishLatestGroupInfo moved to Extensions/MLSConversationManager+Groups.swift
+    /// Buffers out-of-order messages until predecessors arrive
+    /// Key: conversationID, Value: (lastProcessedSeq, bufferedMessages, bufferTimeout)
+    public var messageReorderBuffer: [String: MessageReorderState] = [:]
+    public let messageReorderLock = NSLock()
 
+    /// Maximum time to wait for missing predecessor messages before processing anyway
+    public let messageReorderTimeout: TimeInterval = 5.0 // 5 seconds
 
-  // MARK: - Group Initialization
+    /// Maximum buffer size per conversation before force-flushing
+    public let messageReorderMaxBufferSize: Int = 50
 
-  /// Create a new MLS group/conversation
-  /// - Parameters:
-  ///   - initialMembers: DIDs of initial members to add (optional)
-  ///   - name: Conversation name
-  ///   - description: Conversation description (optional)
-  ///   - avatarUrl: Avatar URL (optional)
-  /// - Returns: Created conversation view
-  // createGroup moved to Extensions/MLSConversationManager+Groups.swift
+    // MARK: - Configuration
 
+    /// Default cipher suite for new groups
+    public let defaultCipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519"
 
-  /// Join an existing group using a Welcome message
-  /// - Parameter welcomeMessage: Base64-encoded Welcome message
-  /// - Returns: Joined conversation view
-  // joinGroup moved to Extensions/MLSConversationManager+Groups.swift
+    /// Key package refresh interval (in seconds) - reduced to 4 hours for proactive monitoring
+    /// Spec §10: KEY_PACKAGE_CHECK_INTERVAL_SEC = 300
+    public let keyPackageRefreshInterval: TimeInterval = 300 // 5 minutes
 
+    /// GroupInfo refresh interval (in seconds) - 1 hour proactive refresh
+    /// Reduced from 6 hours so a stale-post-remote-merge blob has at most ~1 hour
+    /// of bad state before this proactive refresh corrects it. WebSocket
+    /// `groupInfoRefreshRequested` events and the 409-on-update fast-retry path
+    /// are the primary recovery channels; this interval is the final safety net
+    /// for cases where both of those fail (e.g. WS not connected, all retries
+    /// exhausted). GroupInfo TTL is 24 hours so this still provides 24x safety
+    /// margin for the upload-cycle.
+    public let groupInfoRefreshInterval: TimeInterval = 3600 // 1 hour
 
-  // MARK: - Member Management
+    /// Maximum tolerable epoch divergence between local state and server messages.
+    /// Beyond this threshold, the group is considered irrecoverably diverged and
+    /// marked for automatic reset rather than continued decryption attempts.
+    /// A gap of even 2 means messages can't be decrypted (forward secrecy), but
+    /// small gaps (1-5) can occur normally during concurrent group operations.
+    /// Spec §10: EPOCH_DIVERGENCE_THRESHOLD = 5
+    let maxEpochDivergence: UInt64 = 5
 
-  /// Remove a member from the conversation
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - memberDid: DID of member to remove
-  // Member management (Block 1) moved to Extensions/MLSConversationManager+Members.swift
+    /// Maximum retry attempts for failed operations
+    private let maxRetries = 3
 
+    // MARK: - Initialization
 
-  // addMembersImpl moved to Extensions/MLSConversationManager+Members.swift
+    /// Initialize MLS Conversation Manager
+    /// - Parameters:
+    ///   - apiClient: MLS API client for server communication
+    ///   - database: GRDB database queue for MLS storage
+    ///   - userDid: Current user's DID
+    ///   - storage: MLS storage layer (defaults to shared instance)
+    ///   - configuration: MLS configuration (defaults to standard config)
+    ///   - atProtoClient: ATProtoClient for device registration
+    public init(
+        apiClient: MLSAPIClient,
+        database: MLSDatabase,
+        userDid: String? = nil,
+        storage: MLSStorage = .shared,
+        configuration: MLSConfiguration = .default,
+        atProtoClient: ATProtoClient,
+        trustChecker: MLSTrustChecker = AlwaysTrustChecker()
+    ) {
+        self.apiClient = apiClient
+        self.atProtoClient = atProtoClient
+        self.database = database
+        self.userDid = userDid
+        mlsClient = MLSClient.shared // Use singleton to persist groups
+        self.storage = storage
+        self.trustChecker = trustChecker
 
+        // CRITICAL FIX: Create owned database manager (NOT shared singleton)
+        // Each conversation manager owns its database pool lifecycle
+        databaseManager = MLSGRDBManager()
 
-  // MARK: - Device Synchronization
-
-  /// Add a new device to a conversation using a provided key package
-  /// This is called by MLSDeviceSyncManager when processing pending device additions
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - deviceCredentialDid: The credential DID of the device being added (e.g., did:plc:user#device-uuid)
-  ///   - keyPackageData: The MLS key package data for the device
-  /// - Returns: The new epoch after adding the device
-  public func addDeviceWithKeyPackage(
-    convoId: String,
-    deviceCredentialDid: String,
-    keyPackageData: Data
-  ) async throws -> Int {
-    logger.info(
-      "🔵 [MLSConversationManager.addDeviceWithKeyPackage] START - convoId: \(convoId), device: \(deviceCredentialDid)"
-    )
-    try throwIfShuttingDown("addDeviceWithKeyPackage")
-
-    guard let userDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-
-    guard let convo = conversations[convoId] else {
-      logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Conversation not found")
-      throw MLSConversationError.conversationNotFound
-    }
-
-    guard let groupState = groupStates[convo.groupId] else {
-      logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Group state not found")
-      throw MLSConversationError.groupStateNotFound
-    }
-
-    guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-      logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Invalid groupId")
-      throw MLSConversationError.invalidGroupId
-    }
-
-    // Extract user DID from device credential DID (format: did:plc:user#device-uuid)
-    let userDidFromDevice: String
-    if let hashIndex = deviceCredentialDid.firstIndex(of: "#") {
-      userDidFromDevice = String(deviceCredentialDid[..<hashIndex])
-    } else {
-      userDidFromDevice = deviceCredentialDid
-    }
-
-    let decision = try await deviceRecordService.verifyKeyPackageAuthorization(
-      localAccountDid: userDid,
-      targetDid: userDidFromDevice,
-      keyPackageData: keyPackageData
-    )
-    guard decision.allowed else {
-      throw MLSConversationError.operationFailed(
-        decision.failureReason ?? "Device record verification denied key package")
-    }
-
-    // Use GroupOperationCoordinator to serialize operations on this group
-    return try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
-      // Three-phase sender lifecycle (task #44/#62):
-      // 1. Stage commit locally using the provided key package.
-      logger.info(
-        "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 1/3: Creating staged commit...")
-      // `FfiCommitKind.addMembers.memberDids` is informational on the Rust
-      // side (destructured with `_`); we pass the deviceCredentialDid purely
-      // for logging clarity.
-      let plan = try await mlsClient.stageCommit(
-        for: userDid,
-        conversationId: convo.groupId,
-        kind: .addMembers(memberDids: [deviceCredentialDid], keyPackages: [keyPackageData])
-      )
-      logger.info("✅ [MLSConversationManager.addDeviceWithKeyPackage] Staged commit created")
-
-      // 2. Send commit and welcome to server
-      logger.info(
-        "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 2/3: Sending to server...")
-
-      // Track this commit as our own
-      trackOwnCommit(plan.commitBytes)
-
-      let welcomeData = plan.welcomeBytes ?? Data()
-
-      // For device additions, we use the device credential DID (not user DID) in the server call
-      // The server will validate this is a device belonging to an existing member
-
-      // Export POST-commit GroupInfo from local FFI state. After stageCommit,
-      // the FFI holds the new state at epoch N+1 — pass that to the server so
-      // it's stored atomically inside the same txn that records the commit
-      // (closes the External-Commit joiner stale-state race; the followup
-      // publishGroupInfo retry remains as a safety net).
-      let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
-        for: userDid,
-        groupId: groupIdData
-      )
-      if postCommitGroupInfo == nil {
-        logger.warning(
-          "⚠️ [MLSConversationManager.addDeviceWithKeyPackage] Failed to export post-commit GroupInfo — falling back to publishGroupInfo retry"
+        // Initialize Key Package Manager (Phase 3)
+        keyPackageManager = MLSKeyPackageManager(
+            client: MLSClient.shared,
+            apiClient: apiClient,
+            monitor: nil // Monitor set later via property observer
         )
-      }
 
-      let addMembersResult: (success: Bool, newEpoch: Int)
-      do {
-        addMembersResult = try await apiClient.addMembers(
-          convoId: convoId,
-          didList: [],  // Empty - we're adding a device, not a new user
-          commit: plan.commitBytes,
-          welcomeMessage: welcomeData,
-          groupInfo: postCommitGroupInfo,
-          keyPackageHashes: nil  // Server already knows the key package from claim
+        deviceRecordService = MLSDeviceRecordService(
+            atProtoClient: atProtoClient,
+            mlsClient: MLSClient.shared
         )
-      } catch {
-        await mlsClient.discardPending(for: userDid, handle: plan.handle)
-        throw error
-      }
 
-      guard addMembersResult.success else {
-        logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Server rejected commit")
-        await mlsClient.discardPending(for: userDid, handle: plan.handle)
-        throw MLSConversationError.operationFailed("Server rejected device addition")
-      }
+        self.configuration = configuration
 
-      let serverEpoch = addMembersResult.newEpoch
+        // Capture current coordination generation to detect stale task execution later
+        currentCoordinationGeneration =
+            MLSCoordinationStore.shared.getState().coordinationGeneration
 
-      // 3. Confirm commit locally. Server echoes newEpoch for addMembers.
-      //    Idempotency-hit: server may nil-default newEpoch to 0 when the
-      //    commit was already applied in a prior attempt; fall back to the
-      //    skip-fence sentinel so confirmCommit trusts the staged target.
-      //    If confirm throws (e.g. EpochMismatch — #63 flat error), explicitly
-      //    discard the staged commit since the Rust side leaves it in place
-      //    when the server-epoch fence trips.
-      logger.info(
-        "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 3/3: Merging commit locally...")
-      let serverEpochForConfirm: UInt64 =
-        serverEpoch > 0 ? UInt64(serverEpoch) : mlsSkipServerEpochFence()
-      let confirmed: FfiConfirmedCommit
-      do {
-        confirmed = try await mlsClient.confirmCommit(
-          for: userDid, handle: plan.handle, serverEpoch: serverEpochForConfirm)
-      } catch {
-        await mlsClient.discardPending(for: userDid, handle: plan.handle)
-        throw error
-      }
-      let localEpoch = confirmed.newEpoch
+        // Wire up active-user check to prevent refresh spam for inactive users
+        let dbManager = databaseManager
+        Task { [self] in
+            await self.keyPackageManager.setActiveUserCheck { userDid in
+                await dbManager.isActiveUser(userDid)
+            }
+        }
 
-      if localEpoch != UInt64(serverEpoch) {
-        logger.warning(
-          "⚠️ Epoch mismatch after device addition: local=\(localEpoch), server=\(serverEpoch)")
-      }
+        // Phase D-Swift D-S.3: register an own-commit observer so the External
+        // Commit producer in `MLSClient.joinByExternalCommit` (the only
+        // producer that didn't previously call `trackOwnCommit`) tracks its
+        // commits the way the other three producers do. We use a stand-alone
+        // observer object — not `self` directly — to avoid coupling the
+        // manager's Sendable / @Observable shape to the protocol requirements.
+        let trackCommit: @Sendable (Data) -> Void = { [weak self] bytes in
+            self?.trackOwnCommit(bytes)
+        }
+        let observer = OwnCommitClosureObserver(handler: trackCommit)
+        ownCommitObserver = observer
+        Task { [observer] in
+            await MLSClient.shared.setOwnCommitObserver(observer)
+        }
 
-      // Update local state
-      var updatedState = groupState
-      updatedState.epoch = localEpoch
-      // Device additions don't add new user DIDs to members - they're devices of existing members
-      groupStates[convo.groupId] = updatedState
+        // Initialize device sync manager for multi-device support
+        deviceSyncManager = MLSDeviceSyncManager(apiClient: apiClient, mlsClient: mlsClient)
 
-      logger.info(
-        "✅ [MLSConversationManager.addDeviceWithKeyPackage] COMPLETE - device: \(deviceCredentialDid), epoch: \(serverEpoch)"
-      )
-
-      return serverEpoch
-    }
-  }
-
-  /// Get the device sync manager for SSE event wiring
-  /// Call this to register for newDeviceEvent handling in your SSE subscription
-  public func getDeviceSyncManager() -> MLSDeviceSyncManager? {
-    return deviceSyncManager
-  }
-
-  /// Handle SSE new device event by forwarding to the device sync manager
-  /// This provides the real-time path for multi-device sync instead of relying on polling
-  public func handleNewDeviceSSEEvent(_ event: BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async {
-    guard let currentUserDid = userDid else {
-      logger.warning("⚠️ [handleNewDeviceSSEEvent] No user DID available")
-      return
-    }
-
-    guard await ensureActiveAccount(for: currentUserDid, operation: "handleNewDeviceSSEEvent")
-    else {
-      return
-    }
-
-    guard let deviceSyncManager = deviceSyncManager else {
-      logger.warning(
-        "⚠️ [handleNewDeviceSSEEvent] Device sync manager not initialized - SSE new device event ignored"
-      )
-      return
-    }
-    logger.info(
-      "📱 [handleNewDeviceSSEEvent] Forwarding new device event to sync manager - user: \(event.userDid), device: \(event.deviceId)"
-    )
-    await deviceSyncManager.handleNewDeviceEvent(event)
-  }
-
-  /// Request active members to publish fresh GroupInfo for a conversation
-  /// Called when External Commit fails due to stale GroupInfo
-  /// Emits SSE event to notify other members to upload fresh GroupInfo
-  public func groupInfoRefresh(convoId: String) async {
-    logger.info("🔄 [groupInfoRefresh] Requesting refresh for \(convoId)")
-
-    guard let currentUserDid = userDid else {
-      logger.warning("⚠️ [groupInfoRefresh] No user DID available")
-      return
-    }
-
-    guard await ensureActiveAccount(for: currentUserDid, operation: "groupInfoRefresh") else {
-      return
-    }
-
-    do {
-      let input = BlueCatbirdMlsChatCommitGroupChange.Input(
-        convoId: convoId,
-        action: "refreshGroupInfo"
-      )
-      let (responseCode, output) = try await apiClient.client.blue.catbird.mlsChat.commitGroupChange(
-        input: input)
-
-      if responseCode == 200, let output = output {
-        if output.success {
-          logger.info(
-            "✅ [groupInfoRefresh] Request sent via commitGroupChange"
-          )
+        // Initialize membership change observer for transparency
+        if let userDid = userDid {
+            membershipChangeObserver = MLSMembershipChangeObserver(
+                database: database,
+                currentUserDID: userDid
+            )
         } else {
-          logger.warning("⚠️ [groupInfoRefresh] No active members to notify for \(convoId)")
+            membershipChangeObserver = nil
         }
-      } else {
-        logger.warning("⚠️ [groupInfoRefresh] Server returned \(responseCode) for \(convoId)")
-      }
-    } catch {
-      logger.error("❌ [groupInfoRefresh] Failed: \(error.localizedDescription)")
-    }
-  }
 
-  /// Request re-addition to a conversation when both Welcome and External Commit have failed
-  /// Called after all rejoin attempts are exhausted to notify active members
-  /// Emits SSE event to notify other members to re-add the user with fresh KeyPackages
-  public func readdition(convoId: String) async {
-    logger.info("🆘 [readdition] Requesting re-addition for \(convoId)")
-
-    guard let currentUserDid = userDid else {
-      logger.warning("⚠️ [readdition] No user DID available")
-      return
+        logger.info("MLSConversationManager initialized with UniFFI client (using shared MLSClient)")
+        configuration.validate()
     }
 
-    guard await ensureActiveAccount(for: currentUserDid, operation: "readdition") else {
-      return
+    /// Cleanup resources when conversation manager is deallocated
+    /// Ensures database connections are properly closed
+    deinit {
+        let userDidPrefix = self.userDid?.prefix(20) ?? "unknown"
+        logger.info("🧹 [deinit] MLSConversationManager deallocating for user: \(userDidPrefix)")
+
+        // Close database connection synchronously
+        // Note: deinit cannot be async, but databaseManager's deinit will close connections
+        // The databaseManager actor's deinit will handle the actual database closure
+
+        logger.info("✅ [deinit] MLSConversationManager cleanup completed")
     }
 
-    do {
-      let (requested, activeMembers) = try await apiClient.readdition(convoId: convoId)
+    func removeCachedGroupState(
+        conversationID: String,
+        groupID: Data? = nil,
+        groupIdHex: String? = nil
+    ) {
+        groupStates.removeValue(forKey: conversationID)
 
-      if requested {
-        logger.info("✅ [readdition] Request sent - \(activeMembers ?? 0) active members notified")
-      } else {
+        if let groupIdHex, !groupIdHex.isEmpty {
+            groupStates.removeValue(forKey: groupIdHex)
+        }
+
+        if let groupID {
+            groupStates.removeValue(forKey: groupID.hexEncodedString())
+        }
+    }
+
+    // MARK: - Database Pool Refresh
+
+    /// Checks if the current database pool has been closed (e.g., after WAL corruption
+    /// recovery or account-switch drain) and transparently reconnects via `databaseManager`.
+    ///
+    /// Call this at the top of key async entry points (`syncWithServer`, `sendMessage`,
+    /// `processServerMessage`, etc.) to prevent cascading "Connection is closed" errors
+    /// when the pool has been recycled underneath us.
+    public func refreshDatabaseIfNeeded() async throws {
+        guard let userDid = userDid else { return }
+
+        // Fast path: databaseManager still holds our pool — nothing to do.
+        if await databaseManager.isDatabaseOpen(for: userDid) { return }
+
+        // Pool was closed (recovery, corruption repair, account switch, etc.) — get a fresh one.
         logger.warning(
-          "⚠️ [readdition] No active members available to process re-addition for \(convoId)")
-      }
-    } catch {
-      logger.error("❌ [readdition] Failed: \(error.localizedDescription)")
-    }
-  }
-
-  /// Handle GroupInfo refresh request from SSE stream
-  /// When another member encounters stale GroupInfo during External Commit rejoin,
-  /// they request active members to publish fresh GroupInfo. This exports and uploads
-  /// the current GroupInfo from our local MLS state.
-  public func handleGroupInfoRefreshRequest(convoId: String) async {
-    logger.info("🔄 [handleGroupInfoRefreshRequest] Processing refresh request for \(convoId)")
-
-    guard let userDid = userDid else {
-      logger.warning("⚠️ [handleGroupInfoRefreshRequest] No user DID available")
-      return
-    }
-
-    guard await ensureActiveAccount(for: userDid, operation: "handleGroupInfoRefreshRequest")
-    else {
-      return
-    }
-
-    // Try to resolve Group ID from memory first, then fall back to database
-    var groupId: Data?
-
-    // 1. Check in-memory cache
-    if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
-      groupId = gid
-    } 
-    // 2. Fall back to database lookup (for cold starts/background processing)
-    else {
-      do {
-        if let model = try await storage.fetchConversation(
-          conversationID: convoId, 
-          currentUserDID: userDid, 
-          database: database
-        ) {
-          groupId = model.groupID
-          logger.info("✅ [handleGroupInfoRefreshRequest] Resolved Group ID from database for \(convoId)")
-        }
-      } catch {
-        logger.warning("⚠️ [handleGroupInfoRefreshRequest] Database lookup failed: \(error.localizedDescription)")
-      }
-    }
-
-    // Get the group ID from our local conversation state
-    guard let validGroupId = groupId else {
-      logger.warning("⚠️ [handleGroupInfoRefreshRequest] Could not find group ID for \(convoId) (checked memory and DB)")
-      return
-    }
-
-    do {
-      // Export and upload fresh GroupInfo
-      try await mlsClient.publishGroupInfo(for: userDid, convoId: convoId, groupId: validGroupId)
-      logger.info(
-        "✅ [handleGroupInfoRefreshRequest] Successfully published fresh GroupInfo for \(convoId)")
-    } catch {
-      logger.error(
-        "❌ [handleGroupInfoRefreshRequest] Failed to publish GroupInfo for \(convoId): \(error.localizedDescription)"
-      )
-    }
-  }
-
-  /// Handle a group reset event from the SSE/WebSocket stream.
-  ///
-  /// When an admin resets a conversation's MLS group, the conversation identity (`convoId`)
-  /// stays the same but the underlying MLS group changes (`newGroupId`). Clients must:
-  /// 1. Delete old MLS group state
-  /// 2. Join the new group via External Commit
-  /// 3. Notify UI observers
-  ///
-  /// - Parameters:
-  ///   - event: The GroupResetEvent containing reset details
-  public func handleGroupReset(
-    event: BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent
-  ) async {
-    let convoId = event.convoId
-    let newGroupId = event.newGroupId
-
-    logger.info(
-      "🔄 [handleGroupReset] Conversation \(convoId.prefix(16)) reset to group \(newGroupId.prefix(16)) (gen \(event.resetGeneration))"
-    )
-
-    guard let userDid = userDid else {
-      logger.warning("⚠️ [handleGroupReset] No user DID available")
-      return
-    }
-
-    guard await ensureActiveAccount(for: userDid, operation: "handleGroupReset") else {
-      return
-    }
-
-    // CLIENT M (Task #75): one-line entry summary for grep-based forensic
-    // analysis of replay-storm sequences. Mirror the same shape as
-    // handleResetRequested. The `try?` collapses any GRDB error to nil; the
-    // outer flatten unwraps the Optional<Optional<Int64>> to a single
-    // optional for log formatting.
-    let localGroupIdHex = conversations[convoId]?.groupId
-    let storedGenForLog: Int64? = (try? await database.read { db in
-      try MLSConversationResetSQL.loadPendingResetGeneration(
-        db: db, conversationID: convoId, currentUserDID: userDid
-      )
-    }) ?? nil
-    logger.info(
-      "🔍 [RESET-EVENT] handler=handleGroupReset convo=\(convoId.prefix(16)) incomingGen=\(event.resetGeneration) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(newGroupId.prefix(16))"
-    )
-
-    // CLIENT M (Task #75) — fix #1: pre-delete stale-generation guard.
-    // Mirrors `handleResetRequested`'s pre-delete check (this handler was
-    // missing it). If a newer-or-equal `pendingResetGeneration` is already
-    // persisted, the incoming event is a stale replay (WS cursor replay
-    // after first-responder bootstrap success) — short-circuit BEFORE any
-    // destructive call. Without this, the event flood after bootstrap
-    // success calls `MLSClient.deleteGroup` on the freshly bootstrapped
-    // group and destroys it. Production observed at b947c701a32943d0 right
-    // after a successful bootstrap won the race for 4b2cdbaad35a9d13 / gen 25.
-    do {
-      let stored = try await database.read { db in
-        try MLSConversationResetSQL.loadPendingResetGeneration(
-          db: db, conversationID: convoId, currentUserDID: userDid
+            "🔄 [DB-REFRESH] Database pool was closed for \(userDid.prefix(20))... - reconnecting"
         )
-      }
-      if let stored = stored, stored >= Int64(event.resetGeneration) {
+        let newPool = try await databaseManager.getDatabasePool(for: userDid)
+        database = newPool
         logger.info(
-          "⏭️ [STALE-RESET] Skipping incoming gen=\(event.resetGeneration) for convo=\(convoId.prefix(16)) (storedGen=\(stored)) — pre-delete guard"
+            "✅ [DB-REFRESH] Got fresh database pool for \(userDid.prefix(20))..."
         )
-        return
-      }
-    } catch {
-      logger.warning(
-        "⚠️ [handleGroupReset] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
-      )
+        onDatabaseRefreshed?(newPool)
     }
 
-    // CLIENT M (Task #75) — fix #2: self-echo / replay-into-current short-circuit.
-    // If the incoming `newGroupId` matches the conversation's current local
-    // `groupId`, the event is either a self-echo of our own bootstrap or a
-    // historical replay re-announcing the group we already operate at. In
-    // either case there is nothing to reset. Without this, even after the
-    // stale-gen guard short-circuits the destruction the handler still
-    // re-flags RESET_PENDING + minted candidates and forces a needless
-    // recovery cycle. Use lowercased compare; FFI-minted ids are lowercase
-    // hex but server-canonicalized fields elsewhere have varied historically.
-    if let localHex = localGroupIdHex,
-       localHex.lowercased() == newGroupId.lowercased() {
-      logger.info(
-        "⏭️ [SELF-ECHO] Skipping reset event — newGroupId=\(newGroupId.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
-      )
-      return
-    }
+    /// Stop all network streams and pause synchronization
+    /// Call this BEFORE beginning shutdown sequence
+    public func stopAllStreams() {
+        logger.info("🛑 [stopAllStreams] Pausing sync and stopping device streams")
 
-    // 1. Delete old MLS group state
-    // Try to resolve the old group ID from memory or database
-    var oldGroupId: Data?
-    if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
-      oldGroupId = gid
-    } else {
-      do {
-        if let model = try await storage.fetchConversation(
-          conversationID: convoId,
-          currentUserDID: userDid,
-          database: database
-        ) {
-          oldGroupId = model.groupID
+        // 1. Pause sync to reject new API processing
+        isSyncPaused = true
+
+        // 2. Stop device sync polling
+        Task {
+            await deviceSyncManager?.stopPolling()
         }
-      } catch {
-        logger.warning("⚠️ [handleGroupReset] Database lookup for old group failed: \(error.localizedDescription)")
-      }
+
+        // 3. Note: SSE streams are managed by AppState/NetworkManager,
+        // but we flag here that we are no longer accepting data.
     }
 
-    if let oldGroupId = oldGroupId {
-      do {
-        try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
-        logger.info("🗑️ [handleGroupReset] Deleted old MLS state for \(convoId.prefix(16))")
-      } catch {
-        logger.warning("⚠️ [handleGroupReset] Failed to delete old MLS state: \(error.localizedDescription)")
-        // Continue anyway - old state may already be gone
-      }
-    } else {
-      logger.info("ℹ️ [handleGroupReset] No old group ID found for \(convoId.prefix(16)) - may already be cleaned up")
-    }
+    // MARK: - Device Record Management
 
-    // 2. Remove old group state from in-memory caches
-    if let convo = conversations[convoId] {
-      groupStates[convo.groupId] = nil
-    }
-
-    // 3. Flag RESET_PENDING — deferred recovery (§8.5) will handle the External Commit.
-    //    DO NOT call joinByExternalCommit inline from SSE handler.
-    //    This prevents epoch inflation from concurrent/racing SSE events.
-    //    Thread `newGroupId` + `resetGeneration` so Phase 1 takes the recipient
-    //    branch (external-commit into the incoming group) rather than the
-    //    admin-initiator branch (create fresh group + POST resetGroup).
-    do {
-      try await markConversationNeedsReset(
-        convoId,
-        pendingNewGroupId: newGroupId,
-        pendingResetGeneration: Int64(event.resetGeneration)
-      )
-      logger.info(
-        "🏴 [handleGroupReset] Flagged \(convoId.prefix(16)) as RESET_PENDING — deferred recovery will rejoin into \(newGroupId.prefix(16))"
-      )
-    } catch {
-      logger.error(
-        "❌ [handleGroupReset] Failed to flag RESET_PENDING: \(error.localizedDescription)")
-    }
-
-    // 4. Trigger a sync cycle to pick up the deferred recovery promptly
-    Task {
-      try? await self.syncWithServer(fullSync: false)
-    }
-
-    // 5. Notify observers
-    if let resetBy = event.resetBy {
-      notifyObservers(.groupReset(
-        convoId: convoId,
-        newGroupId: newGroupId,
-        resetGeneration: event.resetGeneration,
-        resetBy: resetBy,
-        reason: event.reason
-      ))
-    }
-  }
-
-  /// Handle a Phase 2.5 indirect-trigger `resetRequestedEvent` from the SSE/
-  /// WebSocket stream.
-  ///
-  /// Phase 2.5 (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1)
-  /// closes the indirect-flow gap where the server previously minted a new
-  /// `mls_group_id` itself. With the chokepoint funnel, indirect triggers
-  /// (quorum vote, system sweep, inline 409, inline groupinfo-404) only emit
-  /// `crypto_session_reset_requested`; subscribed clients then elect a first
-  /// responder via `bootstrapResetGroup` / `commitGroupChange` (the
-  /// `crypto_sessions UNIQUE (conversation_id, generation)` constraint
-  /// serializes the winner — first commit wins, losers receive HTTP 409
-  /// `AlreadyBootstrapped` and drop their pre-bootstrap MLS state cleanly).
-  ///
-  /// Mirrors `handleGroupReset(event:)`:
-  /// 1. Delete the old MLS group state (the prior crypto session is now
-  ///    `reset_requested` server-side; its keys are no longer authoritative).
-  /// 2. Remove the old group from in-memory caches.
-  /// 3. Flag `needsReset = true`. Resolution:
-  ///    - If the server attached `expectedNewMlsGroupId` (admin override
-  ///      path, rare), stage that as `pendingNewGroupId`.
-  ///    - Otherwise mint a fresh client-side UUIDv4 candidate id (32 lower-
-  ///      case hex chars, mirroring `record_reset_requested` in
-  ///      `catbird-mls/src/orchestrator/recovery.rs`). This stages the row
-  ///      into the recipient-then-bootstrap branch that already exists in
-  ///      `runDeferredEpochRecovery` — first the External Commit attempt
-  ///      (which fails with `GroupInfo` absent post-reset), then
-  ///      `attemptFirstResponderBootstrap` races the candidate against
-  ///      siblings via `bootstrapResetGroup`. The chokepoint UNIQUE
-  ///      constraint elects the winner; race losers see HTTP 409 and drop
-  ///      their pre-bootstrap state.
-  /// 4. Trigger a sync cycle to drive deferred recovery promptly.
-  ///
-  /// **Why mint client-side instead of leaving `pendingNewGroupId == nil`?**
-  /// The existing sync-loop branch logic (`MLSConversationManager+Sync.swift`
-  /// line 635) treats `pendingNewGroupId == nil` as the **admin-initiator**
-  /// path that calls the privileged `resetGroup` endpoint and fails with
-  /// `notadmin` for non-admin members. Phase 2.5 explicitly retired the
-  /// admin-mint flow for indirect triggers. Minting client-side puts the row
-  /// into the bootstrap-race branch which is the correct Phase 2.5 endpoint
-  /// (`bootstrapResetGroup`) for any active member.
-  ///
-  /// Idempotency: a stale-generation guard runs **before** the destructive
-  /// `deleteGroup` call (mirrors `record_reset_requested` at
-  /// `catbird-mls/src/orchestrator/recovery.rs:1401`). If the stored
-  /// `pendingResetGeneration` is `>=` the incoming `event.generation`, the
-  /// handler returns early without touching MLS state — the row is already
-  /// at this or a newer generation. Required because the global (AppState)
-  /// + per-convo (DetailView) WS subscriptions both deliver this event for
-  /// active conversations, and `event_stream` cursor replay can re-deliver
-  /// after reconnect. `markConversationNeedsReset` applies the same guard
-  /// at the row-write layer as a second line of defense.
-  ///
-  /// - Parameters:
-  ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
-  ///     session id, generation, trigger, and dedup id.
-  public func handleResetRequested(
-    event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
-  ) async {
-    let convoId = event.convoId
-    let generation = event.generation
-    let trigger = event.trigger
-
-    logger.info(
-      "🔄 [handleResetRequested] Conversation \(convoId.prefix(16)) reset requested (gen \(generation), trigger=\(trigger), eventId=\(event.requestEventId.prefix(16)))"
-    )
-
-    guard let userDid = userDid else {
-      logger.warning("⚠️ [handleResetRequested] No user DID available")
-      return
-    }
-
-    guard await ensureActiveAccount(for: userDid, operation: "handleResetRequested") else {
-      return
-    }
-
-    // CLIENT M (Task #75): one-line entry summary for grep-based forensic
-    // analysis of replay-storm sequences. Mirror the same shape as
-    // handleGroupReset. The `try?` + `?? nil` flattens the
-    // Optional<Optional<Int64>> for clean log formatting.
-    let localGroupIdHex = conversations[convoId]?.groupId
-    let storedGenForLog: Int64? = (try? await database.read { db in
-      try MLSConversationResetSQL.loadPendingResetGeneration(
-        db: db, conversationID: convoId, currentUserDID: userDid
-      )
-    }) ?? nil
-    logger.info(
-      "🔍 [RESET-EVENT] handler=handleResetRequested convo=\(convoId.prefix(16)) incomingGen=\(generation) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(event.expectedNewMlsGroupId?.prefix(16) ?? "nil")"
-    )
-
-    // 0. Stale-generation guard (BEFORE destructive delete).
-    //    If a newer or equal `pendingResetGeneration` is already persisted,
-    //    treat this event as a stale replay / dual-subscription duplicate and
-    //    short-circuit. Mirrors `record_reset_requested` at
-    //    `catbird-mls/src/orchestrator/recovery.rs:1401` and the existing
-    //    Swift `markConversationNeedsReset` stale-guard at line 3353.
-    //
-    //    Without this check, a replayed event with an older generation would
-    //    delete the current MLS group state (which may already be operating
-    //    at a NEWER generation) before the staleness check inside
-    //    `markConversationNeedsReset` would reject the row write — clobbering
-    //    valid local state and forcing avoidable recovery.
-    //
-    //    CLIENT M (Task #75) note: this guard relies on success paths writing
-    //    a non-nil `pendingResetGeneration`. Prior to CLIENT M,
-    //    `applyRecipientResetSuccess` nulled this column; that left the guard
-    //    vacuous (`stored == nil` falls through), so historical SSE replays
-    //    after a successful bootstrap still ran through to `deleteGroup` and
-    //    destroyed the freshly-bootstrapped group. The fix is the
-    //    `appliedGeneration` plumbing in `MLSConversationManager+Sync`.
-    do {
-      let stored = try await database.read { db in
-        try MLSConversationResetSQL.loadPendingResetGeneration(
-          db: db, conversationID: convoId, currentUserDID: userDid
+    public func publishChatPolicy(
+        whoCanMessageMe: MLSWhoCanMessageMe?,
+        allowFollowersBypass: Bool?,
+        allowFollowingBypass: Bool?,
+        autoExpireDays: Int?
+    ) async throws {
+        try throwIfShuttingDown("publishChatPolicy")
+        guard let activeDid = userDid else {
+            throw MLSConversationError.noAuthentication
+        }
+        try await deviceRecordService.publishChatPolicy(
+            userDid: activeDid,
+            whoCanMessageMe: whoCanMessageMe,
+            allowFollowersBypass: allowFollowersBypass,
+            allowFollowingBypass: allowFollowingBypass,
+            autoExpireDays: autoExpireDays
         )
-      }
-      if let stored = stored, stored >= Int64(generation) {
+    }
+
+    public func getChatPolicy() async -> MLSChatPolicy? {
+        guard let did = currentUserDID else { return nil }
+        return try? await deviceRecordService.fetchChatPolicy(for: did)
+    }
+
+    public func removeCurrentDeviceRecord() async throws {
+        try throwIfShuttingDown("removeCurrentDeviceRecord")
+        guard let activeDid = userDid else {
+            throw MLSConversationError.noAuthentication
+        }
+        try await deviceRecordService.removeCurrentDeviceRecord(userDid: activeDid)
+    }
+
+    public func ensureDeviceRecordPublished() async throws {
+        try throwIfShuttingDown("ensureDeviceRecordPublished")
+        guard let activeDid = userDid else {
+            throw MLSConversationError.noAuthentication
+        }
+        guard !configuration.skipDeviceRecordPublishing else {
+            logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
+            return
+        }
+        try await deviceRecordService.ensureDeviceRecordPublished(userDid: activeDid)
+    }
+
+    // MARK: - Task Tracking & Generation Validation
+
+    /// Register a background task for tracking and cancellation
+    /// - Returns: Task ID to be used for unregistration
+    public func registerTask() -> UUID {
+        let taskId = UUID()
+        activeTasksLock.withLock {
+            activeTasks.insert(taskId)
+        }
+        return taskId
+    }
+
+    /// Unregister a background task
+    public func unregisterTask(_ taskId: UUID) {
+        activeTasksLock.withLock {
+            activeTasks.remove(taskId)
+        }
+    }
+
+    /// Cancel all active tracked tasks
+    /// This does NOT cancel the stored Task properties (cleanupTask, etc.)
+    /// Those are handled separately in shutdown()
+    public func cancelAllTrackedTasks() {
+        activeTasksLock.withLock {
+            activeTasks.removeAll()
+        }
+    }
+
+    /// Validate that this operation is still valid for the current session
+    /// Throws if the session generation has changed (account switched)
+    public func validateSessionGeneration(capturedGeneration: UUID) throws {
+        guard capturedGeneration == sessionGeneration else {
+            logger.warning("🛑 [Generation] Operation aborted - session generation mismatch")
+            throw MLSConversationError.operationFailed("Session invalidated - account switched")
+        }
+    }
+
+    // MARK: - Lifecycle Coordination
+
+    // thrownIfShuttingDown moved to Extensions/MLSConversationManager+Lifecycle.swift
+
+    // prepareForStorageReset moved to Extensions/MLSConversationManager+Lifecycle.swift
+
+    // MARK: - Account Switching Lifecycle (FIX #4)
+
+    /// Shutdown the conversation manager for account switching
+    ///
+    /// CRITICAL: Call this method BEFORE switching to a different user account.
+    /// This ensures:
+    /// 1. All background tasks are cancelled
+    /// 2. The database connection is properly released
+    /// 3. No stale operations from the previous user can corrupt the new user's data
+    ///
+    /// After calling shutdown(), you must create a NEW MLSConversationManager instance
+    /// for the new user - do NOT reuse the existing instance.
+    ///
+    /// Note: This method has a 5-second timeout to prevent hanging during account switch.
+    /// Add a new device to a conversation using a provided key package
+    /// This is called by MLSDeviceSyncManager when processing pending device additions
+    /// - Parameters:
+    ///   - convoId: Conversation identifier
+    ///   - deviceCredentialDid: The credential DID of the device being added (e.g., did:plc:user#device-uuid)
+    ///   - keyPackageData: The MLS key package data for the device
+    /// - Returns: The new epoch after adding the device
+    @MainActor
+    @discardableResult
+    // shutdown moved to Extensions/MLSConversationManager+Lifecycle.swift (part 1 removed)
+
+    // shutdown moved to Extensions/MLSConversationManager+Lifecycle.swift (part 2 removed)
+
+    // reloadStateFromDisk, ensureStateReloaded, initialize, validateGroupStates moved to Extensions/MLSConversationManager+Lifecycle.swift
+
+    // detectAndRejoinMissingConversations, attemptRejoinWithWelcomeFallback, attemptWelcomeRejoin, fetchConversationForRejoin moved to Extensions/MLSConversationManager+Lifecycle.swift
+
+    // Publish current GroupInfo to the server
+    // CRITICAL: This function now throws errors - failures will propagate to callers
+    // - Throws: Error if GroupInfo export or upload fails
+    // publishLatestGroupInfo moved to Extensions/MLSConversationManager+Groups.swift
+
+    // MARK: - Group Initialization
+
+    // Create a new MLS group/conversation
+    // - Parameters:
+    //   - initialMembers: DIDs of initial members to add (optional)
+    //   - name: Conversation name
+    //   - description: Conversation description (optional)
+    //   - avatarUrl: Avatar URL (optional)
+    // - Returns: Created conversation view
+    // createGroup moved to Extensions/MLSConversationManager+Groups.swift
+
+    // Join an existing group using a Welcome message
+    // - Parameter welcomeMessage: Base64-encoded Welcome message
+    // - Returns: Joined conversation view
+    // joinGroup moved to Extensions/MLSConversationManager+Groups.swift
+
+    // MARK: - Member Management
+
+    // Remove a member from the conversation
+    // - Parameters:
+    //   - convoId: Conversation identifier
+    //   - memberDid: DID of member to remove
+    // Member management (Block 1) moved to Extensions/MLSConversationManager+Members.swift
+
+    // addMembersImpl moved to Extensions/MLSConversationManager+Members.swift
+
+    // MARK: - Device Synchronization
+
+    public func addDeviceWithKeyPackage(
+        convoId: String,
+        deviceCredentialDid: String,
+        keyPackageData: Data
+    ) async throws -> Int {
         logger.info(
-          "⏭️ [STALE-RESET] Skipping incoming gen=\(generation) for convo=\(convoId.prefix(16)) (storedGen=\(stored)) — pre-delete guard (eventId=\(event.requestEventId.prefix(16)))"
+            "🔵 [MLSConversationManager.addDeviceWithKeyPackage] START - convoId: \(convoId), device: \(deviceCredentialDid)"
         )
-        return
-      }
-    } catch {
-      // If the read itself fails, fall through and let the existing
-      // markConversationNeedsReset stale-guard catch it. We only short-circuit
-      // when we positively know the event is stale.
-      logger.warning(
-        "⚠️ [handleResetRequested] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
-      )
-    }
+        try throwIfShuttingDown("addDeviceWithKeyPackage")
 
-    // CLIENT M (Task #75) — fix #2: self-echo / replay-into-current short-circuit.
-    // ResetRequestedEvent's `expectedNewMlsGroupId` is OPTIONAL (Phase 2.5
-    // indirect triggers don't include it; only admin-override paths do). When
-    // it IS present and matches the conversation's current local groupId,
-    // the event is announcing the group we already operate at — skip the
-    // destructive path entirely. When absent, fall through to the existing
-    // candidate-mint flow.
-    if let serverHex = event.expectedNewMlsGroupId,
-       !serverHex.isEmpty,
-       let localHex = localGroupIdHex,
-       localHex.lowercased() == serverHex.lowercased() {
-      logger.info(
-        "⏭️ [SELF-ECHO] Skipping reset event — expectedNewMlsGroupId=\(serverHex.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
-      )
-      return
-    }
-
-    // 1. Delete old MLS group state.
-    //    The prior crypto session is now `reset_requested` server-side; its
-    //    keys are no longer authoritative. Resolve the old group id from
-    //    memory or the DB, then drop OpenMLS state.
-    var oldGroupId: Data?
-    if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
-      oldGroupId = gid
-    } else {
-      do {
-        if let model = try await storage.fetchConversation(
-          conversationID: convoId,
-          currentUserDID: userDid,
-          database: database
-        ) {
-          oldGroupId = model.groupID
+        guard let userDid = userDid else {
+            throw MLSConversationError.noAuthentication
         }
-      } catch {
+
+        guard let convo = conversations[convoId] else {
+            logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Conversation not found")
+            throw MLSConversationError.conversationNotFound
+        }
+
+        guard let groupState = groupStates[convo.groupId] else {
+            logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Group state not found")
+            throw MLSConversationError.groupStateNotFound
+        }
+
+        guard let groupIdData = Data(hexEncoded: convo.groupId) else {
+            logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Invalid groupId")
+            throw MLSConversationError.invalidGroupId
+        }
+
+        // Extract user DID from device credential DID (format: did:plc:user#device-uuid)
+        let userDidFromDevice: String
+        if let hashIndex = deviceCredentialDid.firstIndex(of: "#") {
+            userDidFromDevice = String(deviceCredentialDid[..<hashIndex])
+        } else {
+            userDidFromDevice = deviceCredentialDid
+        }
+
+        let decision = try await deviceRecordService.verifyKeyPackageAuthorization(
+            localAccountDid: userDid,
+            targetDid: userDidFromDevice,
+            keyPackageData: keyPackageData
+        )
+        guard decision.allowed else {
+            throw MLSConversationError.operationFailed(
+                decision.failureReason ?? "Device record verification denied key package"
+            )
+        }
+
+        // Use GroupOperationCoordinator to serialize operations on this group
+        return try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+            // Three-phase sender lifecycle (task #44/#62):
+            // 1. Stage commit locally using the provided key package.
+            logger.info(
+                "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 1/3: Creating staged commit..."
+            )
+            // `FfiCommitKind.addMembers.memberDids` is informational on the Rust
+            // side (destructured with `_`); we pass the deviceCredentialDid purely
+            // for logging clarity.
+            let plan = try await mlsClient.stageCommit(
+                for: userDid,
+                conversationId: convo.groupId,
+                kind: .addMembers(memberDids: [deviceCredentialDid], keyPackages: [keyPackageData])
+            )
+            logger.info("✅ [MLSConversationManager.addDeviceWithKeyPackage] Staged commit created")
+
+            // 2. Send commit and welcome to server
+            logger.info(
+                "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 2/3: Sending to server..."
+            )
+
+            // Track this commit as our own
+            trackOwnCommit(plan.commitBytes)
+
+            let welcomeData = plan.welcomeBytes ?? Data()
+
+            // For device additions, we use the device credential DID (not user DID) in the server call
+            // The server will validate this is a device belonging to an existing member
+
+            // Export POST-commit GroupInfo from local FFI state. After stageCommit,
+            // the FFI holds the new state at epoch N+1 — pass that to the server so
+            // it's stored atomically inside the same txn that records the commit
+            // (closes the External-Commit joiner stale-state race; the followup
+            // publishGroupInfo retry remains as a safety net).
+            let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
+                for: userDid,
+                groupId: groupIdData
+            )
+            if postCommitGroupInfo == nil {
+                logger.warning(
+                    "⚠️ [MLSConversationManager.addDeviceWithKeyPackage] Failed to export post-commit GroupInfo — falling back to publishGroupInfo retry"
+                )
+            }
+
+            let addMembersResult: (success: Bool, newEpoch: Int)
+            do {
+                addMembersResult = try await apiClient.addMembers(
+                    convoId: convoId,
+                    didList: [], // Empty - we're adding a device, not a new user
+                    commit: plan.commitBytes,
+                    welcomeMessage: welcomeData,
+                    groupInfo: postCommitGroupInfo,
+                    keyPackageHashes: nil // Server already knows the key package from claim
+                )
+            } catch {
+                await mlsClient.discardPending(for: userDid, handle: plan.handle)
+                throw error
+            }
+
+            guard addMembersResult.success else {
+                logger.error("❌ [MLSConversationManager.addDeviceWithKeyPackage] Server rejected commit")
+                await mlsClient.discardPending(for: userDid, handle: plan.handle)
+                throw MLSConversationError.operationFailed("Server rejected device addition")
+            }
+
+            let serverEpoch = addMembersResult.newEpoch
+
+            // 3. Confirm commit locally. Server echoes newEpoch for addMembers.
+            //    Idempotency-hit: server may nil-default newEpoch to 0 when the
+            //    commit was already applied in a prior attempt; fall back to the
+            //    skip-fence sentinel so confirmCommit trusts the staged target.
+            //    If confirm throws (e.g. EpochMismatch — #63 flat error), explicitly
+            //    discard the staged commit since the Rust side leaves it in place
+            //    when the server-epoch fence trips.
+            logger.info(
+                "🔵 [MLSConversationManager.addDeviceWithKeyPackage] Step 3/3: Merging commit locally..."
+            )
+            let serverEpochForConfirm: UInt64 =
+                serverEpoch > 0 ? UInt64(serverEpoch) : mlsSkipServerEpochFence()
+            let confirmed: FfiConfirmedCommit
+            do {
+                confirmed = try await mlsClient.confirmCommit(
+                    for: userDid, handle: plan.handle, serverEpoch: serverEpochForConfirm
+                )
+            } catch {
+                await mlsClient.discardPending(for: userDid, handle: plan.handle)
+                throw error
+            }
+            let localEpoch = confirmed.newEpoch
+
+            if localEpoch != UInt64(serverEpoch) {
+                logger.warning(
+                    "⚠️ Epoch mismatch after device addition: local=\(localEpoch), server=\(serverEpoch)"
+                )
+            }
+
+            // Update local state
+            var updatedState = groupState
+            updatedState.epoch = localEpoch
+            // Device additions don't add new user DIDs to members - they're devices of existing members
+            groupStates[convo.groupId] = updatedState
+
+            logger.info(
+                "✅ [MLSConversationManager.addDeviceWithKeyPackage] COMPLETE - device: \(deviceCredentialDid), epoch: \(serverEpoch)"
+            )
+
+            return serverEpoch
+        }
+    }
+
+    /// Get the device sync manager for SSE event wiring
+    /// Call this to register for newDeviceEvent handling in your SSE subscription
+    public func getDeviceSyncManager() -> MLSDeviceSyncManager? {
+        return deviceSyncManager
+    }
+
+    /// Handle SSE new device event by forwarding to the device sync manager
+    /// This provides the real-time path for multi-device sync instead of relying on polling
+    public func handleNewDeviceSSEEvent(_ event: BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async {
+        guard let currentUserDid = userDid else {
+            logger.warning("⚠️ [handleNewDeviceSSEEvent] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: currentUserDid, operation: "handleNewDeviceSSEEvent")
+        else {
+            return
+        }
+
+        guard let deviceSyncManager = deviceSyncManager else {
+            logger.warning(
+                "⚠️ [handleNewDeviceSSEEvent] Device sync manager not initialized - SSE new device event ignored"
+            )
+            return
+        }
+        logger.info(
+            "📱 [handleNewDeviceSSEEvent] Forwarding new device event to sync manager - user: \(event.userDid), device: \(event.deviceId)"
+        )
+        await deviceSyncManager.handleNewDeviceEvent(event)
+    }
+
+    /// Request active members to publish fresh GroupInfo for a conversation
+    /// Called when External Commit fails due to stale GroupInfo
+    /// Emits SSE event to notify other members to upload fresh GroupInfo
+    public func groupInfoRefresh(convoId: String) async {
+        logger.info("🔄 [groupInfoRefresh] Requesting refresh for \(convoId)")
+
+        guard let currentUserDid = userDid else {
+            logger.warning("⚠️ [groupInfoRefresh] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: currentUserDid, operation: "groupInfoRefresh") else {
+            return
+        }
+
+        do {
+            let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+                convoId: convoId,
+                action: "refreshGroupInfo"
+            )
+            let (responseCode, output) = try await apiClient.client.blue.catbird.mlsChat.commitGroupChange(
+                input: input
+            )
+
+            if responseCode == 200, let output = output {
+                if output.success {
+                    logger.info(
+                        "✅ [groupInfoRefresh] Request sent via commitGroupChange"
+                    )
+                } else {
+                    logger.warning("⚠️ [groupInfoRefresh] No active members to notify for \(convoId)")
+                }
+            } else {
+                logger.warning("⚠️ [groupInfoRefresh] Server returned \(responseCode) for \(convoId)")
+            }
+        } catch {
+            logger.error("❌ [groupInfoRefresh] Failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Request re-addition to a conversation when both Welcome and External Commit have failed
+    /// Called after all rejoin attempts are exhausted to notify active members
+    /// Emits SSE event to notify other members to re-add the user with fresh KeyPackages
+    public func readdition(convoId: String) async {
+        logger.info("🆘 [readdition] Requesting re-addition for \(convoId)")
+
+        guard let currentUserDid = userDid else {
+            logger.warning("⚠️ [readdition] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: currentUserDid, operation: "readdition") else {
+            return
+        }
+
+        do {
+            let (requested, activeMembers) = try await apiClient.readdition(convoId: convoId)
+
+            if requested {
+                logger.info("✅ [readdition] Request sent - \(activeMembers ?? 0) active members notified")
+            } else {
+                logger.warning(
+                    "⚠️ [readdition] No active members available to process re-addition for \(convoId)"
+                )
+            }
+        } catch {
+            logger.error("❌ [readdition] Failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Handle GroupInfo refresh request from SSE stream
+    /// When another member encounters stale GroupInfo during External Commit rejoin,
+    /// they request active members to publish fresh GroupInfo. This exports and uploads
+    /// the current GroupInfo from our local MLS state.
+    public func handleGroupInfoRefreshRequest(convoId: String) async {
+        logger.info("🔄 [handleGroupInfoRefreshRequest] Processing refresh request for \(convoId)")
+
+        guard let userDid = userDid else {
+            logger.warning("⚠️ [handleGroupInfoRefreshRequest] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: userDid, operation: "handleGroupInfoRefreshRequest")
+        else {
+            return
+        }
+
+        // Try to resolve Group ID from memory first, then fall back to database
+        var groupId: Data?
+
+        // 1. Check in-memory cache
+        if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
+            groupId = gid
+        }
+        // 2. Fall back to database lookup (for cold starts/background processing)
+        else {
+            do {
+                if let model = try await storage.fetchConversation(
+                    conversationID: convoId,
+                    currentUserDID: userDid,
+                    database: database
+                ) {
+                    groupId = model.groupID
+                    logger.info("✅ [handleGroupInfoRefreshRequest] Resolved Group ID from database for \(convoId)")
+                }
+            } catch {
+                logger.warning("⚠️ [handleGroupInfoRefreshRequest] Database lookup failed: \(error.localizedDescription)")
+            }
+        }
+
+        // Get the group ID from our local conversation state
+        guard let validGroupId = groupId else {
+            logger.warning("⚠️ [handleGroupInfoRefreshRequest] Could not find group ID for \(convoId) (checked memory and DB)")
+            return
+        }
+
+        do {
+            // Export and upload fresh GroupInfo
+            try await mlsClient.publishGroupInfo(for: userDid, convoId: convoId, groupId: validGroupId)
+            logger.info(
+                "✅ [handleGroupInfoRefreshRequest] Successfully published fresh GroupInfo for \(convoId)"
+            )
+        } catch {
+            logger.error(
+                "❌ [handleGroupInfoRefreshRequest] Failed to publish GroupInfo for \(convoId): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Handle a group reset event from the SSE/WebSocket stream.
+    ///
+    /// When an admin resets a conversation's MLS group, the conversation identity (`convoId`)
+    /// stays the same but the underlying MLS group changes (`newGroupId`). Clients must:
+    /// 1. Delete old MLS group state
+    /// 2. Join the new group via External Commit
+    /// 3. Notify UI observers
+    ///
+    /// - Parameters:
+    ///   - event: The GroupResetEvent containing reset details
+    public func handleGroupReset(
+        event: BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent
+    ) async {
+        let convoId = event.convoId
+        let newGroupId = event.newGroupId
+
+        logger.info(
+            "🔄 [handleGroupReset] Conversation \(convoId.prefix(16)) reset to group \(newGroupId.prefix(16)) (gen \(event.resetGeneration))"
+        )
+
+        guard let userDid = userDid else {
+            logger.warning("⚠️ [handleGroupReset] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: userDid, operation: "handleGroupReset") else {
+            return
+        }
+
+        // CLIENT M (Task #75): one-line entry summary for grep-based forensic
+        // analysis of replay-storm sequences. Mirror the same shape as
+        // handleResetRequested. The `try?` collapses any GRDB error to nil; the
+        // outer flatten unwraps the Optional<Optional<Int64>> to a single
+        // optional for log formatting.
+        let localGroupIdHex = conversations[convoId]?.groupId
+        let storedGenForLog: Int64? = (try? await database.read { db in
+            try MLSConversationResetSQL.loadPendingResetGeneration(
+                db: db, conversationID: convoId, currentUserDID: userDid
+            )
+        }) ?? nil
+        logger.info(
+            "🔍 [RESET-EVENT] handler=handleGroupReset convo=\(convoId.prefix(16)) incomingGen=\(event.resetGeneration) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(newGroupId.prefix(16))"
+        )
+
+        // CLIENT M (Task #75) — fix #1: pre-delete stale-generation guard.
+        // Mirrors `handleResetRequested`'s pre-delete check (this handler was
+        // missing it). If a newer-or-equal `pendingResetGeneration` is already
+        // persisted, the incoming event is a stale replay (WS cursor replay
+        // after first-responder bootstrap success) — short-circuit BEFORE any
+        // destructive call. Without this, the event flood after bootstrap
+        // success calls `MLSClient.deleteGroup` on the freshly bootstrapped
+        // group and destroys it. Production observed at b947c701a32943d0 right
+        // after a successful bootstrap won the race for 4b2cdbaad35a9d13 / gen 25.
+        do {
+            let stored = try await database.read { db in
+                try MLSConversationResetSQL.loadPendingResetGeneration(
+                    db: db, conversationID: convoId, currentUserDID: userDid
+                )
+            }
+            if let stored = stored, stored >= Int64(event.resetGeneration) {
+                logger.info(
+                    "⏭️ [STALE-RESET] Skipping incoming gen=\(event.resetGeneration) for convo=\(convoId.prefix(16)) (storedGen=\(stored)) — pre-delete guard"
+                )
+                return
+            }
+        } catch {
+            logger.warning(
+                "⚠️ [handleGroupReset] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
+            )
+        }
+
+        // CLIENT M (Task #75) — fix #2: self-echo / replay-into-current short-circuit.
+        // If the incoming `newGroupId` matches the conversation's current local
+        // `groupId`, the event is either a self-echo of our own bootstrap or a
+        // historical replay re-announcing the group we already operate at. In
+        // either case there is nothing to reset. Without this, even after the
+        // stale-gen guard short-circuits the destruction the handler still
+        // re-flags RESET_PENDING + minted candidates and forces a needless
+        // recovery cycle. Use lowercased compare; FFI-minted ids are lowercase
+        // hex but server-canonicalized fields elsewhere have varied historically.
+        if let localHex = localGroupIdHex,
+           localHex.lowercased() == newGroupId.lowercased()
+        {
+            logger.info(
+                "⏭️ [SELF-ECHO] Skipping reset event — newGroupId=\(newGroupId.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+            )
+            return
+        }
+
+        // 1. Delete old MLS group state
+        // Try to resolve the old group ID from memory or database
+        var oldGroupId: Data?
+        if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
+            oldGroupId = gid
+        } else {
+            do {
+                if let model = try await storage.fetchConversation(
+                    conversationID: convoId,
+                    currentUserDID: userDid,
+                    database: database
+                ) {
+                    oldGroupId = model.groupID
+                }
+            } catch {
+                logger.warning("⚠️ [handleGroupReset] Database lookup for old group failed: \(error.localizedDescription)")
+            }
+        }
+
+        if let oldGroupId = oldGroupId {
+            do {
+                try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
+                logger.info("🗑️ [handleGroupReset] Deleted old MLS state for \(convoId.prefix(16))")
+            } catch {
+                logger.warning("⚠️ [handleGroupReset] Failed to delete old MLS state: \(error.localizedDescription)")
+                // Continue anyway - old state may already be gone
+            }
+        } else {
+            logger.info("ℹ️ [handleGroupReset] No old group ID found for \(convoId.prefix(16)) - may already be cleaned up")
+        }
+
+        // 2. Remove old group state from in-memory caches
+        if let convo = conversations[convoId] {
+            groupStates[convo.groupId] = nil
+        }
+
+        // 3. Flag RESET_PENDING — deferred recovery (§8.5) will handle the External Commit.
+        //    DO NOT call joinByExternalCommit inline from SSE handler.
+        //    This prevents epoch inflation from concurrent/racing SSE events.
+        //    Thread `newGroupId` + `resetGeneration` so Phase 1 takes the recipient
+        //    branch (external-commit into the incoming group) rather than the
+        //    admin-initiator branch (create fresh group + POST resetGroup).
+        do {
+            try await markConversationNeedsReset(
+                convoId,
+                pendingNewGroupId: newGroupId,
+                pendingResetGeneration: Int64(event.resetGeneration)
+            )
+            logger.info(
+                "🏴 [handleGroupReset] Flagged \(convoId.prefix(16)) as RESET_PENDING — deferred recovery will rejoin into \(newGroupId.prefix(16))"
+            )
+        } catch {
+            logger.error(
+                "❌ [handleGroupReset] Failed to flag RESET_PENDING: \(error.localizedDescription)"
+            )
+        }
+
+        // 4. Trigger a sync cycle to pick up the deferred recovery promptly
+        Task {
+            try? await self.syncWithServer(fullSync: false)
+        }
+
+        // 5. Notify observers
+        if let resetBy = event.resetBy {
+            notifyObservers(.groupReset(
+                convoId: convoId,
+                newGroupId: newGroupId,
+                resetGeneration: event.resetGeneration,
+                resetBy: resetBy,
+                reason: event.reason
+            ))
+        }
+    }
+
+    /// Handle a Phase 2.5 indirect-trigger `resetRequestedEvent` from the SSE/
+    /// WebSocket stream.
+    ///
+    /// Phase 2.5 (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1)
+    /// closes the indirect-flow gap where the server previously minted a new
+    /// `mls_group_id` itself. With the chokepoint funnel, indirect triggers
+    /// (quorum vote, system sweep, inline 409, inline groupinfo-404) only emit
+    /// `crypto_session_reset_requested`; subscribed clients then elect a first
+    /// responder via `bootstrapResetGroup` / `commitGroupChange` (the
+    /// `crypto_sessions UNIQUE (conversation_id, generation)` constraint
+    /// serializes the winner — first commit wins, losers receive HTTP 409
+    /// `AlreadyBootstrapped` and drop their pre-bootstrap MLS state cleanly).
+    ///
+    /// Mirrors `handleGroupReset(event:)`:
+    /// 1. Delete the old MLS group state (the prior crypto session is now
+    ///    `reset_requested` server-side; its keys are no longer authoritative).
+    /// 2. Remove the old group from in-memory caches.
+    /// 3. Flag `needsReset = true`. Resolution:
+    ///    - If the server attached `expectedNewMlsGroupId` (admin override
+    ///      path, rare), stage that as `pendingNewGroupId`.
+    ///    - Otherwise mint a fresh client-side UUIDv4 candidate id (32 lower-
+    ///      case hex chars, mirroring `record_reset_requested` in
+    ///      `catbird-mls/src/orchestrator/recovery.rs`). This stages the row
+    ///      into the recipient-then-bootstrap branch that already exists in
+    ///      `runDeferredEpochRecovery` — first the External Commit attempt
+    ///      (which fails with `GroupInfo` absent post-reset), then
+    ///      `attemptFirstResponderBootstrap` races the candidate against
+    ///      siblings via `bootstrapResetGroup`. The chokepoint UNIQUE
+    ///      constraint elects the winner; race losers see HTTP 409 and drop
+    ///      their pre-bootstrap state.
+    /// 4. Trigger a sync cycle to drive deferred recovery promptly.
+    ///
+    /// **Why mint client-side instead of leaving `pendingNewGroupId == nil`?**
+    /// The existing sync-loop branch logic (`MLSConversationManager+Sync.swift`
+    /// line 635) treats `pendingNewGroupId == nil` as the **admin-initiator**
+    /// path that calls the privileged `resetGroup` endpoint and fails with
+    /// `notadmin` for non-admin members. Phase 2.5 explicitly retired the
+    /// admin-mint flow for indirect triggers. Minting client-side puts the row
+    /// into the bootstrap-race branch which is the correct Phase 2.5 endpoint
+    /// (`bootstrapResetGroup`) for any active member.
+    ///
+    /// Idempotency: a stale-generation guard runs **before** the destructive
+    /// `deleteGroup` call (mirrors `record_reset_requested` at
+    /// `catbird-mls/src/orchestrator/recovery.rs:1401`). If the stored
+    /// `pendingResetGeneration` is `>=` the incoming `event.generation`, the
+    /// handler returns early without touching MLS state — the row is already
+    /// at this or a newer generation. Required because the global (AppState)
+    /// + per-convo (DetailView) WS subscriptions both deliver this event for
+    /// active conversations, and `event_stream` cursor replay can re-deliver
+    /// after reconnect. `markConversationNeedsReset` applies the same guard
+    /// at the row-write layer as a second line of defense.
+    ///
+    /// - Parameters:
+    ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
+    ///     session id, generation, trigger, and dedup id.
+    public func handleResetRequested(
+        event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
+    ) async {
+        let convoId = event.convoId
+        let generation = event.generation
+        let trigger = event.trigger
+
+        logger.info(
+            "🔄 [handleResetRequested] Conversation \(convoId.prefix(16)) reset requested (gen \(generation), trigger=\(trigger), eventId=\(event.requestEventId.prefix(16)))"
+        )
+
+        guard let userDid = userDid else {
+            logger.warning("⚠️ [handleResetRequested] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: userDid, operation: "handleResetRequested") else {
+            return
+        }
+
+        // CLIENT M (Task #75): one-line entry summary for grep-based forensic
+        // analysis of replay-storm sequences. Mirror the same shape as
+        // handleGroupReset. The `try?` + `?? nil` flattens the
+        // Optional<Optional<Int64>> for clean log formatting.
+        let localGroupIdHex = conversations[convoId]?.groupId
+        let storedGenForLog: Int64? = (try? await database.read { db in
+            try MLSConversationResetSQL.loadPendingResetGeneration(
+                db: db, conversationID: convoId, currentUserDID: userDid
+            )
+        }) ?? nil
+        logger.info(
+            "🔍 [RESET-EVENT] handler=handleResetRequested convo=\(convoId.prefix(16)) incomingGen=\(generation) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(event.expectedNewMlsGroupId?.prefix(16) ?? "nil")"
+        )
+
+        // 0. Stale-generation guard (BEFORE destructive delete).
+        //    If a newer or equal `pendingResetGeneration` is already persisted,
+        //    treat this event as a stale replay / dual-subscription duplicate and
+        //    short-circuit. Mirrors `record_reset_requested` at
+        //    `catbird-mls/src/orchestrator/recovery.rs:1401` and the existing
+        //    Swift `markConversationNeedsReset` stale-guard at line 3353.
+        //
+        //    Without this check, a replayed event with an older generation would
+        //    delete the current MLS group state (which may already be operating
+        //    at a NEWER generation) before the staleness check inside
+        //    `markConversationNeedsReset` would reject the row write — clobbering
+        //    valid local state and forcing avoidable recovery.
+        //
+        //    CLIENT M (Task #75) note: this guard relies on success paths writing
+        //    a non-nil `pendingResetGeneration`. Prior to CLIENT M,
+        //    `applyRecipientResetSuccess` nulled this column; that left the guard
+        //    vacuous (`stored == nil` falls through), so historical SSE replays
+        //    after a successful bootstrap still ran through to `deleteGroup` and
+        //    destroyed the freshly-bootstrapped group. The fix is the
+        //    `appliedGeneration` plumbing in `MLSConversationManager+Sync`.
+        do {
+            let stored = try await database.read { db in
+                try MLSConversationResetSQL.loadPendingResetGeneration(
+                    db: db, conversationID: convoId, currentUserDID: userDid
+                )
+            }
+            if let stored = stored, stored >= Int64(generation) {
+                logger.info(
+                    "⏭️ [STALE-RESET] Skipping incoming gen=\(generation) for convo=\(convoId.prefix(16)) (storedGen=\(stored)) — pre-delete guard (eventId=\(event.requestEventId.prefix(16)))"
+                )
+                return
+            }
+        } catch {
+            // If the read itself fails, fall through and let the existing
+            // markConversationNeedsReset stale-guard catch it. We only short-circuit
+            // when we positively know the event is stale.
+            logger.warning(
+                "⚠️ [handleResetRequested] Could not read stored pendingResetGeneration: \(error.localizedDescription) — proceeding without pre-delete staleness check"
+            )
+        }
+
+        // CLIENT M (Task #75) — fix #2: self-echo / replay-into-current short-circuit.
+        // ResetRequestedEvent's `expectedNewMlsGroupId` is OPTIONAL (Phase 2.5
+        // indirect triggers don't include it; only admin-override paths do). When
+        // it IS present and matches the conversation's current local groupId,
+        // the event is announcing the group we already operate at — skip the
+        // destructive path entirely. When absent, fall through to the existing
+        // candidate-mint flow.
+        if let serverHex = event.expectedNewMlsGroupId,
+           !serverHex.isEmpty,
+           let localHex = localGroupIdHex,
+           localHex.lowercased() == serverHex.lowercased()
+        {
+            logger.info(
+                "⏭️ [SELF-ECHO] Skipping reset event — expectedNewMlsGroupId=\(serverHex.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+            )
+            return
+        }
+
+        // 1. Delete old MLS group state.
+        //    The prior crypto session is now `reset_requested` server-side; its
+        //    keys are no longer authoritative. Resolve the old group id from
+        //    memory or the DB, then drop OpenMLS state.
+        var oldGroupId: Data?
+        if let convo = conversations[convoId], let gid = Data(hexEncoded: convo.groupId) {
+            oldGroupId = gid
+        } else {
+            do {
+                if let model = try await storage.fetchConversation(
+                    conversationID: convoId,
+                    currentUserDID: userDid,
+                    database: database
+                ) {
+                    oldGroupId = model.groupID
+                }
+            } catch {
+                logger.warning(
+                    "⚠️ [handleResetRequested] Database lookup for old group failed: \(error.localizedDescription)"
+                )
+            }
+        }
+
+        if let oldGroupId = oldGroupId {
+            do {
+                try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
+                logger.info("🗑️ [handleResetRequested] Deleted old MLS state for \(convoId.prefix(16))")
+            } catch {
+                logger.warning(
+                    "⚠️ [handleResetRequested] Failed to delete old MLS state: \(error.localizedDescription)"
+                )
+                // Continue anyway — old state may already be gone.
+            }
+        } else {
+            logger.info(
+                "ℹ️ [handleResetRequested] No old group ID found for \(convoId.prefix(16)) — may already be cleaned up"
+            )
+        }
+
+        // 2. Remove old group state from in-memory caches.
+        if let convo = conversations[convoId] {
+            groupStates[convo.groupId] = nil
+        }
+
+        // 3. Resolve the candidate `pendingNewGroupId` for the row.
+        //    Server-supplied (admin override) takes precedence; otherwise mint
+        //    a fresh UUIDv4-style 32-hex-char id locally for the race-bootstrap
+        //    candidate (mirrors `record_reset_requested` in
+        //    `catbird-mls/src/orchestrator/recovery.rs`).
+        let candidateGroupIdHex: String
+        if let serverHex = event.expectedNewMlsGroupId, !serverHex.isEmpty {
+            candidateGroupIdHex = serverHex
+            logger.info(
+                "🔄 [handleResetRequested] Using server-supplied expectedNewMlsGroupId \(serverHex.prefix(16))"
+            )
+        } else {
+            candidateGroupIdHex = Self.mintCandidateGroupIdHex()
+            logger.info(
+                "🔄 [handleResetRequested] Minting client-side candidate \(candidateGroupIdHex.prefix(16)) for first-responder bootstrap race"
+            )
+        }
+
+        // 4. Flag RESET_PENDING with the candidate id staged. The deferred
+        //    recovery loop will pick this up via `runDeferredEpochRecoveryRecipient`
+        //    → fall through to `attemptFirstResponderBootstrap` (GroupInfo absent
+        //    post-reset → bootstrap race).
+        do {
+            try await markConversationNeedsReset(
+                convoId,
+                pendingNewGroupId: candidateGroupIdHex,
+                pendingResetGeneration: Int64(generation)
+            )
+            logger.info(
+                "🏴 [handleResetRequested] Flagged \(convoId.prefix(16)) as RESET_PENDING — candidateNewGroupId=\(candidateGroupIdHex.prefix(16)), gen \(generation), trigger=\(trigger)"
+            )
+        } catch {
+            logger.error(
+                "❌ [handleResetRequested] Failed to flag RESET_PENDING: \(error.localizedDescription)"
+            )
+        }
+
+        // 5. Trigger a sync cycle to pick up the deferred recovery promptly.
+        Task {
+            do {
+                try await self.syncWithServer(fullSync: false)
+            } catch {
+                self.logger.warning(
+                    "⚠️ [handleResetRequested] syncWithServer failed after reset request handling: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// Mint a client-side UUIDv4-derived 32-lowercase-hex-char id for the
+    /// Phase 2.5 first-responder bootstrap race. Mirrors the Rust orchestrator
+    /// helper `format!("{:032x}", uuid::Uuid::new_v4().as_u128())`.
+    static func mintCandidateGroupIdHex() -> String {
+        UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    /// Handle re-addition request from SSE stream
+    /// When a member's rejoin attempts are exhausted (Welcome failed, External Commit failed),
+    /// they request active members to re-add them. This method re-adds the user with fresh KeyPackages.
+    ///
+    /// - Parameters:
+    ///   - convoId: Conversation ID where re-addition was requested
+    ///   - userDidToAdd: DID of the user requesting re-addition
+    public func handleReadditionRequest(convoId: String, userDidToAdd: String) async {
+        logger.info(
+            "🆘 [handleReadditionRequest] Processing re-addition request for user \(userDidToAdd.prefix(20))... in \(convoId)"
+        )
+
+        guard let currentUserDid = userDid else {
+            logger.warning("⚠️ [handleReadditionRequest] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: currentUserDid, operation: "handleReadditionRequest")
+        else {
+            return
+        }
+
+        // Don't process our own re-addition requests
+        if userDidToAdd == currentUserDid {
+            logger.debug("🔄 [handleReadditionRequest] Ignoring own re-addition request")
+            return
+        }
+
+        // Verify we're an active member of the conversation (having a group state means we're joined)
+        guard groupStates[convoId] != nil else {
+            logger.warning("⚠️ [handleReadditionRequest] Not an active member of \(convoId)")
+            return
+        }
+
+        do {
+            // Re-add the user using the standard addMembers flow
+            // This will fetch fresh KeyPackages and create a Welcome/Commit
+            logger.info(
+                "📤 [handleReadditionRequest] Re-adding user \(userDidToAdd.prefix(20))... to \(convoId)"
+            )
+            try await addMembers(convoId: convoId, memberDids: [userDidToAdd])
+            logger.info(
+                "✅ [handleReadditionRequest] Successfully re-added user \(userDidToAdd.prefix(20))... to \(convoId)"
+            )
+        } catch {
+            logger.error(
+                "❌ [handleReadditionRequest] Failed to re-add user: \(error.localizedDescription)"
+            )
+            // Don't throw - other active members may also receive the request and succeed
+        }
+    }
+
+    /// Validate that this manager's account matches the currently authenticated ATProto session.
+    /// Prevents stale cached managers from mutating MLS/server state after account switches.
+    func ensureActiveAccount(for expectedUserDid: String, operation: String) async -> Bool {
+        let isActive = await apiClient.isAuthenticatedAs(expectedUserDid)
+        if !isActive {
+            logger.info(
+                "⏸️ [\(operation)] Skipping - account \(expectedUserDid.prefix(20))... is not active"
+            )
+        }
+        return isActive
+    }
+
+    // MARK: - Multi-Device External Commit Fallback
+
+    /// Join a conversation via External Commit as a fallback for multi-device sync failures
+    /// This is called when the device sync manager detects that a pending addition failed
+    /// and the new device needs to self-join via External Commit.
+    ///
+    /// - Parameter convoId: The conversation ID to join
+    /// - Throws: MLSConversationError if join fails
+    public func joinViaExternalCommit(convoId: String) async throws {
+        guard let userDid = userDid else {
+            logger.error("❌ [joinViaExternalCommit] No user DID available")
+            throw MLSConversationError.noAuthentication
+        }
+
+        logger.info("📱 [joinViaExternalCommit] Attempting External Commit fallback for \(convoId)")
+
+        // Use the existing External Commit fallback infrastructure
+        let groupIdHex = try await attemptExternalCommitFallback(
+            convoId: convoId,
+            userDid: userDid,
+            reason: "Multi-device sync fallback"
+        )
+
+        // Fetch the conversation to update local state
+        guard let convo = await fetchConversationForRejoin(convoId: convoId) else {
+            logger.warning(
+                "⚠️ [joinViaExternalCommit] Could not fetch conversation after join - local state may be stale"
+            )
+            return
+        }
+
+        // Update group state after join
+        try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
+
+        // Sync conversation to ensure everything is up to date via device sync manager
+        if let deviceSyncManager = deviceSyncManager {
+            await deviceSyncManager.syncConversation(convoId)
+        }
+
+        logger.info(
+            "✅ [joinViaExternalCommit] Successfully joined \(convoId) via External Commit fallback"
+        )
+    }
+
+    // Remove current user from conversation
+    // - Parameter convoId: Conversation identifier
+    // leaveConversation, forceDeleteConversationLocally, forceDeleteConversation moved to Extensions/MLSConversationManager+Groups.swift
+
+    /// Handle being removed/kicked from a conversation
+    /// This is called when we detect (via SSE or sync) that we're no longer a member
+    /// - Parameters:
+    ///   - convoId: Conversation identifier
+    ///   - reason: Optional reason for removal (kicked vs left vs out of sync)
+    public func handleRemovedFromConversation(convoId: String, reason: MembershipChangeReason) async {
         logger.warning(
-          "⚠️ [handleResetRequested] Database lookup for old group failed: \(error.localizedDescription)"
+            "🚫 [handleRemovedFromConversation] Cleaning up after removal: \(convoId), reason: \(reason)"
         )
-      }
+
+        // Get the conversation info before cleanup
+        let groupId = conversations[convoId]?.groupId ?? convoId // Fallback to convoId if not found
+
+        // Force delete using centralized method
+        await forceDeleteConversationLocally(convoId: convoId, groupId: groupId)
+
+        // Notify observers based on reason
+        switch reason {
+        case .selfLeft:
+            notifyObservers(.conversationLeft(convoId))
+        case let .kicked(by, reasonText):
+            notifyObservers(.kickedFromConversation(convoId: convoId, by: by, reason: reasonText))
+        case .outOfSync:
+            notifyObservers(.conversationNeedsRecovery(convoId: convoId, reason: .memberRemoval))
+        case .connectionLost:
+            // Don't notify for connection issues - may be temporary
+            break
+        }
+
+        logger.info("✅ Cleanup completed for removed conversation: \(convoId)")
     }
 
-    if let oldGroupId = oldGroupId {
-      do {
-        try await mlsClient.deleteGroup(for: userDid, groupId: oldGroupId)
-        logger.info("🗑️ [handleResetRequested] Deleted old MLS state for \(convoId.prefix(16))")
-      } catch {
-        logger.warning(
-          "⚠️ [handleResetRequested] Failed to delete old MLS state: \(error.localizedDescription)"
-        )
-        // Continue anyway — old state may already be gone.
-      }
-    } else {
-      logger.info(
-        "ℹ️ [handleResetRequested] No old group ID found for \(convoId.prefix(16)) — may already be cleaned up"
-      )
+    // MARK: - Admin Operations
+
+    // MARK: Admin Helpers
+
+    /// Determine if the current user is an admin of the given conversation using in-memory state with a database fallback.
+    public func isCurrentUserAdmin(of convoId: String) async -> Bool {
+        guard let userDid = userDid else { return false }
+
+        if let convo = conversations[convoId],
+           convo.members.contains(where: { $0.did.description == userDid && $0.isAdmin })
+        {
+            return true
+        }
+
+        do {
+            let members = try await storage.fetchMembers(
+                conversationID: convoId,
+                currentUserDID: userDid,
+                database: database
+            )
+
+            return members.contains { model in
+                model.did == userDid && model.isActive && model.role == .admin
+            }
+        } catch {
+            logger.error("Failed to check admin status for \(convoId): \(error.localizedDescription)")
+            return false
+        }
     }
 
-    // 2. Remove old group state from in-memory caches.
-    if let convo = conversations[convoId] {
-      groupStates[convo.groupId] = nil
+    /// Determine if the current user is an admin for any conversation.
+    public func isCurrentUserAdminInAnyConversation() async -> Bool {
+        guard let userDid = userDid else { return false }
+
+        if conversations.values.contains(where: { convo in
+            convo.members.contains { $0.did.description == userDid && $0.isAdmin }
+        }) {
+            return true
+        }
+
+        do {
+            let adminCount = try await database.read { db in
+                try MLSMemberModel
+                    .filter(MLSMemberModel.Columns.currentUserDID == userDid)
+                    .filter(MLSMemberModel.Columns.role == MLSMemberModel.Role.admin.rawValue)
+                    .filter(MLSMemberModel.Columns.isActive == true)
+                    .fetchCount(db)
+            }
+
+            return adminCount > 0
+        } catch {
+            logger.error("Failed to determine admin membership: \(error.localizedDescription)")
+            return false
+        }
     }
 
-    // 3. Resolve the candidate `pendingNewGroupId` for the row.
-    //    Server-supplied (admin override) takes precedence; otherwise mint
-    //    a fresh UUIDv4-style 32-hex-char id locally for the race-bootstrap
-    //    candidate (mirrors `record_reset_requested` in
-    //    `catbird-mls/src/orchestrator/recovery.rs`).
-    let candidateGroupIdHex: String
-    if let serverHex = event.expectedNewMlsGroupId, !serverHex.isEmpty {
-      candidateGroupIdHex = serverHex
-      logger.info(
-        "🔄 [handleResetRequested] Using server-supplied expectedNewMlsGroupId \(serverHex.prefix(16))"
-      )
-    } else {
-      candidateGroupIdHex = Self.mintCandidateGroupIdHex()
-      logger.info(
-        "🔄 [handleResetRequested] Minting client-side candidate \(candidateGroupIdHex.prefix(16)) for first-responder bootstrap race"
-      )
-    }
+    // Member management (Block 2) moved to Extensions/MLSConversationManager+Members.swift
 
-    // 4. Flag RESET_PENDING with the candidate id staged. The deferred
-    //    recovery loop will pick this up via `runDeferredEpochRecoveryRecipient`
-    //    → fall through to `attemptFirstResponderBootstrap` (GroupInfo absent
-    //    post-reset → bootstrap race).
-    do {
-      try await markConversationNeedsReset(
-        convoId,
-        pendingNewGroupId: candidateGroupIdHex,
-        pendingResetGeneration: Int64(generation)
-      )
-      logger.info(
-        "🏴 [handleResetRequested] Flagged \(convoId.prefix(16)) as RESET_PENDING — candidateNewGroupId=\(candidateGroupIdHex.prefix(16)), gen \(generation), trigger=\(trigger)"
-      )
-    } catch {
-      logger.error(
-        "❌ [handleResetRequested] Failed to flag RESET_PENDING: \(error.localizedDescription)"
-      )
-    }
+    // MARK: - Moderation
 
-    // 5. Trigger a sync cycle to pick up the deferred recovery promptly.
-    Task {
-      do {
-        try await self.syncWithServer(fullSync: false)
-      } catch {
-        self.logger.warning(
-          "⚠️ [handleResetRequested] syncWithServer failed after reset request handling: \(error.localizedDescription)"
-        )
-      }
-    }
-  }
+    // Moderation methods moved to Extensions/MLSConversationManager+Members.swift
 
-  /// Mint a client-side UUIDv4-derived 32-lowercase-hex-char id for the
-  /// Phase 2.5 first-responder bootstrap race. Mirrors the Rust orchestrator
-  /// helper `format!("{:032x}", uuid::Uuid::new_v4().as_u128())`.
-  internal static func mintCandidateGroupIdHex() -> String {
-    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-  }
+    // Warn a member in a conversation (admin-only)
+    // - Parameters:
+    //   - convoId: Conversation identifier
+    //   - memberDid: DID of member to warn
+    //   - reason: Reason for warning
+    // - Returns: Tuple of warning ID and delivery timestamp
+    // warnMember moved to Extensions/MLSConversationManager+Members.swift
 
-  /// Handle re-addition request from SSE stream
-  /// When a member's rejoin attempts are exhausted (Welcome failed, External Commit failed),
-  /// they request active members to re-add them. This method re-adds the user with fresh KeyPackages.
-  ///
-  /// - Parameters:
-  ///   - convoId: Conversation ID where re-addition was requested
-  ///   - userDidToAdd: DID of the user requesting re-addition
-  public func handleReadditionRequest(convoId: String, userDidToAdd: String) async {
-    logger.info(
-      "🆘 [handleReadditionRequest] Processing re-addition request for user \(userDidToAdd.prefix(20))... in \(convoId)"
-    )
-
-    guard let currentUserDid = userDid else {
-      logger.warning("⚠️ [handleReadditionRequest] No user DID available")
-      return
-    }
-
-    guard await ensureActiveAccount(for: currentUserDid, operation: "handleReadditionRequest")
-    else {
-      return
-    }
-
-    // Don't process our own re-addition requests
-    if userDidToAdd == currentUserDid {
-      logger.debug("🔄 [handleReadditionRequest] Ignoring own re-addition request")
-      return
-    }
-
-    // Verify we're an active member of the conversation (having a group state means we're joined)
-    guard groupStates[convoId] != nil else {
-      logger.warning("⚠️ [handleReadditionRequest] Not an active member of \(convoId)")
-      return
-    }
-
-    do {
-      // Re-add the user using the standard addMembers flow
-      // This will fetch fresh KeyPackages and create a Welcome/Commit
-      logger.info(
-        "📤 [handleReadditionRequest] Re-adding user \(userDidToAdd.prefix(20))... to \(convoId)")
-      try await addMembers(convoId: convoId, memberDids: [userDidToAdd])
-      logger.info(
-        "✅ [handleReadditionRequest] Successfully re-added user \(userDidToAdd.prefix(20))... to \(convoId)"
-      )
-    } catch {
-      logger.error(
-        "❌ [handleReadditionRequest] Failed to re-add user: \(error.localizedDescription)")
-      // Don't throw - other active members may also receive the request and succeed
-    }
-  }
-
-  /// Validate that this manager's account matches the currently authenticated ATProto session.
-  /// Prevents stale cached managers from mutating MLS/server state after account switches.
-  internal func ensureActiveAccount(for expectedUserDid: String, operation: String) async -> Bool {
-    let isActive = await apiClient.isAuthenticatedAs(expectedUserDid)
-    if !isActive {
-      logger.info(
-        "⏸️ [\(operation)] Skipping - account \(expectedUserDid.prefix(20))... is not active")
-    }
-    return isActive
-  }
-
-  // MARK: - Multi-Device External Commit Fallback
-
-  /// Join a conversation via External Commit as a fallback for multi-device sync failures
-  /// This is called when the device sync manager detects that a pending addition failed
-  /// and the new device needs to self-join via External Commit.
-  ///
-  /// - Parameter convoId: The conversation ID to join
-  /// - Throws: MLSConversationError if join fails
-  public func joinViaExternalCommit(convoId: String) async throws {
-    guard let userDid = userDid else {
-      logger.error("❌ [joinViaExternalCommit] No user DID available")
-      throw MLSConversationError.noAuthentication
-    }
-
-    logger.info("📱 [joinViaExternalCommit] Attempting External Commit fallback for \(convoId)")
-
-    // Use the existing External Commit fallback infrastructure
-    let groupIdHex = try await attemptExternalCommitFallback(
-      convoId: convoId,
-      userDid: userDid,
-      reason: "Multi-device sync fallback"
-    )
-
-    // Fetch the conversation to update local state
-    guard let convo = await fetchConversationForRejoin(convoId: convoId) else {
-      logger.warning(
-        "⚠️ [joinViaExternalCommit] Could not fetch conversation after join - local state may be stale"
-      )
-      return
-    }
-
-    // Update group state after join
-    try await updateGroupStateAfterJoin(convo: convo, groupIdHex: groupIdHex, userDid: userDid)
-
-    // Sync conversation to ensure everything is up to date via device sync manager
-    if let deviceSyncManager = deviceSyncManager {
-      await deviceSyncManager.syncConversation(convoId)
-    }
-
-    logger.info(
-      "✅ [joinViaExternalCommit] Successfully joined \(convoId) via External Commit fallback")
-  }
-
-  /// Remove current user from conversation
-  /// - Parameter convoId: Conversation identifier
-  // leaveConversation, forceDeleteConversationLocally, forceDeleteConversation moved to Extensions/MLSConversationManager+Groups.swift
-
-
-  /// Handle being removed/kicked from a conversation
-  /// This is called when we detect (via SSE or sync) that we're no longer a member
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - reason: Optional reason for removal (kicked vs left vs out of sync)
-  public func handleRemovedFromConversation(convoId: String, reason: MembershipChangeReason) async {
-    logger.warning(
-      "🚫 [handleRemovedFromConversation] Cleaning up after removal: \(convoId), reason: \(reason)")
-
-    // Get the conversation info before cleanup
-    let groupId = conversations[convoId]?.groupId ?? convoId  // Fallback to convoId if not found
-
-    // Force delete using centralized method
-    await forceDeleteConversationLocally(convoId: convoId, groupId: groupId)
-
-    // Notify observers based on reason
-    switch reason {
-    case .selfLeft:
-      notifyObservers(.conversationLeft(convoId))
-    case .kicked(let by, let reasonText):
-      notifyObservers(.kickedFromConversation(convoId: convoId, by: by, reason: reasonText))
-    case .outOfSync:
-      notifyObservers(.conversationNeedsRecovery(convoId: convoId, reason: .memberRemoval))
-    case .connectionLost:
-      // Don't notify for connection issues - may be temporary
-      break
-    }
-
-    logger.info("✅ Cleanup completed for removed conversation: \(convoId)")
-  }
-
-  // MARK: - Admin Operations
-
-  // MARK: Admin Helpers
-
-  /// Determine if the current user is an admin of the given conversation using in-memory state with a database fallback.
-  public func isCurrentUserAdmin(of convoId: String) async -> Bool {
-    guard let userDid = userDid else { return false }
-
-    if let convo = conversations[convoId],
-      convo.members.contains(where: { $0.did.description == userDid && $0.isAdmin })
-    {
-      return true
-    }
-
-    do {
-      let members = try await storage.fetchMembers(
-        conversationID: convoId,
-        currentUserDID: userDid,
-        database: database
-      )
-
-      return members.contains { model in
-        model.did == userDid && model.isActive && model.role == .admin
-      }
-    } catch {
-      logger.error("Failed to check admin status for \(convoId): \(error.localizedDescription)")
-      return false
-    }
-  }
-
-  /// Determine if the current user is an admin for any conversation.
-  public func isCurrentUserAdminInAnyConversation() async -> Bool {
-    guard let userDid = userDid else { return false }
-
-    if conversations.values.contains(where: { convo in
-      convo.members.contains { $0.did.description == userDid && $0.isAdmin }
-    }) {
-      return true
-    }
-
-    do {
-      let adminCount = try await database.read { db in
-        try MLSMemberModel
-          .filter(MLSMemberModel.Columns.currentUserDID == userDid)
-          .filter(MLSMemberModel.Columns.role == MLSMemberModel.Role.admin.rawValue)
-          .filter(MLSMemberModel.Columns.isActive == true)
-          .fetchCount(db)
-      }
-
-      return adminCount > 0
-    } catch {
-      logger.error("Failed to determine admin membership: \(error.localizedDescription)")
-      return false
-    }
-  }
-
-
-  // Member management (Block 2) moved to Extensions/MLSConversationManager+Members.swift
-
-
-
-
-
-
-
-
-
-
-
-  // MARK: - Moderation
-
-
-  // Moderation methods moved to Extensions/MLSConversationManager+Members.swift
-
-
-  /// Warn a member in a conversation (admin-only)
-  /// - Parameters:
-  ///   - convoId: Conversation identifier
-  ///   - memberDid: DID of member to warn
-  ///   - reason: Reason for warning
-  /// - Returns: Tuple of warning ID and delivery timestamp
-  // warnMember moved to Extensions/MLSConversationManager+Members.swift
-
-
-
-
-
-
-
-
-
-
-  // Server synchronization moved to Extensions/MLSConversationManager+Sync.swift
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    // Server synchronization moved to Extensions/MLSConversationManager+Sync.swift
 }

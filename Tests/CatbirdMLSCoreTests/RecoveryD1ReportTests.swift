@@ -172,6 +172,17 @@ final class RecoveryD1ReportTests: XCTestCase {
     XCTAssertFalse(MLSConversationManager.isTrifectaExternalCommitError(err))
   }
 
+  func testPetrelStyleHttp410ExternalCommitFailureIsBootstrapSignal() {
+    struct PetrelStyleStatusError: LocalizedError {
+      let errorDescription: String? =
+        "Received an error response from the server (Status Code: 410)."
+    }
+
+    XCTAssertTrue(
+      MLSConversationManager.isExternalCommitBootstrapSignal(PetrelStyleStatusError())
+    )
+  }
+
   // MARK: - Combined trifecta gating
 
   /// Partial trifecta: the Welcome arrived (404, not the 200-empty sentinel)

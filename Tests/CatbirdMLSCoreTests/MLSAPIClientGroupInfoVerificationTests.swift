@@ -120,6 +120,28 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
     XCTAssertEqual(welcome, payload)
   }
 
+  func testReissueWelcomeLexiconUsesDeviceDidStrings() {
+    let recipientDeviceDid = "did:plc:34x52srgxttjewbke5hguloh#a5fa15cd-4f25-41b4-8fe3-306d79c3fdb0"
+    let inviterDeviceDid = "did:plc:7nmnou7umkr46rp7u2hbd3nb#inviter-device"
+
+    let input = BlueCatbirdMlsChatReissueWelcome.Input(
+      convoId: "aef60855d8c9d5c14640d2867cfec07d",
+      recipientDeviceDid: recipientDeviceDid,
+      reason: "Welcome unavailable"
+    )
+
+    let output = BlueCatbirdMlsChatReissueWelcome.Output(
+      welcomeRequested: true,
+      requestId: "request-1",
+      requestedAt: ATProtocolDate(date: Date(timeIntervalSince1970: 0)),
+      inviterDevice: inviterDeviceDid
+    )
+
+    XCTAssertEqual(input.recipientDeviceDid, recipientDeviceDid)
+    XCTAssertEqual(output.requestId, "request-1")
+    XCTAssertEqual(output.inviterDevice, inviterDeviceDid)
+  }
+
   func testWelcomeHashQueryPreservesSmallUniqueHashList() {
     let hashes = [
       String(repeating: "a", count: 64),
@@ -132,12 +154,15 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
     XCTAssertEqual(queryHashes, [hashes[0], hashes[1]])
   }
 
-  func testWelcomeHashQueryOmitsOversizedLocalManifest() {
+  func testWelcomeHashQueryCapsOversizedLocalManifest() {
     let hashes = (0 ... MLSAPIClient.maxWelcomeKeyPackageHashesForQuery).map {
       String(format: "%064x", $0)
     }
 
-    XCTAssertNil(MLSAPIClient.welcomeKeyPackageHashesForQuery(hashes))
+    XCTAssertEqual(
+      MLSAPIClient.welcomeKeyPackageHashesForQuery(hashes),
+      Array(hashes.prefix(MLSAPIClient.maxWelcomeKeyPackageHashesForQuery))
+    )
   }
 
   func testGroupResetDetectionAcceptsTypedHTTP410() {
@@ -334,6 +359,26 @@ final class MLSAPIClientBuildExternalCommitInputTests: XCTestCase {
     )
 
     XCTAssertNil(input.confirmationTag)
+  }
+}
+
+final class MLSClientHTTPStatusExtractionTests: XCTestCase {
+
+  private struct PetrelStyleStatusError: LocalizedError {
+    let errorDescription: String? =
+      "Received an error response from the server (Status Code: 409)."
+  }
+
+  func testExtractsStatusCodeFromPetrelStyleDescription() {
+    XCTAssertEqual(MLSClient.httpStatusCode(from: PetrelStyleStatusError()), 409)
+  }
+
+  func testExtractsStatusCodeFromMLSAPIError() {
+    XCTAssertEqual(
+      MLSClient.httpStatusCode(
+        from: MLSAPIError.httpError(statusCode: 429, message: "rate limited")),
+      429
+    )
   }
 }
 

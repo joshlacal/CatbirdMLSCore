@@ -1520,11 +1520,15 @@ extension MLSConversationManager {
       await clearConversationRejoinFlag(convoId)
       return .joined
     } catch {
-      return classifyWelcomeRejoinFailure(error, label: label)
+      return await classifyWelcomeRejoinFailure(error, label: label, convo: convo)
     }
   }
 
-  private func classifyWelcomeRejoinFailure(_ error: Error, label: String) -> WelcomeRejoinResult {
+  private func classifyWelcomeRejoinFailure(
+    _ error: Error,
+    label: String,
+    convo: BlueCatbirdMlsChatDefs.ConvoView
+  ) async -> WelcomeRejoinResult {
     if error is CancellationError {
       logger.info("📭 Welcome rejoin cancelled for \(label)")
       return .doNotFallback(reason: "welcome join cancelled")
@@ -1543,11 +1547,19 @@ extension MLSConversationManager {
       if case .httpError(let code, _) = apiError {
         switch code {
         case 404:
-          logger.info("📭 No Welcome available for \(label) (404) - will try External Commit")
-          return .fallbackToExternalCommit(reason: "Welcome unavailable (HTTP 404)")
+          return await classifyMissingWelcomeRecovery(
+            for: convo,
+            label: label,
+            failure: .welcomeUnavailable,
+            fallbackReason: "Welcome unavailable (HTTP 404)"
+          )
         case 410:
-          logger.info("📭 Welcome expired for \(label) (410) - will try External Commit")
-          return .fallbackToExternalCommit(reason: "Welcome expired (HTTP 410)")
+          return await classifyMissingWelcomeRecovery(
+            for: convo,
+            label: label,
+            failure: .welcomeExpired,
+            fallbackReason: "Welcome expired (HTTP 410)"
+          )
         case 401, 408, 425, 429, 500...599:
           logger.info(
             "🔄 [attemptRejoin] Transient Welcome error for \(label): HTTP \(code) - skipping External Commit"
@@ -1567,11 +1579,19 @@ extension MLSConversationManager {
       case .responseError(let statusCode), .serverError(let statusCode, _):
         switch statusCode {
         case 404:
-          logger.info("📭 No Welcome available for \(label) (NetworkError 404) - will try External Commit")
-          return .fallbackToExternalCommit(reason: "Welcome unavailable (NetworkError 404)")
+          return await classifyMissingWelcomeRecovery(
+            for: convo,
+            label: label,
+            failure: .welcomeUnavailable,
+            fallbackReason: "Welcome unavailable (NetworkError 404)"
+          )
         case 410:
-          logger.info("📭 Welcome expired for \(label) (NetworkError 410) - will try External Commit")
-          return .fallbackToExternalCommit(reason: "Welcome expired (NetworkError 410)")
+          return await classifyMissingWelcomeRecovery(
+            for: convo,
+            label: label,
+            failure: .welcomeExpired,
+            fallbackReason: "Welcome expired (NetworkError 410)"
+          )
         case 401, 408, 425, 429, 500...599:
           logger.info(
             "🔄 [attemptRejoin] Transient network Welcome error for \(label): HTTP \(statusCode) - skipping External Commit"
@@ -1595,6 +1615,37 @@ extension MLSConversationManager {
       "⚠️ Welcome rejoin failed for \(label): \(error.localizedDescription) - not escalating to External Commit"
     )
     return .doNotFallback(reason: "Welcome processing failed")
+  }
+
+  private func classifyMissingWelcomeRecovery(
+    for convo: BlueCatbirdMlsChatDefs.ConvoView,
+    label: String,
+    failure: WelcomeRecoveryFailure,
+    fallbackReason: String
+  ) async -> WelcomeRejoinResult {
+    switch await decideWelcomeRecovery(for: convo, failure: failure) {
+    case .requestReissue(let reason, let nextAttempt):
+      do {
+        try await requestWelcomeReissueAndWait(
+          convo: convo,
+          reason: reason,
+          nextAttempt: nextAttempt
+        )
+      } catch {
+        logger.info(
+          "📨 [attemptRejoin] Welcome reissue path selected for \(label): \(error.localizedDescription)"
+        )
+      }
+      return .doNotFallback(reason: "Welcome reissue requested")
+    case .externalCommitWithHistoryGap:
+      logger.info("📭 \(fallbackReason) for \(label) - will try External Commit")
+      return .fallbackToExternalCommit(reason: fallbackReason)
+    case .surrender(let reason, _):
+      await markWelcomeRecoverySurrendered(convoId: convo.conversationId, reason: reason)
+      return .doNotFallback(reason: reason)
+    case .accept:
+      return .doNotFallback(reason: "Welcome recovery accepted unexpectedly")
+    }
   }
 
   /// Initialize group from Welcome with retry for transient auth errors (401)

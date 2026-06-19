@@ -1,8 +1,8 @@
+import Combine
 import Foundation
+import OSLog
 import Petrel
 import PetrelCatbird
-import OSLog
-import Combine
 
 /// Manages SSE (Server-Sent Events) subscriptions for MLS conversations
 /// Provides real-time message delivery and reactions
@@ -10,7 +10,7 @@ import Combine
 /// preserving thread-safe access to subscription state.
 public actor MLSEventStreamManager {
     private let logger = Logger(subsystem: "blue.catbird", category: "MLSEventStream")
-    
+
     // MARK: - Properties
 
     private let apiClient: MLSAPIClient
@@ -19,16 +19,16 @@ public actor MLSEventStreamManager {
 
     private var connectionState: [String: ConnectionState] = [:]
     private var lastCursor: [String: String] = [:]
-    
+
     /// Flags to signal graceful shutdown (not cancellation)
     /// This allows the SSE loop to exit cleanly without CancellationError
     private var shouldStop: [String: Bool] = [:]
 
     /// Optional persistent cursor storage (survives app restart)
     private var cursorStore: MLSEventCursorStore?
-    
+
     // MARK: - Types
-    
+
     public enum ConnectionState {
         case disconnected
         case connecting
@@ -36,7 +36,7 @@ public actor MLSEventStreamManager {
         case reconnecting
         case error(Error)
     }
-    
+
     public struct EventHandler {
         public var onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)?
         public var onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)?
@@ -46,6 +46,8 @@ public actor MLSEventStreamManager {
         public var onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void)?
         public var onReadditionRequested:
             ((BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void)?
+        public var onWelcomeReissueRequested:
+            ((BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent) async -> Void)?
         public var onMembershipChanged: ((String, DID, MembershipAction) async -> Void)?
         public var onKickedFromConversation: ((String, DID, String?) async -> Void)?
         public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
@@ -68,6 +70,7 @@ public actor MLSEventStreamManager {
             onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)? = nil,
             onGroupInfoRefreshRequested: ((BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void)? = nil,
             onReadditionRequested: ((BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void)? = nil,
+            onWelcomeReissueRequested: ((BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent) async -> Void)? = nil,
             onMembershipChanged: ((String, DID, MembershipAction) async -> Void)? = nil,
             onKickedFromConversation: ((String, DID, String?) async -> Void)? = nil,
             onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)? = nil,
@@ -84,6 +87,7 @@ public actor MLSEventStreamManager {
             self.onNewDevice = onNewDevice
             self.onGroupInfoRefreshRequested = onGroupInfoRefreshRequested
             self.onReadditionRequested = onReadditionRequested
+            self.onWelcomeReissueRequested = onWelcomeReissueRequested
             self.onMembershipChanged = onMembershipChanged
             self.onKickedFromConversation = onKickedFromConversation
             self.onConversationNeedsRecovery = onConversationNeedsRecovery
@@ -94,7 +98,7 @@ public actor MLSEventStreamManager {
             self.onReconnected = onReconnected
         }
     }
-    
+
     // MARK: - Initialization
 
     public init(apiClient: MLSAPIClient) {
@@ -106,12 +110,12 @@ public actor MLSEventStreamManager {
     /// Configure persistent cursor storage for surviving app restarts
     /// - Parameter store: The CursorStore instance to use for persistence
     public func configureCursorStore(_ store: MLSEventCursorStore) {
-        self.cursorStore = store
+        cursorStore = store
         logger.info("CursorStore configured for persistent cursor storage")
     }
 
     // MARK: - Public Methods
-    
+
     /// Subscribe to real-time events for a conversation
     /// - Parameters:
     ///   - convoId: Conversation ID to subscribe to
@@ -171,55 +175,55 @@ public actor MLSEventStreamManager {
             return nil
         }
     }
-    
+
     /// Stop subscription for a specific conversation
     /// - Parameter convoId: Conversation ID
     public func stop(_ convoId: String) {
         logger.info("Stopping subscription for: \(convoId)")
-        
+
         // Set the graceful shutdown flag FIRST so the loop can exit cleanly
         shouldStop[convoId] = true
-        
+
         activeSubscriptions[convoId]?.cancel()
         activeSubscriptions.removeValue(forKey: convoId)
         eventHandlers.removeValue(forKey: convoId)
         connectionState[convoId] = .disconnected
     }
-    
+
     /// Stop all active subscriptions (synchronous - for quick cancellation)
     public func stopAll() {
         logger.info("Stopping all subscriptions")
-        
+
         for convoId in activeSubscriptions.keys {
             stop(convoId)
         }
     }
-    
+
     /// Stop all subscriptions and wait for them to complete
     /// CRITICAL: Call this during account switching to ensure all SSE tasks have
     /// finished writing to the database before closing it
     /// - Parameter timeout: Maximum time to wait for tasks to complete (default 2 seconds)
     public func stopAllAndWait(timeout: TimeInterval = 2.0) async {
         logger.info("🛑 Stopping all subscriptions and waiting for completion...")
-        
+
         // Capture tasks before stopping (stop() removes them from the dictionary)
         let tasksToWait = Array(activeSubscriptions.values)
         let convoIds = Array(activeSubscriptions.keys)
-        
+
         // Set all stop flags first to signal graceful shutdown
         for convoId in convoIds {
             shouldStop[convoId] = true
         }
-        
+
         // Cancel all tasks
         for convoId in convoIds {
             stop(convoId)
         }
-        
+
         // Wait for all tasks to complete with timeout
         if !tasksToWait.isEmpty {
             logger.info("   Waiting for \(tasksToWait.count) SSE task(s) to complete...")
-            
+
             await withTaskGroup(of: Void.self) { group in
                 // Add task to wait for all SSE tasks
                 group.addTask {
@@ -228,23 +232,23 @@ public actor MLSEventStreamManager {
                         _ = await task.result
                     }
                 }
-                
+
                 // Add timeout task
                 group.addTask {
                     try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 }
-                
+
                 // Wait for whichever finishes first
                 _ = await group.next()
                 group.cancelAll()
             }
-            
+
             logger.info("✅ All SSE tasks stopped")
         } else {
             logger.info("✅ No active SSE tasks to wait for")
         }
     }
-    
+
     /// Reconnect to a conversation (using last cursor)
     /// - Parameter convoId: Conversation ID
     public func reconnect(_ convoId: String) {
@@ -252,15 +256,15 @@ public actor MLSEventStreamManager {
             logger.warning("No handler found for reconnection: \(convoId)")
             return
         }
-        
+
         logger.info("Reconnecting to conversation: \(convoId)")
-        
+
         let cursor = lastCursor[convoId]
         subscribe(to: convoId, cursor: cursor, handler: handler)
     }
-    
+
     // MARK: - Private Methods
-    
+
     private func runSubscription(convoId: String, cursor: String?) async {
         print("[SSE] runSubscription() started for convoId: \(convoId.prefix(12))...")
         logger.info("📡 SSE: runSubscription() started for convoId: \(convoId), cursor: \(cursor ?? "nil")")
@@ -269,9 +273,9 @@ public actor MLSEventStreamManager {
         let reconnectDelay: TimeInterval = 2.0
 
         // Check both Task.isCancelled and shouldStop flag for graceful shutdown
-        while !Task.isCancelled && shouldStop[convoId] != true && reconnectAttempts < maxReconnectAttempts {
+        while !Task.isCancelled, shouldStop[convoId] != true, reconnectAttempts < maxReconnectAttempts {
             let connectionStartTime = Date()
-            
+
             do {
                 // Connect to SSE event stream
                 print("[SSE] Attempting connection for: \(convoId.prefix(12))..., attempt: \(reconnectAttempts + 1)")
@@ -310,19 +314,19 @@ public actor MLSEventStreamManager {
                         logger.info("📡 SSE: Graceful shutdown requested for: \(convoId)")
                         break
                     }
-                    
+
                     eventCount += 1
                     print("[SSE] 📡 Event #\(eventCount) received for: \(convoId.prefix(12))...")
                     logger.info("📡 SSE: Event #\(eventCount) received from stream for convoId: \(convoId)")
                     await handleEvent(output, for: convoId)
                 }
-                
+
                 // Check if we're stopping gracefully
                 if shouldStop[convoId] == true {
                     logger.info("📡 SSE: Exiting loop due to graceful shutdown for: \(convoId)")
                     break
                 }
-                
+
                 print("[SSE] Stream ended for: \(convoId.prefix(12))..., received \(eventCount) events, duration: \(Date().timeIntervalSince(connectionStartTime))s")
                 // Check if connection was stable for a while (reset retries if > 5 seconds)
                 let duration = Date().timeIntervalSince(connectionStartTime)
@@ -342,8 +346,8 @@ public actor MLSEventStreamManager {
                         reconnectAttempts += 1
                     }
                 }
-                
-                if reconnectAttempts < maxReconnectAttempts && reconnectAttempts > 0 && shouldStop[convoId] != true {
+
+                if reconnectAttempts < maxReconnectAttempts, reconnectAttempts > 0, shouldStop[convoId] != true {
                     connectionState[convoId] = .reconnecting
                     try? await Task.sleep(nanoseconds: UInt64(reconnectDelay * Double(reconnectAttempts) * 1_000_000_000))
                 }
@@ -354,7 +358,7 @@ public actor MLSEventStreamManager {
                     logger.info("📡 SSE: Exiting due to shutdown/cancellation for: \(convoId)")
                     break
                 }
-                
+
                 print("[SSE] Connection error for \(convoId.prefix(12))...: \(error.localizedDescription)")
                 logger.error("📡 SSE: Connection error for \(convoId): \(error.localizedDescription) - \(String(describing: error))")
 
@@ -364,14 +368,14 @@ public actor MLSEventStreamManager {
                 if let handler = eventHandlers[convoId], let errorHandler = handler.onError {
                     await errorHandler(error)
                 }
-                
+
                 // Check duration for reset
                 if Date().timeIntervalSince(connectionStartTime) > 5.0 {
                     reconnectAttempts = 0
                 }
 
                 // Attempt reconnect only if not shutting down
-                if !Task.isCancelled && shouldStop[convoId] != true {
+                if !Task.isCancelled, shouldStop[convoId] != true {
                     reconnectAttempts += 1
 
                     if reconnectAttempts < maxReconnectAttempts {
@@ -392,7 +396,7 @@ public actor MLSEventStreamManager {
             connectionState[convoId] = .disconnected
         }
     }
-    
+
     private func handleEvent(_ message: BlueCatbirdMlsChatSubscribeEvents.Message, for convoId: String) async {
         guard let handler = eventHandlers[convoId] else {
             logger.warning("📡 SSE: No handler found for convoId: \(convoId) - event dropped!")
@@ -403,73 +407,79 @@ public actor MLSEventStreamManager {
 
         // Handle the event based on the union type
         switch message {
-        case .messageEvent(let messageEvent):
+        case let .messageEvent(messageEvent):
             print("[SSE] 📨 MESSAGE EVENT received - id: \(messageEvent.message.id.prefix(12))...")
             logger.info("📡 SSE: MESSAGE EVENT received - id: \(messageEvent.message.id), calling onMessage handler")
             saveCursor(messageEvent.cursor, for: convoId)
             await handler.onMessage?(messageEvent)
 
-        case .reactionEvent(let reactionEvent):
+        case let .reactionEvent(reactionEvent):
             logger.info(
-                "📡 SSE: REACTION EVENT received - convo: \(convoId.prefix(16)), action: \(reactionEvent.action), reaction: \(reactionEvent.reaction), calling onReaction handler")
+                "📡 SSE: REACTION EVENT received - convo: \(convoId.prefix(16)), action: \(reactionEvent.action), reaction: \(reactionEvent.reaction), calling onReaction handler"
+            )
             saveCursor(reactionEvent.cursor, for: convoId)
             await handler.onReaction?(reactionEvent)
 
-        case .typingEvent(let typingEvent):
+        case let .typingEvent(typingEvent):
             saveCursor(typingEvent.cursor, for: convoId)
             await handler.onTyping?(typingEvent)
 
-        case .infoEvent(let infoEvent):
+        case let .infoEvent(infoEvent):
             logger.info(
-                "📡 SSE: INFO EVENT received - convo: \(convoId.prefix(16)), info: \(infoEvent.info), calling onInfo handler")
+                "📡 SSE: INFO EVENT received - convo: \(convoId.prefix(16)), info: \(infoEvent.info), calling onInfo handler"
+            )
             saveCursor(infoEvent.cursor, for: convoId)
             await handler.onInfo?(infoEvent)
 
-        case .newDeviceEvent(let newDeviceEvent):
+        case let .newDeviceEvent(newDeviceEvent):
             logger.info("New device event: user=\(newDeviceEvent.userDid), device=\(newDeviceEvent.deviceId), convo=\(newDeviceEvent.convoId)")
             saveCursor(newDeviceEvent.cursor, for: convoId)
             await handler.onNewDevice?(newDeviceEvent)
 
-        case .treeChanged(let treeChanged):
+        case let .treeChanged(treeChanged):
             logger.info("Tree changed: convo=\(treeChanged.convoId), epoch=\(treeChanged.epoch)")
             saveCursor(treeChanged.cursor, for: convoId)
             await handler.onTreeChanged?(treeChanged)
 
-        case .groupResetEvent(let groupReset):
+        case let .groupResetEvent(groupReset):
             logger.info(
-                "Group reset: convo=\(groupReset.convoId), newGroup=\(groupReset.newGroupId.prefix(16)), gen=\(groupReset.resetGeneration)")
+                "Group reset: convo=\(groupReset.convoId), newGroup=\(groupReset.newGroupId.prefix(16)), gen=\(groupReset.resetGeneration)"
+            )
             saveCursor(groupReset.cursor, for: convoId)
             await handler.onGroupReset?(groupReset)
 
-        case .resetRequestedEvent(let resetRequested):
+        case let .resetRequestedEvent(resetRequested):
             logger.info(
-                "Reset requested: convo=\(resetRequested.convoId), gen=\(resetRequested.generation), trigger=\(resetRequested.trigger), eventId=\(resetRequested.requestEventId.prefix(16))")
+                "Reset requested: convo=\(resetRequested.convoId), gen=\(resetRequested.generation), trigger=\(resetRequested.trigger), eventId=\(resetRequested.requestEventId.prefix(16))"
+            )
             saveCursor(resetRequested.cursor, for: convoId)
             await handler.onResetRequested?(resetRequested)
 
-        case .groupInfoRefreshRequestedEvent(let refreshEvent):
+        case let .groupInfoRefreshRequestedEvent(refreshEvent):
             logger.info("GroupInfo refresh requested: convo=\(refreshEvent.convoId)")
             saveCursor(refreshEvent.cursor, for: convoId)
             await handler.onGroupInfoRefreshRequested?(refreshEvent)
 
-        case .readditionRequestedEvent(let readditionEvent):
+        case let .readditionRequestedEvent(readditionEvent):
             logger.info("Readdition requested: convo=\(readditionEvent.convoId)")
             saveCursor(readditionEvent.cursor, for: convoId)
             await handler.onReadditionRequested?(readditionEvent)
 
-        case .welcomeReissueRequestedEvent(let reissueEvent):
+        case let .welcomeReissueRequestedEvent(reissueEvent):
             logger.info(
-                "Welcome reissue requested: convo=\(reissueEvent.convoId), recipient=\(reissueEvent.recipientDeviceDid.description.prefix(32)), requestId=\(reissueEvent.requestId.prefix(16))")
+                "Welcome reissue requested: convo=\(reissueEvent.convoId), recipient=\(reissueEvent.recipientDeviceDid.description.prefix(32)), requestId=\(reissueEvent.requestId.prefix(16))"
+            )
             saveCursor(reissueEvent.cursor, for: convoId)
+            await handler.onWelcomeReissueRequested?(reissueEvent)
 
-        case .membershipChangeEvent(let membershipEvent):
+        case let .membershipChangeEvent(membershipEvent):
             logger.info("Membership change: convo=\(membershipEvent.convoId), did=\(membershipEvent.did)")
             saveCursor(membershipEvent.cursor, for: convoId)
             if let action = MembershipAction(rawValue: membershipEvent.action) {
                 await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
             }
 
-        case .circuitBreakerTrippedEvent(let cbEvent):
+        case let .circuitBreakerTrippedEvent(cbEvent):
             logger.warning("Circuit breaker tripped: convo=\(cbEvent.convoId), resetCount=\(cbEvent.resetCount), at=\(cbEvent.trippedAt.iso8601String)")
             saveCursor(cbEvent.cursor, for: convoId)
 
@@ -498,11 +508,11 @@ public actor MLSEventStreamManager {
             object["cursor"] as? String
         )
     }
-    
+
     /// Save cursor to both in-memory cache and persistent storage
     private func saveCursor(_ cursor: String, for convoId: String) {
         lastCursor[convoId] = cursor
-        
+
         // Persist asynchronously to avoid blocking event processing
         if let store = cursorStore {
             Task {
