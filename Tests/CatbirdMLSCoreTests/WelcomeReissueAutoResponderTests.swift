@@ -30,17 +30,17 @@ final class WelcomeReissueAutoResponderTests: XCTestCase {
 
         await manager.handleWelcomeReissueRequested(event: event)
 
-        let stateAfterFailure = manager.welcomeReissueResponseState.withLock { handled in
+        let stateAfterFirstFailure = manager.welcomeReissueResponseState.withLock { handled in
             handled
         }
-        XCTAssertFalse(stateAfterFailure.contains(requestID))
+        XCTAssertFalse(stateAfterFirstFailure.contains(requestID))
 
-        let retryCanProceed = manager.welcomeReissueResponseState.withLock { handled in
-            let inserted = handled.insert(requestID).inserted
-            _ = handled.remove(requestID)
-            return inserted
+        await manager.handleWelcomeReissueRequested(event: event)
+
+        let stateAfterRetry = manager.welcomeReissueResponseState.withLock { handled in
+            handled
         }
-        XCTAssertTrue(retryCanProceed)
+        XCTAssertFalse(stateAfterRetry.contains(requestID))
     }
 
     private func makeManager() async throws -> MLSConversationManager {
