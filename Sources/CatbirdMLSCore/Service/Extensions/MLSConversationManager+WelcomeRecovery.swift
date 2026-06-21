@@ -5,6 +5,17 @@ import Petrel
 import PetrelCatbird
 
 extension MLSConversationManager {
+    static func isWelcomeReissueRequestForCurrentDevice(
+        recipientDeviceDid: String,
+        currentDeviceDid: String
+    ) -> Bool {
+        let recipient = recipientDeviceDid.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let current = currentDeviceDid.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return !recipient.isEmpty && recipient == current
+    }
+
     public func handleWelcomeReissueRequested(
         event: BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent
     ) async {
@@ -55,8 +66,20 @@ extension MLSConversationManager {
         }
 
         let recipientUserDid = Self.userDid(fromDeviceQualifiedDid: recipientDeviceDid)
-        guard recipientUserDid != userDid else {
+        let currentDeviceDid = await mlsClient.getDeviceInfo(for: userDid)?.mlsDid
+        if let currentDeviceDid,
+           Self.isWelcomeReissueRequestForCurrentDevice(
+               recipientDeviceDid: recipientDeviceDid,
+               currentDeviceDid: currentDeviceDid
+           )
+        {
             logger.info("📨 [WELCOME-REISSUE] Ignoring own reissue request for \(convoId.prefix(16))")
+            return
+        }
+        if currentDeviceDid == nil && recipientUserDid == userDid {
+            logger.warning(
+                "⚠️ [WELCOME-REISSUE] Ignoring same-user reissue request for \(convoId.prefix(16)) because current device DID is unavailable"
+            )
             return
         }
 

@@ -89,6 +89,24 @@ final class WelcomeReissueAutoResponderTests: XCTestCase {
         XCTAssertEqual(removeDids, ["did:plc:recipient#phone", "did:plc:recipient#ipad"])
     }
 
+    func testCurrentDeviceDetectionAllowsSameUserOtherDevice() {
+        XCTAssertFalse(
+            MLSConversationManager.isWelcomeReissueRequestForCurrentDevice(
+                recipientDeviceDid: "did:plc:recipient#ipad",
+                currentDeviceDid: "did:plc:recipient#phone"
+            )
+        )
+    }
+
+    func testCurrentDeviceDetectionIgnoresExactCurrentDevice() {
+        XCTAssertTrue(
+            MLSConversationManager.isWelcomeReissueRequestForCurrentDevice(
+                recipientDeviceDid: "did:plc:recipient#phone",
+                currentDeviceDid: "did:plc:recipient#phone"
+            )
+        )
+    }
+
     private func makeManager() async throws -> MLSConversationManager {
         let database = try DatabaseQueue()
         let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
