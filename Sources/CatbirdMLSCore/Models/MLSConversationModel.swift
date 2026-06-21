@@ -160,6 +160,48 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
 
   // MARK: - Update Methods
 
+  static func mergedServerSnapshot(
+    conversationID: String,
+    currentUserDID: String,
+    groupID: Data,
+    epoch: Int64,
+    createdAt: Date,
+    updatedAt: Date,
+    title: String?,
+    existing: MLSConversationModel?,
+    lastMessageAt: Date?,
+    requestState: MLSRequestState
+  ) -> MLSConversationModel {
+    MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: currentUserDID,
+      groupID: groupID,
+      epoch: epoch,
+      joinMethod: existing?.joinMethod ?? .unknown,
+      joinEpoch: existing?.joinEpoch ?? 0,
+      title: title,
+      avatarURL: existing?.avatarURL,
+      avatarImageData: existing?.avatarImageData,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      lastMessageAt: lastMessageAt,
+      lastMembershipChangeAt: existing?.lastMembershipChangeAt,
+      unacknowledgedMemberChanges: existing?.unacknowledgedMemberChanges ?? 0,
+      isActive: true,
+      needsRejoin: existing?.needsRejoin ?? false,
+      needsReset: existing?.needsReset ?? false,
+      isUnrecoverable: existing?.isUnrecoverable ?? false,
+      rejoinRequestedAt: existing?.rejoinRequestedAt,
+      lastRecoveryAttempt: existing?.lastRecoveryAttempt,
+      consecutiveFailures: existing?.consecutiveFailures ?? 0,
+      isPlaceholder: existing?.isPlaceholder ?? false,
+      requestState: existing?.requestState ?? requestState,
+      mutedUntil: existing?.mutedUntil,
+      pendingNewGroupId: existing?.pendingNewGroupId,
+      pendingResetGeneration: existing?.pendingResetGeneration
+    )
+  }
+
   /// Create updated copy with new epoch
   func withEpoch(_ newEpoch: Int64) -> MLSConversationModel {
     MLSConversationModel(

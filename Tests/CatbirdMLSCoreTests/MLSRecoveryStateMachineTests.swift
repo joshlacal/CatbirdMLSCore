@@ -319,6 +319,61 @@ final class MLSRecoveryStateMachineTests: XCTestCase {
     }
   }
 
+  func testServerSnapshotMergePreservesResetAndUnrecoverableState() {
+    let existing = makeModel(
+      needsRejoin: true,
+      needsReset: true,
+      isUnrecoverable: true,
+      pendingNewGroupId: "deadbeefcafebabe",
+      pendingResetGeneration: 7
+    )
+    let now = Date()
+
+    let merged = MLSConversationModel.mergedServerSnapshot(
+      conversationID: existing.conversationID,
+      currentUserDID: existing.currentUserDID,
+      groupID: Data(repeating: 0xCD, count: 16),
+      epoch: 42,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+      title: existing.title,
+      existing: existing,
+      lastMessageAt: nil,
+      requestState: .none
+    )
+
+    XCTAssertTrue(merged.needsReset)
+    XCTAssertTrue(merged.isUnrecoverable)
+    XCTAssertTrue(merged.needsRejoin)
+    XCTAssertEqual(merged.pendingNewGroupId, "deadbeefcafebabe")
+    XCTAssertEqual(merged.pendingResetGeneration, 7)
+    XCTAssertEqual(merged.persistedRecoveryState, .resetPending)
+  }
+
+  func testResetSelfEchoSkipRequiresActiveLocalFFIGroup() {
+    XCTAssertTrue(
+      MLSConversationManager.shouldSkipResetSelfEcho(
+        localGroupIdHex: "abc123",
+        incomingGroupIdHex: "ABC123",
+        localGroupExistsInFFI: true
+      )
+    )
+    XCTAssertFalse(
+      MLSConversationManager.shouldSkipResetSelfEcho(
+        localGroupIdHex: "abc123",
+        incomingGroupIdHex: "ABC123",
+        localGroupExistsInFFI: false
+      )
+    )
+    XCTAssertFalse(
+      MLSConversationManager.shouldSkipResetSelfEcho(
+        localGroupIdHex: "abc123",
+        incomingGroupIdHex: "def456",
+        localGroupExistsInFFI: true
+      )
+    )
+  }
+
   // MARK: - MLSRecoveryManager static methods (spec §10 backoff table)
 
   func testBackoffScheduleMatchesSpec() {
@@ -372,7 +427,9 @@ final class MLSRecoveryStateMachineTests: XCTestCase {
   private func makeModel(
     needsRejoin: Bool = false,
     needsReset: Bool = false,
-    isUnrecoverable: Bool = false
+    isUnrecoverable: Bool = false,
+    pendingNewGroupId: String? = nil,
+    pendingResetGeneration: Int64? = nil
   ) -> MLSConversationModel {
     MLSConversationModel(
       conversationID: "test-convo-\(UUID().uuidString)",
@@ -398,6 +455,8 @@ final class MLSRecoveryStateMachineTests: XCTestCase {
       consecutiveFailures: 0,
       isPlaceholder: false,
       requestState: .none,
-      mutedUntil: nil)
+      mutedUntil: nil,
+      pendingNewGroupId: pendingNewGroupId,
+      pendingResetGeneration: pendingResetGeneration)
   }
 }

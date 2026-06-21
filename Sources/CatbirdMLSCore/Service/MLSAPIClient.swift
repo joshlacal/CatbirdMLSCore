@@ -1939,7 +1939,7 @@ public final class MLSAPIClient {
         return welcomeBytes.data
     }
 
-    static let maxWelcomeKeyPackageHashesForQuery = 200
+    static let maxWelcomeKeyPackageHashesForQuery = 48
 
     static func welcomeKeyPackageHashesForQuery(_ localHashes: [String]) -> [String]? {
         var seen = Set<String>()
@@ -1957,7 +1957,11 @@ public final class MLSAPIClient {
             return nil
         }
 
-        return Array(uniqueHashes.prefix(maxWelcomeKeyPackageHashesForQuery))
+        guard uniqueHashes.count <= maxWelcomeKeyPackageHashesForQuery else {
+            return nil
+        }
+
+        return uniqueHashes
     }
 
     private static func isHexKeyPackageHash(_ value: String) -> Bool {

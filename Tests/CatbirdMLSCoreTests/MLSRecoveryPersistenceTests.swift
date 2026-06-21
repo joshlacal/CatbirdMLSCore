@@ -357,6 +357,16 @@ final class MLSRecoveryPersistenceTests: XCTestCase {
     await manager.clearRejoinTrackingForFreshReset(convoId: "convo-reset")
     let resetCooldown = await manager.successCooldownRemaining(convoId: "convo-reset")
     XCTAssertNil(resetCooldown, "fresh-reset clear must NOT arm the success cooldown")
+
+    // Local state loss is also not a successful recovery outcome, and it must
+    // clear an existing success cooldown so Welcome/reissue recovery can run.
+    await manager.clearRejoinTracking(convoId: "convo-local-loss")
+    let localLossCooldownBefore = await manager.successCooldownRemaining(convoId: "convo-local-loss")
+    XCTAssertNotNil(localLossCooldownBefore)
+
+    await manager.clearRejoinTrackingAfterLocalStateLoss(convoId: "convo-local-loss")
+    let localLossCooldownAfter = await manager.successCooldownRemaining(convoId: "convo-local-loss")
+    XCTAssertNil(localLossCooldownAfter, "local-state-loss clear must remove the success cooldown")
   }
 
   func testHydrationDropsFutureDatedEntryAndDeletesRow() async throws {

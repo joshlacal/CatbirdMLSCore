@@ -1392,6 +1392,15 @@ extension MLSConversationManager {
       logger.info(
         "🔄 [attemptRejoin] \(fallbackReason) for \(label), attempting External Commit...")
 
+      if let recoveryManager = await mlsClient.recovery(for: userDid),
+         let remaining = await recoveryManager.successCooldownRemaining(convoId: convoId)
+      {
+        logger.info(
+          "⏭️ [attemptRejoin] Skipping External Commit for \(label): successful-rejoin cooldown active (\(Int(remaining))s remaining)"
+        )
+        return .skippedNoAttempt
+      }
+
       // Phase 2 Stage 3 (spec §8.6 / ADR-008 D1): if the Welcome failure was
       // specifically the "200 with no welcome blob" sentinel, this attempt is
       // a candidate for the operationally-unrecoverable trifecta. The third

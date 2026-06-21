@@ -884,10 +884,15 @@ public extension MLSConversationManager {
         if let remaining = await recoveryManager.successCooldownRemaining(
           convoId: convo.conversationID
         ) {
+          if await mlsClient.groupExists(for: userDid, groupId: convo.groupID) {
+            logger.info(
+              "⏭️ [DEFERRED-RECOVERY] Skipping \(convo.conversationID.prefix(16))... - successful-rejoin cooldown active (\(Int(remaining))s remaining, spiral protection)"
+            )
+            continue
+          }
           logger.info(
-            "⏭️ [DEFERRED-RECOVERY] Skipping \(convo.conversationID.prefix(16))... - successful-rejoin cooldown active (\(Int(remaining))s remaining, spiral protection)"
+            "🔄 [DEFERRED-RECOVERY] Allowing Welcome/reissue recovery for \(convo.conversationID.prefix(16)) despite successful-rejoin cooldown because local MLS group is missing"
           )
-          continue
         }
       }
 
@@ -2254,29 +2259,17 @@ public extension MLSConversationManager {
           }
         }()
 
-        let model = MLSConversationModel(
+        let model = MLSConversationModel.mergedServerSnapshot(
           conversationID: convo.conversationId,
           currentUserDID: userDid,
           groupID: groupIdData,
           epoch: Int64(convo.epoch),
-          joinMethod: existing?.joinMethod ?? .unknown,
-          joinEpoch: existing?.joinEpoch ?? 0,
-          title: title,
-          avatarURL: existing?.avatarURL,
-          avatarImageData: existing?.avatarImageData,
           createdAt: convo.createdAt.date,
           updatedAt: Date(),
+          title: title,
+          existing: existing,
           lastMessageAt: mergedLastMessage,
-          lastMembershipChangeAt: existing?.lastMembershipChangeAt,
-          unacknowledgedMemberChanges: existing?.unacknowledgedMemberChanges ?? 0,
-          isActive: true,
-          needsRejoin: existing?.needsRejoin ?? false,
-          rejoinRequestedAt: existing?.rejoinRequestedAt,
-          lastRecoveryAttempt: existing?.lastRecoveryAttempt,
-          consecutiveFailures: existing?.consecutiveFailures ?? 0,
-          isPlaceholder: existing?.isPlaceholder ?? false,
-          requestState: existing?.requestState ?? requestState,
-          mutedUntil: existing?.mutedUntil
+          requestState: requestState
         )
 
         try model.save(db)

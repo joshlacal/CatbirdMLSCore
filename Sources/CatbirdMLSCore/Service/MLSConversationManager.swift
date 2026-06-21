@@ -1035,6 +1035,22 @@ public final class MLSConversationManager {
         }
     }
 
+    static func shouldSkipResetSelfEcho(
+        localGroupIdHex: String?,
+        incomingGroupIdHex: String?,
+        localGroupExistsInFFI: Bool
+    ) -> Bool {
+        guard let localGroupIdHex,
+              let incomingGroupIdHex,
+              !incomingGroupIdHex.isEmpty
+        else {
+            return false
+        }
+
+        return localGroupIdHex.lowercased() == incomingGroupIdHex.lowercased()
+            && localGroupExistsInFFI
+    }
+
     /// Handle a group reset event from the SSE/WebSocket stream.
     ///
     /// When an admin resets a conversation's MLS group, the conversation identity (`convoId`)
@@ -1118,10 +1134,29 @@ public final class MLSConversationManager {
         if let localHex = localGroupIdHex,
            localHex.lowercased() == newGroupId.lowercased()
         {
-            logger.info(
-                "⏭️ [SELF-ECHO] Skipping reset event — newGroupId=\(newGroupId.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+            let localGroupExistsInFFI: Bool
+            if let localGroupIdData = Data(hexEncoded: localHex) {
+                localGroupExistsInFFI = await mlsClient.groupExists(
+                    for: userDid, groupId: localGroupIdData
+                )
+            } else {
+                localGroupExistsInFFI = false
+            }
+
+            if Self.shouldSkipResetSelfEcho(
+                localGroupIdHex: localHex,
+                incomingGroupIdHex: newGroupId,
+                localGroupExistsInFFI: localGroupExistsInFFI
+            ) {
+                logger.info(
+                    "⏭️ [SELF-ECHO] Skipping reset event — newGroupId=\(newGroupId.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+                )
+                return
+            }
+
+            logger.warning(
+                "🔄 [SELF-ECHO] Local row groupID matches reset newGroupId for \(convoId.prefix(16)), but FFI group is missing — processing reset event"
             )
-            return
         }
 
         // 1. Delete old MLS group state
@@ -1340,10 +1375,29 @@ public final class MLSConversationManager {
            let localHex = localGroupIdHex,
            localHex.lowercased() == serverHex.lowercased()
         {
-            logger.info(
-                "⏭️ [SELF-ECHO] Skipping reset event — expectedNewMlsGroupId=\(serverHex.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+            let localGroupExistsInFFI: Bool
+            if let localGroupIdData = Data(hexEncoded: localHex) {
+                localGroupExistsInFFI = await mlsClient.groupExists(
+                    for: userDid, groupId: localGroupIdData
+                )
+            } else {
+                localGroupExistsInFFI = false
+            }
+
+            if Self.shouldSkipResetSelfEcho(
+                localGroupIdHex: localHex,
+                incomingGroupIdHex: serverHex,
+                localGroupExistsInFFI: localGroupExistsInFFI
+            ) {
+                logger.info(
+                    "⏭️ [SELF-ECHO] Skipping reset event — expectedNewMlsGroupId=\(serverHex.prefix(16)) matches local groupID for convo=\(convoId.prefix(16))"
+                )
+                return
+            }
+
+            logger.warning(
+                "🔄 [SELF-ECHO] Local row groupID matches expected reset group for \(convoId.prefix(16)), but FFI group is missing — processing reset event"
             )
-            return
         }
 
         // 1. Delete old MLS group state.

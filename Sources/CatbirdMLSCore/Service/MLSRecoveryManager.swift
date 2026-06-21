@@ -1239,6 +1239,30 @@ public actor MLSRecoveryManager {
     }
   }
 
+  /// Clear tracking after local MLS state is known to be absent for a
+  /// conversation that still exists in app/server metadata.
+  ///
+  /// This is not a successful recovery outcome, so it must not arm the global
+  /// rejoin floor. Unlike fresh-reset bookkeeping, it also clears an existing
+  /// successful-rejoin cooldown because the next sync needs to fetch/consume a
+  /// Welcome or request a reissue to recreate the missing local FFI group.
+  public func clearRejoinTrackingAfterLocalStateLoss(convoId: String) {
+    let hadTracking = failedRejoins.removeValue(forKey: convoId) != nil
+    quarantinedUntil.removeValue(forKey: convoId)
+    quarantineStates.removeValue(forKey: convoId)
+    transientStates.removeValue(forKey: convoId)
+    commitFailureCounts.removeValue(forKey: convoId)
+    decryptionFailureCounts.removeValue(forKey: convoId)
+    serverDataGapCounts.removeValue(forKey: convoId)
+    successfulRejoins.removeValue(forKey: convoId)
+    persistClearConversationEntry(convoId: convoId)
+    if hadTracking {
+      logger.info(
+        "🧹 [MLSRecoveryManager] Cleared rejoin tracking for \(convoId.prefix(16)) (local MLS state loss — success cooldown cleared)"
+      )
+    }
+  }
+
   /// Remaining `SUCCESSFUL_REJOIN_COOLDOWN` imposed by a recent SUCCESSFUL
   /// rejoin on this conversation, or `nil` when none is active. Applies to
   /// SYNC-TRIGGERED rejoin attempts only — callers on decrypt-triggered or

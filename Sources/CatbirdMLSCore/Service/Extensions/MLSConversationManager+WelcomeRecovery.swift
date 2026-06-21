@@ -220,14 +220,22 @@ extension MLSConversationManager {
     ) async -> WelcomeRecoveryDecision {
         let priorAttempts = await storedWelcomeReissueAttempts(convoId: convo.conversationId)
         let hasAdmin = convo.members.contains { $0.isAdmin }
-        let currentUserDid = userDid?.lowercased()
+        let currentUserDid = userDid.map { Self.userDid(fromDeviceQualifiedDid: $0.lowercased()) }
         let serverListsCurrentUserAsMember = currentUserDid.map { normalizedUserDid in
             convo.members.contains { member in
-                member.userDid.didString().lowercased() == normalizedUserDid
-                    || member.did.description.lowercased() == normalizedUserDid
+                let memberUserDid = Self.userDid(
+                    fromDeviceQualifiedDid: member.userDid.didString().lowercased()
+                )
+                let memberDid = Self.userDid(
+                    fromDeviceQualifiedDid: member.did.description.lowercased()
+                )
+                return memberUserDid == normalizedUserDid || memberDid == normalizedUserDid
             }
         } ?? false
         let lastSeenEpoch = UInt64(max(convo.epoch, 0))
+        logger.info(
+            "🧭 [WELCOME-RECOVERY] Decision context for \(convo.conversationId.prefix(16)): failure=\(failure.reason), priorAttempts=\(priorAttempts), serverListsCurrentUserAsMember=\(serverListsCurrentUserAsMember), hasAdmin=\(hasAdmin), memberCount=\(convo.members.count), epoch=\(lastSeenEpoch)"
+        )
 
         return WelcomeRecoveryPolicy.decide(
             welcomeFailure: failure,
@@ -256,6 +264,8 @@ extension MLSConversationManager {
             recipientDeviceDid = try await mlsClient.ensureDeviceRegistered(userDid: userDid)
         }
 
+        try await prepareKeyPackagesForWelcomeReissue(userDid: userDid, reason: reason)
+
         let response = try await apiClient.requestWelcomeReissue(
             convoId: convo.conversationId,
             recipientDeviceDid: recipientDeviceDid,
@@ -266,27 +276,34 @@ extension MLSConversationManager {
             "📨 [WELCOME-RECOVERY] Requested Welcome reissue for \(convo.conversationId.prefix(16)) attempt \(nextAttempt): requested=\(response.requested), recipientDeviceDid=\(recipientDeviceDid.prefix(32))"
         )
 
-        Task.detached(priority: .utility) { [mlsClient, logger, userDid] in
-            do {
-                _ = try await mlsClient.syncKeyPackageHashes(for: userDid)
-            } catch {
-                logger.warning(
-                    "⚠️ [WELCOME-RECOVERY] Failed to sync key package hashes after \(reason): \(error.localizedDescription)"
-                )
-            }
-
-            do {
-                _ = try await mlsClient.monitorAndReplenishBundles(for: userDid)
-            } catch {
-                logger.warning(
-                    "⚠️ [WELCOME-RECOVERY] Failed to replenish key packages after \(reason): \(error.localizedDescription)"
-                )
-            }
-        }
-
         throw MLSConversationError.operationFailed(
             "Welcome reissue requested; waiting for inviter to retry"
         )
+    }
+
+    private func prepareKeyPackagesForWelcomeReissue(userDid: String, reason: String) async throws {
+        do {
+            let sync = try await mlsClient.syncKeyPackageHashes(for: userDid)
+            logger.info(
+                "🔑 [WELCOME-RECOVERY] Synced key packages before reissue (\(reason)): remainingAvailable=\(sync.remainingAvailable), orphaned=\(sync.orphanedCount), deleted=\(sync.deletedCount)"
+            )
+        } catch {
+            logger.warning(
+                "⚠️ [WELCOME-RECOVERY] Key package hash sync before reissue failed (\(reason)): \(error.localizedDescription)"
+            )
+        }
+
+        do {
+            let replenish = try await mlsClient.monitorAndReplenishBundles(for: userDid)
+            logger.info(
+                "🔑 [WELCOME-RECOVERY] Prepared key packages before reissue (\(reason)): available=\(replenish.available), uploaded=\(replenish.uploaded)"
+            )
+        } catch {
+            logger.warning(
+                "⚠️ [WELCOME-RECOVERY] Failed to prepare key packages before reissue (\(reason)): \(error.localizedDescription)"
+            )
+            throw error
+        }
     }
 
     func markWelcomeRecoverySurrendered(convoId: String, reason: String) async {

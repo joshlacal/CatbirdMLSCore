@@ -335,6 +335,65 @@ extension MLSConversationManager {
       logger.error("⚠️ Failed to persist MLS state: \(error.localizedDescription)")
     }
 
+    func finalizeCreatedConversation() async throws -> BlueCatbirdMlsChatDefs.ConvoView {
+      // Mark conversation as active AFTER server sync completes
+      conversationStates[groupIdHex] = .active
+      logger.info("✅ Conversation '\(groupIdHex)' marked as ACTIVE - ready for messaging")
+
+      // Notify observers as soon as the server-backed conversation is active.
+      // GroupInfo publishing can be slower than the receiver's Welcome recovery path,
+      // and global event subscriptions need the new conversation before reissue events arrive.
+      notifyObservers(.conversationCreated(convo))
+
+      // Publish GroupInfo to enable external joins (welcome backup)
+      // CRITICAL: If this fails, new group cannot accept external joins
+      try await publishLatestGroupInfo(
+        userDid: userDid,
+        convoId: groupIdHex,
+        groupId: groupId,
+        context: "after createGroup"
+      )
+
+      // METADATA: Upload encrypted metadata blob if present in creation result.
+      // The Rust FFI encrypts metadata during group creation and returns the blob
+      // along with a locator. We upload the blob to the server so other members
+      // can fetch and decrypt it after processing the Welcome/commit.
+      if let encryptedBlob = mlsCreationResult.encryptedMetadataBlob,
+        let locator = mlsCreationResult.metadataBlobLocator
+      {
+        await uploadMetadataBlobAfterCreation(
+          groupIdHex: groupIdHex,
+          encryptedBlob: encryptedBlob,
+          blobLocator: locator,
+          metadataReferenceJSON: mlsCreationResult.metadataReferenceJson
+        )
+      }
+
+      // Track key package consumption if members were added
+      if let members = filteredMembers, !members.isEmpty {
+        Task {
+          do {
+            try await keyPackageMonitor?.trackConsumption(
+              count: members.count,
+              operation: .createConversation,
+              context: "Created group '\(name)' with \(members.count) initial members"
+            )
+            logger.info("📊 Tracked consumption: \(members.count) packages for group creation")
+
+            // Proactive refresh check after consumption
+            try await smartRefreshKeyPackages()
+          } catch {
+            logger.warning("⚠️ Failed to track consumption or refresh: \(error.localizedDescription)")
+          }
+        }
+      }
+
+      logger.info(
+        "✅ [MLSConversationManager.createGroup] COMPLETE - convoId: \(groupIdHex), epoch: \(convo.epoch)"
+      )
+      return convo
+    }
+
     // CRITICAL FIX: If members were added, sync with server BEFORE allowing messages
     if let members = filteredMembers, !members.isEmpty, let commitData = commitData {
       // Check if createConvo already processed the members (serverEpoch >= 1)
@@ -397,8 +456,7 @@ extension MLSConversationManager {
         }
 
         // Mark conversation as active
-        conversationStates[groupIdHex] = .active
-        return convo
+        return try await finalizeCreatedConversation()
       }
 
       // Fallback: Server didn't process members during createConvo, so we need to call addMembers
@@ -555,60 +613,7 @@ extension MLSConversationManager {
       }
     }
 
-    // Mark conversation as active AFTER server sync completes
-    conversationStates[groupIdHex] = .active
-    logger.info("✅ Conversation '\(groupIdHex)' marked as ACTIVE - ready for messaging")
-
-    // Publish GroupInfo to enable external joins (welcome backup)
-    // CRITICAL: If this fails, new group cannot accept external joins
-    try await publishLatestGroupInfo(
-      userDid: userDid,
-      convoId: groupIdHex,
-      groupId: groupId,
-      context: "after createGroup"
-    )
-
-    // METADATA: Upload encrypted metadata blob if present in creation result.
-    // The Rust FFI encrypts metadata during group creation and returns the blob
-    // along with a locator. We upload the blob to the server so other members
-    // can fetch and decrypt it after processing the Welcome/commit.
-    if let encryptedBlob = mlsCreationResult.encryptedMetadataBlob,
-      let locator = mlsCreationResult.metadataBlobLocator
-    {
-      await uploadMetadataBlobAfterCreation(
-        groupIdHex: groupIdHex,
-        encryptedBlob: encryptedBlob,
-        blobLocator: locator,
-        metadataReferenceJSON: mlsCreationResult.metadataReferenceJson
-      )
-    }
-
-    // Notify observers AFTER state is active
-    notifyObservers(.conversationCreated(convo))
-
-    // Track key package consumption if members were added
-    if let members = filteredMembers, !members.isEmpty {
-      Task {
-        do {
-          try await keyPackageMonitor?.trackConsumption(
-            count: members.count,
-            operation: .createConversation,
-            context: "Created group '\(name)' with \(members.count) initial members"
-          )
-          logger.info("📊 Tracked consumption: \(members.count) packages for group creation")
-
-          // Proactive refresh check after consumption
-          try await smartRefreshKeyPackages()
-        } catch {
-          logger.warning("⚠️ Failed to track consumption or refresh: \(error.localizedDescription)")
-        }
-      }
-    }
-
-    logger.info(
-      "✅ [MLSConversationManager.createGroup] COMPLETE - convoId: \(groupIdHex), epoch: \(convo.epoch)"
-    )
-    return convo
+    return try await finalizeCreatedConversation()
   }
 
   /// Join an existing group using a Welcome message

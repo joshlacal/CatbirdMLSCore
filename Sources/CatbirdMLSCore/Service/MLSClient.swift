@@ -3153,9 +3153,9 @@ public actor MLSClient {
       }
     }
 
-    // Detect recovery mode condition: both local and server have 0 bundles for this device
-    // This indicates a fresh install or corrupted state that needs rate limit bypass
-    let useRecoveryMode = localBundleCount == 0 && availableForThisDevice == 0
+    // Detect recovery mode condition: this device has 0 available server bundles.
+    // A local bundle cache does not help the inviter until those bundles are published.
+    let useRecoveryMode = availableForThisDevice == 0
     if useRecoveryMode {
       logger.warning("🔑 [Phase 4] Recovery mode detected: local=0, server=0 - will bypass rate limits")
     }
