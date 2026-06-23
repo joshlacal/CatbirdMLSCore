@@ -1058,6 +1058,10 @@ public final class MLSConversationManager {
             && localGroupExistsInFFI
     }
 
+    static func shouldRunRustResetFollowups(for outcome: MLSResetRecordOutcome) -> Bool {
+        outcome.didRecordResetState
+    }
+
     /// Handle a group reset event from the SSE/WebSocket stream.
     ///
     /// When an admin resets a conversation's MLS group, the conversation identity (`convoId`)
@@ -1101,6 +1105,43 @@ public final class MLSConversationManager {
         logger.info(
             "🔍 [RESET-EVENT] handler=handleGroupReset convo=\(convoId.prefix(16)) incomingGen=\(event.resetGeneration) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(newGroupId.prefix(16))"
         )
+
+        if protocolAuthorityMode.usesRustForDecisions {
+            do {
+                let outcome = try await withRustAuthoritativeRuntime(operation: "handleGroupReset") { runtime in
+                    try runtime.recordGroupResetOutcome(
+                        conversationId: convoId,
+                        newGroupIdHex: newGroupId,
+                        resetGeneration: Int32(clamping: event.resetGeneration)
+                    )
+                }
+                logger.info(
+                    "[MLS-AUTHORITY] handleGroupReset Rust outcome=\(outcome.rawValue, privacy: .public) convo=\(convoId.prefix(16), privacy: .private)"
+                )
+                if Self.shouldRunRustResetFollowups(for: outcome) {
+                    if let convo = conversations[convoId] {
+                        groupStates[convo.groupId] = nil
+                    }
+                    Task {
+                        try? await self.syncWithServer(fullSync: false)
+                    }
+                    if let resetBy = event.resetBy {
+                        notifyObservers(.groupReset(
+                            convoId: convoId,
+                            newGroupId: newGroupId,
+                            resetGeneration: event.resetGeneration,
+                            resetBy: resetBy,
+                            reason: event.reason
+                        ))
+                    }
+                }
+            } catch {
+                logger.error(
+                    "[MLS-AUTHORITY] handleGroupReset failed in Rust authority: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
 
         // CLIENT M (Task #75) — fix #1: pre-delete stale-generation guard.
         // Mirrors `handleResetRequested`'s pre-delete check (this handler was
@@ -1328,6 +1369,43 @@ public final class MLSConversationManager {
         logger.info(
             "🔍 [RESET-EVENT] handler=handleResetRequested convo=\(convoId.prefix(16)) incomingGen=\(generation) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(event.expectedNewMlsGroupId?.prefix(16) ?? "nil")"
         )
+
+        if protocolAuthorityMode.usesRustForDecisions {
+            do {
+                let outcome = try await withRustAuthoritativeRuntime(operation: "handleResetRequested") { runtime in
+                    try runtime.recordResetRequestedOutcome(
+                        conversationId: convoId,
+                        cryptoSessionId: event.cryptoSessionId,
+                        resetGeneration: Int32(clamping: generation),
+                        trigger: trigger,
+                        requestEventId: event.requestEventId,
+                        expectedNewMlsGroupIdHex: event.expectedNewMlsGroupId
+                    )
+                }
+                logger.info(
+                    "[MLS-AUTHORITY] handleResetRequested Rust outcome=\(outcome.rawValue, privacy: .public) convo=\(convoId.prefix(16), privacy: .private)"
+                )
+                if Self.shouldRunRustResetFollowups(for: outcome) {
+                    if let convo = conversations[convoId] {
+                        groupStates[convo.groupId] = nil
+                    }
+                    Task {
+                        do {
+                            try await self.syncWithServer(fullSync: false)
+                        } catch {
+                            self.logger.warning(
+                                "[MLS-AUTHORITY] handleResetRequested syncWithServer failed after Rust record: \(error.localizedDescription, privacy: .public)"
+                            )
+                        }
+                    }
+                }
+            } catch {
+                logger.error(
+                    "[MLS-AUTHORITY] handleResetRequested failed in Rust authority: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
 
         // 0. Stale-generation guard (BEFORE destructive delete).
         //    If a newer or equal `pendingResetGeneration` is already persisted,

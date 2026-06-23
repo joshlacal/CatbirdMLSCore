@@ -38,6 +38,12 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     XCTAssertEqual(MLSResetRecordOutcome(ffiOutcome: .selfEchoNoOp), .selfEchoNoOp)
   }
 
+  func testRustResetFollowupsOnlyRunForRecordedOutcome() {
+    XCTAssertTrue(MLSConversationManager.shouldRunRustResetFollowups(for: .recorded))
+    XCTAssertFalse(MLSConversationManager.shouldRunRustResetFollowups(for: .staleOrDuplicate))
+    XCTAssertFalse(MLSConversationManager.shouldRunRustResetFollowups(for: .selfEchoNoOp))
+  }
+
   func testIncomingRustMessagePayloadJsonMapsToApplicationOutcome() throws {
     let payload = MLSMessagePayload.text("decoded from payload", embed: nil)
     let ffiMessage = FfiMessage(
