@@ -79,6 +79,15 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   @discardableResult
+  public func sendPayload(conversationId: String, payload: MLSMessagePayload) throws -> FfiMessage {
+    let payloadData = try payload.encodeToJSON()
+    guard let payloadJson = String(data: payloadData, encoding: .utf8) else {
+      throw MLSConversationError.operationFailed("MLS payload JSON was not valid UTF-8")
+    }
+    return try bridge.sendPayloadJson(conversationId: conversationId, payloadJson: payloadJson)
+  }
+
+  @discardableResult
   public func sendReaction(
     conversationId: String,
     messageId: String,

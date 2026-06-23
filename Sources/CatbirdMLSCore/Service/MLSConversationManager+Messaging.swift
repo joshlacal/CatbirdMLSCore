@@ -473,8 +473,9 @@ public extension MLSConversationManager {
     try await refreshDatabaseIfNeeded()
 
     if protocolAuthorityMode.usesRustForDecisions {
+      let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendMessage(conversationId: convoId, text: plaintext)
+        try runtime.sendPayload(conversationId: convoId, payload: payload)
       }
       let timestamp = ISO8601DateFormatter().date(from: ffiMessage.timestamp) ?? Date()
       return (

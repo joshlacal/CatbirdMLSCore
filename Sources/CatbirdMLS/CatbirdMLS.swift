@@ -3304,6 +3304,11 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func sendMessage(conversationId: String, text: String) throws -> FfiMessage
 
     /**
+     * Send a JSON-encoded MLS message payload envelope.
+     */
+    func sendPayloadJson(conversationId: String, payloadJson: String) throws -> FfiMessage
+
+    /**
      * Send an encrypted reaction payload.
      */
     func sendReaction(conversationId: String, messageId: String, emoji: String, action: String) throws -> FfiMessage
@@ -3808,6 +3813,17 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_send_message(self.uniffiClonePointer(),
                                                                          FfiConverterString.lower(conversationId),
                                                                          FfiConverterString.lower(text), $0)
+        })
+    }
+
+    /**
+     * Send a JSON-encoded MLS message payload envelope.
+     */
+    open func sendPayloadJson(conversationId: String, payloadJson: String) throws -> FfiMessage {
+        return try FfiConverterTypeFFIMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_send_payload_json(self.uniffiClonePointer(),
+                                                                              FfiConverterString.lower(conversationId),
+                                                                              FfiConverterString.lower(payloadJson), $0)
         })
     }
 
@@ -14854,6 +14870,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_message() != 21757 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_payload_json() != 24377 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_reaction() != 38649 {
