@@ -30,6 +30,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   private let dbPool: DatabasePool
   private let userDID: String
+  private let mlsContext: MlsContext
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "OrchestratorStorageAdapter")
 
   // MARK: - ISO 8601 Formatter
@@ -55,9 +56,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   /// - Parameters:
   ///   - dbPool: A GRDB DatabasePool for the current user's MLS database.
   ///   - userDID: The current user's DID (normalized).
-  public init(dbPool: DatabasePool, userDID: String) {
+  ///   - mlsContext: The active Rust context used for field-level payload encryption.
+  public init(dbPool: DatabasePool, userDID: String, mlsContext: MlsContext) {
     self.dbPool = dbPool
     self.userDID = MLSStorageHelpers.normalizeDID(userDID)
+    self.mlsContext = mlsContext
 
     // Create orchestrator-specific tables up front so read-only paths
     // never need to issue DDL on a WAL snapshot connection.
@@ -394,46 +397,62 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
     let timestamp = parseDate(message.timestamp) ?? Date()
 
-    // Prefer the full payload JSON from the Rust bridge when present.
-    let payloadData: Data?
+    let payload: MLSMessagePayload?
     if let payloadJson = message.payloadJson {
-      payloadData = payloadJson.data(using: .utf8)
+      guard let payloadData = payloadJson.data(using: .utf8) else {
+        throw OrchestratorBridgeError.Storage(message: "Rust message payload JSON was not valid UTF-8")
+      }
+      payload = try MLSMessagePayload.decodeFromJSON(payloadData)
     } else if !message.text.isEmpty {
-      let payload = MLSMessagePayload.text(message.text, embed: nil)
-      payloadData = try? payload.encodeToJSON()
+      payload = MLSMessagePayload.text(message.text, embed: nil)
     } else {
-      payloadData = nil
+      payload = nil
     }
 
-    let model = MLSMessageModel(
-      messageID: message.id,
-      currentUserDID: normalizedDID,
-      conversationID: message.conversationId,
-      senderID: message.senderDid,
-      payloadJSON: payloadData,
-      wireFormat: nil,
-      contentType: "application/json",
-      timestamp: timestamp,
-      epoch: Int64(message.epoch),
-      sequenceNumber: Int64(message.sequenceNumber),
-      authenticatedData: nil,
-      signature: nil,
-      isDelivered: true,
-      isRead: false,
-      isSent: message.isOwn,
-      sendAttempts: 0,
-      error: nil,
-      processingState: "delivered",
-      gapBefore: false,
-      payloadExpired: false,
-      processingError: nil,
-      processingAttempts: 0,
-      validationFailureReason: nil
-    )
+    guard let payload else { return }
+
+    let isDelivered: Bool
+    switch message.deliveryStatus {
+    case .deliveredToAll:
+      isDelivered = true
+    case .partial(let ackedCount, let totalCount):
+      isDelivered = totalCount > 0 && ackedCount >= totalCount
+    case .pending, .localOnly:
+      isDelivered = false
+    case nil:
+      isDelivered = !message.isOwn
+    }
 
     try dbPool.write { db in
-      // Use save (insert or update) to handle idempotent re-stores
-      try model.save(db)
+      try MLSStorageHelpers.savePayloadSync(
+        context: mlsContext,
+        in: db,
+        messageID: message.id,
+        conversationID: message.conversationId,
+        currentUserDID: normalizedDID,
+        payload: payload,
+        senderID: message.senderDid,
+        epoch: Int64(message.epoch),
+        sequenceNumber: Int64(message.sequenceNumber),
+        timestamp: timestamp
+      )
+
+      try db.execute(
+        sql: """
+          UPDATE MLSMessageModel
+          SET isDelivered = ?,
+              isSent = ?,
+              processingState = ?
+          WHERE messageID = ? AND currentUserDID = ?;
+          """,
+        arguments: [
+          isDelivered,
+          message.isOwn,
+          MLSMessageProcessingState.cached,
+          message.id,
+          normalizedDID,
+        ]
+      )
     }
   }
 

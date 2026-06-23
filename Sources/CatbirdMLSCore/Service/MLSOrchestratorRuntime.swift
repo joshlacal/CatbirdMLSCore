@@ -36,7 +36,8 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
     let storageAdapter = MLSOrchestratorStorageAdapter(
       dbPool: databasePool,
-      userDID: normalizedDID
+      userDID: normalizedDID,
+      mlsContext: mlsContext
     )
     let credentialAdapter = MLSOrchestratorCredentialAdapter(
       keychainManager: keychainManager,
@@ -139,6 +140,24 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   public func shutdown() {
     bridge.shutdown()
+  }
+}
+
+extension MLSOrchestratorRuntime {
+  internal static func messageProcessingOutcome(from message: FfiMessage?) throws -> MessageProcessingOutcome {
+    guard let message else { return .nonApplication }
+
+    let payload: MLSMessagePayload
+    if let payloadJson = message.payloadJson {
+      guard let payloadData = payloadJson.data(using: .utf8) else {
+        throw MLSConversationError.operationFailed("Rust message payload JSON was not valid UTF-8")
+      }
+      payload = try MLSMessagePayload.decodeFromJSON(payloadData)
+    } else {
+      payload = .text(message.text, embed: nil)
+    }
+
+    return .application(payload: payload, sender: message.senderDid)
   }
 }
 

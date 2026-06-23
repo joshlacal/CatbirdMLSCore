@@ -236,6 +236,42 @@ public extension MLSConversationManager {
     }
   }
 
+  private func finishSuccessfulMessageProcessing(
+    message: BlueCatbirdMlsChatDefs.MessageView,
+    userDid: String
+  ) async throws {
+    // FIX D: Clear any persistent decryption failure tracking on success
+    clearPersistentDecryptionFailure(messageID: message.id)
+
+    let readyMessages = try await self.messageOrderingCoordinator.recordMessageProcessed(
+      messageID: message.id,
+      conversationID: message.convoId,
+      sequenceNumber: Int64(message.seq),
+      currentUserDID: userDid,
+      database: self.database
+    )
+
+    // Darwin self-loop fix (2026-04): App-originated mutations must NOT post
+    // the `stateChanged` Darwin notification or bump the cross-process disk
+    // version (NSE→app only). See note at message_processing_atomic_commit.
+    MLSNotificationCoordinator.publishMutation(
+      userDID: userDid,
+      source: "message_processing_sequence_commit",
+      decryptionOwner: .appSync,
+      incrementVersion: false,
+      postStateChanged: false
+    )
+
+    // Process any buffered messages that are now ready (recursive processing)
+    for pending in readyMessages {
+      if let pendingMessage = deserializeMessageView(pending.messageViewJSON) {
+        logger.info("[SEQ-ORDER] Processing buffered message \(pendingMessage.id) seq=\(pendingMessage.seq)")
+        // Recursively process - this will handle the full ordering check again
+        _ = try? await processServerMessage(pendingMessage, source: "buffered")
+      }
+    }
+  }
+
   private func shouldSkipProcessingForRejoin(conversationID: String, source: String) async -> Bool {
     if await conversationNeedsRejoin(conversationID) {
       logger.warning(
@@ -1185,6 +1221,15 @@ public extension MLSConversationManager {
       break
     }
 
+    if protocolAuthorityMode.usesRustForDecisions {
+      return try await processServerMessageWithRustAuthority(
+        message,
+        source: source,
+        userDid: userDid,
+        attemptID: nextProcessingAttemptID()
+      )
+    }
+
     // Attempt processing with retry logic for SecretReuseError
     // This handles the race condition where NSE updates the state in the background
     let maxRetries = 2  // Increased from 1 to give more chances for cache to be populated
@@ -1212,40 +1257,7 @@ public extension MLSConversationManager {
         // ═══════════════════════════════════════════════════════════════════════════
         // CRITICAL: Record successful processing and process any ready buffered messages
         // ═══════════════════════════════════════════════════════════════════════════
-
-        // FIX D: Clear any persistent decryption failure tracking on success
-        clearPersistentDecryptionFailure(messageID: message.id)
-
-        // No advisory lock needed - SQLite WAL handles concurrent access
-        // Cross-process coordination uses MLSNotificationCoordinator.
-
-        let readyMessages = try await self.messageOrderingCoordinator.recordMessageProcessed(
-          messageID: message.id,
-          conversationID: message.convoId,
-          sequenceNumber: Int64(message.seq),
-          currentUserDID: userDid,
-          database: self.database
-        )
-
-        // Darwin self-loop fix (2026-04): App-originated mutations must NOT post
-        // the `stateChanged` Darwin notification or bump the cross-process disk
-        // version (NSE→app only). See note at message_processing_atomic_commit.
-        MLSNotificationCoordinator.publishMutation(
-          userDID: userDid,
-          source: "message_processing_sequence_commit",
-          decryptionOwner: .appSync,
-          incrementVersion: false,
-          postStateChanged: false
-        )
-
-        // Process any buffered messages that are now ready (recursive processing)
-        for pending in readyMessages {
-          if let pendingMessage = deserializeMessageView(pending.messageViewJSON) {
-            logger.info("[SEQ-ORDER] Processing buffered message \(pendingMessage.id) seq=\(pendingMessage.seq)")
-            // Recursively process - this will handle the full ordering check again
-            _ = try? await processServerMessage(pendingMessage, source: "buffered")
-          }
-        }
+        try await finishSuccessfulMessageProcessing(message: message, userDid: userDid)
 
         return outcome
       } catch {
@@ -1530,6 +1542,39 @@ public extension MLSConversationManager {
       throw lastError
     }
     throw MLSConversationError.operationFailed("Processing failed with unknown error")
+  }
+
+  private func processServerMessageWithRustAuthority(
+    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    source: String,
+    userDid: String,
+    attemptID: String
+  ) async throws -> MessageProcessingOutcome {
+    let runtime = try await withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
+      runtime
+    }
+
+    let (_, outcome) = try await withMLSUserPermit(for: userDid) { [self] in
+      try await self.messageProcessingCoordinator.withQueuedSection(conversationID: message.convoId) { queueIndex in
+        let envelope = FfiIncomingEnvelope(
+          conversationId: message.convoId,
+          senderDid: "",
+          ciphertext: message.ciphertext.data,
+          timestamp: ISO8601DateFormatter().string(from: message.createdAt.date),
+          serverMessageId: message.id
+        )
+
+        self.logger.info(
+          "🦀 [MLS-AUTHORITY] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
+        )
+
+        let ffiMessage = try runtime.processIncoming(envelope: envelope)
+        return try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+      }
+    }
+
+    try await finishSuccessfulMessageProcessing(message: message, userDid: userDid)
+    return outcome
   }
 
   // MARK: - Message Ordering Helpers
