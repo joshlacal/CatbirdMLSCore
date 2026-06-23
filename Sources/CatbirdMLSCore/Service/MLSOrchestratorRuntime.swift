@@ -119,6 +119,20 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     )
   }
 
+  @discardableResult
+  public func recordGroupResetOutcome(
+    conversationId: String,
+    newGroupIdHex: String,
+    resetGeneration: Int32
+  ) throws -> MLSResetRecordOutcome {
+    let outcome = try bridge.recordGroupResetOutcome(
+      convoId: conversationId,
+      newGroupIdHex: newGroupIdHex,
+      resetGeneration: resetGeneration
+    )
+    return MLSResetRecordOutcome(ffiOutcome: outcome)
+  }
+
   public func recordResetRequested(
     conversationId: String,
     cryptoSessionId: String,
@@ -135,6 +149,26 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       requestEventId: requestEventId,
       expectedNewMlsGroupIdHex: expectedNewMlsGroupIdHex
     )
+  }
+
+  @discardableResult
+  public func recordResetRequestedOutcome(
+    conversationId: String,
+    cryptoSessionId: String,
+    resetGeneration: Int32,
+    trigger: String,
+    requestEventId: String,
+    expectedNewMlsGroupIdHex: String?
+  ) throws -> MLSResetRecordOutcome {
+    let outcome = try bridge.recordResetRequestedOutcome(
+      convoId: conversationId,
+      cryptoSessionId: cryptoSessionId,
+      resetGeneration: resetGeneration,
+      trigger: trigger,
+      requestEventId: requestEventId,
+      expectedNewMlsGroupIdHex: expectedNewMlsGroupIdHex
+    )
+    return MLSResetRecordOutcome(ffiOutcome: outcome)
   }
 
   public func performSilentRecovery(conversationIds: [String]) throws {
@@ -204,5 +238,26 @@ extension ConversationRecoveryState {
     case .resetPending:
       self = .resetPending
     }
+  }
+}
+
+public enum MLSResetRecordOutcome: String, Codable, Equatable, Sendable, CaseIterable {
+  case recorded
+  case staleOrDuplicate
+  case selfEchoNoOp
+
+  init(ffiOutcome outcome: FfiResetRecordOutcome) {
+    switch outcome {
+    case .recorded:
+      self = .recorded
+    case .staleOrDuplicate:
+      self = .staleOrDuplicate
+    case .selfEchoNoOp:
+      self = .selfEchoNoOp
+    }
+  }
+
+  public var didRecordResetState: Bool {
+    self == .recorded
   }
 }

@@ -32,6 +32,12 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .resetPending), .resetPending)
   }
 
+  func testFFIResetRecordOutcomeMapsToSwiftVocabulary() {
+    XCTAssertEqual(MLSResetRecordOutcome(ffiOutcome: .recorded), .recorded)
+    XCTAssertEqual(MLSResetRecordOutcome(ffiOutcome: .staleOrDuplicate), .staleOrDuplicate)
+    XCTAssertEqual(MLSResetRecordOutcome(ffiOutcome: .selfEchoNoOp), .selfEchoNoOp)
+  }
+
   func testIncomingRustMessagePayloadJsonMapsToApplicationOutcome() throws {
     let payload = MLSMessagePayload.text("decoded from payload", embed: nil)
     let ffiMessage = FfiMessage(

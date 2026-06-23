@@ -3233,6 +3233,13 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func recordGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws
 
     /**
+     * Outcome-returning variant of `record_group_reset` for platforms that
+     * need to distinguish recorded resets from stale/self-echo no-ops before
+     * triggering UI notifications or sync work.
+     */
+    func recordGroupResetOutcome(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws -> FfiResetRecordOutcome
+
+    /**
      * Persist a Phase 2.5 `resetRequestedEvent` from the DS — the indirect-
      * trigger SSE event where the server has NOT minted a new MLS group id
      * and is asking subscribed clients to elect a first responder
@@ -3271,6 +3278,13 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * `request_event_id` for audit).
      */
     func recordResetRequested(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws
+
+    /**
+     * Outcome-returning variant of `record_reset_requested` for platforms
+     * that need to avoid follow-up sync/UI churn when Rust classified the
+     * event as stale or self-echo.
+     */
+    func recordResetRequestedOutcome(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws -> FfiResetRecordOutcome
 
     /**
      * Remove a device.
@@ -3709,6 +3723,20 @@ open class OrchestratorBridge:
     }
 
     /**
+     * Outcome-returning variant of `record_group_reset` for platforms that
+     * need to distinguish recorded resets from stale/self-echo no-ops before
+     * triggering UI notifications or sync work.
+     */
+    open func recordGroupResetOutcome(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws -> FfiResetRecordOutcome {
+        return try FfiConverterTypeFFIResetRecordOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_record_group_reset_outcome(self.uniffiClonePointer(),
+                                                                                       FfiConverterString.lower(convoId),
+                                                                                       FfiConverterString.lower(newGroupIdHex),
+                                                                                       FfiConverterInt32.lower(resetGeneration), $0)
+        })
+    }
+
+    /**
      * Persist a Phase 2.5 `resetRequestedEvent` from the DS — the indirect-
      * trigger SSE event where the server has NOT minted a new MLS group id
      * and is asking subscribed clients to elect a first responder
@@ -3756,6 +3784,23 @@ open class OrchestratorBridge:
                                                                                    FfiConverterString.lower(requestEventId),
                                                                                    FfiConverterOptionString.lower(expectedNewMlsGroupIdHex), $0)
         }
+    }
+
+    /**
+     * Outcome-returning variant of `record_reset_requested` for platforms
+     * that need to avoid follow-up sync/UI churn when Rust classified the
+     * event as stale or self-echo.
+     */
+    open func recordResetRequestedOutcome(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws -> FfiResetRecordOutcome {
+        return try FfiConverterTypeFFIResetRecordOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_record_reset_requested_outcome(self.uniffiClonePointer(),
+                                                                                           FfiConverterString.lower(convoId),
+                                                                                           FfiConverterString.lower(cryptoSessionId),
+                                                                                           FfiConverterInt32.lower(resetGeneration),
+                                                                                           FfiConverterString.lower(trigger),
+                                                                                           FfiConverterString.lower(requestEventId),
+                                                                                           FfiConverterOptionString.lower(expectedNewMlsGroupIdHex), $0)
+        })
     }
 
     /**
@@ -9060,6 +9105,64 @@ public func FfiConverterTypeFFIQuarantineReason_lower(_ value: FfiQuarantineReas
 }
 
 extension FfiQuarantineReason: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiResetRecordOutcome {
+    case recorded
+    case staleOrDuplicate
+    case selfEchoNoOp
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIResetRecordOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = FfiResetRecordOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiResetRecordOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .recorded
+
+        case 2: return .staleOrDuplicate
+
+        case 3: return .selfEchoNoOp
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiResetRecordOutcome, into buf: inout [UInt8]) {
+        switch value {
+        case .recorded:
+            writeInt(&buf, Int32(1))
+
+        case .staleOrDuplicate:
+            writeInt(&buf, Int32(2))
+
+        case .selfEchoNoOp:
+            writeInt(&buf, Int32(3))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIResetRecordOutcome_lift(_ buf: RustBuffer) throws -> FfiResetRecordOutcome {
+    return try FfiConverterTypeFFIResetRecordOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIResetRecordOutcome_lower(_ value: FfiResetRecordOutcome) -> RustBuffer {
+    return FfiConverterTypeFFIResetRecordOutcome.lower(value)
+}
+
+extension FfiResetRecordOutcome: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -14854,7 +14957,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset() != 53737 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset_outcome() != 53891 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_reset_requested() != 65518 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_reset_requested_outcome() != 25351 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_device() != 60366 {
