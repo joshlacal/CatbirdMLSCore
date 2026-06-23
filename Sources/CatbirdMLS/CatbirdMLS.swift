@@ -3316,6 +3316,16 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func setEventCallback(callback: OrchestratorEventCallback?)
 
     /**
+     * Opt in to returning/storing known non-displayable MLS control payloads
+     * from `process_incoming`.
+     *
+     * Defaults off for source compatibility with existing clients. Catbird iOS
+     * enables this in Rust-authoritative mode and handles the side effects in
+     * Swift after Rust has performed the MLS decrypt/process step.
+     */
+    func setStoreControlMessages(enabled: Bool)
+
+    /**
      * Shut down the orchestrator.
      */
     func shutdown()
@@ -3823,6 +3833,21 @@ open class OrchestratorBridge:
         try! rustCall {
             uniffi_catbird_mls_fn_method_orchestratorbridge_set_event_callback(self.uniffiClonePointer(),
                                                                                FfiConverterOptionCallbackInterfaceOrchestratorEventCallback.lower(callback), $0)
+        }
+    }
+
+    /**
+     * Opt in to returning/storing known non-displayable MLS control payloads
+     * from `process_incoming`.
+     *
+     * Defaults off for source compatibility with existing clients. Catbird iOS
+     * enables this in Rust-authoritative mode and handles the side effects in
+     * Swift after Rust has performed the MLS decrypt/process step.
+     */
+    open func setStoreControlMessages(enabled: Bool) {
+        try! rustCall {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_set_store_control_messages(self.uniffiClonePointer(),
+                                                                                       FfiConverterBool.lower(enabled), $0)
         }
     }
 
@@ -14817,6 +14842,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_event_callback() != 27441 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_store_control_messages() != 51733 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932 {

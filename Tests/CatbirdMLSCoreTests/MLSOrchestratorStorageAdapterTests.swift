@@ -78,4 +78,46 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(row.payloadKeyVersion, 1)
     XCTAssertEqual(row.decryptedPayload(context: context)?.text, "stored by rust")
   }
+
+  func testStoreMessagePersistsControlPayloadWithEmptyDisplayText() throws {
+    let userDID = "did:plc:receiver"
+    let payload = MLSMessagePayload.reaction(
+      messageId: "parent-msg-1",
+      emoji: "+1",
+      action: .add
+    )
+    let adapter = MLSOrchestratorStorageAdapter(
+      dbPool: dbPool,
+      userDID: userDID,
+      mlsContext: context
+    )
+
+    try adapter.storeMessage(
+      message: FfiMessage(
+        id: "reaction-msg-1",
+        conversationId: "convo-rust-store",
+        senderDid: "did:plc:sender",
+        text: "",
+        timestamp: "2026-06-22T12:00:00Z",
+        epoch: 3,
+        sequenceNumber: 8,
+        isOwn: false,
+        deliveryStatus: nil,
+        payloadJson: String(data: try payload.encodeToJSON(), encoding: .utf8)
+      )
+    )
+
+    let row = try XCTUnwrap(dbPool.read { db in
+      try MLSMessageModel
+        .filter(MLSMessageModel.Columns.messageID == "reaction-msg-1")
+        .filter(MLSMessageModel.Columns.currentUserDID == MLSStorageHelpers.normalizeDID(userDID))
+        .fetchOne(db)
+    })
+    let decoded = try XCTUnwrap(row.decryptedPayload(context: context))
+
+    XCTAssertNil(row.payloadJSON)
+    XCTAssertNotNil(row.payloadEncrypted)
+    XCTAssertEqual(decoded.messageType, .reaction)
+    XCTAssertEqual(decoded.reaction?.messageId, "parent-msg-1")
+  }
 }

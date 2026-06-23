@@ -58,6 +58,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       config: config ?? .default
     )
     bridge.setEventCallback(callback: eventCallback)
+    bridge.setStoreControlMessages(enabled: mode.usesRustForDecisions)
 
     logger.info(
       "MLSOrchestratorRuntime initialized mode=\(mode.rawValue, privacy: .public) user=\(normalizedDID.prefix(20), privacy: .private)"

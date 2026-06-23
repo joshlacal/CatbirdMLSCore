@@ -1569,12 +1569,109 @@ public extension MLSConversationManager {
         )
 
         let ffiMessage = try runtime.processIncoming(envelope: envelope)
-        return try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        try await self.handleRustAuthoritativePayloadSideEffects(
+          outcome,
+          message: message,
+          userDid: userDid
+        )
+        return outcome
       }
     }
 
     try await finishSuccessfulMessageProcessing(message: message, userDid: userDid)
     return outcome
+  }
+
+  private func handleRustAuthoritativePayloadSideEffects(
+    _ outcome: MessageProcessingOutcome,
+    message: BlueCatbirdMlsChatDefs.MessageView,
+    userDid: String
+  ) async throws {
+    guard case .application(let payload, let senderDID) = outcome else { return }
+
+    switch payload.messageType {
+    case .text:
+      if senderDID != userDid {
+        enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
+      }
+
+      let adopted = try await storage.adoptOrphansForMessage(
+        message.id,
+        currentUserDID: userDid,
+        database: database
+      )
+      for reaction in adopted {
+        notifyObservers(.reactionReceived(
+          convoId: reaction.conversationID,
+          messageId: reaction.messageID,
+          emoji: reaction.emoji,
+          senderDID: reaction.actorDID,
+          action: reaction.action
+        ))
+      }
+
+    case .reaction:
+      guard let reaction = payload.reaction else {
+        logger.warning("⚠️ [MLS-AUTHORITY] Reaction payload missing reaction body for \(message.id.prefix(16))")
+        return
+      }
+
+      let reactionModel = MLSReactionModel(
+        messageID: reaction.messageId,
+        conversationID: message.convoId,
+        currentUserDID: userDid,
+        actorDID: senderDID,
+        emoji: reaction.emoji,
+        action: reaction.action.rawValue,
+        timestamp: message.createdAt.date
+      )
+
+      if reaction.action == .add {
+        try await withDatabaseRecovery(currentUserDID: userDid) { db in
+          try await self.storage.saveReaction(reactionModel, database: db)
+        }
+      } else {
+        try await withDatabaseRecovery(currentUserDID: userDid) { db in
+          try await self.storage.deleteReaction(
+            messageID: reaction.messageId,
+            actorDID: senderDID,
+            emoji: reaction.emoji,
+            currentUserDID: userDid,
+            database: db
+          )
+        }
+      }
+
+      notifyObservers(.reactionReceived(
+        convoId: message.convoId,
+        messageId: reaction.messageId,
+        emoji: reaction.emoji,
+        senderDID: senderDID,
+        action: reaction.action.rawValue
+      ))
+
+    case .deliveryAck:
+      if let ackPayload = payload.deliveryAck {
+        await handleReceivedDeliveryAck(
+          payload: ackPayload,
+          senderDID: senderDID,
+          conversationId: message.convoId
+        )
+      }
+
+    case .recoveryRequest:
+      if let recoveryPayload = payload.recoveryRequest {
+        await handleRecoveryRequest(
+          payload: recoveryPayload,
+          requesterDID: senderDID,
+          conversationId: message.convoId
+        )
+      }
+
+    case .readReceipt, .typing, .adminRoster, .adminAction, .system:
+      break
+    }
   }
 
   // MARK: - Message Ordering Helpers
