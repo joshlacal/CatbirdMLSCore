@@ -79,6 +79,21 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   @discardableResult
+  public func sendReaction(
+    conversationId: String,
+    messageId: String,
+    emoji: String,
+    action: MLSReactionPayload.ReactionAction
+  ) throws -> FfiMessage {
+    try bridge.sendReaction(
+      conversationId: conversationId,
+      messageId: messageId,
+      emoji: emoji,
+      action: action.rawValue
+    )
+  }
+
+  @discardableResult
   public func processIncoming(envelope: FfiIncomingEnvelope) throws -> FfiMessage? {
     try bridge.processIncoming(envelope: envelope)
   }

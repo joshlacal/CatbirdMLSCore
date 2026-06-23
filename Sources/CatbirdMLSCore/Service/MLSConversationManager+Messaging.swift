@@ -834,6 +834,24 @@ public extension MLSConversationManager {
       throw MLSConversationError.noAuthentication
     }
 
+    if protocolAuthorityMode.usesRustForDecisions {
+      let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendEncryptedReaction") { runtime in
+        try runtime.sendReaction(
+          conversationId: convoId,
+          messageId: messageId,
+          emoji: emoji,
+          action: action
+        )
+      }
+      let timestamp = ISO8601DateFormatter().date(from: ffiMessage.timestamp) ?? Date()
+      return (
+        messageId: ffiMessage.id,
+        receivedAt: ATProtocolDate(date: timestamp),
+        sequenceNumber: Int64(clamping: ffiMessage.sequenceNumber),
+        epoch: Int64(clamping: ffiMessage.epoch)
+      )
+    }
+
     guard let groupIdData = Data(hexEncoded: convo.groupId) else {
       throw MLSConversationError.invalidGroupId
     }
