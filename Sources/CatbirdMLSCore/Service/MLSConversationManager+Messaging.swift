@@ -5858,6 +5858,22 @@ public extension MLSConversationManager {
       return
     }
 
+    do {
+      if let _ = try await joinOrRejoinWithRustAuthorityIfNeeded(
+        conversationId: convoId,
+        operation: "ensureGroupInitialized"
+      ) {
+        return
+      }
+    } catch is CancellationError {
+      throw MLSConversationError.groupNotInitialized
+    } catch where protocolAuthorityMode.usesRustForDecisions {
+      logger.error(
+        "❌ [ensureGroupInitialized] Rust joinOrRejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+      )
+      throw MLSConversationError.groupNotInitialized
+    }
+
     // ⭐ CRITICAL FIX: Check if we are the creator before trying to join via Welcome
     let isCreator = convo.creator.description.lowercased() == userDid.lowercased()
 

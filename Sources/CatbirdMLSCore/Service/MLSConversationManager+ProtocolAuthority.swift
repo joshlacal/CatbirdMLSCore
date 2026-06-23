@@ -62,6 +62,24 @@ extension MLSConversationManager {
     return try body(runtime)
   }
 
+  internal func joinOrRejoinWithRustAuthorityIfNeeded(
+    conversationId: String,
+    operation: String
+  ) async throws -> MLSJoinOrRejoinResult? {
+    guard protocolAuthorityMode.usesRustForDecisions else {
+      await mirrorRustRecoveryState(operation: operation, conversationId: conversationId)
+      return nil
+    }
+
+    let result = try await withRustAuthoritativeRuntime(operation: operation) { runtime in
+      try runtime.joinOrRejoin(conversationId: conversationId)
+    }
+    logger.info(
+      "✅ [MLS-AUTHORITY] \(operation, privacy: .public) Rust joinOrRejoin completed for \(conversationId.prefix(16), privacy: .private) epoch=\(result.epoch, privacy: .public) state=\(result.recoveryState.rawValue, privacy: .public)"
+    )
+    return result
+  }
+
   internal func mirrorRustRecoveryState(
     operation: String,
     conversationId: String,

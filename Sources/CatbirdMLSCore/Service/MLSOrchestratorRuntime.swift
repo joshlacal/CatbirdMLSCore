@@ -16,9 +16,9 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   public let bridge: OrchestratorBridge
 
-  private let storageAdapter: OrchestratorStorageCallback
-  private let apiClient: OrchestratorApiCallback
-  private let credentialAdapter: OrchestratorCredentialCallback
+  private let storageAdapter: OrchestratorStorageCallback?
+  private let apiClient: OrchestratorApiCallback?
+  private let credentialAdapter: OrchestratorCredentialCallback?
   private let eventCallback: OrchestratorEventCallback?
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "OrchestratorRuntime")
 
@@ -63,6 +63,22 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     logger.info(
       "MLSOrchestratorRuntime initialized mode=\(mode.rawValue, privacy: .public) user=\(normalizedDID.prefix(20), privacy: .private)"
     )
+  }
+
+  internal init(
+    userDID: String,
+    mode: MLSProtocolAuthorityMode = MLSProtocolAuthorityMode.defaultMode,
+    bridge: OrchestratorBridge,
+    eventCallback: OrchestratorEventCallback? = nil
+  ) {
+    let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
+    self.userDID = normalizedDID
+    self.mode = mode
+    self.bridge = bridge
+    self.storageAdapter = nil
+    self.apiClient = nil
+    self.credentialAdapter = nil
+    self.eventCallback = eventCallback
   }
 
   public func initialize() throws {
@@ -175,6 +191,11 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.performSilentRecovery(conversationIds: conversationIds)
   }
 
+  public func joinOrRejoin(conversationId: String) throws -> MLSJoinOrRejoinResult {
+    let result = try bridge.joinOrRejoin(convoId: conversationId)
+    return MLSJoinOrRejoinResult(ffiResult: result)
+  }
+
   @discardableResult
   public func ensureDeviceRegistered() throws -> String {
     try bridge.ensureDeviceRegistered()
@@ -199,6 +220,21 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   public func shutdown() {
     bridge.shutdown()
+  }
+}
+
+public struct MLSJoinOrRejoinResult: Equatable, Sendable {
+  public let epoch: UInt64
+  public let recoveryState: ConversationRecoveryState
+
+  init(ffiResult result: FfiJoinOrRejoinResult) {
+    self.epoch = result.epoch
+    self.recoveryState = ConversationRecoveryState(ffiRecoveryState: result.recoveryState)
+  }
+
+  public init(epoch: UInt64, recoveryState: ConversationRecoveryState) {
+    self.epoch = epoch
+    self.recoveryState = recoveryState
   }
 }
 

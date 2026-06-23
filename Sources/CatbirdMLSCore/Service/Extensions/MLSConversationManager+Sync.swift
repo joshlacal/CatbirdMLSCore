@@ -512,11 +512,28 @@ public extension MLSConversationManager {
             logger.info("🔄 [SYNC] Member missing local group for \(convo.conversationId.prefix(16))... - trying Welcome first")
 
             do {
+              if let _ = try await joinOrRejoinWithRustAuthorityIfNeeded(
+                conversationId: convo.conversationId,
+                operation: "syncMemberMissingLocalGroup"
+              ) {
+                continue
+              }
+            } catch is CancellationError {
+              logger.info("📭 [SYNC] Rust joinOrRejoin cancelled for \(convo.conversationId.prefix(16))")
+              continue
+            } catch where protocolAuthorityMode.usesRustForDecisions {
+              logger.error(
+                "❌ [SYNC] Rust joinOrRejoin failed for \(convo.conversationId.prefix(16)): \(error.localizedDescription)"
+              )
+              continue
+            }
+
+            do {
               try await initializeGroupFromWelcome(convo: convo)
               logger.info("✅ [SYNC] Successfully joined via Welcome message")
             } catch let mlsApiError as MLSAPIError {
-              // Check if Welcome is unavailable (device-sync scenario)
-              if case .httpError(let code, _) = mlsApiError, code == 404 {
+	              // Check if Welcome is unavailable (device-sync scenario)
+	              if case .httpError(let code, _) = mlsApiError, code == 404 {
                 logger.info("📭 [SYNC] No Welcome available (HTTP 404) - routing through WelcomeRecoveryPolicy")
                 switch await decideWelcomeRecovery(for: convo, failure: .welcomeUnavailable) {
                 case .externalCommitWithHistoryGap:

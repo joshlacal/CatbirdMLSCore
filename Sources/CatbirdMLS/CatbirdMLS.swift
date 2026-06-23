@@ -3181,6 +3181,16 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func joinGroup(welcomeData: Data) throws -> FfiConversationView
 
     /**
+     * Join or rejoin one conversation through the normal Rust recovery path.
+     *
+     * Unlike `perform_silent_recovery`, this does not delete or re-register
+     * the device. It delegates to `MLSOrchestrator::join_or_rejoin`, preserving
+     * the Welcome-first and ResetPending-bootstrap-before-External-Commit
+     * ordering used by sync and incoming-message recovery.
+     */
+    func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult
+
+    /**
      * Leave a conversation.
      */
     func leaveGroup(convoId: String) throws
@@ -3631,6 +3641,21 @@ open class OrchestratorBridge:
         return try FfiConverterTypeFFIConversationView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_join_group(self.uniffiClonePointer(),
                                                                        FfiConverterData.lower(welcomeData), $0)
+        })
+    }
+
+    /**
+     * Join or rejoin one conversation through the normal Rust recovery path.
+     *
+     * Unlike `perform_silent_recovery`, this does not delete or re-register
+     * the device. It delegates to `MLSOrchestrator::join_or_rejoin`, preserving
+     * the Welcome-first and ResetPending-bootstrap-before-External-Commit
+     * ordering used by sync and incoming-message recovery.
+     */
+    open func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult {
+        return try FfiConverterTypeFFIJoinOrRejoinResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_join_or_rejoin(self.uniffiClonePointer(),
+                                                                           FfiConverterString.lower(convoId), $0)
         })
     }
 
@@ -5707,6 +5732,67 @@ public func FfiConverterTypeFFIIncomingEnvelope_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeFFIIncomingEnvelope_lower(_ value: FfiIncomingEnvelope) -> RustBuffer {
     return FfiConverterTypeFFIIncomingEnvelope.lower(value)
+}
+
+public struct FfiJoinOrRejoinResult {
+    public var epoch: UInt64
+    public var recoveryState: FfiConversationRecoveryState
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(epoch: UInt64, recoveryState: FfiConversationRecoveryState) {
+        self.epoch = epoch
+        self.recoveryState = recoveryState
+    }
+}
+
+extension FfiJoinOrRejoinResult: Equatable, Hashable {
+    public static func == (lhs: FfiJoinOrRejoinResult, rhs: FfiJoinOrRejoinResult) -> Bool {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.recoveryState != rhs.recoveryState {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(epoch)
+        hasher.combine(recoveryState)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIJoinOrRejoinResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiJoinOrRejoinResult {
+        return
+            try FfiJoinOrRejoinResult(
+                epoch: FfiConverterUInt64.read(from: &buf),
+                recoveryState: FfiConverterTypeFFIConversationRecoveryState.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiJoinOrRejoinResult, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterTypeFFIConversationRecoveryState.write(value.recoveryState, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIJoinOrRejoinResult_lift(_ buf: RustBuffer) throws -> FfiJoinOrRejoinResult {
+    return try FfiConverterTypeFFIJoinOrRejoinResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIJoinOrRejoinResult_lower(_ value: FfiJoinOrRejoinResult) -> RustBuffer {
+    return FfiConverterTypeFFIJoinOrRejoinResult.lower(value)
 }
 
 public struct FfiKeyPackageRef {
@@ -14934,6 +15020,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_group() != 10530 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_or_rejoin() != 36176 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_group() != 23679 {

@@ -1373,6 +1373,22 @@ extension MLSConversationManager {
       return .skippedNoAttempt
     }
 
+    do {
+      if let _ = try await joinOrRejoinWithRustAuthorityIfNeeded(
+        conversationId: convoId,
+        operation: "attemptRejoinWithWelcomeFallback"
+      ) {
+        await clearConversationRejoinFlag(convoId)
+        return .joined
+      }
+    } catch is CancellationError {
+      logger.info("📭 [attemptRejoin] Rust joinOrRejoin cancelled for \(label) (expected during shutdown)")
+      return .skippedNoAttempt
+    } catch {
+      logger.error("❌ [attemptRejoin] Rust joinOrRejoin failed for \(label): \(error.localizedDescription)")
+      return .failed
+    }
+
     // ALWAYS try Welcome first, even for creators without local state.
     // External Commit should only be used when Welcome is truly unavailable (404/410).
     // This preserves the epoch and avoids unnecessary epoch advancement on transient errors.
