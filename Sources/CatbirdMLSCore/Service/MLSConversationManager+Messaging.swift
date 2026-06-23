@@ -436,6 +436,19 @@ public extension MLSConversationManager {
     // Reconnect database pool if it was closed during recovery
     try await refreshDatabaseIfNeeded()
 
+    if protocolAuthorityMode.usesRustForDecisions {
+      let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
+        try runtime.sendMessage(conversationId: convoId, text: plaintext)
+      }
+      let timestamp = ISO8601DateFormatter().date(from: ffiMessage.timestamp) ?? Date()
+      return (
+        messageId: ffiMessage.id,
+        receivedAt: ATProtocolDate(date: timestamp),
+        sequenceNumber: Int64(clamping: ffiMessage.sequenceNumber),
+        epoch: Int64(clamping: ffiMessage.epoch)
+      )
+    }
+
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
@@ -500,6 +513,11 @@ public extension MLSConversationManager {
       // GUARD: Check FFI group existence BEFORE proceeding to avoid loops on preSendSync FFI errors
       guard await mlsClient.groupExists(for: userDid, groupId: groupIdData) else {
         logger.error("❌ Cannot send: group \(convoId) is not active in FFI. Recovery deferred.")
+        await mirrorRustRecoveryState(
+          operation: "sendMessage.preflight",
+          conversationId: convoId,
+          swiftDecision: .groupMissing
+        )
         throw MLSConversationError.groupNotInitialized
       }
 
@@ -751,6 +769,11 @@ public extension MLSConversationManager {
       }
 
       logger.info("✅ [Gen: \(self.currentCoordinationGeneration)] [Epoch: \(sendResult.epoch)] Message \(localMsgId) confirmed by server (Seq: \(sendResult.sequenceNumber))")
+      await mirrorRustRecoveryState(
+        operation: "sendMessage",
+        conversationId: convoId,
+        swiftDecision: .healthy
+      )
       return (
         messageId: sendResult.messageId,
         receivedAt: sendResult.receivedAt,
@@ -1033,6 +1056,11 @@ public extension MLSConversationManager {
 
     // Validate session generation hasn't changed (account switch)
     try validateSessionGeneration(capturedGeneration: myGeneration)
+
+    await mirrorRustRecoveryState(
+      operation: "processServerMessage",
+      conversationId: message.convoId
+    )
 
     let gen = currentCoordinationGeneration
     let convoIdPrefix = String(message.convoId.prefix(8))

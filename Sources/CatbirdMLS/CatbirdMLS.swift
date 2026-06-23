@@ -3132,6 +3132,17 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func getConversationQuarantineState(convoId: String) -> FfiQuarantineState?
 
     /**
+     * Project the orchestrator's current conversation recovery state into the
+     * Swift `ConversationRecoveryState` vocabulary.
+     *
+     * Unknown conversations default to `Healthy` so adding this method does not
+     * change behavior for clients that have not opted into Rust authority. When
+     * Rust has a cached group state but the low-level MLS context no longer has
+     * matching local group state, the projection reports `GroupMissing`.
+     */
+    func getConversationRecoveryState(conversationId: String) throws -> FfiConversationRecoveryState
+
+    /**
      * Get key package stats.
      */
     func getKeyPackageStats() throws -> FfiKeyPackageStats
@@ -3511,6 +3522,22 @@ open class OrchestratorBridge:
         return try! FfiConverterOptionTypeFFIQuarantineState.lift(try! rustCall {
             uniffi_catbird_mls_fn_method_orchestratorbridge_get_conversation_quarantine_state(self.uniffiClonePointer(),
                                                                                               FfiConverterString.lower(convoId), $0)
+        })
+    }
+
+    /**
+     * Project the orchestrator's current conversation recovery state into the
+     * Swift `ConversationRecoveryState` vocabulary.
+     *
+     * Unknown conversations default to `Healthy` so adding this method does not
+     * change behavior for clients that have not opted into Rust authority. When
+     * Rust has a cached group state but the low-level MLS context no longer has
+     * matching local group state, the projection reports `GroupMissing`.
+     */
+    open func getConversationRecoveryState(conversationId: String) throws -> FfiConversationRecoveryState {
+        return try FfiConverterTypeFFIConversationRecoveryState.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_get_conversation_recovery_state(self.uniffiClonePointer(),
+                                                                                            FfiConverterString.lower(conversationId), $0)
         })
     }
 
@@ -8710,6 +8737,88 @@ public func FfiConverterTypeFFICommitKind_lower(_ value: FfiCommitKind) -> RustB
 }
 
 extension FfiCommitKind: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiConversationRecoveryState {
+    case healthy
+    case epochBehind
+    case groupMissing
+    case needsRejoin
+    case recovering
+    case unrecoverableLocal
+    case resetPending
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIConversationRecoveryState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConversationRecoveryState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationRecoveryState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .healthy
+
+        case 2: return .epochBehind
+
+        case 3: return .groupMissing
+
+        case 4: return .needsRejoin
+
+        case 5: return .recovering
+
+        case 6: return .unrecoverableLocal
+
+        case 7: return .resetPending
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiConversationRecoveryState, into buf: inout [UInt8]) {
+        switch value {
+        case .healthy:
+            writeInt(&buf, Int32(1))
+
+        case .epochBehind:
+            writeInt(&buf, Int32(2))
+
+        case .groupMissing:
+            writeInt(&buf, Int32(3))
+
+        case .needsRejoin:
+            writeInt(&buf, Int32(4))
+
+        case .recovering:
+            writeInt(&buf, Int32(5))
+
+        case .unrecoverableLocal:
+            writeInt(&buf, Int32(6))
+
+        case .resetPending:
+            writeInt(&buf, Int32(7))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConversationRecoveryState_lift(_ buf: RustBuffer) throws -> FfiConversationRecoveryState {
+    return try FfiConverterTypeFFIConversationRecoveryState.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConversationRecoveryState_lower(_ value: FfiConversationRecoveryState) -> RustBuffer {
+    return FfiConverterTypeFFIConversationRecoveryState.lower(value)
+}
+
+extension FfiConversationRecoveryState: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -14648,6 +14757,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_quarantine_state() != 47830 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_recovery_state() != 48248 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268 {

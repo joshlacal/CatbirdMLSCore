@@ -43,6 +43,8 @@ public final class MLSConversationManager {
     public let storage: MLSStorage
     @ObservationIgnored public var database: MLSDatabase
     public let configuration: MLSConfiguration
+    public let protocolAuthorityMode: MLSProtocolAuthorityMode
+    @ObservationIgnored public internal(set) var orchestratorRuntime: MLSOrchestratorRuntime?
 
     /// Called when the database pool is refreshed after recovery.
     /// Allows the app layer to update its own cached pool references.
@@ -419,7 +421,8 @@ public final class MLSConversationManager {
         storage: MLSStorage = .shared,
         configuration: MLSConfiguration = .default,
         atProtoClient: ATProtoClient,
-        trustChecker: MLSTrustChecker = AlwaysTrustChecker()
+        trustChecker: MLSTrustChecker = AlwaysTrustChecker(),
+        protocolAuthorityMode: MLSProtocolAuthorityMode = .defaultMode
     ) {
         self.apiClient = apiClient
         self.atProtoClient = atProtoClient
@@ -428,6 +431,7 @@ public final class MLSConversationManager {
         mlsClient = MLSClient.shared // Use singleton to persist groups
         self.storage = storage
         self.trustChecker = trustChecker
+        self.protocolAuthorityMode = protocolAuthorityMode
 
         // CRITICAL FIX: Create owned database manager (NOT shared singleton)
         // Each conversation manager owns its database pool lifecycle
@@ -487,7 +491,7 @@ public final class MLSConversationManager {
             membershipChangeObserver = nil
         }
 
-        logger.info("MLSConversationManager initialized with UniFFI client (using shared MLSClient)")
+        logger.info("MLSConversationManager initialized with UniFFI client (using shared MLSClient), authority=\(protocolAuthorityMode.rawValue, privacy: .public)")
         configuration.validate()
     }
 
@@ -500,6 +504,8 @@ public final class MLSConversationManager {
         // Close database connection synchronously
         // Note: deinit cannot be async, but databaseManager's deinit will close connections
         // The databaseManager actor's deinit will handle the actual database closure
+        orchestratorRuntime?.shutdown()
+        orchestratorRuntime = nil
 
         logger.info("✅ [deinit] MLSConversationManager cleanup completed")
     }
@@ -540,6 +546,7 @@ public final class MLSConversationManager {
         )
         let newPool = try await databaseManager.getDatabasePool(for: userDid)
         database = newPool
+        resetOrchestratorRuntime(reason: "database pool refreshed")
         logger.info(
             "✅ [DB-REFRESH] Got fresh database pool for \(userDid.prefix(20))..."
         )

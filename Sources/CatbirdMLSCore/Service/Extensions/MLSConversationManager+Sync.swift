@@ -108,6 +108,13 @@ public extension MLSConversationManager {
     // Reconnect database pool if it was closed during recovery
     try await refreshDatabaseIfNeeded()
 
+    if protocolAuthorityMode.usesRustForDecisions {
+      try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
+        try runtime.syncWithServer(fullSync: fullSync)
+      }
+      return
+    }
+
     // 🪝 [CLIENT E] One-time-per-session boot scan for half-staged
     // bootstrap groups. Must run BEFORE the first sync iteration so any
     // half-staged group is cleaned up before the new sync's recovery
@@ -657,6 +664,11 @@ public extension MLSConversationManager {
 
       // Reset circuit breaker on success
       consecutiveSyncFailures = 0
+
+      await mirrorRustRecoveryStates(
+        operation: "syncWithServer",
+        conversationIds: allConvos.map(\.conversationId)
+      )
 
       // ⭐ FIX: Schedule deferred recovery for any conversations flagged needsRejoin
       // during this sync pass. Without this, needsRejoin set mid-session would only

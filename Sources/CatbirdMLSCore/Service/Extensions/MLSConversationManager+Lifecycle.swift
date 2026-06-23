@@ -43,6 +43,7 @@ extension MLSConversationManager {
     isSyncPaused = true
     MLSCoreContext.markSuspensionInProgress()
     MLSClient.markSuspensionInProgress(reason: "MLSConversationManager.suspendMLSOperations")
+    resetOrchestratorRuntime(reason: "MLS suspension")
     // Reset circuit breaker during lifecycle suspension so transient suspended errors
     // cannot strand foreground sync for the full backoff window.
     consecutiveSyncFailures = 0
@@ -346,6 +347,7 @@ extension MLSConversationManager {
 
     isShuttingDown = true
     isSyncPaused = true  // CRITICAL: Reject any new sync attempts immediately
+    resetOrchestratorRuntime(reason: "manager shutdown")
     var shutdownWasSafe = true
 
     logger.info(
