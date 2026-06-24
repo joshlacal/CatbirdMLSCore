@@ -22,6 +22,17 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     XCTAssertTrue(MLSProtocolAuthorityMode.rustAuthoritative.usesRustForDecisions)
   }
 
+  func testRustFullModeParsesFromRuntimeValue() {
+    XCTAssertEqual(MLSProtocolAuthorityMode(rawRuntimeValue: "rustFull"), .rustFull)
+    XCTAssertEqual(MLSProtocolAuthorityMode(rawRuntimeValue: "fullRust"), .rustFull)
+  }
+
+  func testRustFullRequiresRustOnlyMutations() {
+    XCTAssertTrue(MLSProtocolAuthorityMode.rustFull.requiresRustOnlyProtocolMutations)
+    XCTAssertFalse(MLSProtocolAuthorityMode.rustAuthoritative.requiresRustOnlyProtocolMutations)
+    XCTAssertFalse(MLSProtocolAuthorityMode.swiftLegacy.requiresRustOnlyProtocolMutations)
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)

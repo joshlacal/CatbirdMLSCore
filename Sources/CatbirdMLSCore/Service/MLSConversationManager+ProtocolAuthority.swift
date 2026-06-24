@@ -9,6 +9,15 @@ public extension MLSConversationManager {
 }
 
 extension MLSConversationManager {
+  internal func assertSwiftProtocolMutationAllowed(_ operation: StaticString) throws {
+    guard !protocolAuthorityMode.requiresRustOnlyProtocolMutations else {
+      logger.fault(
+        "[MLS-FULL-RUST] Swift protocol mutation blocked: \(String(describing: operation), privacy: .public)"
+      )
+      throw MLSConversationError.operationFailed("Swift MLS protocol mutation blocked in rustFull mode")
+    }
+  }
+
   internal func ensureOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
     guard protocolAuthorityMode != .swiftLegacy else { return nil }
     if let orchestratorRuntime { return orchestratorRuntime }

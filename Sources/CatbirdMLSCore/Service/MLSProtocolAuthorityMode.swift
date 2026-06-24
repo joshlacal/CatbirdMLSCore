@@ -11,13 +11,29 @@ public enum MLSProtocolAuthorityMode: String, Codable, CaseIterable, Sendable {
   /// Rust orchestrator owns protocol decisions; Swift owns lifecycle/storage access.
   case rustAuthoritative
 
+  /// Rust orchestrator owns both protocol decisions and protocol mutations.
+  case rustFull
+
   public static let defaultMode: MLSProtocolAuthorityMode = .swiftLegacy
 
+  public init?(rawRuntimeValue: String) {
+    switch rawRuntimeValue {
+    case "fullRust":
+      self = .rustFull
+    default:
+      self.init(rawValue: rawRuntimeValue)
+    }
+  }
+
   public var mirrorsRustDecisions: Bool {
-    self == .rustShadow || self == .rustAuthoritative
+    self == .rustShadow || self == .rustAuthoritative || self == .rustFull
   }
 
   public var usesRustForDecisions: Bool {
-    self == .rustAuthoritative
+    self == .rustAuthoritative || self == .rustFull
+  }
+
+  public var requiresRustOnlyProtocolMutations: Bool {
+    self == .rustFull
   }
 }
