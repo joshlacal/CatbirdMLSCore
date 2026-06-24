@@ -5852,6 +5852,23 @@ public extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
+    if protocolAuthorityMode.requiresRustOnlyProtocolMutations {
+      do {
+        _ = try await joinOrRejoinWithRustAuthorityIfNeeded(
+          conversationId: convoId,
+          operation: "ensureGroupInitialized"
+        )
+        return
+      } catch is CancellationError {
+        throw MLSConversationError.groupNotInitialized
+      } catch {
+        logger.error(
+          "❌ [ensureGroupInitialized] Rust joinOrRejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+        )
+        throw MLSConversationError.groupNotInitialized
+      }
+    }
+
     // Check if group already exists locally
     if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
       logger.debug("Group already exists locally for conversation \(convoId)")

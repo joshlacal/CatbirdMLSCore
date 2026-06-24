@@ -864,6 +864,15 @@ extension MLSConversationManager {
     }
 
     do {
+      try assertSwiftProtocolMutationAllowed("validateGroupStates")
+    } catch {
+      logger.info(
+        "⏭️ [MLS-FULL-RUST] Skipping validateGroupStates in \(self.protocolAuthorityMode.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+      )
+      return
+    }
+
+    do {
       let conversations = try await database.read { db in
         try MLSConversationModel
           .filter(MLSConversationModel.Columns.currentUserDID == userDid)
@@ -999,6 +1008,8 @@ extension MLSConversationManager {
       }
       automaticMissingConversationRecoverySuppressedUntil = nil
     }
+
+    try assertSwiftProtocolMutationAllowed("detectAndRejoinMissingConversations")
 
     do {
       let corruptedConvos = try await database.read { db in

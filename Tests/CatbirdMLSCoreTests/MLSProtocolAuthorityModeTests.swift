@@ -28,6 +28,8 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
   }
 
   func testRustFullRequiresRustOnlyMutations() {
+    XCTAssertTrue(MLSProtocolAuthorityMode.rustFull.mirrorsRustDecisions)
+    XCTAssertTrue(MLSProtocolAuthorityMode.rustFull.usesRustForDecisions)
     XCTAssertTrue(MLSProtocolAuthorityMode.rustFull.requiresRustOnlyProtocolMutations)
     XCTAssertFalse(MLSProtocolAuthorityMode.rustAuthoritative.requiresRustOnlyProtocolMutations)
     XCTAssertFalse(MLSProtocolAuthorityMode.swiftLegacy.requiresRustOnlyProtocolMutations)

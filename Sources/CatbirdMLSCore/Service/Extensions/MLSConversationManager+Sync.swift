@@ -749,6 +749,7 @@ public extension MLSConversationManager {
     guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
       return
     }
+    try assertSwiftProtocolMutationAllowed("runDeferredEpochRecovery")
 
     // Phase 1: Handle needsReset conversations (group reset — fresh MLS group at epoch 0)
     // This MUST run before needsRejoin to prevent External Commits on diverged groups.
