@@ -43,7 +43,19 @@ extension MLSConversationManager {
     isSyncPaused = true
     MLSCoreContext.markSuspensionInProgress()
     MLSClient.markSuspensionInProgress(reason: "MLSConversationManager.suspendMLSOperations")
-    resetOrchestratorRuntime(reason: "MLS suspension")
+    if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
+      do {
+        _ = try runtime.prepareForSuspend(
+          reason: "MLSConversationManager.suspendMLSOperations"
+        )
+      } catch {
+        logger.error(
+          "❌ [MLS-FULL-RUST] prepareForSuspend failed: \(error.localizedDescription, privacy: .public)"
+        )
+      }
+    } else {
+      resetOrchestratorRuntime(reason: "MLS suspension")
+    }
     // Reset circuit breaker during lifecycle suspension so transient suspended errors
     // cannot strand foreground sync for the full backoff window.
     consecutiveSyncFailures = 0
@@ -121,6 +133,16 @@ extension MLSConversationManager {
     isSyncPaused = false
     MLSCoreContext.clearSuspensionFlag()
     MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
+
+    if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
+      do {
+        try runtime.resumeFromSuspend(reason: "MLSConversationManager.resumeMLSOperations")
+      } catch {
+        logger.error(
+          "❌ [MLS-FULL-RUST] resumeFromSuspend failed: \(error.localizedDescription, privacy: .public)"
+        )
+      }
+    }
 
     // Restart background tasks (only if we're initialized)
     guard isInitialized else {

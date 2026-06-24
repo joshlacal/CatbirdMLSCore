@@ -89,6 +89,25 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.syncWithServer(fullSync: fullSync)
   }
 
+  public func prepareForSuspend(
+    reason: String,
+    deadlineMs: UInt64 = 1_500
+  ) throws -> FfiSuspendResult {
+    try bridge.prepareForSuspend(reason: reason, deadlineMs: deadlineMs)
+  }
+
+  public func resumeFromSuspend(reason: String) throws {
+    try bridge.resumeFromSuspend(reason: reason)
+  }
+
+  public func interruptStorage(reason: String) throws {
+    try bridge.interruptStorage(reason: reason)
+  }
+
+  public func emergencyClose(reason: String) throws {
+    try bridge.emergencyClose(reason: reason)
+  }
+
   @discardableResult
   public func sendMessage(conversationId: String, text: String) throws -> FfiMessage {
     try bridge.sendMessage(conversationId: conversationId, text: text)

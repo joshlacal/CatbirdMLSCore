@@ -3105,6 +3105,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func discardPending(handle: FfiStagedCommitHandle) throws
 
+    func emergencyClose(reason: String) throws
+
     /**
      * Ensure device is registered with MLS service.
      */
@@ -3175,6 +3177,10 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func initialize(userDid: String) throws
 
+    func initializeEngine(userDid: String) throws
+
+    func interruptStorage(reason: String) throws
+
     /**
      * Join an existing group via Welcome message.
      */
@@ -3204,6 +3210,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * Perform full silent recovery.
      */
     func performSilentRecovery(conversationIds: [String]) throws
+
+    func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult
 
     /**
      * Encode PCM audio to Opus, extract waveform, encrypt blob.
@@ -3321,6 +3329,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * path are logged and swallowed internally.
      */
     func reportUnrecoverableLocal(convoId: String, reason: String) throws
+
+    func resumeFromSuspend(reason: String) throws
 
     /**
      * Send a text message.
@@ -3522,6 +3532,13 @@ open class OrchestratorBridge:
         }
     }
 
+    open func emergencyClose(reason: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_emergency_close(self.uniffiClonePointer(),
+                                                                            FfiConverterString.lower(reason), $0)
+        }
+    }
+
     /**
      * Ensure device is registered with MLS service.
      */
@@ -3634,6 +3651,20 @@ open class OrchestratorBridge:
         }
     }
 
+    open func initializeEngine(userDid: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_initialize_engine(self.uniffiClonePointer(),
+                                                                              FfiConverterString.lower(userDid), $0)
+        }
+    }
+
+    open func interruptStorage(reason: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_interrupt_storage(self.uniffiClonePointer(),
+                                                                              FfiConverterString.lower(reason), $0)
+        }
+    }
+
     /**
      * Join an existing group via Welcome message.
      */
@@ -3686,6 +3717,14 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_perform_silent_recovery(self.uniffiClonePointer(),
                                                                                     FfiConverterSequenceString.lower(conversationIds), $0)
         }
+    }
+
+    open func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult {
+        return try FfiConverterTypeFFISuspendResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_prepare_for_suspend(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(reason),
+                                                                                FfiConverterUInt64.lower(deadlineMs), $0)
+        })
     }
 
     /**
@@ -3872,6 +3911,13 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_report_unrecoverable_local(self.uniffiClonePointer(),
                                                                                        FfiConverterString.lower(convoId),
                                                                                        FfiConverterString.lower(reason), $0)
+        }
+    }
+
+    open func resumeFromSuspend(reason: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_resume_from_suspend(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(reason), $0)
         }
     }
 
@@ -6790,6 +6836,67 @@ public func FfiConverterTypeFFIStagedCommitHandle_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeFFIStagedCommitHandle_lower(_ value: FfiStagedCommitHandle) -> RustBuffer {
     return FfiConverterTypeFFIStagedCommitHandle.lower(value)
+}
+
+public struct FfiSuspendResult {
+    public var acceptingNewWork: Bool
+    public var interruptedContexts: UInt32
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(acceptingNewWork: Bool, interruptedContexts: UInt32) {
+        self.acceptingNewWork = acceptingNewWork
+        self.interruptedContexts = interruptedContexts
+    }
+}
+
+extension FfiSuspendResult: Equatable, Hashable {
+    public static func == (lhs: FfiSuspendResult, rhs: FfiSuspendResult) -> Bool {
+        if lhs.acceptingNewWork != rhs.acceptingNewWork {
+            return false
+        }
+        if lhs.interruptedContexts != rhs.interruptedContexts {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(acceptingNewWork)
+        hasher.combine(interruptedContexts)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFISuspendResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSuspendResult {
+        return
+            try FfiSuspendResult(
+                acceptingNewWork: FfiConverterBool.read(from: &buf),
+                interruptedContexts: FfiConverterUInt32.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiSuspendResult, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.acceptingNewWork, into: &buf)
+        FfiConverterUInt32.write(value.interruptedContexts, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISuspendResult_lift(_ buf: RustBuffer) throws -> FfiSuspendResult {
+    return try FfiConverterTypeFFISuspendResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISuspendResult_lower(_ value: FfiSuspendResult) -> RustBuffer {
+    return FfiConverterTypeFFISuspendResult.lower(value)
 }
 
 public struct FfiSyncCursor {
@@ -14995,6 +15102,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_discard_pending() != 1943 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_emergency_close() != 38033 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_device_registered() != 54125 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15019,6 +15129,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_initialize() != 22546 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_initialize_engine() != 25853 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_interrupt_storage() != 40115 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_group() != 10530 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15032,6 +15148,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_perform_silent_recovery() != 48593 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_for_suspend() != 11343 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_voice_message() != 64276 {
@@ -15065,6 +15184,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_report_unrecoverable_local() != 63696 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_resume_from_suspend() != 171 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_message() != 21757 {
