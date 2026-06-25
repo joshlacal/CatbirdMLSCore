@@ -12,6 +12,10 @@ import PetrelCatbird
 /// 3. Re-registers device with fresh key packages
 /// 4. Persists affected conversations for deferred rejoin recovery
 /// 5. Leaves External Commit attempts to the conversation recovery queue
+///
+/// In `rustFull`, deferred-recovery scheduling and its cooldown/backoff gates
+/// live in Rust; this actor remains the legacy / partial-authority recovery
+/// implementation for Swift-owned flows.
 @available(iOS 18.0, macOS 13.0, *)
 public actor MLSRecoveryManager {
   public typealias DeferredRejoinHandler = @Sendable (

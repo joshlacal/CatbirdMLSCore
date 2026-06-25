@@ -6,6 +6,32 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSFullRustRecoveryRoutingTests: XCTestCase {
+  func testRuntimeRunDeferredRecoveryWrapsBridgeResult() throws {
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.deferredRecoveryReport = FfiDeferredRecoveryReport(
+      scanned: 3,
+      attempted: 1,
+      recovered: 1,
+      skipped: 1,
+      failed: 0
+    )
+    let runtime = MLSOrchestratorRuntime(
+      userDID: "did:plc:alice",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let report = try runtime.runDeferredRecovery(reason: "unit-test")
+
+    XCTAssertEqual(bridge.runDeferredRecoveryCallCount, 1)
+    XCTAssertEqual(bridge.lastDeferredRecoveryReason, "unit-test")
+    XCTAssertEqual(report.scanned, 3)
+    XCTAssertEqual(report.attempted, 1)
+    XCTAssertEqual(report.recovered, 1)
+    XCTAssertEqual(report.skipped, 1)
+    XCTAssertEqual(report.failed, 0)
+  }
+
   func testRuntimeStartupReconcileWrapsBridgeResult() throws {
     let bridge = RecordingStartupReconcileBridge()
     bridge.report = FfiStartupReconcileReport(
@@ -89,6 +115,52 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.startupReconcileCallCount, 0)
   }
 
+  func testRustFullRunDeferredEpochRecoveryRoutesThroughRuntimeOnly() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.deferredRecoveryReport = FfiDeferredRecoveryReport(
+      scanned: 1,
+      attempted: 0,
+      recovered: 0,
+      skipped: 1,
+      failed: 0
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try await manager.database.write { db in
+      try MLSConversationModel(
+        conversationID: "convo-needs-rejoin",
+        currentUserDID: "did:plc:testuser",
+        groupID: Data([0xde, 0xad, 0xbe, 0xef])
+      ).insert(db)
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsRejoin = 1
+          WHERE conversationID = ? AND currentUserDID = ?;
+        """,
+        arguments: ["convo-needs-rejoin", "did:plc:testuser"]
+      )
+    }
+
+    try await manager.runDeferredEpochRecovery()
+
+    let conversation = try await manager.database.read { db in
+      try MLSConversationModel.fetchOne(
+        db,
+        key: ["conversationID": "convo-needs-rejoin", "currentUserDID": "did:plc:testuser"]
+      )
+    }
+
+    XCTAssertEqual(bridge.runDeferredRecoveryCallCount, 1)
+    XCTAssertEqual(bridge.lastDeferredRecoveryReason, "swift-scheduler-request")
+    XCTAssertEqual(conversation?.needsRejoin, true)
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
@@ -117,7 +189,16 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
     resetPending: 0,
     unrecoverableLocal: 0
   )
+  var deferredRecoveryReport = FfiDeferredRecoveryReport(
+    scanned: 0,
+    attempted: 0,
+    recovered: 0,
+    skipped: 0,
+    failed: 0
+  )
   private(set) var startupReconcileCallCount = 0
+  private(set) var runDeferredRecoveryCallCount = 0
+  private(set) var lastDeferredRecoveryReason: String?
 
   init() {
     super.init(noPointer: .init())
@@ -130,6 +211,12 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
   override func startupReconcile() throws -> FfiStartupReconcileReport {
     startupReconcileCallCount += 1
     return report
+  }
+
+  override func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport {
+    runDeferredRecoveryCallCount += 1
+    lastDeferredRecoveryReason = reason
+    return deferredRecoveryReport
   }
 
   override func shutdown() {

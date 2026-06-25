@@ -744,6 +744,12 @@ public extension MLSConversationManager {
   /// `attemptExternalCommitFallback` doesn't short-circuit on `groupExists`.
   internal func runDeferredEpochRecovery() async throws {
     guard !isShuttingDown, !Task.isCancelled else { return }
+    if protocolAuthorityMode == .rustFull {
+      _ = try await withRustAuthoritativeRuntime(operation: "runDeferredEpochRecovery") { runtime in
+        try runtime.runDeferredRecovery(reason: "swift-scheduler-request")
+      }
+      return
+    }
     guard let userDid = userDid else { return }
     guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
       return

@@ -3334,6 +3334,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
 
     func resumeFromSuspend(reason: String) throws
 
+    func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport
+
     /**
      * Send a text message.
      */
@@ -3931,6 +3933,13 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_resume_from_suspend(self.uniffiClonePointer(),
                                                                                 FfiConverterString.lower(reason), $0)
         }
+    }
+
+    open func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport {
+        return try FfiConverterTypeFFIDeferredRecoveryReport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_run_deferred_recovery(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(reason), $0)
+        })
     }
 
     /**
@@ -5496,6 +5505,91 @@ public func FfiConverterTypeFFICreateConversationResult_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeFFICreateConversationResult_lower(_ value: FfiCreateConversationResult) -> RustBuffer {
     return FfiConverterTypeFFICreateConversationResult.lower(value)
+}
+
+public struct FfiDeferredRecoveryReport {
+    public var scanned: UInt32
+    public var attempted: UInt32
+    public var recovered: UInt32
+    public var skipped: UInt32
+    public var failed: UInt32
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(scanned: UInt32, attempted: UInt32, recovered: UInt32, skipped: UInt32, failed: UInt32) {
+        self.scanned = scanned
+        self.attempted = attempted
+        self.recovered = recovered
+        self.skipped = skipped
+        self.failed = failed
+    }
+}
+
+extension FfiDeferredRecoveryReport: Equatable, Hashable {
+    public static func == (lhs: FfiDeferredRecoveryReport, rhs: FfiDeferredRecoveryReport) -> Bool {
+        if lhs.scanned != rhs.scanned {
+            return false
+        }
+        if lhs.attempted != rhs.attempted {
+            return false
+        }
+        if lhs.recovered != rhs.recovered {
+            return false
+        }
+        if lhs.skipped != rhs.skipped {
+            return false
+        }
+        if lhs.failed != rhs.failed {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(scanned)
+        hasher.combine(attempted)
+        hasher.combine(recovered)
+        hasher.combine(skipped)
+        hasher.combine(failed)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIDeferredRecoveryReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeferredRecoveryReport {
+        return
+            try FfiDeferredRecoveryReport(
+                scanned: FfiConverterUInt32.read(from: &buf),
+                attempted: FfiConverterUInt32.read(from: &buf),
+                recovered: FfiConverterUInt32.read(from: &buf),
+                skipped: FfiConverterUInt32.read(from: &buf),
+                failed: FfiConverterUInt32.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiDeferredRecoveryReport, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.scanned, into: &buf)
+        FfiConverterUInt32.write(value.attempted, into: &buf)
+        FfiConverterUInt32.write(value.recovered, into: &buf)
+        FfiConverterUInt32.write(value.skipped, into: &buf)
+        FfiConverterUInt32.write(value.failed, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIDeferredRecoveryReport_lift(_ buf: RustBuffer) throws -> FfiDeferredRecoveryReport {
+    return try FfiConverterTypeFFIDeferredRecoveryReport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIDeferredRecoveryReport_lower(_ value: FfiDeferredRecoveryReport) -> RustBuffer {
+    return FfiConverterTypeFFIDeferredRecoveryReport.lower(value)
 }
 
 public struct FfiDeviceInfo {
@@ -15293,6 +15387,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_resume_from_suspend() != 171 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_run_deferred_recovery() != 32669 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_message() != 21757 {

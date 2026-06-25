@@ -96,6 +96,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.startupReconcile()
   }
 
+  public func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport {
+    try bridge.runDeferredRecovery(reason: reason)
+  }
+
   public func prepareForSuspend(
     reason: String,
     deadlineMs: UInt64 = 1_500
