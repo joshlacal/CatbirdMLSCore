@@ -27,10 +27,14 @@ extension MLSConversationManager {
   /// Call this BEFORE GRDBSuspensionCoordinator.setLifecycleSuspended() to ensure
   /// MLS tasks are cancelled before GRDB starts rejecting operations
   ///
-  /// - Note: This is NOT the same as shutdown() - we don't close databases or clear state
-  ///         We simply cancel in-flight tasks to prevent them from holding locks
+  /// - Returns: `true` only when `.rustFull` successfully prepared the Rust lifecycle
+  ///   suspend path. Callers should use legacy synchronous interrupt fallback whenever this
+  ///   returns `false`.
+  /// - Note: In `.rustFull`, Rust currently performs an internal engine shutdown while
+  ///   preserving lifecycle state for resume. Other modes keep the legacy Swift shutdown path.
   @MainActor
-  public func suspendMLSOperations() {
+  @discardableResult
+  public func suspendMLSOperations() -> Bool {
     logger.info("⏸️ [SUSPEND] Suspending MLS operations for app background")
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
@@ -43,17 +47,24 @@ extension MLSConversationManager {
     isSyncPaused = true
     MLSCoreContext.markSuspensionInProgress()
     MLSClient.markSuspensionInProgress(reason: "MLSConversationManager.suspendMLSOperations")
+    let rustPrepareSucceeded: Bool
     if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
       do {
         _ = try runtime.prepareForSuspend(
           reason: "MLSConversationManager.suspendMLSOperations"
         )
+        rustPrepareSucceeded = true
       } catch {
+        rustPrepareSucceeded = false
         logger.error(
           "❌ [MLS-FULL-RUST] prepareForSuspend failed: \(error.localizedDescription, privacy: .public)"
         )
       }
     } else {
+      rustPrepareSucceeded = false
+      if protocolAuthorityMode == .rustFull {
+        logger.warning("⚠️ [MLS-FULL-RUST] Missing runtime during suspend; legacy fallback required")
+      }
       resetOrchestratorRuntime(reason: "MLS suspension")
     }
     // Reset circuit breaker during lifecycle suspension so transient suspended errors
@@ -110,6 +121,7 @@ extension MLSConversationManager {
     cancelAllTrackedTasks()
 
     logger.info("✅ [SUSPEND] MLS operations suspended - safe for app suspension")
+    return rustPrepareSucceeded
   }
 
   /// Resume MLS operations when app returns to foreground

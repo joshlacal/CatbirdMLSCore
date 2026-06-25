@@ -34,10 +34,11 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       bridge: bridge
     )
 
-    await MainActor.run {
+    let rustPrepared = await MainActor.run {
       manager.suspendMLSOperations()
     }
 
+    XCTAssertTrue(rustPrepared)
     XCTAssertEqual(
       bridge.prepareCalls,
       [LifecycleCall(reason: "MLSConversationManager.suspendMLSOperations", deadlineMs: 1_500)]
@@ -54,12 +55,49 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       bridge: bridge
     )
 
-    await MainActor.run {
+    let rustPrepared = await MainActor.run {
       manager.suspendMLSOperations()
     }
 
+    XCTAssertFalse(rustPrepared)
     XCTAssertTrue(bridge.prepareCalls.isEmpty)
     XCTAssertTrue(bridge.shutdownCalled)
+    XCTAssertNil(manager.orchestratorRuntime)
+  }
+
+  func testRustFullSuspendFailureRequestsLegacyFallback() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingLifecycleBridge()
+    bridge.prepareError = TestLifecycleError.prepareFailed
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+
+    XCTAssertFalse(rustPrepared)
+    XCTAssertEqual(
+      bridge.prepareCalls,
+      [LifecycleCall(reason: "MLSConversationManager.suspendMLSOperations", deadlineMs: 1_500)]
+    )
+    XCTAssertNotNil(
+      manager.orchestratorRuntime,
+      "prepare failure should preserve runtime so later close paths can still see it"
+    )
+  }
+
+  func testRustFullSuspendWithoutRuntimeRequestsLegacyFallback() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+
+    XCTAssertFalse(rustPrepared)
     XCTAssertNil(manager.orchestratorRuntime)
   }
 
@@ -121,6 +159,7 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
   private(set) var interruptCalls: [LifecycleReasonCall] = []
   private(set) var emergencyCloseCalls: [LifecycleReasonCall] = []
   private(set) var shutdownCalled = false
+  var prepareError: Error?
 
   init() {
     super.init(noPointer: .init())
@@ -132,6 +171,9 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
 
   override func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult {
     prepareCalls.append(LifecycleCall(reason: reason, deadlineMs: deadlineMs))
+    if let prepareError {
+      throw prepareError
+    }
     return prepareResult
   }
 
@@ -150,4 +192,8 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
   override func shutdown() {
     shutdownCalled = true
   }
+}
+
+private enum TestLifecycleError: Error {
+  case prepareFailed
 }

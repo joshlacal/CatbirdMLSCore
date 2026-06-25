@@ -9,7 +9,10 @@ import OSLog
 /// `rustShadow` to mirror decisions for telemetry, then `rustAuthoritative` to
 /// delegate protocol decisions after parity is proven. Swift still owns
 /// SQLCipher/GRDB lifecycle, Keychain setup, App Group paths, NSE coordination,
-/// suspension, shutdown, and 0xdead10cc handling.
+/// suspension orchestration, App Group shutdown ordering, and 0xdead10cc
+/// handling. In `.rustFull`, the host-driven suspend path currently asks Rust
+/// to prepare by internally shutting down the engine while preserving enough
+/// lifecycle state for resume.
 public final class MLSOrchestratorRuntime: @unchecked Sendable {
   public let userDID: String
   public let mode: MLSProtocolAuthorityMode
