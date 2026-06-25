@@ -5865,7 +5865,7 @@ public extension MLSConversationManager {
         ) { runtime in
           try runtime.ensureConversationReady(conversationId: convoId)
         }
-        guard result.sendAllowed || result.recoveryState == .healthy else {
+        guard result.sendAllowed else {
           throw MLSConversationError.groupNotInitialized
         }
         logger.info(

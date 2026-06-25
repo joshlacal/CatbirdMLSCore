@@ -51,6 +51,33 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
   }
 
+  func testRustFullEnsureGroupInitializedRejectsHealthyButNonSendableRustReadiness() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-not-ready", on: manager)
+
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.conversationReadyResult = FfiConversationReadyResult(
+      recoveryState: .healthy,
+      epoch: 5,
+      sendAllowed: false
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    await XCTAssertThrowsErrorAsync(try await manager.ensureGroupInitialized(for: "convo-not-ready")) { error in
+      guard case MLSConversationError.groupNotInitialized = error else {
+        return XCTFail("Expected groupNotInitialized, got \(error)")
+      }
+    }
+
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 1)
+    XCTAssertEqual(bridge.lastEnsureConversationReadyConversationId, "convo-not-ready")
+    XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
+  }
+
   func testRustFullEnsureGroupInitializedSkipsInactiveAccountBeforeRuntime() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     try await seedConversation(conversationID: "convo-inactive", on: manager)
