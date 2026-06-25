@@ -116,7 +116,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
   }
 
   func testRustFullRunDeferredEpochRecoveryRoutesThroughRuntimeOnly() async throws {
-    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()
     bridge.deferredRecoveryReport = FfiDeferredRecoveryReport(
       scanned: 1,
@@ -161,6 +161,52 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(conversation?.needsRejoin, true)
   }
 
+  func testRustFullRunDeferredEpochRecoverySkipsInactiveAccountBeforeRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.deferredRecoveryReport = FfiDeferredRecoveryReport(
+      scanned: 1,
+      attempted: 0,
+      recovered: 0,
+      skipped: 1,
+      failed: 0
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try await manager.database.write { db in
+      try MLSConversationModel(
+        conversationID: "convo-inactive",
+        currentUserDID: "did:plc:testuser",
+        groupID: Data([0xca, 0xfe, 0xba, 0xbe])
+      ).insert(db)
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsRejoin = 1
+          WHERE conversationID = ? AND currentUserDID = ?;
+        """,
+        arguments: ["convo-inactive", "did:plc:testuser"]
+      )
+    }
+
+    try await manager.runDeferredEpochRecovery()
+
+    let conversation = try await manager.database.read { db in
+      try MLSConversationModel.fetchOne(
+        db,
+        key: ["conversationID": "convo-inactive", "currentUserDID": "did:plc:testuser"]
+      )
+    }
+
+    XCTAssertEqual(bridge.runDeferredRecoveryCallCount, 0)
+    XCTAssertNil(bridge.lastDeferredRecoveryReason)
+    XCTAssertEqual(conversation?.needsRejoin, true)
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
@@ -175,6 +221,59 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
       apiClient: apiClient,
       database: database,
       userDid: "did:plc:testuser",
+      atProtoClient: atProtoClient,
+      protocolAuthorityMode: protocolAuthorityMode
+    )
+  }
+
+  private func makeAuthenticatedManager(
+    protocolAuthorityMode: MLSProtocolAuthorityMode
+  ) async throws -> MLSConversationManager {
+    let database = try DatabaseQueue()
+    try MLSGRDBManager.makeMigrator().migrate(database)
+
+    let userDid = "did:plc:testuser"
+    let namespace = "MLSFullRustRecoveryRoutingTests.\(UUID().uuidString)"
+    let storage = KeychainStorage(namespace: namespace)
+    try await storage.saveAccount(
+      Account(
+        did: userDid,
+        handle: "testuser.bsky.social",
+        pdsURL: URL(string: "https://example.com")!
+      ),
+      for: userDid
+    )
+    try await storage.saveSession(
+      Session(
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        createdAt: Date(),
+        expiresIn: 3600,
+        tokenType: .bearer,
+        did: userDid
+      ),
+      for: userDid
+    )
+    try await storage.saveCurrentDID(userDid)
+
+    let atProtoClient = try await ATProtoClient(
+      baseURL: URL(string: "https://example.com")!,
+      oauthConfig: OAuthConfig(
+        clientId: "unit-test-client",
+        redirectUri: "catbird://tests/oauth",
+        scope: "atproto"
+      ),
+      namespace: namespace,
+      authMode: .legacy
+    )
+    let apiClient = await MLSAPIClient(
+      client: atProtoClient,
+      environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
+    )
+    return MLSConversationManager(
+      apiClient: apiClient,
+      database: database,
+      userDid: userDid,
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )

@@ -739,19 +739,23 @@ public extension MLSConversationManager {
   /// Runs outside the sync hot-path with MLSRecoveryManager backoff to
   /// prevent the epoch inflation feedback loop.
   ///
-  /// Key difference from `detectAndRejoinMissingConversations`: this method
-  /// **deletes stale local group state** before attempting rejoin so that
-  /// `attemptExternalCommitFallback` doesn't short-circuit on `groupExists`.
+  /// In `.rustFull`, this method only verifies the manager still belongs to
+  /// the active account before delegating deferred recovery scheduling to the
+  /// Rust runtime.
+  ///
+  /// In legacy Swift-owned modes, it also deletes stale local group state
+  /// before attempting rejoin so that `attemptExternalCommitFallback` doesn't
+  /// short-circuit on `groupExists`.
   internal func runDeferredEpochRecovery() async throws {
     guard !isShuttingDown, !Task.isCancelled else { return }
+    guard let userDid = userDid else { return }
+    guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
+      return
+    }
     if protocolAuthorityMode == .rustFull {
       _ = try await withRustAuthoritativeRuntime(operation: "runDeferredEpochRecovery") { runtime in
         try runtime.runDeferredRecovery(reason: "swift-scheduler-request")
       }
-      return
-    }
-    guard let userDid = userDid else { return }
-    guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
       return
     }
     try assertSwiftProtocolMutationAllowed("runDeferredEpochRecovery")
