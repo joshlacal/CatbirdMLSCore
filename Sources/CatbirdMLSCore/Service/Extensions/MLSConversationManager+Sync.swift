@@ -103,6 +103,11 @@ public extension MLSConversationManager {
     // CRITICAL: Capture session generation at start to detect account switches
     let myGeneration = sessionGeneration
 
+    if isSyncPaused || isSuspending || MLSClient.isSuspensionInProgress {
+      logger.info("⏸️ [SYNC] Skipping sync while MLS is paused/suspending")
+      return
+    }
+
     try throwIfShuttingDown("syncWithServer")
 
     // Reconnect database pool if it was closed during recovery
@@ -122,12 +127,6 @@ public extension MLSConversationManager {
     if !didRunBootstrapPendingScan {
       didRunBootstrapPendingScan = true
       await cleanUpHalfStagedBootstrapGroups()
-    }
-
-    // Do not start sync while lifecycle has MLS paused/suspending.
-    if isSyncPaused || isSuspending || MLSClient.isSuspensionInProgress {
-      logger.info("⏸️ [SYNC] Skipping sync while MLS is paused/suspending")
-      return
     }
 
     // Validate session generation

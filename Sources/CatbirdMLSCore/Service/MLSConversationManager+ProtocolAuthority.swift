@@ -9,18 +9,8 @@ public extension MLSConversationManager {
 }
 
 extension MLSConversationManager {
-  internal func assertSwiftProtocolMutationAllowed(_ operation: StaticString) throws {
-    guard !protocolAuthorityMode.requiresRustOnlyProtocolMutations else {
-      logger.fault(
-        "[MLS-FULL-RUST] Swift protocol mutation blocked: \(String(describing: operation), privacy: .public)"
-      )
-      throw MLSConversationError.operationFailed("Swift MLS protocol mutation blocked in rustFull mode")
-    }
-  }
-
-  internal func ensureOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
+  internal func buildOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
     guard protocolAuthorityMode != .swiftLegacy else { return nil }
-    if let orchestratorRuntime { return orchestratorRuntime }
     guard let userDid else { return nil }
 
     guard let databasePool = database as? DatabasePool else {
@@ -33,13 +23,36 @@ extension MLSConversationManager {
     do {
       let context = try await MLSCoreContext.shared.getContext(for: userDid)
       let apiAdapter = MLSOrchestratorAPIAdapter(apiClient: apiClient)
-      let runtime = MLSOrchestratorRuntime(
+      return MLSOrchestratorRuntime(
         userDID: userDid,
         mode: protocolAuthorityMode,
         mlsContext: context,
         databasePool: databasePool,
         apiClient: apiAdapter
       )
+    } catch {
+      logger.error(
+        "❌ [MLS-AUTHORITY] Failed to build Rust orchestrator runtime: \(error.localizedDescription, privacy: .public)"
+      )
+      return nil
+    }
+  }
+
+  internal func assertSwiftProtocolMutationAllowed(_ operation: StaticString) throws {
+    guard !protocolAuthorityMode.requiresRustOnlyProtocolMutations else {
+      logger.fault(
+        "[MLS-FULL-RUST] Swift protocol mutation blocked: \(String(describing: operation), privacy: .public)"
+      )
+      throw MLSConversationError.operationFailed("Swift MLS protocol mutation blocked in rustFull mode")
+    }
+  }
+
+  internal func ensureOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
+    guard protocolAuthorityMode != .swiftLegacy else { return nil }
+    if let orchestratorRuntime { return orchestratorRuntime }
+    guard let runtime = await buildOrchestratorRuntime() else { return nil }
+
+    do {
       try runtime.initialize()
       orchestratorRuntime = runtime
       return runtime
@@ -64,13 +77,27 @@ extension MLSConversationManager {
     orchestratorRuntime = nil
   }
 
-  internal func restoreOrchestratorRuntimeAfterSuspendClose() async -> MLSOrchestratorRuntime? {
+  internal func restoreOrchestratorRuntimeAfterSuspendClose(
+    reason: String
+  ) async -> MLSOrchestratorRuntime? {
+    let runtime: MLSOrchestratorRuntime?
     if let runtimeFactory = orchestratorRuntimeResumeFactory {
-      let runtime = await runtimeFactory()
+      runtime = await runtimeFactory()
+    } else {
+      runtime = await buildOrchestratorRuntime()
+    }
+    guard let runtime else { return nil }
+
+    do {
+      try runtime.reattachAfterSuspend(reason: reason)
       orchestratorRuntime = runtime
       return runtime
+    } catch {
+      logger.error(
+        "❌ [MLS-AUTHORITY] Failed to reattach Rust orchestrator runtime after suspend close: \(error.localizedDescription, privacy: .public)"
+      )
+      return nil
     }
-    return await ensureOrchestratorRuntime()
   }
 
   internal func withRustAuthoritativeRuntime<T>(

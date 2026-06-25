@@ -3229,6 +3229,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func publishKeyPackage() throws
 
+    func reattachAfterSuspend(userDid: String, reason: String) throws
+
     /**
      * Persist a `groupResetEvent` WITHOUT performing inline recovery
      * (spec §8.5 Phase 1, ADR-008 D2 deferred-recovery invariant).
@@ -3755,6 +3757,14 @@ open class OrchestratorBridge:
     open func publishKeyPackage() throws {
         try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_publish_key_package(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    open func reattachAfterSuspend(userDid: String, reason: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_reattach_after_suspend(self.uniffiClonePointer(),
+                                                                                   FfiConverterString.lower(userDid),
+                                                                                   FfiConverterString.lower(reason), $0)
         }
     }
 
@@ -15160,6 +15170,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_publish_key_package() != 29237 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_reattach_after_suspend() != 41039 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset() != 53737 {

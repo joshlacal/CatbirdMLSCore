@@ -156,7 +156,7 @@ extension MLSConversationManager {
         logger.info(
           "🔄 [MLS-FULL-RUST] Restoring runtime before foreground resume"
         )
-        guard await restoreOrchestratorRuntimeAfterSuspendClose() != nil else {
+        guard await restoreOrchestratorRuntimeAfterSuspendClose(reason: resumeReason) != nil else {
           logger.error(
             "❌ [MLS-FULL-RUST] Failed to rebuild runtime after suspension close; keeping MLS work suspended"
           )
@@ -172,7 +172,7 @@ extension MLSConversationManager {
           )
           rustRuntimeRequiresForegroundRestore = true
           invalidateOrchestratorRuntime(reason: "resumeFromSuspend failed")
-          guard await restoreOrchestratorRuntimeAfterSuspendClose() != nil else {
+          guard await restoreOrchestratorRuntimeAfterSuspendClose(reason: resumeReason) != nil else {
             logger.error(
               "❌ [MLS-FULL-RUST] Failed to rebuild runtime after resume failure; keeping MLS work suspended"
             )
@@ -188,6 +188,7 @@ extension MLSConversationManager {
     isSyncPaused = false
     MLSCoreContext.clearSuspensionFlag()
     MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
+    schedulePostReloadSyncIfNeeded()
 
     // Restart background tasks (only if we're initialized)
     guard isInitialized else {
@@ -227,6 +228,26 @@ extension MLSConversationManager {
     // If needed, it will be triggered by syncWithServer or explicit rejoin requests
 
     logger.info("✅ [RESUME] MLS operations resumed")
+  }
+
+  @MainActor
+  private func schedulePostReloadSyncIfNeeded() {
+    guard postReloadSyncPending else { return }
+    guard !isSuspending, !isSyncPaused, !MLSClient.isSuspensionInProgress else {
+      logger.info("⏸️ [MLS Reload] Deferring post-reload sync while MLS remains suspended")
+      return
+    }
+
+    postReloadSyncPending = false
+    Task(priority: .userInitiated) { [weak self] in
+      guard let self = self else { return }
+      do {
+        try await self.syncWithServer(fullSync: false)
+        self.logger.info("✅ [MLS Reload] Post-reload sync completed")
+      } catch {
+        self.logger.warning("⚠️ [MLS Reload] Post-reload sync failed: \(error.localizedDescription)")
+      }
+    }
   }
 
   internal func throwIfShuttingDown(_ operation: String) throws {
@@ -667,16 +688,9 @@ extension MLSConversationManager {
     }
     logger.debug("🔄 [MLS Reload] Notified \(waiters.count) waiting operation(s)")
 
-    // Step 8: Optionally trigger a sync
-    Task(priority: .userInitiated) { [weak self] in
-      guard let self = self else { return }
-      do {
-        try await self.syncWithServer(fullSync: false)
-        self.logger.info("✅ [MLS Reload] Post-reload sync completed")
-      } catch {
-        self.logger.warning("⚠️ [MLS Reload] Post-reload sync failed: \(error.localizedDescription)")
-      }
-    }
+    // Step 8: Optionally trigger a sync, but never while lifecycle suspension is still active.
+    postReloadSyncPending = true
+    schedulePostReloadSyncIfNeeded()
   }
 
   public func ensureStateReloaded() async throws {

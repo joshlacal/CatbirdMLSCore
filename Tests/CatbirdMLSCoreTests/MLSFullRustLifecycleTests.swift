@@ -121,6 +121,46 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     )
   }
 
+  func testRustFullForceCloseRestoreUsesLifecycleReattachInsteadOfFullInitialize() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let staleBridge = RecordingLifecycleBridge()
+    let rebuiltBridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: staleBridge
+    )
+    manager.orchestratorRuntimeResumeFactory = {
+      MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: rebuiltBridge
+      )
+    }
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+    XCTAssertTrue(rustPrepared)
+
+    await MainActor.run {
+      manager.markRustRuntimeClosedForSuspend(reason: "unit-test force close")
+    }
+
+    await manager.resumeMLSOperations()
+
+    XCTAssertTrue(staleBridge.resumeCalls.isEmpty)
+    XCTAssertTrue(rebuiltBridge.initializeCalls.isEmpty)
+    XCTAssertEqual(
+      rebuiltBridge.reattachCalls,
+      [LifecycleUserReasonCall(
+        userDID: "did:plc:testuser",
+        reason: "MLSConversationManager.resumeMLSOperations"
+      )]
+    )
+    XCTAssertFalse(manager.rustRuntimeRequiresForegroundRestore)
+  }
+
   func testRustFullForceCloseInvalidatesRuntimeAndAvoidsResumingStaleBridge() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let staleBridge = RecordingLifecycleBridge()
@@ -148,6 +188,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     }
 
     XCTAssertNil(manager.orchestratorRuntime)
+    XCTAssertTrue(manager.rustRuntimeRequiresForegroundRestore)
 
     await manager.resumeMLSOperations()
 
@@ -157,10 +198,41 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     )
     XCTAssertTrue(
       rebuiltBridge.resumeCalls.isEmpty,
-      "freshly rebuilt runtime should not be treated as the suspended engine"
+      "freshly rebuilt runtime should use lifecycle reattach, not resume the stale engine"
     )
     XCTAssertTrue(manager.orchestratorRuntime?.bridge === rebuiltBridge)
     XCTAssertFalse(manager.isSuspending)
+  }
+
+  func testReloadWhileSuspendedDefersPostReloadSyncUntilResume() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    await MainActor.run {
+      manager.isInitialized = true
+      manager.isSuspending = true
+      manager.isSyncPaused = true
+    }
+
+    await manager.reloadStateFromDisk()
+    try? await Task.sleep(nanoseconds: 50_000_000)
+
+    XCTAssertTrue(bridge.syncCalls.isEmpty)
+    XCTAssertTrue(manager.postReloadSyncPending)
+
+    await manager.resumeMLSOperations()
+    try? await Task.sleep(nanoseconds: 50_000_000)
+
+    XCTAssertEqual(
+      bridge.resumeCalls,
+      [LifecycleReasonCall(reason: "MLSConversationManager.resumeMLSOperations")]
+    )
+    XCTAssertFalse(manager.postReloadSyncPending)
   }
 
   func testRustFullResumeStaysSuspendedWhenRuntimeCannotBeRestored() async throws {
@@ -195,7 +267,11 @@ final class MLSFullRustLifecycleTests: XCTestCase {
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
-    let database = try DatabaseQueue()
+    let databasePath = URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent(UUID().uuidString)
+      .appendingPathExtension("sqlite")
+      .path
+    let database = try DatabasePool(path: databasePath)
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let apiClient = await MLSAPIClient(
       client: atProtoClient,
@@ -220,13 +296,21 @@ private struct LifecycleReasonCall: Equatable {
   let reason: String
 }
 
+private struct LifecycleUserReasonCall: Equatable {
+  let userDID: String
+  let reason: String
+}
+
 private final class RecordingLifecycleBridge: OrchestratorBridge {
   var prepareResult = FfiSuspendResult(
     acceptingNewWork: false,
     interruptedContexts: 1
   )
+  private(set) var initializeCalls: [String] = []
   private(set) var prepareCalls: [LifecycleCall] = []
+  private(set) var reattachCalls: [LifecycleUserReasonCall] = []
   private(set) var resumeCalls: [LifecycleReasonCall] = []
+  private(set) var syncCalls: [Bool] = []
   private(set) var interruptCalls: [LifecycleReasonCall] = []
   private(set) var emergencyCloseCalls: [LifecycleReasonCall] = []
   private(set) var shutdownCalled = false
@@ -240,6 +324,10 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
     super.init(unsafeFromRawPointer: pointer)
   }
 
+  override func initialize(userDid: String) throws {
+    initializeCalls.append(userDid)
+  }
+
   override func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult {
     prepareCalls.append(LifecycleCall(reason: reason, deadlineMs: deadlineMs))
     if let prepareError {
@@ -248,8 +336,16 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
     return prepareResult
   }
 
+  override func reattachAfterSuspend(userDid: String, reason: String) throws {
+    reattachCalls.append(LifecycleUserReasonCall(userDID: userDid, reason: reason))
+  }
+
   override func resumeFromSuspend(reason: String) throws {
     resumeCalls.append(LifecycleReasonCall(reason: reason))
+  }
+
+  override func syncWithServer(fullSync: Bool) throws {
+    syncCalls.append(fullSync)
   }
 
   override func interruptStorage(reason: String) throws {

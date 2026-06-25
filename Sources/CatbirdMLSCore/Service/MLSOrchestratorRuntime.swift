@@ -99,6 +99,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.prepareForSuspend(reason: reason, deadlineMs: deadlineMs)
   }
 
+  public func reattachAfterSuspend(reason: String) throws {
+    try bridge.reattachAfterSuspend(userDid: userDID, reason: reason)
+  }
+
   public func resumeFromSuspend(reason: String) throws {
     try bridge.resumeFromSuspend(reason: reason)
   }
