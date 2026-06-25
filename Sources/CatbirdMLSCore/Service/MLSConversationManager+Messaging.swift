@@ -5839,6 +5839,9 @@ public extension MLSConversationManager {
 
   /// Initialize MLS group is initialized for a conversation
   func ensureGroupInitialized(for convoId: String) async throws {
+    guard !isShuttingDown, !Task.isCancelled else {
+      throw MLSConversationError.groupNotInitialized
+    }
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
@@ -5852,18 +5855,28 @@ public extension MLSConversationManager {
       throw MLSConversationError.invalidGroupId
     }
 
-    if protocolAuthorityMode.requiresRustOnlyProtocolMutations {
+    if protocolAuthorityMode == .rustFull {
+      guard await ensureActiveAccount(for: userDid, operation: "ensureGroupInitialized") else {
+        throw MLSConversationError.groupNotInitialized
+      }
       do {
-        _ = try await joinOrRejoinWithRustAuthorityIfNeeded(
-          conversationId: convoId,
-          operation: "ensureGroupInitialized"
+        let result = try await withRustAuthoritativeRuntime(
+          operation: "ensureConversationReady"
+        ) { runtime in
+          try runtime.ensureConversationReady(conversationId: convoId)
+        }
+        guard result.sendAllowed || result.recoveryState == .healthy else {
+          throw MLSConversationError.groupNotInitialized
+        }
+        logger.info(
+          "✅ [MLS-AUTHORITY] ensureConversationReady completed for \(convoId.prefix(16), privacy: .private) epoch=\(String(describing: result.epoch), privacy: .public) state=\(result.recoveryState.rawValue, privacy: .public) sendAllowed=\(result.sendAllowed, privacy: .public)"
         )
         return
       } catch is CancellationError {
         throw MLSConversationError.groupNotInitialized
       } catch {
         logger.error(
-          "❌ [ensureGroupInitialized] Rust joinOrRejoin failed for \(convoId.prefix(16)): \(error.localizedDescription)"
+          "❌ [ensureGroupInitialized] Rust ensureConversationReady failed for \(convoId.prefix(16)): \(error.localizedDescription)"
         )
         throw MLSConversationError.groupNotInitialized
       }

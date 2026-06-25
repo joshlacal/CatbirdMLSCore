@@ -6,6 +6,77 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSFullRustRecoveryRoutingTests: XCTestCase {
+  func testRuntimeEnsureConversationReadyWrapsBridgeResult() throws {
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.conversationReadyResult = FfiConversationReadyResult(
+      recoveryState: .recovering,
+      epoch: 17,
+      sendAllowed: false
+    )
+    let runtime = MLSOrchestratorRuntime(
+      userDID: "did:plc:alice",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let result = try runtime.ensureConversationReady(conversationId: "convo-1")
+
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 1)
+    XCTAssertEqual(bridge.lastEnsureConversationReadyConversationId, "convo-1")
+    XCTAssertEqual(result.recoveryState, .recovering)
+    XCTAssertEqual(result.epoch, 17)
+    XCTAssertFalse(result.sendAllowed)
+  }
+
+  func testRustFullEnsureGroupInitializedCallsOnlyRustEnsureConversationReady() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-ready", on: manager)
+
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.conversationReadyResult = FfiConversationReadyResult(
+      recoveryState: .healthy,
+      epoch: 5,
+      sendAllowed: true
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try await manager.ensureGroupInitialized(for: "convo-ready")
+
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 1)
+    XCTAssertEqual(bridge.lastEnsureConversationReadyConversationId, "convo-ready")
+    XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
+  }
+
+  func testRustFullEnsureGroupInitializedSkipsInactiveAccountBeforeRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-inactive", on: manager)
+
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.conversationReadyResult = FfiConversationReadyResult(
+      recoveryState: .healthy,
+      epoch: 9,
+      sendAllowed: true
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    await XCTAssertThrowsErrorAsync(try await manager.ensureGroupInitialized(for: "convo-inactive")) { error in
+      guard case MLSConversationError.groupNotInitialized = error else {
+        return XCTFail("Expected groupNotInitialized, got \(error)")
+      }
+    }
+
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 0)
+    XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
+  }
+
   func testRuntimeRunDeferredRecoveryWrapsBridgeResult() throws {
     let bridge = RecordingStartupReconcileBridge()
     bridge.deferredRecoveryReport = FfiDeferredRecoveryReport(
@@ -278,6 +349,21 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
       protocolAuthorityMode: protocolAuthorityMode
     )
   }
+
+  private func seedConversation(
+    conversationID: String,
+    on manager: MLSConversationManager
+  ) async throws {
+    let model = MLSConversationModel(
+      conversationID: conversationID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data([0xde, 0xad, 0xbe, 0xef])
+    )
+    try await manager.database.write { db in
+      try model.insert(db)
+    }
+    manager.conversations[conversationID] = try XCTUnwrap(model.asConvoView())
+  }
 }
 
 private final class RecordingStartupReconcileBridge: OrchestratorBridge {
@@ -295,9 +381,17 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
     skipped: 0,
     failed: 0
   )
+  var conversationReadyResult = FfiConversationReadyResult(
+    recoveryState: .healthy,
+    epoch: 0,
+    sendAllowed: true
+  )
   private(set) var startupReconcileCallCount = 0
   private(set) var runDeferredRecoveryCallCount = 0
+  private(set) var ensureConversationReadyCallCount = 0
+  private(set) var joinOrRejoinCallCount = 0
   private(set) var lastDeferredRecoveryReason: String?
+  private(set) var lastEnsureConversationReadyConversationId: String?
 
   init() {
     super.init(noPointer: .init())
@@ -318,6 +412,32 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
     return deferredRecoveryReport
   }
 
+  override func ensureConversationReady(convoId: String) throws -> FfiConversationReadyResult {
+    ensureConversationReadyCallCount += 1
+    lastEnsureConversationReadyConversationId = convoId
+    return conversationReadyResult
+  }
+
+  override func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult {
+    joinOrRejoinCallCount += 1
+    return FfiJoinOrRejoinResult(
+      epoch: conversationReadyResult.epoch ?? 0,
+      recoveryState: conversationReadyResult.recoveryState
+    )
+  }
+
   override func shutdown() {
+  }
+}
+
+private func XCTAssertThrowsErrorAsync<T>(
+  _ expression: @autoclosure () async throws -> T,
+  _ handler: (Error) -> Void
+) async {
+  do {
+    _ = try await expression()
+    XCTFail("Expected error to be thrown")
+  } catch {
+    handler(error)
   }
 }

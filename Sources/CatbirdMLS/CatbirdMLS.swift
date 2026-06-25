@@ -3108,6 +3108,12 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func emergencyClose(reason: String) throws
 
     /**
+     * Ensure one conversation is ready for open/send work using the same
+     * recovery ordering as the Rust recovery pipeline.
+     */
+    func ensureConversationReady(convoId: String) throws -> FfiConversationReadyResult
+
+    /**
      * Ensure device is registered with MLS service.
      */
     func ensureDeviceRegistered() throws -> String
@@ -3543,6 +3549,17 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_emergency_close(self.uniffiClonePointer(),
                                                                             FfiConverterString.lower(reason), $0)
         }
+    }
+
+    /**
+     * Ensure one conversation is ready for open/send work using the same
+     * recovery ordering as the Rust recovery pipeline.
+     */
+    open func ensureConversationReady(convoId: String) throws -> FfiConversationReadyResult {
+        return try FfiConverterTypeFFIConversationReadyResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_ensure_conversation_ready(self.uniffiClonePointer(),
+                                                                                      FfiConverterString.lower(convoId), $0)
+        })
     }
 
     /**
@@ -5312,6 +5329,75 @@ public func FfiConverterTypeFFIConversationListPage_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeFFIConversationListPage_lower(_ value: FfiConversationListPage) -> RustBuffer {
     return FfiConverterTypeFFIConversationListPage.lower(value)
+}
+
+public struct FfiConversationReadyResult {
+    public var recoveryState: FfiConversationRecoveryState
+    public var epoch: UInt64?
+    public var sendAllowed: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(recoveryState: FfiConversationRecoveryState, epoch: UInt64?, sendAllowed: Bool) {
+        self.recoveryState = recoveryState
+        self.epoch = epoch
+        self.sendAllowed = sendAllowed
+    }
+}
+
+extension FfiConversationReadyResult: Equatable, Hashable {
+    public static func == (lhs: FfiConversationReadyResult, rhs: FfiConversationReadyResult) -> Bool {
+        if lhs.recoveryState != rhs.recoveryState {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.sendAllowed != rhs.sendAllowed {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(recoveryState)
+        hasher.combine(epoch)
+        hasher.combine(sendAllowed)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIConversationReadyResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationReadyResult {
+        return
+            try FfiConversationReadyResult(
+                recoveryState: FfiConverterTypeFFIConversationRecoveryState.read(from: &buf),
+                epoch: FfiConverterOptionUInt64.read(from: &buf),
+                sendAllowed: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiConversationReadyResult, into buf: inout [UInt8]) {
+        FfiConverterTypeFFIConversationRecoveryState.write(value.recoveryState, into: &buf)
+        FfiConverterOptionUInt64.write(value.epoch, into: &buf)
+        FfiConverterBool.write(value.sendAllowed, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConversationReadyResult_lift(_ buf: RustBuffer) throws -> FfiConversationReadyResult {
+    return try FfiConverterTypeFFIConversationReadyResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConversationReadyResult_lower(_ value: FfiConversationReadyResult) -> RustBuffer {
+    return FfiConverterTypeFFIConversationReadyResult.lower(value)
 }
 
 public struct FfiConversationView {
@@ -15300,6 +15386,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_emergency_close() != 38033 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_conversation_ready() != 3867 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_device_registered() != 54125 {

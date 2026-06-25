@@ -230,6 +230,11 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return MLSJoinOrRejoinResult(ffiResult: result)
   }
 
+  public func ensureConversationReady(conversationId: String) throws -> MLSConversationReadyResult {
+    let result = try bridge.ensureConversationReady(convoId: conversationId)
+    return MLSConversationReadyResult(ffiResult: result)
+  }
+
   @discardableResult
   public func ensureDeviceRegistered() throws -> String {
     try bridge.ensureDeviceRegistered()
@@ -269,6 +274,28 @@ public struct MLSJoinOrRejoinResult: Equatable, Sendable {
   public init(epoch: UInt64, recoveryState: ConversationRecoveryState) {
     self.epoch = epoch
     self.recoveryState = recoveryState
+  }
+}
+
+public struct MLSConversationReadyResult: Equatable, Sendable {
+  public let recoveryState: ConversationRecoveryState
+  public let epoch: UInt64?
+  public let sendAllowed: Bool
+
+  init(ffiResult result: FfiConversationReadyResult) {
+    self.recoveryState = ConversationRecoveryState(ffiRecoveryState: result.recoveryState)
+    self.epoch = result.epoch
+    self.sendAllowed = result.sendAllowed
+  }
+
+  public init(
+    recoveryState: ConversationRecoveryState,
+    epoch: UInt64?,
+    sendAllowed: Bool
+  ) {
+    self.recoveryState = recoveryState
+    self.epoch = epoch
+    self.sendAllowed = sendAllowed
   }
 }
 
