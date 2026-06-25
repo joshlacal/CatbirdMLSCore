@@ -45,6 +45,36 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.startupReconcileCallCount, 1)
   }
 
+  func testRustFullValidateGroupStatesDoesNotRunLegacyEpochDeleteSweep() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try await manager.database.write { db in
+      try MLSConversationModel(
+        conversationID: "convo-missing",
+        currentUserDID: "did:plc:testuser",
+        groupID: Data([0xde, 0xad, 0xbe, 0xef])
+      ).insert(db)
+    }
+
+    await manager.validateGroupStates()
+
+    let conversation = try await manager.database.read { db in
+      try MLSConversationModel.fetchOne(
+        db,
+        key: ["conversationID": "convo-missing", "currentUserDID": "did:plc:testuser"]
+      )
+    }
+
+    XCTAssertEqual(bridge.startupReconcileCallCount, 1)
+    XCTAssertEqual(conversation?.needsRejoin, false)
+  }
+
   func testRustAuthoritativeValidateGroupStatesDoesNotCallStartupReconcile() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustAuthoritative)
     let bridge = RecordingStartupReconcileBridge()
@@ -63,6 +93,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
     let database = try DatabaseQueue()
+    try MLSGRDBManager.makeMigrator().migrate(database)
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let apiClient = await MLSAPIClient(
       client: atProtoClient,
