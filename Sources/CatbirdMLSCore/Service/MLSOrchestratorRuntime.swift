@@ -92,6 +92,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.syncWithServer(fullSync: fullSync)
   }
 
+  public func startupReconcile() throws -> FfiStartupReconcileReport {
+    try bridge.startupReconcile()
+  }
+
   public func prepareForSuspend(
     reason: String,
     deadlineMs: UInt64 = 1_500

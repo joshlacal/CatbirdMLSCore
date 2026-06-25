@@ -3383,6 +3383,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func stageCommit(conversationId: String, kind: FfiCommitKind) throws -> FfiCommitPlan
 
+    func startupReconcile() throws -> FfiStartupReconcileReport
+
     /**
      * Atomically swap members in a single commit.
      */
@@ -4030,6 +4032,12 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_stage_commit(self.uniffiClonePointer(),
                                                                          FfiConverterString.lower(conversationId),
                                                                          FfiConverterTypeFFICommitKind.lower(kind), $0)
+        })
+    }
+
+    open func startupReconcile() throws -> FfiStartupReconcileReport {
+        return try FfiConverterTypeFFIStartupReconcileReport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_startup_reconcile(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -6846,6 +6854,91 @@ public func FfiConverterTypeFFIStagedCommitHandle_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeFFIStagedCommitHandle_lower(_ value: FfiStagedCommitHandle) -> RustBuffer {
     return FfiConverterTypeFFIStagedCommitHandle.lower(value)
+}
+
+public struct FfiStartupReconcileReport {
+    public var scanned: UInt32
+    public var healthy: UInt32
+    public var needsRejoin: UInt32
+    public var resetPending: UInt32
+    public var unrecoverableLocal: UInt32
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(scanned: UInt32, healthy: UInt32, needsRejoin: UInt32, resetPending: UInt32, unrecoverableLocal: UInt32) {
+        self.scanned = scanned
+        self.healthy = healthy
+        self.needsRejoin = needsRejoin
+        self.resetPending = resetPending
+        self.unrecoverableLocal = unrecoverableLocal
+    }
+}
+
+extension FfiStartupReconcileReport: Equatable, Hashable {
+    public static func == (lhs: FfiStartupReconcileReport, rhs: FfiStartupReconcileReport) -> Bool {
+        if lhs.scanned != rhs.scanned {
+            return false
+        }
+        if lhs.healthy != rhs.healthy {
+            return false
+        }
+        if lhs.needsRejoin != rhs.needsRejoin {
+            return false
+        }
+        if lhs.resetPending != rhs.resetPending {
+            return false
+        }
+        if lhs.unrecoverableLocal != rhs.unrecoverableLocal {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(scanned)
+        hasher.combine(healthy)
+        hasher.combine(needsRejoin)
+        hasher.combine(resetPending)
+        hasher.combine(unrecoverableLocal)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIStartupReconcileReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStartupReconcileReport {
+        return
+            try FfiStartupReconcileReport(
+                scanned: FfiConverterUInt32.read(from: &buf),
+                healthy: FfiConverterUInt32.read(from: &buf),
+                needsRejoin: FfiConverterUInt32.read(from: &buf),
+                resetPending: FfiConverterUInt32.read(from: &buf),
+                unrecoverableLocal: FfiConverterUInt32.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiStartupReconcileReport, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.scanned, into: &buf)
+        FfiConverterUInt32.write(value.healthy, into: &buf)
+        FfiConverterUInt32.write(value.needsRejoin, into: &buf)
+        FfiConverterUInt32.write(value.resetPending, into: &buf)
+        FfiConverterUInt32.write(value.unrecoverableLocal, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIStartupReconcileReport_lift(_ buf: RustBuffer) throws -> FfiStartupReconcileReport {
+    return try FfiConverterTypeFFIStartupReconcileReport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIStartupReconcileReport_lower(_ value: FfiStartupReconcileReport) -> RustBuffer {
+    return FfiConverterTypeFFIStartupReconcileReport.lower(value)
 }
 
 public struct FfiSuspendResult {
@@ -15224,6 +15317,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_stage_commit() != 32523 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_startup_reconcile() != 62080 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_swap_members() != 36054 {
