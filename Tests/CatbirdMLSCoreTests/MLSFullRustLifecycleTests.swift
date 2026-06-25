@@ -112,13 +112,84 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
     await MainActor.run {
       manager.isSuspending = true
-      manager.resumeMLSOperations()
     }
+    await manager.resumeMLSOperations()
 
     XCTAssertEqual(
       bridge.resumeCalls,
       [LifecycleReasonCall(reason: "MLSConversationManager.resumeMLSOperations")]
     )
+  }
+
+  func testRustFullForceCloseInvalidatesRuntimeAndAvoidsResumingStaleBridge() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let staleBridge = RecordingLifecycleBridge()
+    let rebuiltBridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: staleBridge
+    )
+    manager.orchestratorRuntimeResumeFactory = {
+      MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: rebuiltBridge
+      )
+    }
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+    XCTAssertTrue(rustPrepared)
+
+    await MainActor.run {
+      manager.markRustRuntimeClosedForSuspend(reason: "unit-test force close")
+    }
+
+    XCTAssertNil(manager.orchestratorRuntime)
+
+    await manager.resumeMLSOperations()
+
+    XCTAssertTrue(
+      staleBridge.resumeCalls.isEmpty,
+      "stale runtime must not be resumed after app-level force close"
+    )
+    XCTAssertTrue(
+      rebuiltBridge.resumeCalls.isEmpty,
+      "freshly rebuilt runtime should not be treated as the suspended engine"
+    )
+    XCTAssertTrue(manager.orchestratorRuntime?.bridge === rebuiltBridge)
+    XCTAssertFalse(manager.isSuspending)
+  }
+
+  func testRustFullResumeStaysSuspendedWhenRuntimeCannotBeRestored() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+    manager.orchestratorRuntimeResumeFactory = { nil }
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+    XCTAssertTrue(rustPrepared)
+
+    await MainActor.run {
+      manager.markRustRuntimeClosedForSuspend(reason: "unit-test force close")
+    }
+
+    await manager.resumeMLSOperations()
+
+    XCTAssertTrue(
+      bridge.resumeCalls.isEmpty,
+      "stale runtime must not be resumed once app-level force close invalidates it"
+    )
+    XCTAssertTrue(manager.isSuspending, "resume should not silently re-enable work without a runtime")
+    XCTAssertNil(manager.orchestratorRuntime)
   }
 
   private func makeManager(

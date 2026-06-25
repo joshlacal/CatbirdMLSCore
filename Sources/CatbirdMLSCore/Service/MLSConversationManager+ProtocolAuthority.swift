@@ -58,6 +58,21 @@ extension MLSConversationManager {
     orchestratorRuntime = nil
   }
 
+  internal func invalidateOrchestratorRuntime(reason: String) {
+    guard orchestratorRuntime != nil else { return }
+    logger.info("🔄 [MLS-AUTHORITY] Invalidating Rust orchestrator runtime: \(reason, privacy: .public)")
+    orchestratorRuntime = nil
+  }
+
+  internal func restoreOrchestratorRuntimeAfterSuspendClose() async -> MLSOrchestratorRuntime? {
+    if let runtimeFactory = orchestratorRuntimeResumeFactory {
+      let runtime = await runtimeFactory()
+      orchestratorRuntime = runtime
+      return runtime
+    }
+    return await ensureOrchestratorRuntime()
+  }
+
   internal func withRustAuthoritativeRuntime<T>(
     operation: String,
     body: (MLSOrchestratorRuntime) throws -> T

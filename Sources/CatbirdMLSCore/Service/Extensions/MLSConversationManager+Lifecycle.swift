@@ -53,6 +53,7 @@ extension MLSConversationManager {
         _ = try runtime.prepareForSuspend(
           reason: "MLSConversationManager.suspendMLSOperations"
         )
+        rustRuntimeRequiresForegroundRestore = false
         rustPrepareSucceeded = true
       } catch {
         rustPrepareSucceeded = false
@@ -124,10 +125,19 @@ extension MLSConversationManager {
     return rustPrepareSucceeded
   }
 
+  /// Marks the rustFull runtime as unusable after an app-level force close
+  /// destroyed the underlying Rust MLS context during suspension.
+  @MainActor
+  public func markRustRuntimeClosedForSuspend(reason: String) {
+    guard protocolAuthorityMode == .rustFull else { return }
+    rustRuntimeRequiresForegroundRestore = true
+    invalidateOrchestratorRuntime(reason: reason)
+  }
+
   /// Resume MLS operations when app returns to foreground
   /// This restarts background tasks that were cancelled during suspension
   @MainActor
-  public func resumeMLSOperations() {
+  public func resumeMLSOperations() async {
     guard isSuspending else {
       logger.debug("🔄 [RESUME] MLS not suspended - nothing to resume")
       return
@@ -140,21 +150,44 @@ extension MLSConversationManager {
       process: "app"
     )
 
-    // Clear suspension flags
+    if protocolAuthorityMode == .rustFull {
+      let resumeReason = "MLSConversationManager.resumeMLSOperations"
+      if rustRuntimeRequiresForegroundRestore || orchestratorRuntime == nil {
+        logger.info(
+          "🔄 [MLS-FULL-RUST] Restoring runtime before foreground resume"
+        )
+        guard await restoreOrchestratorRuntimeAfterSuspendClose() != nil else {
+          logger.error(
+            "❌ [MLS-FULL-RUST] Failed to rebuild runtime after suspension close; keeping MLS work suspended"
+          )
+          return
+        }
+        rustRuntimeRequiresForegroundRestore = false
+      } else if let runtime = orchestratorRuntime {
+        do {
+          try runtime.resumeFromSuspend(reason: resumeReason)
+        } catch {
+          logger.error(
+            "❌ [MLS-FULL-RUST] resumeFromSuspend failed: \(error.localizedDescription, privacy: .public)"
+          )
+          rustRuntimeRequiresForegroundRestore = true
+          invalidateOrchestratorRuntime(reason: "resumeFromSuspend failed")
+          guard await restoreOrchestratorRuntimeAfterSuspendClose() != nil else {
+            logger.error(
+              "❌ [MLS-FULL-RUST] Failed to rebuild runtime after resume failure; keeping MLS work suspended"
+            )
+            return
+          }
+          rustRuntimeRequiresForegroundRestore = false
+        }
+      }
+    }
+
+    // Clear suspension flags only after the rustFull runtime is resumable again.
     isSuspending = false
     isSyncPaused = false
     MLSCoreContext.clearSuspensionFlag()
     MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
-
-    if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
-      do {
-        try runtime.resumeFromSuspend(reason: "MLSConversationManager.resumeMLSOperations")
-      } catch {
-        logger.error(
-          "❌ [MLS-FULL-RUST] resumeFromSuspend failed: \(error.localizedDescription, privacy: .public)"
-        )
-      }
-    }
 
     // Restart background tasks (only if we're initialized)
     guard isInitialized else {

@@ -45,6 +45,8 @@ public final class MLSConversationManager {
     public let configuration: MLSConfiguration
     public let protocolAuthorityMode: MLSProtocolAuthorityMode
     @ObservationIgnored public internal(set) var orchestratorRuntime: MLSOrchestratorRuntime?
+    @ObservationIgnored internal var orchestratorRuntimeResumeFactory: (() async -> MLSOrchestratorRuntime?)?
+    @ObservationIgnored internal var rustRuntimeRequiresForegroundRestore = false
 
     /// Called when the database pool is refreshed after recovery.
     /// Allows the app layer to update its own cached pool references.
