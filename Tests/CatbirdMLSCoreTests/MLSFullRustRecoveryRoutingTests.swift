@@ -104,6 +104,17 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
   }
 
+  func testRustShadowEnsureGroupInitializedDoesNotShortCircuitOnShutdownBeforeModeSplit() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustShadow)
+    manager.isShuttingDown = true
+
+    await XCTAssertThrowsErrorAsync(try await manager.ensureGroupInitialized(for: "missing-convo")) { error in
+      guard case MLSConversationError.conversationNotFound = error else {
+        return XCTFail("Expected conversationNotFound, got \(error)")
+      }
+    }
+  }
+
   func testRuntimeRunDeferredRecoveryWrapsBridgeResult() throws {
     let bridge = RecordingStartupReconcileBridge()
     bridge.deferredRecoveryReport = FfiDeferredRecoveryReport(

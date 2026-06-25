@@ -5839,9 +5839,6 @@ public extension MLSConversationManager {
 
   /// Initialize MLS group is initialized for a conversation
   func ensureGroupInitialized(for convoId: String) async throws {
-    guard !isShuttingDown, !Task.isCancelled else {
-      throw MLSConversationError.groupNotInitialized
-    }
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
@@ -5856,6 +5853,9 @@ public extension MLSConversationManager {
     }
 
     if protocolAuthorityMode == .rustFull {
+      guard !isShuttingDown, !Task.isCancelled else {
+        throw MLSConversationError.groupNotInitialized
+      }
       guard await ensureActiveAccount(for: userDid, operation: "ensureGroupInitialized") else {
         throw MLSConversationError.groupNotInitialized
       }
