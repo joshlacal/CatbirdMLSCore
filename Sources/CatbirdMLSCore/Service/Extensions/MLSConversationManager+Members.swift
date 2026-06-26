@@ -27,7 +27,7 @@ public extension MLSConversationManager {
       let result = try await withRustAuthoritativeRuntime(operation: "addMembers") { runtime in
         try runtime.addMembers(conversationId: convoId, memberDids: memberDids)
       }
-      try await applyRustConversationSnapshot(result.conversation)
+      try await applyRustConversationSnapshot(result.conversation, metadata: result.metadata)
       let dids = try memberDids.map { try DID(didString: $0) }
       for did in dids {
         notifyObservers(.membershipChanged(convoId: convoId, did: did, action: .joined))
@@ -458,7 +458,7 @@ public extension MLSConversationManager {
       let result = try await withRustAuthoritativeRuntime(operation: "removeMember") { runtime in
         try runtime.removeMembers(conversationId: convoId, memberDids: [memberDid])
       }
-      try await applyRustConversationSnapshot(result.conversation)
+      try await applyRustConversationSnapshot(result.conversation, metadata: result.metadata)
       let targetDid = try DID(didString: memberDid)
       notifyObservers(.membershipChanged(convoId: convoId, did: targetDid, action: .removed))
       notifyObservers(.epochUpdated(convoId, result.conversation.epoch))

@@ -94,6 +94,10 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
       Set(manager.groupStates["deadbeef"]?.members ?? []),
       Set(["did:plc:testuser", "did:plc:bob"])
     )
+    let persisted = try await fetchConversation(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(persisted?.title, "Rust group")
+    XCTAssertEqual(persisted?.description, "unit-test")
+    XCTAssertEqual(persisted?.avatarURL, "https://example.com/rust.png")
   }
 
   func testRustFullRemoveMemberUsesRuntimeAndSkipsLegacyStageCommitPath() async throws {
@@ -118,6 +122,10 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(bridge.removeMembersCallCount, 1)
     XCTAssertEqual(manager.groupStates["deadbeef"]?.epoch, 11)
     XCTAssertEqual(manager.groupStates["deadbeef"]?.members, ["did:plc:testuser"])
+    let persisted = try await fetchConversation(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(persisted?.title, "Rust group")
+    XCTAssertEqual(persisted?.description, "unit-test")
+    XCTAssertEqual(persisted?.avatarURL, "https://example.com/rust.png")
   }
 
   func testRustFullLeaveConversationUsesRuntimeAndSkipsLegacyServerPath() async throws {
