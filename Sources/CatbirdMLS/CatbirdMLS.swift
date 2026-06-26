@@ -1587,6 +1587,8 @@ public protocol MlsContextProtocol: AnyObject {
      */
     func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data) throws -> FfiCommitPlan
 
+    func storageLifecycleStatus() -> StorageLifecycleStatus
+
     /**
      * Store a proposal in the proposal queue after validation
      * The application should inspect the proposal before storing it
@@ -2898,6 +2900,12 @@ open class MlsContext:
         })
     }
 
+    open func storageLifecycleStatus() -> StorageLifecycleStatus {
+        return try! FfiConverterTypeStorageLifecycleStatus.lift(try! rustCall {
+            uniffi_catbird_mls_fn_method_mlscontext_storage_lifecycle_status(self.uniffiClonePointer(), $0)
+        })
+    }
+
     /**
      * Store a proposal in the proposal queue after validation
      * The application should inspect the proposal before storing it
@@ -3431,6 +3439,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func stageCommit(conversationId: String, kind: FfiCommitKind) throws -> FfiCommitPlan
 
     func startupReconcile() throws -> FfiStartupReconcileReport
+
+    func storageLifecycleStatus() -> StorageLifecycleStatus
 
     /**
      * Atomically swap members in a single commit.
@@ -4183,6 +4193,12 @@ open class OrchestratorBridge:
     open func startupReconcile() throws -> FfiStartupReconcileReport {
         return try FfiConverterTypeFFIStartupReconcileReport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_startup_reconcile(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func storageLifecycleStatus() -> StorageLifecycleStatus {
+        return try! FfiConverterTypeStorageLifecycleStatus.lift(try! rustCall {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_storage_lifecycle_status(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -9274,6 +9290,75 @@ public func FfiConverterTypeStagedWelcomeInfo_lower(_ value: StagedWelcomeInfo) 
     return FfiConverterTypeStagedWelcomeInfo.lower(value)
 }
 
+public struct StorageLifecycleStatus {
+    public var state: StorageLifecycleState
+    public var interruptibleContexts: UInt32
+    public var lastOperationLabel: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(state: StorageLifecycleState, interruptibleContexts: UInt32, lastOperationLabel: String?) {
+        self.state = state
+        self.interruptibleContexts = interruptibleContexts
+        self.lastOperationLabel = lastOperationLabel
+    }
+}
+
+extension StorageLifecycleStatus: Equatable, Hashable {
+    public static func == (lhs: StorageLifecycleStatus, rhs: StorageLifecycleStatus) -> Bool {
+        if lhs.state != rhs.state {
+            return false
+        }
+        if lhs.interruptibleContexts != rhs.interruptibleContexts {
+            return false
+        }
+        if lhs.lastOperationLabel != rhs.lastOperationLabel {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(state)
+        hasher.combine(interruptibleContexts)
+        hasher.combine(lastOperationLabel)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStorageLifecycleStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StorageLifecycleStatus {
+        return
+            try StorageLifecycleStatus(
+                state: FfiConverterTypeStorageLifecycleState.read(from: &buf),
+                interruptibleContexts: FfiConverterUInt32.read(from: &buf),
+                lastOperationLabel: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: StorageLifecycleStatus, into buf: inout [UInt8]) {
+        FfiConverterTypeStorageLifecycleState.write(value.state, into: &buf)
+        FfiConverterUInt32.write(value.interruptibleContexts, into: &buf)
+        FfiConverterOptionString.write(value.lastOperationLabel, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageLifecycleStatus_lift(_ buf: RustBuffer) throws -> StorageLifecycleStatus {
+    return try FfiConverterTypeStorageLifecycleStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageLifecycleStatus_lower(_ value: StorageLifecycleStatus) -> RustBuffer {
+    return FfiConverterTypeStorageLifecycleStatus.lower(value)
+}
+
 /**
  * Tree hash data for epoch state verification
  */
@@ -11134,6 +11219,64 @@ public func FfiConverterTypeProposalInfo_lower(_ value: ProposalInfo) -> RustBuf
 }
 
 extension ProposalInfo: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum StorageLifecycleState {
+    case open
+    case suspended
+    case closed
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeStorageLifecycleState: FfiConverterRustBuffer {
+    typealias SwiftType = StorageLifecycleState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StorageLifecycleState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .open
+
+        case 2: return .suspended
+
+        case 3: return .closed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: StorageLifecycleState, into buf: inout [UInt8]) {
+        switch value {
+        case .open:
+            writeInt(&buf, Int32(1))
+
+        case .suspended:
+            writeInt(&buf, Int32(2))
+
+        case .closed:
+            writeInt(&buf, Int32(3))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageLifecycleState_lift(_ buf: RustBuffer) throws -> StorageLifecycleState {
+    return try FfiConverterTypeStorageLifecycleState.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStorageLifecycleState_lower(_ value: StorageLifecycleState) -> RustBuffer {
+    return FfiConverterTypeStorageLifecycleState.lower(value)
+}
+
+extension StorageLifecycleState: Equatable, Hashable {}
 
 /**
  * Credential validator callback trait for Swift-side policy enforcement
@@ -15894,6 +16037,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 12530 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_mlscontext_storage_lifecycle_status() != 61806 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 33747 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -16072,6 +16218,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_startup_reconcile() != 62080 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_storage_lifecycle_status() != 28866 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_swap_members() != 36054 {
