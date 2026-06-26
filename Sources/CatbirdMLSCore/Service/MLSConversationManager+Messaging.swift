@@ -469,6 +469,20 @@ public extension MLSConversationManager {
     // ═══════════════════════════════════════════════════════════════════════════
     try throwIfShuttingDown("sendMessage")
 
+    if protocolAuthorityMode == .rustFull {
+      let payload = MLSMessagePayload.text(plaintext, embed: embed)
+      let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
+        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+      }
+      let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
+      return (
+        messageId: sendResult.message.id,
+        receivedAt: ATProtocolDate(date: timestamp),
+        sequenceNumber: Int64(clamping: sendResult.message.sequenceNumber),
+        epoch: Int64(clamping: sendResult.message.epoch)
+      )
+    }
+
     // Reconnect database pool if it was closed during recovery
     try await refreshDatabaseIfNeeded()
 
@@ -1098,6 +1112,20 @@ public extension MLSConversationManager {
     // CRITICAL: Capture session generation at start to detect account switches
     let myGeneration = sessionGeneration
 
+    if protocolAuthorityMode == .rustFull {
+      try throwIfShuttingDown("processServerMessage")
+      guard let userDid = userDid else {
+        throw MLSConversationError.noAuthentication
+      }
+      try validateSessionGeneration(capturedGeneration: myGeneration)
+      return try await processServerMessageWithFullRust(
+        message,
+        source: source,
+        userDid: userDid,
+        attemptID: nextProcessingAttemptID()
+      )
+    }
+
     // CRITICAL FIX: Ensure state is reloaded from disk before processing
     // This handles the case where NSE advanced the MLS ratchet while app was in background.
     // Without this, we may try to decrypt with stale keys → SecretReuseError
@@ -1589,6 +1617,49 @@ public extension MLSConversationManager {
 
         let ffiMessage = try runtime.processIncoming(envelope: envelope)
         let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        try await self.handleRustAuthoritativePayloadSideEffects(
+          outcome,
+          message: message,
+          userDid: userDid
+        )
+        return outcome
+      }
+    }
+
+    try await finishSuccessfulMessageProcessing(message: message, userDid: userDid)
+    return outcome
+  }
+
+  private func processServerMessageWithFullRust(
+    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    source: String,
+    userDid: String,
+    attemptID: String
+  ) async throws -> MessageProcessingOutcome {
+    let runtime = try await withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
+      runtime
+    }
+
+    let serverEpoch = message.epoch >= 0 ? UInt64(message.epoch) : nil
+    let (_, outcome) = try await withMLSUserPermit(for: userDid) { [self] in
+      try await self.messageProcessingCoordinator.withQueuedSection(conversationID: message.convoId) { queueIndex in
+        let envelope = FfiIncomingEnvelope(
+          conversationId: message.convoId,
+          senderDid: "",
+          ciphertext: message.ciphertext.data,
+          timestamp: ISO8601DateFormatter().string(from: message.createdAt.date),
+          serverMessageId: message.id
+        )
+
+        self.logger.info(
+          "🦀 [MLS-FULL-RUST] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
+        )
+
+        let result = try runtime.processIncomingMessage(
+          envelope: envelope,
+          serverEpoch: serverEpoch
+        )
+        let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: result.message)
         try await self.handleRustAuthoritativePayloadSideEffects(
           outcome,
           message: message,

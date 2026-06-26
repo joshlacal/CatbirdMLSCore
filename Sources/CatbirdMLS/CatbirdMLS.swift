@@ -3231,6 +3231,16 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func processIncoming(envelope: FfiIncomingEnvelope) throws -> FfiMessage?
 
     /**
+     * Process an incoming encrypted envelope through the Rust-owned engine.
+     */
+    func processIncomingMessage(envelope: FfiIncomingEnvelope, serverEpoch: UInt64?) throws -> FfiMessageProcessingResult
+
+    /**
+     * Process a server event envelope through the Rust-owned engine.
+     */
+    func processServerEvent(eventJson: String) throws -> [FfiEngineEvent]
+
+    /**
      * Publish a single key package.
      */
     func publishKeyPackage() throws
@@ -3351,6 +3361,11 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * Send a JSON-encoded MLS message payload envelope.
      */
     func sendPayloadJson(conversationId: String, payloadJson: String) throws -> FfiMessage
+
+    /**
+     * Send a JSON-encoded MLS message payload through the Rust-owned engine.
+     */
+    func sendPayloadResultJson(conversationId: String, payloadJson: String) throws -> FfiSendResult
 
     /**
      * Send an encrypted reaction payload.
@@ -3773,6 +3788,27 @@ open class OrchestratorBridge:
     }
 
     /**
+     * Process an incoming encrypted envelope through the Rust-owned engine.
+     */
+    open func processIncomingMessage(envelope: FfiIncomingEnvelope, serverEpoch: UInt64?) throws -> FfiMessageProcessingResult {
+        return try FfiConverterTypeFFIMessageProcessingResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_process_incoming_message(self.uniffiClonePointer(),
+                                                                                     FfiConverterTypeFFIIncomingEnvelope.lower(envelope),
+                                                                                     FfiConverterOptionUInt64.lower(serverEpoch), $0)
+        })
+    }
+
+    /**
+     * Process a server event envelope through the Rust-owned engine.
+     */
+    open func processServerEvent(eventJson: String) throws -> [FfiEngineEvent] {
+        return try FfiConverterSequenceTypeFFIEngineEvent.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_process_server_event(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(eventJson), $0)
+        })
+    }
+
+    /**
      * Publish a single key package.
      */
     open func publishKeyPackage() throws {
@@ -3978,6 +4014,17 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_send_payload_json(self.uniffiClonePointer(),
                                                                               FfiConverterString.lower(conversationId),
                                                                               FfiConverterString.lower(payloadJson), $0)
+        })
+    }
+
+    /**
+     * Send a JSON-encoded MLS message payload through the Rust-owned engine.
+     */
+    open func sendPayloadResultJson(conversationId: String, payloadJson: String) throws -> FfiSendResult {
+        return try FfiConverterTypeFFISendResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_send_payload_result_json(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(conversationId),
+                                                                                     FfiConverterString.lower(payloadJson), $0)
         })
     }
 
@@ -5755,6 +5802,83 @@ public func FfiConverterTypeFFIDeviceInfo_lower(_ value: FfiDeviceInfo) -> RustB
     return FfiConverterTypeFFIDeviceInfo.lower(value)
 }
 
+public struct FfiEngineEvent {
+    public var kind: FfiEngineEventKind
+    public var conversationId: String
+    public var messageId: String?
+    public var recoveryState: FfiConversationRecoveryState?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(kind: FfiEngineEventKind, conversationId: String, messageId: String?, recoveryState: FfiConversationRecoveryState?) {
+        self.kind = kind
+        self.conversationId = conversationId
+        self.messageId = messageId
+        self.recoveryState = recoveryState
+    }
+}
+
+extension FfiEngineEvent: Equatable, Hashable {
+    public static func == (lhs: FfiEngineEvent, rhs: FfiEngineEvent) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.recoveryState != rhs.recoveryState {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(conversationId)
+        hasher.combine(messageId)
+        hasher.combine(recoveryState)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIEngineEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEngineEvent {
+        return
+            try FfiEngineEvent(
+                kind: FfiConverterTypeFFIEngineEventKind.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterOptionString.read(from: &buf),
+                recoveryState: FfiConverterOptionTypeFFIConversationRecoveryState.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiEngineEvent, into buf: inout [UInt8]) {
+        FfiConverterTypeFFIEngineEventKind.write(value.kind, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterOptionString.write(value.messageId, into: &buf)
+        FfiConverterOptionTypeFFIConversationRecoveryState.write(value.recoveryState, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIEngineEvent_lift(_ buf: RustBuffer) throws -> FfiEngineEvent {
+    return try FfiConverterTypeFFIEngineEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIEngineEvent_lower(_ value: FfiEngineEvent) -> RustBuffer {
+    return FfiConverterTypeFFIEngineEvent.lower(value)
+}
+
 public struct FfiFetchMessagesResult {
     public var messages: [FfiMessage]
     public var cursor: String?
@@ -6424,6 +6548,67 @@ public func FfiConverterTypeFFIMessage_lower(_ value: FfiMessage) -> RustBuffer 
     return FfiConverterTypeFFIMessage.lower(value)
 }
 
+public struct FfiMessageProcessingResult {
+    public var message: FfiMessage?
+    public var events: [FfiEngineEvent]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(message: FfiMessage?, events: [FfiEngineEvent]) {
+        self.message = message
+        self.events = events
+    }
+}
+
+extension FfiMessageProcessingResult: Equatable, Hashable {
+    public static func == (lhs: FfiMessageProcessingResult, rhs: FfiMessageProcessingResult) -> Bool {
+        if lhs.message != rhs.message {
+            return false
+        }
+        if lhs.events != rhs.events {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(message)
+        hasher.combine(events)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIMessageProcessingResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMessageProcessingResult {
+        return
+            try FfiMessageProcessingResult(
+                message: FfiConverterOptionTypeFFIMessage.read(from: &buf),
+                events: FfiConverterSequenceTypeFFIEngineEvent.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiMessageProcessingResult, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeFFIMessage.write(value.message, into: &buf)
+        FfiConverterSequenceTypeFFIEngineEvent.write(value.events, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIMessageProcessingResult_lift(_ buf: RustBuffer) throws -> FfiMessageProcessingResult {
+    return try FfiConverterTypeFFIMessageProcessingResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIMessageProcessingResult_lower(_ value: FfiMessageProcessingResult) -> RustBuffer {
+    return FfiConverterTypeFFIMessageProcessingResult.lower(value)
+}
+
 public struct FfiMessagesPage {
     public var envelopes: [FfiIncomingEnvelope]
     public var cursor: String?
@@ -6969,6 +7154,67 @@ public func FfiConverterTypeFFIQuarantineState_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeFFIQuarantineState_lower(_ value: FfiQuarantineState) -> RustBuffer {
     return FfiConverterTypeFFIQuarantineState.lower(value)
+}
+
+public struct FfiSendResult {
+    public var message: FfiMessage
+    public var events: [FfiEngineEvent]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(message: FfiMessage, events: [FfiEngineEvent]) {
+        self.message = message
+        self.events = events
+    }
+}
+
+extension FfiSendResult: Equatable, Hashable {
+    public static func == (lhs: FfiSendResult, rhs: FfiSendResult) -> Bool {
+        if lhs.message != rhs.message {
+            return false
+        }
+        if lhs.events != rhs.events {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(message)
+        hasher.combine(events)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFISendResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSendResult {
+        return
+            try FfiSendResult(
+                message: FfiConverterTypeFFIMessage.read(from: &buf),
+                events: FfiConverterSequenceTypeFFIEngineEvent.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiSendResult, into buf: inout [UInt8]) {
+        FfiConverterTypeFFIMessage.write(value.message, into: &buf)
+        FfiConverterSequenceTypeFFIEngineEvent.write(value.events, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISendResult_lift(_ buf: RustBuffer) throws -> FfiSendResult {
+    return try FfiConverterTypeFFISendResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISendResult_lower(_ value: FfiSendResult) -> RustBuffer {
+    return FfiConverterTypeFFISendResult.lower(value)
 }
 
 /**
@@ -9465,6 +9711,70 @@ public func FfiConverterTypeFFIDeliveryStatus_lower(_ value: FfiDeliveryStatus) 
 }
 
 extension FfiDeliveryStatus: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiEngineEventKind {
+    case conversationUpdated
+    case messageInserted
+    case recoveryStateChanged
+    case needsUiRefresh
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIEngineEventKind: FfiConverterRustBuffer {
+    typealias SwiftType = FfiEngineEventKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEngineEventKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .conversationUpdated
+
+        case 2: return .messageInserted
+
+        case 3: return .recoveryStateChanged
+
+        case 4: return .needsUiRefresh
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiEngineEventKind, into buf: inout [UInt8]) {
+        switch value {
+        case .conversationUpdated:
+            writeInt(&buf, Int32(1))
+
+        case .messageInserted:
+            writeInt(&buf, Int32(2))
+
+        case .recoveryStateChanged:
+            writeInt(&buf, Int32(3))
+
+        case .needsUiRefresh:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIEngineEventKind_lift(_ buf: RustBuffer) throws -> FfiEngineEventKind {
+    return try FfiConverterTypeFFIEngineEventKind.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIEngineEventKind_lower(_ value: FfiEngineEventKind) -> RustBuffer {
+    return FfiConverterTypeFFIEngineEventKind.lower(value)
+}
+
+extension FfiEngineEventKind: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -13961,6 +14271,30 @@ private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeFFIConversationRecoveryState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConversationRecoveryState?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFFIConversationRecoveryState.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFFIConversationRecoveryState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeFFIDeliveryStatus: FfiConverterRustBuffer {
     typealias SwiftType = FfiDeliveryStatus?
 
@@ -14249,6 +14583,31 @@ private struct FfiConverterSequenceTypeFFIDeviceInfo: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeFFIDeviceInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFFIEngineEvent: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiEngineEvent]
+
+    static func write(_ value: [FfiEngineEvent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFFIEngineEvent.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiEngineEvent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiEngineEvent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFFIEngineEvent.read(from: &buf))
         }
         return seq
     }
@@ -15445,6 +15804,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_process_incoming() != 39528 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_process_incoming_message() != 60856 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_process_server_event() != 20677 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_publish_key_package() != 29237 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15485,6 +15850,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_payload_json() != 24377 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_payload_result_json() != 11680 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_reaction() != 38649 {

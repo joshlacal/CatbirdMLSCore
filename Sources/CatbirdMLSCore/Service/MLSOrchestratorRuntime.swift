@@ -130,11 +130,14 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   @discardableResult
   public func sendPayload(conversationId: String, payload: MLSMessagePayload) throws -> FfiMessage {
-    let payloadData = try payload.encodeToJSON()
-    guard let payloadJson = String(data: payloadData, encoding: .utf8) else {
-      throw MLSConversationError.operationFailed("MLS payload JSON was not valid UTF-8")
-    }
+    let payloadJson = try encodePayloadJson(payload)
     return try bridge.sendPayloadJson(conversationId: conversationId, payloadJson: payloadJson)
+  }
+
+  @discardableResult
+  public func sendPayloadResult(conversationId: String, payload: MLSMessagePayload) throws -> FfiSendResult {
+    let payloadJson = try encodePayloadJson(payload)
+    return try bridge.sendPayloadResultJson(conversationId: conversationId, payloadJson: payloadJson)
   }
 
   @discardableResult
@@ -155,6 +158,18 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   @discardableResult
   public func processIncoming(envelope: FfiIncomingEnvelope) throws -> FfiMessage? {
     try bridge.processIncoming(envelope: envelope)
+  }
+
+  @discardableResult
+  public func processIncomingMessage(
+    envelope: FfiIncomingEnvelope,
+    serverEpoch: UInt64?
+  ) throws -> FfiMessageProcessingResult {
+    try bridge.processIncomingMessage(envelope: envelope, serverEpoch: serverEpoch)
+  }
+
+  public func processServerEvent(eventJson: String) throws -> [FfiEngineEvent] {
+    try bridge.processServerEvent(eventJson: eventJson)
   }
 
   public func recordGroupReset(
@@ -259,6 +274,14 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   public func shutdown() {
     bridge.shutdown()
+  }
+
+  private func encodePayloadJson(_ payload: MLSMessagePayload) throws -> String {
+    let payloadData = try payload.encodeToJSON()
+    guard let payloadJson = String(data: payloadData, encoding: .utf8) else {
+      throw MLSConversationError.operationFailed("MLS payload JSON was not valid UTF-8")
+    }
+    return payloadJson
   }
 }
 
