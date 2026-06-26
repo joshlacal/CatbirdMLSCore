@@ -99,7 +99,13 @@ extension MLSConversationManager {
       }
       try await applyRustConversationSnapshot(
         result.conversation,
-        titleOverride: name.isEmpty ? nil : name
+        metadata: result.metadata.fillingMissingValues(
+          from: MLSConversationSnapshotMetadata(
+            title: name,
+            description: description,
+            avatarUrl: avatarUrl
+          )
+        )
       )
       notifyObservers(.conversationCreated(result.conversation))
       logger.info(
@@ -856,7 +862,7 @@ extension MLSConversationManager {
       let result = try await withRustAuthoritativeRuntime(operation: "leaveConversation") { runtime in
         try runtime.leaveConversation(conversationId: convoId)
       }
-      await removeRustConversationSnapshot(
+      try await removeRustConversationSnapshot(
         conversationId: result.conversationId,
         groupId: result.groupId
       )
@@ -1005,6 +1011,7 @@ extension MLSConversationManager {
 
   internal func applyRustConversationSnapshot(
     _ convo: BlueCatbirdMlsChatDefs.ConvoView,
+    metadata: MLSConversationSnapshotMetadata? = nil,
     titleOverride: String? = nil
   ) async throws {
     conversations[convo.conversationId] = convo
@@ -1020,15 +1027,17 @@ extension MLSConversationManager {
     try await persistConversationsToDatabase([convo])
     try await persistMembersToDatabase([convo])
 
-    if let titleOverride, !titleOverride.isEmpty, let userDid {
+    let metadataTitle = metadata?.title ?? MLSConversationSnapshotMetadata.nonEmpty(titleOverride)
+    let metadataAvatarURL = metadata?.avatarUrl
+    if let userDid, metadataTitle != nil || metadataAvatarURL != nil {
       try await database.write { db in
         try db.execute(
           sql: """
             UPDATE MLSConversationModel
-            SET title = ?, updatedAt = ?
+            SET title = COALESCE(?, title), avatarURL = COALESCE(?, avatarURL), updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?
             """,
-          arguments: [titleOverride, Date(), convo.conversationId, userDid]
+          arguments: [metadataTitle, metadataAvatarURL, Date(), convo.conversationId, userDid]
         )
       }
     }
@@ -1037,30 +1046,26 @@ extension MLSConversationManager {
   internal func removeRustConversationSnapshot(
     conversationId: String,
     groupId: String?
-  ) async {
-    do {
-      guard let userDid else { return }
-      try await database.write { db in
-        try db.execute(
-          sql: "DELETE FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?;",
-          arguments: [conversationId, userDid]
-        )
-        try db.execute(
-          sql: "DELETE FROM MLSMessageModel WHERE conversationID = ? AND currentUserDID = ?;",
-          arguments: [conversationId, userDid]
-        )
-        try db.execute(
-          sql: "DELETE FROM MLSMemberModel WHERE conversationID = ? AND currentUserDID = ?;",
-          arguments: [conversationId, userDid]
-        )
-        try db.execute(
-          sql: "DELETE FROM MLSEpochKeyModel WHERE conversationID = ? AND currentUserDID = ?;",
-          arguments: [conversationId, userDid]
-        )
-      }
-    } catch {
-      logger.warning(
-        "⚠️ [MLSConversationManager.removeRustConversationSnapshot] Failed to delete local rows: \(error.localizedDescription)"
+  ) async throws {
+    guard let userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+    try await database.write { db in
+      try db.execute(
+        sql: "DELETE FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?;",
+        arguments: [conversationId, userDid]
+      )
+      try db.execute(
+        sql: "DELETE FROM MLSMessageModel WHERE conversationID = ? AND currentUserDID = ?;",
+        arguments: [conversationId, userDid]
+      )
+      try db.execute(
+        sql: "DELETE FROM MLSMemberModel WHERE conversationID = ? AND currentUserDID = ?;",
+        arguments: [conversationId, userDid]
+      )
+      try db.execute(
+        sql: "DELETE FROM MLSEpochKeyModel WHERE conversationID = ? AND currentUserDID = ?;",
+        arguments: [conversationId, userDid]
       )
     }
 

@@ -332,25 +332,37 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
 public struct MLSCreateConversationResult: Sendable {
   public let conversation: BlueCatbirdMlsChatDefs.ConvoView
+  public let metadata: MLSConversationSnapshotMetadata
 
   init(ffiResult result: FfiCreateConversationResult, userDID: String) throws {
     self.conversation = try decodeConversationSnapshot(result.conversation, fallbackUserDID: userDID)
+    self.metadata = MLSConversationSnapshotMetadata(ffiConversation: result.conversation)
   }
 
-  public init(conversation: BlueCatbirdMlsChatDefs.ConvoView) {
+  public init(
+    conversation: BlueCatbirdMlsChatDefs.ConvoView,
+    metadata: MLSConversationSnapshotMetadata = MLSConversationSnapshotMetadata()
+  ) {
     self.conversation = conversation
+    self.metadata = metadata
   }
 }
 
 public struct MLSGroupMutationResult: Sendable {
   public let conversation: BlueCatbirdMlsChatDefs.ConvoView
+  public let metadata: MLSConversationSnapshotMetadata
 
   init(ffiResult result: FfiGroupMutationResult, userDID: String) throws {
     self.conversation = try decodeConversationSnapshot(result.conversation, fallbackUserDID: userDID)
+    self.metadata = MLSConversationSnapshotMetadata(ffiConversation: result.conversation)
   }
 
-  public init(conversation: BlueCatbirdMlsChatDefs.ConvoView) {
+  public init(
+    conversation: BlueCatbirdMlsChatDefs.ConvoView,
+    metadata: MLSConversationSnapshotMetadata = MLSConversationSnapshotMetadata()
+  ) {
     self.conversation = conversation
+    self.metadata = metadata
   }
 }
 
@@ -366,6 +378,43 @@ public struct MLSLeaveConversationResult: Equatable, Sendable {
   public init(conversationId: String, groupId: String?) {
     self.conversationId = conversationId
     self.groupId = groupId
+  }
+}
+
+public struct MLSConversationSnapshotMetadata: Equatable, Sendable {
+  public let title: String?
+  public let description: String?
+  public let avatarUrl: String?
+
+  init(ffiConversation: FfiConversationView) {
+    self.init(
+      title: ffiConversation.name,
+      description: ffiConversation.description,
+      avatarUrl: ffiConversation.avatarUrl
+    )
+  }
+
+  public init(
+    title: String? = nil,
+    description: String? = nil,
+    avatarUrl: String? = nil
+  ) {
+    self.title = Self.nonEmpty(title)
+    self.description = Self.nonEmpty(description)
+    self.avatarUrl = Self.nonEmpty(avatarUrl)
+  }
+
+  func fillingMissingValues(from fallback: MLSConversationSnapshotMetadata) -> MLSConversationSnapshotMetadata {
+    MLSConversationSnapshotMetadata(
+      title: title ?? fallback.title,
+      description: description ?? fallback.description,
+      avatarUrl: avatarUrl ?? fallback.avatarUrl
+    )
+  }
+
+  static func nonEmpty(_ value: String?) -> String? {
+    guard let value, !value.isEmpty else { return nil }
+    return value
   }
 }
 

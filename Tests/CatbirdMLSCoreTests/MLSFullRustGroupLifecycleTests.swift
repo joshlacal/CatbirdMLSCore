@@ -23,12 +23,28 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
 
     XCTAssertEqual(bridge.createConversationCallCount, 1)
     XCTAssertEqual(bridge.lastCreateConversationName, "Rust group")
+    XCTAssertEqual(result.metadata.title, "Rust group")
+    XCTAssertEqual(result.metadata.description, "unit-test")
+    XCTAssertEqual(result.metadata.avatarUrl, "https://example.com/rust.png")
     XCTAssertEqual(result.conversation.conversationId, "convo-rust")
   }
 
-  func testRustFullCreateGroupUsesRuntimeAndSkipsLegacyGroupCreationPath() async throws {
+  func testRustFullCreateGroupPersistsMetadataAndSkipsLegacyGroupCreationPath() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingGroupLifecycleBridge()
+    bridge.createConversationResult = FfiCreateConversationResult(
+      conversation: makeFFIConversationView(
+        conversationID: "convo-rust",
+        groupID: "deadbeef",
+        epoch: 7,
+        members: ["did:plc:testuser", "did:plc:bob"],
+        name: "Rust group",
+        description: "unit-test",
+        avatarUrl: nil
+      ),
+      commitData: nil,
+      welcomeData: nil
+    )
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
       mode: .rustFull,
@@ -38,13 +54,18 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     let convo = try await manager.createGroup(
       initialMembers: [try DID(didString: "did:plc:bob")],
       name: "Rust group",
-      description: "unit-test"
+      description: "unit-test",
+      avatarUrl: "https://example.com/request-avatar.png"
     )
 
     XCTAssertEqual(bridge.createConversationCallCount, 1)
+    XCTAssertEqual(bridge.lastCreateConversationDescription, "unit-test")
     XCTAssertEqual(convo.conversationId, "convo-rust")
     XCTAssertEqual(manager.conversations["convo-rust"]?.conversationId, "convo-rust")
     XCTAssertEqual(manager.groupStates["deadbeef"]?.epoch, 7)
+    let persisted = try await fetchConversation(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(persisted?.title, "Rust group")
+    XCTAssertEqual(persisted?.avatarURL, "https://example.com/request-avatar.png")
   }
 
   func testRustFullAddMembersUsesRuntimeAndSkipsLegacyStageCommitPath() async throws {
@@ -119,6 +140,33 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(bridge.leaveConversationCallCount, 1)
     XCTAssertNil(manager.conversations["convo-rust"])
     XCTAssertNil(manager.groupStates["deadbeef"])
+    let remainingRows = try await countDurableConversationRows(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(remainingRows, 0)
+  }
+
+  func testRustFullLeaveConversationPropagatesDurableCleanupFailure() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-rust", on: manager)
+    seedGroupState(conversationID: "convo-rust", groupID: "deadbeef", on: manager)
+
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.leaveResult = FfiLeaveResult(
+      conversationId: "convo-rust",
+      groupId: "deadbeef"
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try manager.database.close()
+
+    await XCTAssertThrowsErrorAsync(try await manager.leaveConversation(convoId: "convo-rust")) { _ in }
+
+    XCTAssertEqual(bridge.leaveConversationCallCount, 1)
+    XCTAssertNotNil(manager.conversations["convo-rust"])
+    XCTAssertNotNil(manager.groupStates["deadbeef"])
   }
 
   func testRustAuthoritativeAddMembersKeepsLegacyPreconditions() async throws {
@@ -171,8 +219,70 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     )
     try await manager.database.write { db in
       try model.insert(db)
+      try MLSMemberModel(
+        memberID: "\(conversationID)_did:plc:testuser",
+        conversationID: conversationID,
+        currentUserDID: "did:plc:testuser",
+        did: "did:plc:testuser",
+        leafIndex: 0,
+        role: .admin
+      ).insert(db)
+      try MLSEpochKeyModel(
+        epochKeyID: "\(conversationID)_epoch_1",
+        conversationID: conversationID,
+        currentUserDID: "did:plc:testuser",
+        epoch: 1,
+        keyMaterial: Data([0x01, 0x02])
+      ).insert(db)
+      try MLSMessageModel(
+        messageID: "\(conversationID)_message_1",
+        currentUserDID: "did:plc:testuser",
+        conversationID: conversationID,
+        senderID: "did:plc:testuser",
+        epoch: 1,
+        sequenceNumber: 1,
+        isDelivered: true,
+        isSent: true
+      ).insert(db)
     }
     manager.conversations[conversationID] = try XCTUnwrap(model.asConvoView())
+  }
+
+  private func fetchConversation(
+    conversationID: String,
+    on manager: MLSConversationManager
+  ) async throws -> MLSConversationModel? {
+    try await manager.database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchOne(db)
+    }
+  }
+
+  private func countDurableConversationRows(
+    conversationID: String,
+    on manager: MLSConversationManager
+  ) async throws -> Int {
+    try await manager.database.read { db in
+      let conversationCount = try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchCount(db)
+      let memberCount = try MLSMemberModel
+        .filter(MLSMemberModel.Columns.conversationID == conversationID)
+        .filter(MLSMemberModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchCount(db)
+      let epochKeyCount = try MLSEpochKeyModel
+        .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
+        .filter(MLSEpochKeyModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchCount(db)
+      let messageCount = try MLSMessageModel
+        .filter(MLSMessageModel.Columns.conversationID == conversationID)
+        .filter(MLSMessageModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchCount(db)
+      return conversationCount + memberCount + epochKeyCount + messageCount
+    }
   }
 
   private func seedGroupState(
@@ -209,7 +319,10 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     conversationID: String,
     groupID: String,
     epoch: UInt64,
-    members: [String]
+    members: [String],
+    name: String = "Rust group",
+    description: String? = "unit-test",
+    avatarUrl: String? = "https://example.com/rust.png"
   ) -> FfiConversationView {
     FfiConversationView(
       groupId: groupID,
@@ -221,9 +334,9 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
           role: $0 == "did:plc:testuser" ? "admin" : "member"
         )
       },
-      name: "Rust group",
-      description: "unit-test",
-      avatarUrl: nil,
+      name: name,
+      description: description,
+      avatarUrl: avatarUrl,
       createdAt: ISO8601DateFormatter().string(from: Date()),
       updatedAt: nil
     )
@@ -259,6 +372,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
   private(set) var removeMembersCallCount = 0
   private(set) var leaveConversationCallCount = 0
   private(set) var lastCreateConversationName: String?
+  private(set) var lastCreateConversationDescription: String?
 
   init() {
     super.init(noPointer: .init())
@@ -275,6 +389,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
   ) throws -> FfiCreateConversationResult {
     createConversationCallCount += 1
     lastCreateConversationName = name
+    lastCreateConversationDescription = description
     return createConversationResult
   }
 
@@ -308,7 +423,10 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
     conversationID: String,
     groupID: String,
     epoch: UInt64,
-    members: [String]
+    members: [String],
+    name: String = "Rust group",
+    description: String? = "unit-test",
+    avatarUrl: String? = "https://example.com/rust.png"
   ) -> FfiConversationView {
     FfiConversationView(
       groupId: groupID,
@@ -320,9 +438,9 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
           role: $0 == "did:plc:testuser" ? "admin" : "member"
         )
       },
-      name: "Rust group",
-      description: "unit-test",
-      avatarUrl: nil,
+      name: name,
+      description: description,
+      avatarUrl: avatarUrl,
       createdAt: ISO8601DateFormatter().string(from: Date()),
       updatedAt: nil
     )
