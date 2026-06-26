@@ -9,6 +9,14 @@ import Synchronization
 public extension MLSConversationManager {
   private typealias AdoptedReaction = MLSStorage.AdoptedReaction
 
+  internal struct RustEngineResetNotification {
+    let convoId: String
+    let newGroupId: String
+    let resetGeneration: Int
+    let resetBy: DID?
+    let reason: String?
+  }
+
   private struct ProcessingContext {
     let attemptID: String
     let source: String
@@ -474,6 +482,7 @@ public extension MLSConversationManager {
       let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
         try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
       }
+      await handleRustEngineEvents(sendResult.events, source: "sendMessage")
       let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
       return (
         messageId: sendResult.message.id,
@@ -1659,6 +1668,7 @@ public extension MLSConversationManager {
           envelope: envelope,
           serverEpoch: serverEpoch
         )
+        await self.handleRustEngineEvents(result.events, source: "processServerMessage")
         let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: result.message)
         try await self.handleRustAuthoritativePayloadSideEffects(
           outcome,
@@ -1671,6 +1681,75 @@ public extension MLSConversationManager {
 
     try await finishSuccessfulMessageProcessing(message: message, userDid: userDid)
     return outcome
+  }
+
+  internal func handleRustEngineEvents(
+    _ events: [FfiEngineEvent],
+    source: String,
+    resetNotification: RustEngineResetNotification? = nil
+  ) async {
+    guard !events.isEmpty else { return }
+
+    var conversationsNeedingFollowup = Set<String>()
+
+    for event in events {
+      switch event.kind {
+      case .conversationUpdated:
+        conversationsNeedingFollowup.insert(event.conversationId)
+        logger.info(
+          "🦀 [MLS-FULL-RUST] event=conversationUpdated source=\(source, privacy: .public) convo=\(event.conversationId.prefix(16), privacy: .private)"
+        )
+
+      case .messageInserted:
+        logger.debug(
+          "🦀 [MLS-FULL-RUST] event=messageInserted source=\(source, privacy: .public) convo=\(event.conversationId.prefix(16), privacy: .private) message=\((event.messageId ?? "nil").prefix(16), privacy: .private) handled by existing message persistence path"
+        )
+
+      case .recoveryStateChanged:
+        conversationsNeedingFollowup.insert(event.conversationId)
+        logger.info(
+          "🦀 [MLS-FULL-RUST] event=recoveryStateChanged source=\(source, privacy: .public) convo=\(event.conversationId.prefix(16), privacy: .private) state=\(String(describing: event.recoveryState), privacy: .public)"
+        )
+
+      case .needsUiRefresh:
+        conversationsNeedingFollowup.insert(event.conversationId)
+        logger.info(
+          "🦀 [MLS-FULL-RUST] event=needsUiRefresh source=\(source, privacy: .public) convo=\(event.conversationId.prefix(16), privacy: .private)"
+        )
+      }
+    }
+
+    let followupConvoIds = conversationsNeedingFollowup.filter { !$0.isEmpty }
+    guard !followupConvoIds.isEmpty else { return }
+
+    for convoId in followupConvoIds {
+      if let convo = conversations[convoId] {
+        groupStates[convo.groupId] = nil
+      }
+    }
+
+    Task {
+      do {
+        try await self.syncWithServer(fullSync: false)
+      } catch {
+        self.logger.warning(
+          "[MLS-FULL-RUST] syncWithServer failed after engine events source=\(source, privacy: .public): \(error.localizedDescription, privacy: .public)"
+        )
+      }
+    }
+
+    if let resetNotification,
+       followupConvoIds.contains(resetNotification.convoId),
+       resetNotification.resetBy != nil
+    {
+      notifyObservers(.groupReset(
+        convoId: resetNotification.convoId,
+        newGroupId: resetNotification.newGroupId,
+        resetGeneration: resetNotification.resetGeneration,
+        resetBy: resetNotification.resetBy,
+        reason: resetNotification.reason
+      ))
+    }
   }
 
   private func handleRustAuthoritativePayloadSideEffects(
