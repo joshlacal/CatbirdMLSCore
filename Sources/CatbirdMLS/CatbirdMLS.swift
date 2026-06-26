@@ -3082,11 +3082,23 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func addMembers(groupId: String, memberDids: [String]) throws
 
     /**
+     * Add members through the Rust-owned engine and return the updated
+     * conversation snapshot for full-authority clients.
+     */
+    func addMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult
+
+    /**
      * Confirm a previously staged commit: merges it locally, advances the
      * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
      * the fence (for API paths that don't echo an epoch).
      */
     func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws -> FfiConfirmedCommit
+
+    /**
+     * Create a new MLS conversation through the Rust-owned engine and
+     * return the conversation snapshot needed by full-authority clients.
+     */
+    func createConversation(name: String, initialMembers: [String]?, description: String?) throws -> FfiCreateConversationResult
 
     /**
      * Create a new MLS group/conversation.
@@ -3201,6 +3213,12 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * ordering used by sync and incoming-message recovery.
      */
     func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult
+
+    /**
+     * Leave a conversation through the Rust-owned engine and return the
+     * identifiers Swift needs to clean up local state immediately.
+     */
+    func leaveConversation(conversationId: String) throws -> FfiLeaveResult
 
     /**
      * Leave a conversation.
@@ -3331,6 +3349,12 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * Remove members from a group.
      */
     func removeMembers(groupId: String, memberDids: [String]) throws
+
+    /**
+     * Remove members through the Rust-owned engine and return the updated
+     * conversation snapshot for full-authority clients.
+     */
+    func removeMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult
 
     /**
      * Check and replenish key packages if needed.
@@ -3513,6 +3537,18 @@ open class OrchestratorBridge:
     }
 
     /**
+     * Add members through the Rust-owned engine and return the updated
+     * conversation snapshot for full-authority clients.
+     */
+    open func addMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult {
+        return try FfiConverterTypeFFIGroupMutationResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_add_members_result(self.uniffiClonePointer(),
+                                                                               FfiConverterString.lower(conversationId),
+                                                                               FfiConverterSequenceString.lower(memberDids), $0)
+        })
+    }
+
+    /**
      * Confirm a previously staged commit: merges it locally, advances the
      * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
      * the fence (for API paths that don't echo an epoch).
@@ -3522,6 +3558,19 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_confirm_commit(self.uniffiClonePointer(),
                                                                            FfiConverterTypeFFIStagedCommitHandle.lower(handle),
                                                                            FfiConverterUInt64.lower(serverEpoch), $0)
+        })
+    }
+
+    /**
+     * Create a new MLS conversation through the Rust-owned engine and
+     * return the conversation snapshot needed by full-authority clients.
+     */
+    open func createConversation(name: String, initialMembers: [String]?, description: String?) throws -> FfiCreateConversationResult {
+        return try FfiConverterTypeFFICreateConversationResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_create_conversation(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(name),
+                                                                                FfiConverterOptionSequenceString.lower(initialMembers),
+                                                                                FfiConverterOptionString.lower(description), $0)
         })
     }
 
@@ -3725,6 +3774,17 @@ open class OrchestratorBridge:
         return try FfiConverterTypeFFIJoinOrRejoinResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_join_or_rejoin(self.uniffiClonePointer(),
                                                                            FfiConverterString.lower(convoId), $0)
+        })
+    }
+
+    /**
+     * Leave a conversation through the Rust-owned engine and return the
+     * identifiers Swift needs to clean up local state immediately.
+     */
+    open func leaveConversation(conversationId: String) throws -> FfiLeaveResult {
+        return try FfiConverterTypeFFILeaveResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_leave_conversation(self.uniffiClonePointer(),
+                                                                               FfiConverterString.lower(conversationId), $0)
         })
     }
 
@@ -3953,6 +4013,18 @@ open class OrchestratorBridge:
                                                                            FfiConverterString.lower(groupId),
                                                                            FfiConverterSequenceString.lower(memberDids), $0)
         }
+    }
+
+    /**
+     * Remove members through the Rust-owned engine and return the updated
+     * conversation snapshot for full-authority clients.
+     */
+    open func removeMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult {
+        return try FfiConverterTypeFFIGroupMutationResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_remove_members_result(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(conversationId),
+                                                                                  FfiConverterSequenceString.lower(memberDids), $0)
+        })
     }
 
     /**
@@ -5940,6 +6012,59 @@ public func FfiConverterTypeFFIFetchMessagesResult_lower(_ value: FfiFetchMessag
     return FfiConverterTypeFFIFetchMessagesResult.lower(value)
 }
 
+public struct FfiGroupMutationResult {
+    public var conversation: FfiConversationView
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversation: FfiConversationView) {
+        self.conversation = conversation
+    }
+}
+
+extension FfiGroupMutationResult: Equatable, Hashable {
+    public static func == (lhs: FfiGroupMutationResult, rhs: FfiGroupMutationResult) -> Bool {
+        if lhs.conversation != rhs.conversation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversation)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIGroupMutationResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiGroupMutationResult {
+        return
+            try FfiGroupMutationResult(
+                conversation: FfiConverterTypeFFIConversationView.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiGroupMutationResult, into buf: inout [UInt8]) {
+        FfiConverterTypeFFIConversationView.write(value.conversation, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIGroupMutationResult_lift(_ buf: RustBuffer) throws -> FfiGroupMutationResult {
+    return try FfiConverterTypeFFIGroupMutationResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIGroupMutationResult_lower(_ value: FfiGroupMutationResult) -> RustBuffer {
+    return FfiConverterTypeFFIGroupMutationResult.lower(value)
+}
+
 public struct FfiGroupState {
     public var groupId: String
     public var conversationId: String
@@ -6360,6 +6485,67 @@ public func FfiConverterTypeFFIKeyPackageSyncResult_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeFFIKeyPackageSyncResult_lower(_ value: FfiKeyPackageSyncResult) -> RustBuffer {
     return FfiConverterTypeFFIKeyPackageSyncResult.lower(value)
+}
+
+public struct FfiLeaveResult {
+    public var conversationId: String
+    public var groupId: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, groupId: String?) {
+        self.conversationId = conversationId
+        self.groupId = groupId
+    }
+}
+
+extension FfiLeaveResult: Equatable, Hashable {
+    public static func == (lhs: FfiLeaveResult, rhs: FfiLeaveResult) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.groupId != rhs.groupId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(groupId)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFILeaveResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLeaveResult {
+        return
+            try FfiLeaveResult(
+                conversationId: FfiConverterString.read(from: &buf),
+                groupId: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLeaveResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterOptionString.write(value.groupId, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFILeaveResult_lift(_ buf: RustBuffer) throws -> FfiLeaveResult {
+    return try FfiConverterTypeFFILeaveResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFILeaveResult_lower(_ value: FfiLeaveResult) -> RustBuffer {
+    return FfiConverterTypeFFILeaveResult.lower(value)
 }
 
 public struct FfiMemberView {
@@ -15732,7 +15918,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members() != 30814 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members_result() != 22800 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_confirm_commit() != 2386 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_create_conversation() != 1210 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_create_group() != 46751 {
@@ -15786,6 +15978,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_or_rejoin() != 36176 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_conversation() != 20896 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_group() != 23679 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15832,6 +16027,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_members() != 36326 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_members_result() != 31740 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_replenish_key_packages_if_needed() != 14347 {

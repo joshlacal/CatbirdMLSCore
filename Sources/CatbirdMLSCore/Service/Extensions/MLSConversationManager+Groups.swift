@@ -72,6 +72,42 @@ extension MLSConversationManager {
     )
     try throwIfShuttingDown("createGroup")
 
+    func filteredInitialMembers(for userDid: String) -> [DID]? {
+      guard let members = initialMembers else { return nil }
+      let selfDid = userDid.lowercased()
+      let filtered = members.filter { $0.description.lowercased() != selfDid }
+      if filtered.count != members.count {
+        logger.warning(
+          "⚠️ [createGroup] Filtered out self-DID from initialMembers (was \(members.count), now \(filtered.count))"
+        )
+      }
+      return filtered.isEmpty ? nil : filtered
+    }
+
+    if protocolAuthorityMode == .rustFull {
+      guard let userDid = userDid else {
+        logger.error("❌ [MLSConversationManager.createGroup] No authentication")
+        throw MLSConversationError.noAuthentication
+      }
+      let filteredMembers = filteredInitialMembers(for: userDid)
+      let result = try await withRustAuthoritativeRuntime(operation: "createGroup") { runtime in
+        try runtime.createConversation(
+          name: name,
+          initialMemberDids: filteredMembers?.map(\.description) ?? [],
+          description: description
+        )
+      }
+      try await applyRustConversationSnapshot(
+        result.conversation,
+        titleOverride: name.isEmpty ? nil : name
+      )
+      notifyObservers(.conversationCreated(result.conversation))
+      logger.info(
+        "✅ [MLSConversationManager.createGroup] rustFull complete - convoId: \(result.conversation.conversationId), epoch: \(result.conversation.epoch)"
+      )
+      return result.conversation
+    }
+
     guard isInitialized else {
       logger.error("❌ [MLSConversationManager.createGroup] Context not initialized")
       throw MLSConversationError.contextNotInitialized
@@ -85,19 +121,7 @@ extension MLSConversationManager {
     // ⭐ FIX #1: Filter out the creator's DID from initialMembers
     // In MLS, you only fetch key packages for OTHER members you're adding.
     // The creator is implicitly added during group creation.
-    let filteredMembers: [DID]?
-    if let members = initialMembers {
-      let selfDid = userDid.lowercased()
-      let filtered = members.filter { $0.description.lowercased() != selfDid }
-      if filtered.count != members.count {
-        logger.warning(
-          "⚠️ [createGroup] Filtered out self-DID from initialMembers (was \(members.count), now \(filtered.count))"
-        )
-      }
-      filteredMembers = filtered.isEmpty ? nil : filtered
-    } else {
-      filteredMembers = nil
-    }
+    let filteredMembers = filteredInitialMembers(for: userDid)
 
     // Create temporary tracking ID for initialization state
     let tempId = UUID().uuidString
@@ -828,6 +852,19 @@ extension MLSConversationManager {
       throw MLSConversationError.contextNotInitialized
     }
 
+    if protocolAuthorityMode == .rustFull {
+      let result = try await withRustAuthoritativeRuntime(operation: "leaveConversation") { runtime in
+        try runtime.leaveConversation(conversationId: convoId)
+      }
+      await removeRustConversationSnapshot(
+        conversationId: result.conversationId,
+        groupId: result.groupId
+      )
+      notifyObservers(.conversationLeft(result.conversationId))
+      logger.info("✅ [MLSConversationManager.leaveConversation] rustFull complete: \(result.conversationId)")
+      return
+    }
+
     // Try to get conversation from memory first, or look up from database
     let convo: BlueCatbirdMlsChatDefs.ConvoView
     if let memoryConvo = conversations[convoId] {
@@ -964,6 +1001,77 @@ extension MLSConversationManager {
 
     // Notify observers
     notifyObservers(.conversationLeft(convoId))
+  }
+
+  internal func applyRustConversationSnapshot(
+    _ convo: BlueCatbirdMlsChatDefs.ConvoView,
+    titleOverride: String? = nil
+  ) async throws {
+    conversations[convo.conversationId] = convo
+    conversationStates[convo.conversationId] = .active
+    groupStates[convo.groupId] = MLSGroupState(
+      groupId: convo.groupId,
+      convoId: convo.conversationId,
+      epoch: UInt64(clamping: convo.epoch),
+      members: Set(convo.members.map { $0.userDid.description }),
+      knownServerEpoch: UInt64(clamping: convo.epoch)
+    )
+
+    try await persistConversationsToDatabase([convo])
+    try await persistMembersToDatabase([convo])
+
+    if let titleOverride, !titleOverride.isEmpty, let userDid {
+      try await database.write { db in
+        try db.execute(
+          sql: """
+            UPDATE MLSConversationModel
+            SET title = ?, updatedAt = ?
+            WHERE conversationID = ? AND currentUserDID = ?
+            """,
+          arguments: [titleOverride, Date(), convo.conversationId, userDid]
+        )
+      }
+    }
+  }
+
+  internal func removeRustConversationSnapshot(
+    conversationId: String,
+    groupId: String?
+  ) async {
+    do {
+      guard let userDid else { return }
+      try await database.write { db in
+        try db.execute(
+          sql: "DELETE FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?;",
+          arguments: [conversationId, userDid]
+        )
+        try db.execute(
+          sql: "DELETE FROM MLSMessageModel WHERE conversationID = ? AND currentUserDID = ?;",
+          arguments: [conversationId, userDid]
+        )
+        try db.execute(
+          sql: "DELETE FROM MLSMemberModel WHERE conversationID = ? AND currentUserDID = ?;",
+          arguments: [conversationId, userDid]
+        )
+        try db.execute(
+          sql: "DELETE FROM MLSEpochKeyModel WHERE conversationID = ? AND currentUserDID = ?;",
+          arguments: [conversationId, userDid]
+        )
+      }
+    } catch {
+      logger.warning(
+        "⚠️ [MLSConversationManager.removeRustConversationSnapshot] Failed to delete local rows: \(error.localizedDescription)"
+      )
+    }
+
+    conversations.removeValue(forKey: conversationId)
+    conversationStates.removeValue(forKey: conversationId)
+    if let groupId {
+      let groupStillInUse = conversations.values.contains(where: { $0.groupId == groupId })
+      if !groupStillInUse {
+        groupStates.removeValue(forKey: groupId)
+      }
+    }
   }
 
   /// Publish current GroupInfo to the server

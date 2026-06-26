@@ -2,6 +2,8 @@ import CatbirdMLS
 import Foundation
 import GRDB
 import OSLog
+import Petrel
+import PetrelCatbird
 
 /// Owns the Rust orchestrator bridge and its Swift callback adapters.
 ///
@@ -260,6 +262,49 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return ConversationRecoveryState(ffiRecoveryState: ffiState)
   }
 
+  public func createConversation(
+    name: String,
+    initialMemberDids: [String],
+    description: String?
+  ) throws -> MLSCreateConversationResult {
+    let ffiResult = try bridge.createConversation(
+      name: name,
+      initialMembers: initialMemberDids.isEmpty ? nil : initialMemberDids,
+      description: description
+    )
+    return try MLSCreateConversationResult(ffiResult: ffiResult, userDID: userDID)
+  }
+
+  public func addMembers(
+    conversationId: String,
+    memberDids: [String]
+  ) throws -> MLSGroupMutationResult {
+    let ffiResult = try bridge.addMembersResult(
+      conversationId: conversationId,
+      memberDids: memberDids
+    )
+    return try MLSGroupMutationResult(ffiResult: ffiResult, userDID: userDID)
+  }
+
+  public func removeMembers(
+    conversationId: String,
+    memberDids: [String]
+  ) throws -> MLSGroupMutationResult {
+    let ffiResult = try bridge.removeMembersResult(
+      conversationId: conversationId,
+      memberDids: memberDids
+    )
+    return try MLSGroupMutationResult(ffiResult: ffiResult, userDID: userDID)
+  }
+
+  public func leaveConversation(
+    conversationId: String
+  ) throws -> MLSLeaveConversationResult {
+    MLSLeaveConversationResult(
+      ffiResult: try bridge.leaveConversation(conversationId: conversationId)
+    )
+  }
+
   public func recordShadowDecisionMismatch(
     operation: String,
     conversationId: String?,
@@ -282,6 +327,45 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       throw MLSConversationError.operationFailed("MLS payload JSON was not valid UTF-8")
     }
     return payloadJson
+  }
+}
+
+public struct MLSCreateConversationResult: Sendable {
+  public let conversation: BlueCatbirdMlsChatDefs.ConvoView
+
+  init(ffiResult result: FfiCreateConversationResult, userDID: String) throws {
+    self.conversation = try decodeConversationSnapshot(result.conversation, fallbackUserDID: userDID)
+  }
+
+  public init(conversation: BlueCatbirdMlsChatDefs.ConvoView) {
+    self.conversation = conversation
+  }
+}
+
+public struct MLSGroupMutationResult: Sendable {
+  public let conversation: BlueCatbirdMlsChatDefs.ConvoView
+
+  init(ffiResult result: FfiGroupMutationResult, userDID: String) throws {
+    self.conversation = try decodeConversationSnapshot(result.conversation, fallbackUserDID: userDID)
+  }
+
+  public init(conversation: BlueCatbirdMlsChatDefs.ConvoView) {
+    self.conversation = conversation
+  }
+}
+
+public struct MLSLeaveConversationResult: Equatable, Sendable {
+  public let conversationId: String
+  public let groupId: String?
+
+  init(ffiResult result: FfiLeaveResult) {
+    self.conversationId = result.conversationId
+    self.groupId = result.groupId
+  }
+
+  public init(conversationId: String, groupId: String?) {
+    self.conversationId = conversationId
+    self.groupId = groupId
   }
 }
 
@@ -320,6 +404,59 @@ public struct MLSConversationReadyResult: Equatable, Sendable {
     self.epoch = epoch
     self.sendAllowed = sendAllowed
   }
+}
+
+private func decodeConversationSnapshot(
+  _ ffiConversation: FfiConversationView,
+  fallbackUserDID: String
+) throws -> BlueCatbirdMlsChatDefs.ConvoView {
+  let createdAtDate = parseFFIISO8601Date(ffiConversation.createdAt) ?? Date()
+  let joinedAt = ATProtocolDate(date: createdAtDate)
+  let creatorDIDString =
+    ffiConversation.members.first(where: { $0.role.lowercased() == "admin" })?.did ?? fallbackUserDID
+  let creatorDID = try DID(didString: creatorDIDString)
+  let members: [BlueCatbirdMlsChatDefs.MemberView] = try ffiConversation.members.map { member in
+    let did = try DID(didString: member.did)
+    return BlueCatbirdMlsChatDefs.MemberView(
+      did: did,
+      userDid: did,
+      deviceId: nil,
+      deviceName: nil,
+      joinedAt: joinedAt,
+      isAdmin: member.role.lowercased() == "admin",
+      isModerator: nil,
+      promotedAt: nil,
+      promotedBy: nil,
+      leafIndex: nil,
+      credential: nil
+    )
+  }
+
+  return BlueCatbirdMlsChatDefs.ConvoView(
+    conversationId: ffiConversation.conversationId,
+    groupId: ffiConversation.groupId,
+    creator: creatorDID,
+    members: members,
+    epoch: Int(ffiConversation.epoch),
+    cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+    createdAt: ATProtocolDate(date: createdAtDate),
+    lastMessageAt: parseFFIISO8601Date(ffiConversation.updatedAt).map(ATProtocolDate.init(date:)),
+    confirmationTag: nil,
+    resetGeneration: nil,
+    sequencerDid: nil
+  )
+}
+
+private let ffiConversationDateFormatter: ISO8601DateFormatter = {
+  let formatter = ISO8601DateFormatter()
+  formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return formatter
+}()
+
+private func parseFFIISO8601Date(_ value: String?) -> Date? {
+  guard let value else { return nil }
+  return ffiConversationDateFormatter.date(from: value)
+    ?? ISO8601DateFormatter().date(from: value)
 }
 
 extension MLSOrchestratorRuntime {
