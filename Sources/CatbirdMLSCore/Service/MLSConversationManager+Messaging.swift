@@ -472,6 +472,38 @@ public extension MLSConversationManager {
   ) async throws -> (
     messageId: String, receivedAt: ATProtocolDate, sequenceNumber: Int64, epoch: Int64
   ) {
+    try throwIfShuttingDown("sendMessage")
+
+    if protocolAuthorityMode == .rustFull {
+      let payload = MLSMessagePayload.text(plaintext, embed: embed)
+      let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
+        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+      }
+      await handleRustEngineEvents(sendResult.events, source: "sendMessage")
+      let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
+      return (
+        messageId: sendResult.message.id,
+        receivedAt: ATProtocolDate(date: timestamp),
+        sequenceNumber: Int64(clamping: sendResult.message.sequenceNumber),
+        epoch: Int64(clamping: sendResult.message.epoch)
+      )
+    }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    return try await sendMessageLegacy(convoId: convoId, plaintext: plaintext, embed: embed)
+#else
+    try assertSwiftProtocolMutationAllowed("sendMessage legacy protocol implementation")
+    return try await sendMessageLegacy(convoId: convoId, plaintext: plaintext, embed: embed)
+#endif
+  }
+
+  private func sendMessageLegacy(
+    convoId: String,
+    plaintext: String,
+    embed: MLSEmbedData? = nil
+  ) async throws -> (
+    messageId: String, receivedAt: ATProtocolDate, sequenceNumber: Int64, epoch: Int64
+  ) {
     // ═══════════════════════════════════════════════════════════════════════════
     // EARLY VALIDATION: Run outside the queue to fail fast
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1114,6 +1146,35 @@ public extension MLSConversationManager {
 
   /// Process a single server message through UniFFI and return application payloads when available
   internal func processServerMessage(
+    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    source: String = "unknown"
+  ) async throws -> MessageProcessingOutcome
+  {
+    let myGeneration = sessionGeneration
+
+    if protocolAuthorityMode == .rustFull {
+      try throwIfShuttingDown("processServerMessage")
+      guard let userDid = userDid else {
+        throw MLSConversationError.noAuthentication
+      }
+      try validateSessionGeneration(capturedGeneration: myGeneration)
+      return try await processServerMessageWithFullRust(
+        message,
+        source: source,
+        userDid: userDid,
+        attemptID: nextProcessingAttemptID()
+      )
+    }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    return try await processServerMessageLegacy(message, source: source)
+#else
+    try assertSwiftProtocolMutationAllowed("processServerMessage legacy protocol implementation")
+    return try await processServerMessageLegacy(message, source: source)
+#endif
+  }
+
+  private func processServerMessageLegacy(
     _ message: BlueCatbirdMlsChatDefs.MessageView,
     source: String = "unknown"
   ) async throws -> MessageProcessingOutcome
@@ -5992,6 +6053,7 @@ public extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
+
     guard let convo = conversations[convoId] else {
       logger.warning("Cannot initialize group: conversation \(convoId) not found")
       throw MLSConversationError.conversationNotFound
@@ -6032,6 +6094,30 @@ public extension MLSConversationManager {
       }
     }
 
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    try await ensureGroupInitializedLegacy(
+      for: convoId,
+      userDid: userDid,
+      convo: convo,
+      groupIdData: groupIdData
+    )
+#else
+    try assertSwiftProtocolMutationAllowed("ensureGroupInitialized legacy protocol implementation")
+    try await ensureGroupInitializedLegacy(
+      for: convoId,
+      userDid: userDid,
+      convo: convo,
+      groupIdData: groupIdData
+    )
+#endif
+  }
+
+  private func ensureGroupInitializedLegacy(
+    for convoId: String,
+    userDid: String,
+    convo: BlueCatbirdMlsChatDefs.ConvoView,
+    groupIdData: Data
+  ) async throws {
     // Check if group already exists locally
     if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
       logger.debug("Group already exists locally for conversation \(convoId)")

@@ -100,6 +100,29 @@ public extension MLSConversationManager {
   /// Sync conversations with server
   /// - Parameter fullSync: Whether to perform full sync or incremental
   public func syncWithServer(fullSync: Bool = false) async throws {
+    if protocolAuthorityMode == .rustFull {
+      try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
+        try runtime.syncWithServer(fullSync: fullSync)
+      }
+      return
+    }
+
+    if protocolAuthorityMode.usesRustForDecisions {
+      try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
+        try runtime.syncWithServer(fullSync: fullSync)
+      }
+      return
+    }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    try await syncWithServerLegacy(fullSync: fullSync)
+#else
+    try assertSwiftProtocolMutationAllowed("syncWithServer legacy protocol implementation")
+    try await syncWithServerLegacy(fullSync: fullSync)
+#endif
+  }
+
+  private func syncWithServerLegacy(fullSync: Bool = false) async throws {
     // CRITICAL: Capture session generation at start to detect account switches
     let myGeneration = sessionGeneration
 
@@ -747,6 +770,27 @@ public extension MLSConversationManager {
   /// before attempting rejoin so that `attemptExternalCommitFallback` doesn't
   /// short-circuit on `groupExists`.
   internal func runDeferredEpochRecovery() async throws {
+    guard !isShuttingDown, !Task.isCancelled else { return }
+    guard let userDid = userDid else { return }
+    guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
+      return
+    }
+    if protocolAuthorityMode == .rustFull {
+      _ = try await withRustAuthoritativeRuntime(operation: "runDeferredEpochRecovery") { runtime in
+        try runtime.runDeferredRecovery(reason: "swift-scheduler-request")
+      }
+      return
+    }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    try await runDeferredEpochRecoveryLegacy()
+#else
+    try assertSwiftProtocolMutationAllowed("runDeferredEpochRecovery legacy protocol implementation")
+    try await runDeferredEpochRecoveryLegacy()
+#endif
+  }
+
+  private func runDeferredEpochRecoveryLegacy() async throws {
     guard !isShuttingDown, !Task.isCancelled else { return }
     guard let userDid = userDid else { return }
     guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {

@@ -1102,6 +1102,82 @@ public final class MLSConversationManager {
             return
         }
 
+        let localGroupIdHex = conversations[convoId]?.groupId
+        let storedGenForLog: Int64? = (try? await database.read { db in
+            try MLSConversationResetSQL.loadPendingResetGeneration(
+                db: db, conversationID: convoId, currentUserDID: userDid
+            )
+        }) ?? nil
+        logger.info(
+            "🔍 [RESET-EVENT] handler=handleGroupReset convo=\(convoId.prefix(16)) incomingGen=\(event.resetGeneration) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(newGroupId.prefix(16))"
+        )
+
+        if protocolAuthorityMode == .rustFull {
+            do {
+                let eventJson = try Self.rustServerEventJson(fields: [
+                    "type": "groupReset",
+                    "convoId": convoId,
+                    "newGroupId": newGroupId,
+                    "resetGeneration": event.resetGeneration,
+                ])
+                let events = try await withRustAuthoritativeRuntime(operation: "handleGroupReset") { runtime in
+                    try runtime.processServerEvent(eventJson: eventJson)
+                }
+                logger.info(
+                    "[MLS-FULL-RUST] handleGroupReset processed server event via Rust events=\(events.count, privacy: .public) convo=\(convoId.prefix(16), privacy: .private)"
+                )
+                await handleRustEngineEvents(
+                    events,
+                    source: "handleGroupReset",
+                    resetNotification: RustEngineResetNotification(
+                        convoId: convoId,
+                        newGroupId: newGroupId,
+                        resetGeneration: event.resetGeneration,
+                        resetBy: event.resetBy,
+                        reason: event.reason
+                    )
+                )
+            } catch {
+                logger.error(
+                    "[MLS-FULL-RUST] handleGroupReset failed in Rust server event path: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+        await handleGroupResetLegacy(event: event)
+#else
+        do {
+            try assertSwiftProtocolMutationAllowed("handleGroupReset legacy protocol implementation")
+            await handleGroupResetLegacy(event: event)
+        } catch {
+            logger.error(
+                "[MLS-FULL-RUST] handleGroupReset legacy path blocked: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+#endif
+    }
+
+    private func handleGroupResetLegacy(
+        event: BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent
+    ) async {
+        let convoId = event.convoId
+        let newGroupId = event.newGroupId
+
+        logger.info(
+            "🔄 [handleGroupReset] Conversation \(convoId.prefix(16)) reset to group \(newGroupId.prefix(16)) (gen \(event.resetGeneration))"
+        )
+
+        guard let userDid = userDid else {
+            logger.warning("⚠️ [handleGroupReset] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: userDid, operation: "handleGroupReset") else {
+            return
+        }
+
         // CLIENT M (Task #75): one-line entry summary for grep-based forensic
         // analysis of replay-storm sequences. Mirror the same shape as
         // handleResetRequested. The `try?` collapses any GRDB error to nil; the
@@ -1381,6 +1457,79 @@ public final class MLSConversationManager {
     ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
     ///     session id, generation, trigger, and dedup id.
     public func handleResetRequested(
+        event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
+    ) async {
+        let convoId = event.convoId
+        let generation = event.generation
+        let trigger = event.trigger
+
+        logger.info(
+            "🔄 [handleResetRequested] Conversation \(convoId.prefix(16)) reset requested (gen \(generation), trigger=\(trigger), eventId=\(event.requestEventId.prefix(16)))"
+        )
+
+        guard let userDid = userDid else {
+            logger.warning("⚠️ [handleResetRequested] No user DID available")
+            return
+        }
+
+        guard await ensureActiveAccount(for: userDid, operation: "handleResetRequested") else {
+            return
+        }
+
+        let localGroupIdHex = conversations[convoId]?.groupId
+        let storedGenForLog: Int64? = (try? await database.read { db in
+            try MLSConversationResetSQL.loadPendingResetGeneration(
+                db: db, conversationID: convoId, currentUserDID: userDid
+            )
+        }) ?? nil
+        logger.info(
+            "🔍 [RESET-EVENT] handler=handleResetRequested convo=\(convoId.prefix(16)) incomingGen=\(generation) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(event.expectedNewMlsGroupId?.prefix(16) ?? "nil")"
+        )
+
+        if protocolAuthorityMode == .rustFull {
+            do {
+                var fields: [String: Any] = [
+                    "type": "resetRequested",
+                    "convoId": convoId,
+                    "cryptoSessionId": event.cryptoSessionId,
+                    "resetGeneration": generation,
+                    "trigger": trigger,
+                    "requestEventId": event.requestEventId,
+                ]
+                if let expectedNewMlsGroupId = event.expectedNewMlsGroupId {
+                    fields["expectedNewMlsGroupIdHex"] = expectedNewMlsGroupId
+                }
+                let eventJson = try Self.rustServerEventJson(fields: fields)
+                let events = try await withRustAuthoritativeRuntime(operation: "handleResetRequested") { runtime in
+                    try runtime.processServerEvent(eventJson: eventJson)
+                }
+                logger.info(
+                    "[MLS-FULL-RUST] handleResetRequested processed server event via Rust events=\(events.count, privacy: .public) convo=\(convoId.prefix(16), privacy: .private)"
+                )
+                await handleRustEngineEvents(events, source: "handleResetRequested")
+            } catch {
+                logger.error(
+                    "[MLS-FULL-RUST] handleResetRequested failed in Rust server event path: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+            return
+        }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+        await handleResetRequestedLegacy(event: event)
+#else
+        do {
+            try assertSwiftProtocolMutationAllowed("handleResetRequested legacy protocol implementation")
+            await handleResetRequestedLegacy(event: event)
+        } catch {
+            logger.error(
+                "[MLS-FULL-RUST] handleResetRequested legacy path blocked: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+#endif
+    }
+
+    private func handleResetRequestedLegacy(
         event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
     ) async {
         let convoId = event.convoId

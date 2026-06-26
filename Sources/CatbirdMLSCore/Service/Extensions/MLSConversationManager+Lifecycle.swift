@@ -937,6 +937,37 @@ extension MLSConversationManager {
   }
 
   internal func validateGroupStates() async {
+    if protocolAuthorityMode == .rustFull {
+      do {
+        let report = try await withRustAuthoritativeRuntime(operation: "startupReconcile") { runtime in
+          try runtime.startupReconcile()
+        }
+        logger.info(
+          "✅ [MLS-FULL-RUST] Startup reconcile completed scanned=\(report.scanned, privacy: .public) healthy=\(report.healthy, privacy: .public) needsRejoin=\(report.needsRejoin, privacy: .public) resetPending=\(report.resetPending, privacy: .public) unrecoverableLocal=\(report.unrecoverableLocal, privacy: .public)"
+        )
+      } catch {
+        logger.error(
+          "❌ [MLS-FULL-RUST] Startup reconcile failed: \(error.localizedDescription, privacy: .public)"
+        )
+      }
+      return
+    }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    await validateGroupStatesLegacy()
+#else
+    do {
+      try assertSwiftProtocolMutationAllowed("validateGroupStates legacy protocol implementation")
+      await validateGroupStatesLegacy()
+    } catch {
+      logger.info(
+        "⏭️ [MLS-FULL-RUST] Skipping validateGroupStates in \(self.protocolAuthorityMode.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+      )
+    }
+#endif
+  }
+
+  private func validateGroupStatesLegacy() async {
     logger.info("🔍 [STARTUP] Validating MLS group state for all conversations...")
 
     guard let userDid = userDid else {
@@ -1078,6 +1109,24 @@ extension MLSConversationManager {
   }
 
   public func detectAndRejoinMissingConversations() async throws {
+    if protocolAuthorityMode == .rustFull {
+      try assertSwiftProtocolMutationAllowed(
+        "detectAndRejoinMissingConversations legacy protocol implementation"
+      )
+      return
+    }
+
+#if MLS_SWIFT_LEGACY_PROTOCOL
+    try await detectAndRejoinMissingConversationsLegacy()
+#else
+    try assertSwiftProtocolMutationAllowed(
+      "detectAndRejoinMissingConversations legacy protocol implementation"
+    )
+    try await detectAndRejoinMissingConversationsLegacy()
+#endif
+  }
+
+  private func detectAndRejoinMissingConversationsLegacy() async throws {
     logger.info("🔍 Detecting missing conversations for auto-rejoin")
     try throwIfShuttingDown("detectAndRejoinMissingConversations")
 
