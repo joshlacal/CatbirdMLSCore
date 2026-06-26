@@ -107,13 +107,6 @@ public extension MLSConversationManager {
       return
     }
 
-    if protocolAuthorityMode.usesRustForDecisions {
-      try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
-        try runtime.syncWithServer(fullSync: fullSync)
-      }
-      return
-    }
-
 #if MLS_SWIFT_LEGACY_PROTOCOL
     try await syncWithServerLegacy(fullSync: fullSync)
 #else
@@ -794,12 +787,6 @@ public extension MLSConversationManager {
     guard !isShuttingDown, !Task.isCancelled else { return }
     guard let userDid = userDid else { return }
     guard await ensureActiveAccount(for: userDid, operation: "runDeferredEpochRecovery") else {
-      return
-    }
-    if protocolAuthorityMode == .rustFull {
-      _ = try await withRustAuthoritativeRuntime(operation: "runDeferredEpochRecovery") { runtime in
-        try runtime.runDeferredRecovery(reason: "swift-scheduler-request")
-      }
       return
     }
     try assertSwiftProtocolMutationAllowed("runDeferredEpochRecovery")

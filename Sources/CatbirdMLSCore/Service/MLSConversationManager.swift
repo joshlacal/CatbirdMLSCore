@@ -1193,39 +1193,6 @@ public final class MLSConversationManager {
             "🔍 [RESET-EVENT] handler=handleGroupReset convo=\(convoId.prefix(16)) incomingGen=\(event.resetGeneration) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(newGroupId.prefix(16))"
         )
 
-        if protocolAuthorityMode == .rustFull {
-            do {
-                let eventJson = try Self.rustServerEventJson(fields: [
-                    "type": "groupReset",
-                    "convoId": convoId,
-                    "newGroupId": newGroupId,
-                    "resetGeneration": event.resetGeneration,
-                ])
-                let events = try await withRustAuthoritativeRuntime(operation: "handleGroupReset") { runtime in
-                    try runtime.processServerEvent(eventJson: eventJson)
-                }
-                logger.info(
-                    "[MLS-FULL-RUST] handleGroupReset processed server event via Rust events=\(events.count, privacy: .public) convo=\(convoId.prefix(16), privacy: .private)"
-                )
-                await handleRustEngineEvents(
-                    events,
-                    source: "handleGroupReset",
-                    resetNotification: RustEngineResetNotification(
-                        convoId: convoId,
-                        newGroupId: newGroupId,
-                        resetGeneration: event.resetGeneration,
-                        resetBy: event.resetBy,
-                        reason: event.reason
-                    )
-                )
-            } catch {
-                logger.error(
-                    "[MLS-FULL-RUST] handleGroupReset failed in Rust server event path: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-            return
-        }
-
         if protocolAuthorityMode.usesRustForDecisions {
             do {
                 let outcome = try await withRustAuthoritativeRuntime(operation: "handleGroupReset") { runtime in
@@ -1562,35 +1529,6 @@ public final class MLSConversationManager {
         logger.info(
             "🔍 [RESET-EVENT] handler=handleResetRequested convo=\(convoId.prefix(16)) incomingGen=\(generation) storedGen=\(storedGenForLog.map(String.init) ?? "nil") localGroupId=\(localGroupIdHex?.prefix(16) ?? "nil") incomingNewGroupId=\(event.expectedNewMlsGroupId?.prefix(16) ?? "nil")"
         )
-
-        if protocolAuthorityMode == .rustFull {
-            do {
-                var fields: [String: Any] = [
-                    "type": "resetRequested",
-                    "convoId": convoId,
-                    "cryptoSessionId": event.cryptoSessionId,
-                    "resetGeneration": generation,
-                    "trigger": trigger,
-                    "requestEventId": event.requestEventId,
-                ]
-                if let expectedNewMlsGroupId = event.expectedNewMlsGroupId {
-                    fields["expectedNewMlsGroupIdHex"] = expectedNewMlsGroupId
-                }
-                let eventJson = try Self.rustServerEventJson(fields: fields)
-                let events = try await withRustAuthoritativeRuntime(operation: "handleResetRequested") { runtime in
-                    try runtime.processServerEvent(eventJson: eventJson)
-                }
-                logger.info(
-                    "[MLS-FULL-RUST] handleResetRequested processed server event via Rust events=\(events.count, privacy: .public) convo=\(convoId.prefix(16), privacy: .private)"
-                )
-                await handleRustEngineEvents(events, source: "handleResetRequested")
-            } catch {
-                logger.error(
-                    "[MLS-FULL-RUST] handleResetRequested failed in Rust server event path: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-            return
-        }
 
         if protocolAuthorityMode.usesRustForDecisions {
             do {

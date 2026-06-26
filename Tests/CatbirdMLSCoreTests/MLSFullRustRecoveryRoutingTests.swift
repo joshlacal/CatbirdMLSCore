@@ -316,6 +316,42 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(conversation?.needsRejoin, true)
   }
 
+  func testRustAuthoritativeSyncWithServerHonorsPauseBeforeRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustAuthoritative)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustAuthoritative,
+      bridge: bridge
+    )
+    manager.isSyncPaused = true
+
+    try await manager.syncWithServer(fullSync: false)
+
+    XCTAssertEqual(bridge.syncWithServerCallCount, 0)
+    XCTAssertNil(bridge.lastSyncWithServerFullSync)
+  }
+
+  func testRustAuthoritativeSyncWithServerHonorsShutdownBeforeRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustAuthoritative)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustAuthoritative,
+      bridge: bridge
+    )
+    manager.isShuttingDown = true
+
+    await XCTAssertThrowsErrorAsync(try await manager.syncWithServer(fullSync: false)) { error in
+      guard case MLSConversationError.operationFailed = error else {
+        return XCTFail("Expected operationFailed, got \(error)")
+      }
+    }
+
+    XCTAssertEqual(bridge.syncWithServerCallCount, 0)
+    XCTAssertNil(bridge.lastSyncWithServerFullSync)
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
@@ -428,8 +464,10 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
   private(set) var runDeferredRecoveryCallCount = 0
   private(set) var ensureConversationReadyCallCount = 0
   private(set) var joinOrRejoinCallCount = 0
+  private(set) var syncWithServerCallCount = 0
   private(set) var lastDeferredRecoveryReason: String?
   private(set) var lastEnsureConversationReadyConversationId: String?
+  private(set) var lastSyncWithServerFullSync: Bool?
 
   init() {
     super.init(noPointer: .init())
@@ -462,6 +500,11 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
       epoch: conversationReadyResult.epoch ?? 0,
       recoveryState: conversationReadyResult.recoveryState
     )
+  }
+
+  override func syncWithServer(fullSync: Bool) throws {
+    syncWithServerCallCount += 1
+    lastSyncWithServerFullSync = fullSync
   }
 
   override func shutdown() {

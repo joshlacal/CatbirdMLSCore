@@ -975,22 +975,6 @@ extension MLSConversationManager {
       return
     }
 
-    if protocolAuthorityMode == .rustFull {
-      do {
-        let report = try await withRustAuthoritativeRuntime(operation: "startupReconcile") { runtime in
-          try runtime.startupReconcile()
-        }
-        logger.info(
-          "✅ [MLS-FULL-RUST] Startup reconcile completed scanned=\(report.scanned, privacy: .public) healthy=\(report.healthy, privacy: .public) needsRejoin=\(report.needsRejoin, privacy: .public) resetPending=\(report.resetPending, privacy: .public) unrecoverableLocal=\(report.unrecoverableLocal, privacy: .public)"
-        )
-      } catch {
-        logger.error(
-          "❌ [MLS-FULL-RUST] Startup reconcile failed: \(error.localizedDescription, privacy: .public)"
-        )
-      }
-      return
-    }
-
     do {
       try assertSwiftProtocolMutationAllowed("startup validation")
     } catch {

@@ -509,21 +509,6 @@ public extension MLSConversationManager {
     // ═══════════════════════════════════════════════════════════════════════════
     try throwIfShuttingDown("sendMessage")
 
-    if protocolAuthorityMode == .rustFull {
-      let payload = MLSMessagePayload.text(plaintext, embed: embed)
-      let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
-      }
-      await handleRustEngineEvents(sendResult.events, source: "sendMessage")
-      let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
-      return (
-        messageId: sendResult.message.id,
-        receivedAt: ATProtocolDate(date: timestamp),
-        sequenceNumber: Int64(clamping: sendResult.message.sequenceNumber),
-        epoch: Int64(clamping: sendResult.message.epoch)
-      )
-    }
-
     // Reconnect database pool if it was closed during recovery
     try await refreshDatabaseIfNeeded()
 
@@ -1181,20 +1166,6 @@ public extension MLSConversationManager {
   {
     // CRITICAL: Capture session generation at start to detect account switches
     let myGeneration = sessionGeneration
-
-    if protocolAuthorityMode == .rustFull {
-      try throwIfShuttingDown("processServerMessage")
-      guard let userDid = userDid else {
-        throw MLSConversationError.noAuthentication
-      }
-      try validateSessionGeneration(capturedGeneration: myGeneration)
-      return try await processServerMessageWithFullRust(
-        message,
-        source: source,
-        userDid: userDid,
-        attemptID: nextProcessingAttemptID()
-      )
-    }
 
     // CRITICAL FIX: Ensure state is reloaded from disk before processing
     // This handles the case where NSE advanced the MLS ratchet while app was in background.
