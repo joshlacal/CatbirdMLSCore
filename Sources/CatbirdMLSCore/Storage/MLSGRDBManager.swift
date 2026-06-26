@@ -5759,8 +5759,29 @@ public actor MLSGRDBManager {
       .replacingOccurrences(of: "?", with: "-")
   }
 
+  private nonisolated func rustStorageIdentifier(for userDID: String) -> String {
+    userDID
+      .data(using: .utf8)?
+      .base64EncodedString()
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "=", with: "")
+      .prefix(64)
+      .description ?? "default"
+  }
+
+  internal nonisolated func appContentDatabasePath(for userDID: String) -> URL {
+    databasePath(for: userDID)
+  }
+
+  internal nonisolated func rustStateDatabasePath(for userDID: String) -> URL {
+    let rustDirectory = MLSStoragePaths.baseContainerURL()
+      .appendingPathComponent("mls-state", isDirectory: true)
+    return rustDirectory.appendingPathComponent("\(rustStorageIdentifier(for: userDID)).db")
+  }
+
   /// Get database file path for user
-  private func databasePath(for userDID: String) -> URL {
+  private nonisolated func databasePath(for userDID: String) -> URL {
     // Sanitize DID string for use in filesystem path (doesn't modify the actual DID)
     let sanitizedDID = sanitizeDID(userDID)
 

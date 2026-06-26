@@ -6,6 +6,30 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSFullRustLifecycleTests: XCTestCase {
+  func testRuntimeStorageLifecycleStatusWrapsBridgeResult() throws {
+    let bridge = RecordingLifecycleBridge()
+    bridge.storageLifecycleStatusResult = StorageLifecycleStatus(
+      state: .open,
+      interruptibleContexts: 2,
+      isBusy: true,
+      busyContexts: 1,
+      lastOperationLabel: "encrypt_message"
+    )
+    let runtime = MLSOrchestratorRuntime(
+      userDID: "did:plc:alice",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let status = runtime.storageLifecycleStatus()
+
+    XCTAssertEqual(status.state, .open)
+    XCTAssertEqual(status.interruptibleContexts, 2)
+    XCTAssertTrue(status.isBusy)
+    XCTAssertEqual(status.busyContexts, 1)
+    XCTAssertEqual(status.lastOperationLabel, "encrypt_message")
+  }
+
   func testRuntimePrepareForSuspendWrapsBridgeResult() throws {
     let bridge = RecordingLifecycleBridge()
     bridge.prepareResult = FfiSuspendResult(
@@ -264,6 +288,42 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertNil(manager.orchestratorRuntime)
   }
 
+  func testSwiftHostMaterialKeepsAppContentAndRustStorageSeparate() throws {
+    let baseDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+    MLSStoragePaths.setBaseDirectoryOverride(baseDirectory)
+    defer {
+      MLSStoragePaths.setBaseDirectoryOverride(nil)
+      try? FileManager.default.removeItem(at: baseDirectory)
+    }
+
+    let manager = MLSGRDBManager()
+    let appContentPath = manager.appContentDatabasePath(for: "did:plc:testuser")
+    let rustStoragePath = manager.rustStateDatabasePath(for: "did:plc:testuser")
+
+    XCTAssertNotEqual(appContentPath, rustStoragePath)
+    XCTAssertTrue(appContentPath.path.contains("/MLS/"))
+    XCTAssertTrue(rustStoragePath.path.contains("/mls-state/"))
+
+    let context = try MlsContext(
+      storagePath: rustStoragePath.path,
+      encryptionKey: "test-key",
+      keychain: MLSKeychainAccessBridge()
+    )
+    let status = context.storageLifecycleStatus()
+
+    XCTAssertEqual(status.state, .open)
+    XCTAssertFalse(status.isBusy)
+    XCTAssertEqual(status.busyContexts, 0)
+    XCTAssertEqual(status.interruptibleContexts, 2)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: rustStoragePath.path))
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: appContentPath.path),
+      "creating the Rust context should not synthesize a Swift projection database"
+    )
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
@@ -306,6 +366,13 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
     acceptingNewWork: false,
     interruptedContexts: 1
   )
+  var storageLifecycleStatusResult = StorageLifecycleStatus(
+    state: .open,
+    interruptibleContexts: 2,
+    isBusy: false,
+    busyContexts: 0,
+    lastOperationLabel: "initialized"
+  )
   private(set) var initializeCalls: [String] = []
   private(set) var prepareCalls: [LifecycleCall] = []
   private(set) var reattachCalls: [LifecycleUserReasonCall] = []
@@ -334,6 +401,10 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
       throw prepareError
     }
     return prepareResult
+  }
+
+  override func storageLifecycleStatus() -> StorageLifecycleStatus {
+    storageLifecycleStatusResult
   }
 
   override func reattachAfterSuspend(userDid: String, reason: String) throws {

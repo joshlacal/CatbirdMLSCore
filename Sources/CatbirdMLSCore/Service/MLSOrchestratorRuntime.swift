@@ -125,6 +125,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.emergencyClose(reason: reason)
   }
 
+  public func storageLifecycleStatus() -> StorageLifecycleStatus {
+    bridge.storageLifecycleStatus()
+  }
+
   @discardableResult
   public func sendMessage(conversationId: String, text: String) throws -> FfiMessage {
     try bridge.sendMessage(conversationId: conversationId, text: text)

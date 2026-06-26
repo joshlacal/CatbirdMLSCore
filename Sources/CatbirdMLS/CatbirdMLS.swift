@@ -9293,13 +9293,17 @@ public func FfiConverterTypeStagedWelcomeInfo_lower(_ value: StagedWelcomeInfo) 
 public struct StorageLifecycleStatus {
     public var state: StorageLifecycleState
     public var interruptibleContexts: UInt32
+    public var isBusy: Bool
+    public var busyContexts: UInt32
     public var lastOperationLabel: String?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(state: StorageLifecycleState, interruptibleContexts: UInt32, lastOperationLabel: String?) {
+    public init(state: StorageLifecycleState, interruptibleContexts: UInt32, isBusy: Bool, busyContexts: UInt32, lastOperationLabel: String?) {
         self.state = state
         self.interruptibleContexts = interruptibleContexts
+        self.isBusy = isBusy
+        self.busyContexts = busyContexts
         self.lastOperationLabel = lastOperationLabel
     }
 }
@@ -9312,6 +9316,12 @@ extension StorageLifecycleStatus: Equatable, Hashable {
         if lhs.interruptibleContexts != rhs.interruptibleContexts {
             return false
         }
+        if lhs.isBusy != rhs.isBusy {
+            return false
+        }
+        if lhs.busyContexts != rhs.busyContexts {
+            return false
+        }
         if lhs.lastOperationLabel != rhs.lastOperationLabel {
             return false
         }
@@ -9321,6 +9331,8 @@ extension StorageLifecycleStatus: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(state)
         hasher.combine(interruptibleContexts)
+        hasher.combine(isBusy)
+        hasher.combine(busyContexts)
         hasher.combine(lastOperationLabel)
     }
 }
@@ -9334,6 +9346,8 @@ public struct FfiConverterTypeStorageLifecycleStatus: FfiConverterRustBuffer {
             try StorageLifecycleStatus(
                 state: FfiConverterTypeStorageLifecycleState.read(from: &buf),
                 interruptibleContexts: FfiConverterUInt32.read(from: &buf),
+                isBusy: FfiConverterBool.read(from: &buf),
+                busyContexts: FfiConverterUInt32.read(from: &buf),
                 lastOperationLabel: FfiConverterOptionString.read(from: &buf)
             )
     }
@@ -9341,6 +9355,8 @@ public struct FfiConverterTypeStorageLifecycleStatus: FfiConverterRustBuffer {
     public static func write(_ value: StorageLifecycleStatus, into buf: inout [UInt8]) {
         FfiConverterTypeStorageLifecycleState.write(value.state, into: &buf)
         FfiConverterUInt32.write(value.interruptibleContexts, into: &buf)
+        FfiConverterBool.write(value.isBusy, into: &buf)
+        FfiConverterUInt32.write(value.busyContexts, into: &buf)
         FfiConverterOptionString.write(value.lastOperationLabel, into: &buf)
     }
 }
