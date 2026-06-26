@@ -498,18 +498,14 @@ extension MLSConversationManager {
 
     // Phase F: legacy 0xff00 reader removed. Source the title from
     // local GRDB (the cache populated by `bootstrapMetadataAfterJoin`).
-    // The avatar bytes live alongside it on `MLSConversationModel`.
+    // The description and avatar bytes live alongside it on `MLSConversationModel`.
     let localAvatarData = localDisplayMetadata?.avatarImageData
     let currentMetadata: GroupMetadataV1?
     if let localTitle = localDisplayMetadata?.title, !localTitle.isEmpty {
       let avatarLocator = localAvatarData != nil ? UUID().uuidString.lowercased() : nil
       currentMetadata = GroupMetadataV1(
         title: localTitle,
-        // LocalDisplayMetadata doesn't carry description (the GRDB
-        // helper only persists title + avatarImageData). Re-wrap
-        // ships an empty description; if the description was set
-        // previously it can be re-derived from a separate fetch.
-        description: "",
+        description: localDisplayMetadata?.description ?? "",
         avatar_blob_locator: avatarLocator
       )
     } else {
@@ -619,6 +615,7 @@ extension MLSConversationManager {
           currentUserDID: userDid,
           groupIdHex: groupIdHex,
           title: metadata.title.isEmpty ? nil : metadata.title,
+          description: metadata.description.isEmpty ? nil : metadata.description,
           avatarImageData: decryptedAvatarData,
           now: Date()
         )

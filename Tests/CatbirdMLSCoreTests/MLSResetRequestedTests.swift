@@ -649,6 +649,7 @@ final class MLSResetRequestedTests: XCTestCase {
       t.column("joinMethod", .text).notNull().defaults(to: "unknown")
       t.column("joinEpoch", .integer).notNull().defaults(to: 0)
       t.column("title", .text)
+      t.column("description", .text)
       t.column("avatarURL", .text)
       t.column("avatarImageData", .blob)
       t.column("createdAt", .datetime).notNull()

@@ -4499,7 +4499,7 @@ public actor MLSGRDBManager {
     try Self.makeMigrator().migrate(db)
   }
 
-  /// Build the full production migration chain (v1…v32).
+  /// Build the full production migration chain (v1…v33).
   ///
   /// Extracted from `runMigrations` so the test substrate can run the exact
   /// same chain against an in-memory `DatabaseQueue` (N37: hand-rolled test
@@ -4519,6 +4519,7 @@ public actor MLSGRDBManager {
         t.column("joinMethod", .text).notNull().defaults(to: "unknown")
         t.column("joinEpoch", .integer).notNull().defaults(to: 0)
         t.column("title", .text)
+        t.column("description", .text)
         t.column("avatarURL", .text)
         t.column("createdAt", .datetime).notNull()
         t.column("updatedAt", .datetime).notNull()
@@ -5403,6 +5404,14 @@ public actor MLSGRDBManager {
       try db.create(table: "MLSRecoveryGlobalStateModel", ifNotExists: true) { t in
         t.column("currentUserDID", .text).notNull().primaryKey()
         t.column("lastGlobalRejoinAttemptAtMs", .integer).notNull()
+      }
+    }
+
+    migrator.registerMigration("v33_conversation_description") { db in
+      let columns = try db.columns(in: "MLSConversationModel").map(\.name)
+      guard !columns.contains("description") else { return }
+      try db.alter(table: "MLSConversationModel") { t in
+        t.add(column: "description", .text)
       }
     }
 

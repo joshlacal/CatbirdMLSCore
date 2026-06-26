@@ -251,6 +251,7 @@ final class MLSGroupResetRecipientTests: XCTestCase {
         currentUserDID: userDid,
         groupIdHex: rotatedGroup.hexEncodedString(),
         title: "Restored Group Title",
+        description: "Restored Description",
         avatarImageData: avatarData,
         now: Date(timeIntervalSince1970: 1_700_000_100)
       )
@@ -269,6 +270,7 @@ final class MLSGroupResetRecipientTests: XCTestCase {
     }
 
     XCTAssertEqual(row.title, "Restored Group Title")
+    XCTAssertEqual(row.description, "Restored Description")
     XCTAssertEqual(row.avatarImageData, avatarData)
     XCTAssertFalse(row.isPlaceholder)
   }
@@ -390,6 +392,7 @@ final class MLSGroupResetRecipientTests: XCTestCase {
       t.column("joinMethod", .text).notNull().defaults(to: "unknown")
       t.column("joinEpoch", .integer).notNull().defaults(to: 0)
       t.column("title", .text)
+      t.column("description", .text)
       t.column("avatarURL", .text)
       t.column("avatarImageData", .blob)
       t.column("createdAt", .datetime).notNull()

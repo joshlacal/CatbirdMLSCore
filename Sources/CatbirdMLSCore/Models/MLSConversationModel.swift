@@ -33,6 +33,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let joinMethod: MLSJoinMethod
   public let joinEpoch: Int64
   public let title: String?
+  public let description: String?
   public let avatarURL: String?
   public let avatarImageData: Data?
   public let createdAt: Date
@@ -110,6 +111,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     joinMethod: MLSJoinMethod = .unknown,
     joinEpoch: Int64 = 0,
     title: String? = nil,
+    description: String? = nil,
     avatarURL: String? = nil,
     avatarImageData: Data? = nil,
     createdAt: Date = Date(),
@@ -137,6 +139,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     self.joinMethod = joinMethod
     self.joinEpoch = joinEpoch
     self.title = title
+    self.description = description
     self.avatarURL = avatarURL
     self.avatarImageData = avatarImageData
     self.createdAt = createdAt
@@ -180,6 +183,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: existing?.joinMethod ?? .unknown,
       joinEpoch: existing?.joinEpoch ?? 0,
       title: title,
+      description: existing?.description,
       avatarURL: existing?.avatarURL,
       avatarImageData: existing?.avatarImageData,
       createdAt: createdAt,
@@ -212,6 +216,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -243,6 +248,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: method,
       joinEpoch: epoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -275,6 +281,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -307,6 +314,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -329,9 +337,14 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
     )
   }
 
-  /// Create updated copy with new title, avatar URL, and optional avatar image data
+  /// Create updated copy with new display metadata.
   /// Note: Setting metadata clears the isPlaceholder flag (placeholder healed)
-  func withMetadata(title: String?, avatarURL: String?, avatarImageData: Data? = nil) -> MLSConversationModel {
+  func withMetadata(
+    title: String?,
+    description: String? = nil,
+    avatarURL: String?,
+    avatarImageData: Data? = nil
+  ) -> MLSConversationModel {
     MLSConversationModel(
       conversationID: conversationID,
       currentUserDID: currentUserDID,
@@ -340,6 +353,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -372,6 +386,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -406,6 +421,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -438,6 +454,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -470,6 +487,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -502,6 +520,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -534,6 +553,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -566,6 +586,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
       joinMethod: joinMethod,
       joinEpoch: joinEpoch,
       title: title,
+      description: description,
       avatarURL: avatarURL,
       avatarImageData: avatarImageData,
       createdAt: createdAt,
@@ -601,6 +622,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     public static let joinMethod = Column("joinMethod")
     public static let joinEpoch = Column("joinEpoch")
     public static let title = Column("title")
+    public static let description = Column("description")
     public static let avatarURL = Column("avatarURL")
     public static let avatarImageData = Column("avatarImageData")
     public static let createdAt = Column("createdAt")
@@ -630,6 +652,7 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case joinMethod
     case joinEpoch
     case title
+    case description
     case avatarURL
     case avatarImageData
     case createdAt

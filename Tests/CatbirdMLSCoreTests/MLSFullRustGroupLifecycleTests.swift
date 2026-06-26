@@ -65,6 +65,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(manager.groupStates["deadbeef"]?.epoch, 7)
     let persisted = try await fetchConversation(conversationID: "convo-rust", on: manager)
     XCTAssertEqual(persisted?.title, "Rust group")
+    XCTAssertEqual(persisted?.description, "unit-test")
     XCTAssertEqual(persisted?.avatarURL, "https://example.com/request-avatar.png")
   }
 

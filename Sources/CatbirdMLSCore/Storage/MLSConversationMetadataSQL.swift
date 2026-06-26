@@ -7,6 +7,7 @@ enum MLSConversationMetadataSQL {
   struct LocalDisplayMetadata: Equatable, Sendable {
     let conversationID: String
     let title: String?
+    let description: String?
     let avatarImageData: Data?
   }
 
@@ -67,7 +68,7 @@ enum MLSConversationMetadataSQL {
       let row = try Row.fetchOne(
         db,
         sql: """
-          SELECT title, avatarImageData
+          SELECT title, description, avatarImageData
           FROM MLSConversationModel
           WHERE conversationID = ? AND currentUserDID = ?
           LIMIT 1;
@@ -81,6 +82,7 @@ enum MLSConversationMetadataSQL {
     return LocalDisplayMetadata(
       conversationID: conversationID,
       title: row["title"],
+      description: row["description"],
       avatarImageData: row["avatarImageData"]
     )
   }
@@ -91,6 +93,7 @@ enum MLSConversationMetadataSQL {
     currentUserDID: String,
     groupIdHex: String,
     title: String?,
+    description: String?,
     avatarImageData: Data?,
     now: Date
   ) throws -> String? {
@@ -107,10 +110,10 @@ enum MLSConversationMetadataSQL {
     try db.execute(
       sql: """
         UPDATE MLSConversationModel
-        SET title = ?, avatarImageData = ?, updatedAt = ?, isPlaceholder = 0
+        SET title = ?, description = ?, avatarImageData = ?, updatedAt = ?, isPlaceholder = 0
         WHERE conversationID = ? AND currentUserDID = ?;
         """,
-      arguments: [title, avatarImageData, now, conversationID, currentUserDID]
+      arguments: [title, description, avatarImageData, now, conversationID, currentUserDID]
     )
 
     return conversationID

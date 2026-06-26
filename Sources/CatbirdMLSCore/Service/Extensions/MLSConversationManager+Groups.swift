@@ -1028,16 +1028,17 @@ extension MLSConversationManager {
     try await persistMembersToDatabase([convo])
 
     let metadataTitle = metadata?.title ?? MLSConversationSnapshotMetadata.nonEmpty(titleOverride)
+    let metadataDescription = metadata?.description
     let metadataAvatarURL = metadata?.avatarUrl
-    if let userDid, metadataTitle != nil || metadataAvatarURL != nil {
+    if let userDid, metadataTitle != nil || metadataDescription != nil || metadataAvatarURL != nil {
       try await database.write { db in
         try db.execute(
           sql: """
             UPDATE MLSConversationModel
-            SET title = COALESCE(?, title), avatarURL = COALESCE(?, avatarURL), updatedAt = ?
+            SET title = COALESCE(?, title), description = COALESCE(?, description), avatarURL = COALESCE(?, avatarURL), updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?
             """,
-          arguments: [metadataTitle, metadataAvatarURL, Date(), convo.conversationId, userDid]
+          arguments: [metadataTitle, metadataDescription, metadataAvatarURL, Date(), convo.conversationId, userDid]
         )
       }
     }
@@ -1279,7 +1280,7 @@ extension MLSConversationManager {
     // 5. Update local group state cache.
     groupStates[conversationId]?.epoch = mergedEpoch
 
-    // 6. Persist decrypted title on the local conversation row so
+    // 6. Persist decrypted display metadata on the local conversation row so
     //    subsequent reads (search, list view) pick up the change
     //    without waiting for a bootstrap-after-join.
     if let title {
@@ -1291,13 +1292,14 @@ extension MLSConversationManager {
             currentUserDID: userDid,
             groupIdHex: conversationId,
             title: title,
+            description: description,
             avatarImageData: nil,
             now: now
           )
         }
       } catch {
         logger.warning(
-          "⚠️ [updateGroupMetadataEncrypted] Local title cache update failed: \(error.localizedDescription)"
+          "⚠️ [updateGroupMetadataEncrypted] Local metadata cache update failed: \(error.localizedDescription)"
         )
       }
     }
