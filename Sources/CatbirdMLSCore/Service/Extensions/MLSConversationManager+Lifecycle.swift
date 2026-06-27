@@ -913,22 +913,26 @@ extension MLSConversationManager {
 
     await validateGroupStates()
 
-    // Run detectAndRejoinMissingConversations in background to avoid blocking startup
-    // CRITICAL FIX: Store task reference so it can be properly cancelled during shutdown
-    // Previously this was a fire-and-forget Task.detached which caused 40+ second hangs
-    // during account switching as External Commit operations continued running
-    missingConversationsTask = Task(priority: .utility) { [weak self] in
-      guard let self else { return }
-      do {
-        // Wait for app to settle before heavy FFI work (External Commits).
-        try await Task.sleep(nanoseconds: 5_000_000_000)
-        try Task.checkCancellation()
-        try await self.detectAndRejoinMissingConversations()
-      } catch is CancellationError {
-        self.logger.info("📭 Missing conversation detection cancelled (expected during shutdown)")
-      } catch {
-        self.logger.error(
-          "Failed to auto-rejoin missing conversations: \(error.localizedDescription)")
+    if protocolAuthorityMode == .rustFull {
+      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift missing-conversation sweep after Rust startup reconcile")
+    } else {
+      // Run detectAndRejoinMissingConversations in background to avoid blocking startup
+      // CRITICAL FIX: Store task reference so it can be properly cancelled during shutdown
+      // Previously this was a fire-and-forget Task.detached which caused 40+ second hangs
+      // during account switching as External Commit operations continued running
+      missingConversationsTask = Task(priority: .utility) { [weak self] in
+        guard let self else { return }
+        do {
+          // Wait for app to settle before heavy FFI work (External Commits).
+          try await Task.sleep(nanoseconds: 5_000_000_000)
+          try Task.checkCancellation()
+          try await self.detectAndRejoinMissingConversations()
+        } catch is CancellationError {
+          self.logger.info("📭 Missing conversation detection cancelled (expected during shutdown)")
+        } catch {
+          self.logger.error(
+            "Failed to auto-rejoin missing conversations: \(error.localizedDescription)")
+        }
       }
     }
     if configuration.enableAutomaticCleanup {
@@ -1098,8 +1102,11 @@ extension MLSConversationManager {
 
   public func detectAndRejoinMissingConversations() async throws {
     if protocolAuthorityMode == .rustFull {
-      try assertSwiftProtocolMutationAllowed(
-        "detectAndRejoinMissingConversations legacy protocol implementation"
+      let report = try await withRustAuthoritativeRuntime(operation: "detectAndRejoinMissingConversations") { runtime in
+        try runtime.startupReconcile()
+      }
+      logger.info(
+        "✅ [MLS-FULL-RUST] Missing-conversation Rust reconcile completed scanned=\(report.scanned, privacy: .public) healthy=\(report.healthy, privacy: .public) needsRejoin=\(report.needsRejoin, privacy: .public) resetPending=\(report.resetPending, privacy: .public) unrecoverableLocal=\(report.unrecoverableLocal, privacy: .public)"
       )
       return
     }

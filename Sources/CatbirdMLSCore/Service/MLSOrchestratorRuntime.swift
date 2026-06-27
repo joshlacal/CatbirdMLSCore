@@ -88,6 +88,9 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   public func initialize() throws {
     try bridge.initialize(userDid: userDID)
+    logger.info(
+      "MlsEngine initialized mode=\(self.mode.rawValue, privacy: .public) user=\(self.userDID.prefix(20), privacy: .private)"
+    )
   }
 
   public func syncWithServer(fullSync: Bool) throws {

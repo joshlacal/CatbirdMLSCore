@@ -210,6 +210,27 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(conversation?.needsRejoin, false)
   }
 
+  func testRustFullDetectAndRejoinMissingConversationsRoutesThroughRuntimeStartupReconcile() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.report = FfiStartupReconcileReport(
+      scanned: 3,
+      healthy: 1,
+      needsRejoin: 1,
+      resetPending: 1,
+      unrecoverableLocal: 0
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try await manager.detectAndRejoinMissingConversations()
+
+    XCTAssertEqual(bridge.startupReconcileCallCount, 1)
+  }
+
   func testRustAuthoritativeValidateGroupStatesDoesNotCallStartupReconcile() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustAuthoritative)
     let bridge = RecordingStartupReconcileBridge()

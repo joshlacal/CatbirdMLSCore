@@ -91,7 +91,7 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
         "withRustAuthoritativeRuntime",
       ],
       "public func detectAndRejoinMissingConversations() async throws": [
-        "assertSwiftProtocolMutationAllowed",
+        "withRustAuthoritativeRuntime",
       ],
     ]
 
