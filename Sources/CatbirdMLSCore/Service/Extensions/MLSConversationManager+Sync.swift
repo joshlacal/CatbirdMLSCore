@@ -104,6 +104,7 @@ public extension MLSConversationManager {
       try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
         try runtime.syncWithServer(fullSync: fullSync)
       }
+      try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer")
       return
     }
 
@@ -113,6 +114,103 @@ public extension MLSConversationManager {
     try assertSwiftProtocolMutationAllowed("syncWithServer legacy protocol implementation")
     try await syncWithServerLegacy(fullSync: fullSync)
 #endif
+  }
+
+  internal func hydrateSwiftCachesFromDatabaseAfterRustSync(reason: String) async throws {
+    guard let userDid else {
+      logger.warning("⚠️ [MLS-FULL-RUST] Skipping Swift cache hydrate after \(reason): no user DID")
+      return
+    }
+
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(userDid)
+    let snapshot = try await storage.fetchConversationsWithMembers(
+      currentUserDID: normalizedUserDID,
+      database: database
+    )
+
+    var hydratedConversations: [(String, BlueCatbirdMlsChatDefs.ConvoView)] = []
+    var hydratedGroupStates: [(String, MLSGroupState)] = []
+
+    for model in snapshot.conversations {
+      let members = snapshot.membersByConvoID[model.conversationID] ?? []
+      let apiMembers: [BlueCatbirdMlsChatDefs.MemberView] = members.compactMap { member in
+        guard let did = try? DID(didString: member.did) else {
+          logger.warning(
+            "⚠️ [MLS-FULL-RUST] Dropping invalid member DID while hydrating \(model.conversationID.prefix(16), privacy: .private)"
+          )
+          return nil
+        }
+
+        return BlueCatbirdMlsChatDefs.MemberView(
+          did: did,
+          userDid: did,
+          deviceId: nil,
+          deviceName: nil,
+          joinedAt: ATProtocolDate(date: member.addedAt),
+          isAdmin: member.role == .admin,
+          isModerator: member.role == .moderator,
+          promotedAt: nil,
+          promotedBy: nil,
+          leafIndex: member.leafIndex,
+          credential: nil
+        )
+      }
+
+      let creatorDIDString =
+        members.first(where: { $0.role == .admin })?.did
+        ?? members.first(where: { $0.did.caseInsensitiveCompare(normalizedUserDID) == .orderedSame })?.did
+        ?? normalizedUserDID
+
+      guard let creatorDID = try? DID(didString: creatorDIDString) else {
+        logger.warning(
+          "⚠️ [MLS-FULL-RUST] Skipping cache hydrate for \(model.conversationID.prefix(16), privacy: .private): invalid creator DID"
+        )
+        continue
+      }
+
+      let groupIdHex = model.groupID.hexEncodedString()
+      let convo = BlueCatbirdMlsChatDefs.ConvoView(
+        conversationId: model.conversationID,
+        groupId: groupIdHex,
+        creator: creatorDID,
+        members: apiMembers,
+        epoch: Int(model.epoch),
+        cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+        createdAt: ATProtocolDate(date: model.createdAt),
+        lastMessageAt: model.lastMessageAt.map { ATProtocolDate(date: $0) },
+        confirmationTag: nil,
+        resetGeneration: model.pendingResetGeneration.map(Int.init),
+        sequencerDid: nil
+      )
+
+      hydratedConversations.append((model.conversationID, convo))
+      hydratedGroupStates.append((
+        groupIdHex,
+        MLSGroupState(
+          groupId: groupIdHex,
+          convoId: model.conversationID,
+          epoch: UInt64(clamping: model.epoch),
+          members: Set(apiMembers.map { $0.userDid.description }),
+          knownServerEpoch: UInt64(clamping: model.epoch)
+        )
+      ))
+    }
+
+    let oldConversationCount = conversations.count
+    let oldGroupStateCount = groupStates.count
+    conversations.removeAll()
+    groupStates.removeAll()
+    for (conversationId, convo) in hydratedConversations {
+      conversations[conversationId] = convo
+      conversationStates[conversationId] = .active
+    }
+    for (groupId, state) in hydratedGroupStates {
+      groupStates[groupId] = state
+    }
+
+    logger.info(
+      "✅ [MLS-FULL-RUST] Hydrated Swift caches after \(reason, privacy: .public): conversations \(oldConversationCount, privacy: .public)->\(hydratedConversations.count, privacy: .public), groups \(oldGroupStateCount, privacy: .public)->\(hydratedGroupStates.count, privacy: .public)"
+    )
   }
 
   private func syncWithServerLegacy(fullSync: Bool = false) async throws {

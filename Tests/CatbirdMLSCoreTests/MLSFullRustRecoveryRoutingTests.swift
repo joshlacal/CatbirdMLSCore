@@ -388,6 +388,61 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertNil(bridge.lastSyncWithServerFullSync)
   }
 
+  func testRustFullSyncHydratesSwiftCachesFromPersistedRustStorage() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let conversationID = "rust-synced-convo"
+    let groupID = Data([0xca, 0xfe, 0xba, 0xbe])
+    try await manager.database.write { db in
+      try MLSConversationModel(
+        conversationID: conversationID,
+        currentUserDID: "did:plc:testuser",
+        groupID: groupID,
+        epoch: 7,
+        joinMethod: .welcome,
+        joinEpoch: 7,
+        title: "Hydrated"
+      ).insert(db)
+
+      try MLSMemberModel(
+        memberID: "\(conversationID)_alice",
+        conversationID: conversationID,
+        currentUserDID: "did:plc:testuser",
+        did: "did:plc:testuser",
+        leafIndex: 0,
+        role: .admin
+      ).insert(db)
+      try MLSMemberModel(
+        memberID: "\(conversationID)_bob",
+        conversationID: conversationID,
+        currentUserDID: "did:plc:testuser",
+        did: "did:plc:bob",
+        leafIndex: 1,
+        role: .member
+      ).insert(db)
+    }
+
+    manager.conversations.removeAll()
+    manager.groupStates.removeAll()
+
+    try await manager.syncWithServer(fullSync: false)
+
+    let hydrated = try XCTUnwrap(manager.conversations[conversationID])
+    XCTAssertEqual(bridge.syncWithServerCallCount, 1)
+    XCTAssertEqual(hydrated.conversationId, conversationID)
+    XCTAssertEqual(hydrated.groupId, groupID.hexEncodedString())
+    XCTAssertEqual(hydrated.epoch, 7)
+    XCTAssertEqual(hydrated.members.map(\.did.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
+    XCTAssertEqual(manager.groupStates[groupID.hexEncodedString()]?.convoId, conversationID)
+    XCTAssertEqual(manager.groupStates[groupID.hexEncodedString()]?.epoch, 7)
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
