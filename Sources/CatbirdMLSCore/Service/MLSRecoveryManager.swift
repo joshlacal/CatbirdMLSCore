@@ -1537,6 +1537,17 @@ public actor MLSRecoveryManager {
   /// This is the main entry point for automatic recovery
   public func performSilentRecovery(for userDid: String, conversationIds: [String] = []) async throws {
     logger.info("🔄 [MLSRecoveryManager] Starting silent recovery for \(userDid.prefix(20))...")
+    if MLSAuthorityModeSharedState.isRustFullEnabled {
+      logger.warning(
+        "⏭️ [MLSRecoveryManager] rustFull authority: blocking Swift silent recovery; use Rust orchestrator recovery"
+      )
+      throw MLSRecoveryError.recoveryFailed(
+        underlying: MLSSQLCipherError.storageUnavailable(
+          reason: "rustFull authority disables Swift silent recovery"
+        )
+      )
+    }
+
     guard let mlsClient else {
       logger.error(
         "❌ [MLSRecoveryManager] Cannot perform silent recovery — no MLS client configured (test/headless context)"

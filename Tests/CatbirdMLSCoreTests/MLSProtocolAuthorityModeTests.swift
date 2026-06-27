@@ -72,6 +72,31 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     }
   }
 
+  func testRustFullSharedStateBlocksSwiftSilentRecovery() async throws {
+    MLSAuthorityModeSharedState.clearForTesting()
+    defer { MLSAuthorityModeSharedState.clearForTesting() }
+
+    MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
+    let recoveryManager = MLSRecoveryManager(persistence: nil)
+
+    do {
+      try await recoveryManager.performSilentRecovery(
+        for: "did:plc:rustfull-recovery-guard",
+        conversationIds: ["convo-rustfull-recovery-guard"]
+      )
+      XCTFail("Expected rustFull to block Swift silent recovery")
+    } catch let error as MLSRecoveryError {
+      guard case .recoveryFailed(let underlying) = error,
+        let storageError = underlying as? MLSSQLCipherError,
+        case .storageUnavailable(let reason) = storageError
+      else {
+        return XCTFail("Unexpected MLSRecoveryError: \(error)")
+      }
+      XCTAssertTrue(reason.contains("rustFull"))
+      XCTAssertTrue(reason.contains("silent recovery"))
+    }
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)
