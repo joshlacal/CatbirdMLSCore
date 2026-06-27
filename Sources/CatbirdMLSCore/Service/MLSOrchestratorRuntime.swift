@@ -265,6 +265,13 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return MLSConversationReadyResult(ffiResult: result)
   }
 
+  public func debugWipeLocalGroupForRecovery(
+    conversationId: String
+  ) throws -> MLSDebugWipeLocalGroupResult {
+    let result = try bridge.debugWipeLocalGroupForRecovery(convoId: conversationId)
+    return MLSDebugWipeLocalGroupResult(ffiResult: result)
+  }
+
   @discardableResult
   public func ensureDeviceRegistered() throws -> String {
     try bridge.ensureDeviceRegistered()
@@ -505,6 +512,28 @@ public struct MLSConversationReadyResult: Equatable, Sendable {
     self.recoveryState = recoveryState
     self.epoch = epoch
     self.sendAllowed = sendAllowed
+  }
+}
+
+public struct MLSDebugWipeLocalGroupResult: Equatable, Sendable {
+  public let conversationId: String
+  public let groupId: String?
+  public let deletedLocalGroup: Bool
+
+  init(ffiResult result: FfiDebugWipeLocalGroupResult) {
+    self.conversationId = result.conversationId
+    self.groupId = result.groupId
+    self.deletedLocalGroup = result.deletedLocalGroup
+  }
+
+  public init(
+    conversationId: String,
+    groupId: String?,
+    deletedLocalGroup: Bool
+  ) {
+    self.conversationId = conversationId
+    self.groupId = groupId
+    self.deletedLocalGroup = deletedLocalGroup
   }
 }
 

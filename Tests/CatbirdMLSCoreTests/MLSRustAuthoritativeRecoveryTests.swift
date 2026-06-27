@@ -6,6 +6,29 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSRustAuthoritativeRecoveryTests: XCTestCase {
+  func testRuntimeDebugWipeLocalGroupForRecoveryWrapsBridgeResult() throws {
+    let bridge = RecordingJoinOrRejoinBridge(
+      result: FfiJoinOrRejoinResult(epoch: 37, recoveryState: .resetPending)
+    )
+    bridge.debugWipeResult = FfiDebugWipeLocalGroupResult(
+      conversationId: "convo-wipe",
+      groupId: "abc123",
+      deletedLocalGroup: true
+    )
+    let runtime = MLSOrchestratorRuntime(
+      userDID: "did:plc:alice",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let result = try runtime.debugWipeLocalGroupForRecovery(conversationId: "convo-wipe")
+
+    XCTAssertEqual(bridge.debugWipeCalls, ["convo-wipe"])
+    XCTAssertEqual(result.conversationId, "convo-wipe")
+    XCTAssertEqual(result.groupId, "abc123")
+    XCTAssertTrue(result.deletedLocalGroup)
+  }
+
   func testRuntimeJoinOrRejoinWrapsBridgeResult() throws {
     let bridge = RecordingJoinOrRejoinBridge(
       result: FfiJoinOrRejoinResult(epoch: 37, recoveryState: .resetPending)
@@ -42,6 +65,32 @@ final class MLSRustAuthoritativeRecoveryTests: XCTestCase {
     XCTAssertEqual(bridge.joinOrRejoinCalls, ["convo-rust"])
     XCTAssertEqual(result?.epoch, 8)
     XCTAssertEqual(result?.recoveryState, .healthy)
+  }
+
+  func testRustFullManagerRoutesDebugWipeThroughRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingJoinOrRejoinBridge(
+      result: FfiJoinOrRejoinResult(epoch: 8, recoveryState: .healthy)
+    )
+    bridge.debugWipeResult = FfiDebugWipeLocalGroupResult(
+      conversationId: "convo-debug-wipe",
+      groupId: "fedcba",
+      deletedLocalGroup: true
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let result = try await manager.debugWipeLocalGroupForRecovery(
+      conversationId: "convo-debug-wipe"
+    )
+
+    XCTAssertEqual(bridge.debugWipeCalls, ["convo-debug-wipe"])
+    XCTAssertEqual(result?.conversationId, "convo-debug-wipe")
+    XCTAssertEqual(result?.groupId, "fedcba")
+    XCTAssertEqual(result?.deletedLocalGroup, true)
   }
 
   func testPublicJoinOrRejoinConversationRoutesRustFullThroughRuntime() async throws {
@@ -104,6 +153,12 @@ final class MLSRustAuthoritativeRecoveryTests: XCTestCase {
 private final class RecordingJoinOrRejoinBridge: OrchestratorBridge {
   private let result: FfiJoinOrRejoinResult
   private(set) var joinOrRejoinCalls: [String] = []
+  private(set) var debugWipeCalls: [String] = []
+  var debugWipeResult = FfiDebugWipeLocalGroupResult(
+    conversationId: "",
+    groupId: nil,
+    deletedLocalGroup: false
+  )
 
   init(result: FfiJoinOrRejoinResult) {
     self.result = result
@@ -118,6 +173,11 @@ private final class RecordingJoinOrRejoinBridge: OrchestratorBridge {
   override func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult {
     joinOrRejoinCalls.append(convoId)
     return result
+  }
+
+  override func debugWipeLocalGroupForRecovery(convoId: String) throws -> FfiDebugWipeLocalGroupResult {
+    debugWipeCalls.append(convoId)
+    return debugWipeResult
   }
 
   override func shutdown() {

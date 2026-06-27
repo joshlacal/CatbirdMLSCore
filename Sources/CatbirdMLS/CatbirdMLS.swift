@@ -3114,6 +3114,14 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func createGroup(name: String, initialMembers: [String]?, description: String?) throws -> FfiConversationView
 
     /**
+     * Fault-injection hook used by rustFull E2E recovery tests.
+     *
+     * Deletes only local OpenMLS group state, preserves the conversation
+     * projection, and marks the conversation for Rust-owned rejoin.
+     */
+    func debugWipeLocalGroupForRecovery(convoId: String) throws -> FfiDebugWipeLocalGroupResult
+
+    /**
      * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
      * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
      */
@@ -3599,6 +3607,19 @@ open class OrchestratorBridge:
                                                                          FfiConverterString.lower(name),
                                                                          FfiConverterOptionSequenceString.lower(initialMembers),
                                                                          FfiConverterOptionString.lower(description), $0)
+        })
+    }
+
+    /**
+     * Fault-injection hook used by rustFull E2E recovery tests.
+     *
+     * Deletes only local OpenMLS group state, preserves the conversation
+     * projection, and marks the conversation for Rust-owned rejoin.
+     */
+    open func debugWipeLocalGroupForRecovery(convoId: String) throws -> FfiDebugWipeLocalGroupResult {
+        return try FfiConverterTypeFFIDebugWipeLocalGroupResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_debug_wipe_local_group_for_recovery(self.uniffiClonePointer(),
+                                                                                                FfiConverterString.lower(convoId), $0)
         })
     }
 
@@ -5743,6 +5764,75 @@ public func FfiConverterTypeFFICreateConversationResult_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeFFICreateConversationResult_lower(_ value: FfiCreateConversationResult) -> RustBuffer {
     return FfiConverterTypeFFICreateConversationResult.lower(value)
+}
+
+public struct FfiDebugWipeLocalGroupResult {
+    public var conversationId: String
+    public var groupId: String?
+    public var deletedLocalGroup: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, groupId: String?, deletedLocalGroup: Bool) {
+        self.conversationId = conversationId
+        self.groupId = groupId
+        self.deletedLocalGroup = deletedLocalGroup
+    }
+}
+
+extension FfiDebugWipeLocalGroupResult: Equatable, Hashable {
+    public static func == (lhs: FfiDebugWipeLocalGroupResult, rhs: FfiDebugWipeLocalGroupResult) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.groupId != rhs.groupId {
+            return false
+        }
+        if lhs.deletedLocalGroup != rhs.deletedLocalGroup {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(groupId)
+        hasher.combine(deletedLocalGroup)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIDebugWipeLocalGroupResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDebugWipeLocalGroupResult {
+        return
+            try FfiDebugWipeLocalGroupResult(
+                conversationId: FfiConverterString.read(from: &buf),
+                groupId: FfiConverterOptionString.read(from: &buf),
+                deletedLocalGroup: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiDebugWipeLocalGroupResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterOptionString.write(value.groupId, into: &buf)
+        FfiConverterBool.write(value.deletedLocalGroup, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIDebugWipeLocalGroupResult_lift(_ buf: RustBuffer) throws -> FfiDebugWipeLocalGroupResult {
+    return try FfiConverterTypeFFIDebugWipeLocalGroupResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIDebugWipeLocalGroupResult_lower(_ value: FfiDebugWipeLocalGroupResult) -> RustBuffer {
+    return FfiConverterTypeFFIDebugWipeLocalGroupResult.lower(value)
 }
 
 public struct FfiDeferredRecoveryReport {
@@ -16107,6 +16197,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_create_group() != 46751 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_debug_wipe_local_group_for_recovery() != 2551 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_decode_opus_to_pcm() != 46696 {

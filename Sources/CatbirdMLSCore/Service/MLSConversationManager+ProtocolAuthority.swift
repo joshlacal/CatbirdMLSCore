@@ -66,6 +66,24 @@ public extension MLSConversationManager {
     )
   }
 
+  func debugWipeLocalGroupForRecovery(
+    conversationId: String
+  ) async throws -> MLSDebugWipeLocalGroupResult? {
+    guard protocolAuthorityMode == .rustFull else {
+      return nil
+    }
+
+    let result = try await withRustAuthoritativeRuntime(
+      operation: "debugWipeLocalGroupForRecovery"
+    ) { runtime in
+      try runtime.debugWipeLocalGroupForRecovery(conversationId: conversationId)
+    }
+    logger.info(
+      "✅ [MLS-AUTHORITY] debugWipeLocalGroupForRecovery completed for \(conversationId.prefix(16), privacy: .private) groupId=\(result.groupId ?? "nil", privacy: .private) deletedLocalGroup=\(result.deletedLocalGroup, privacy: .public)"
+    )
+    return result
+  }
+
   func conversationDiagnosticsProjection(
     conversationId: String,
     ensureReady: Bool = false
