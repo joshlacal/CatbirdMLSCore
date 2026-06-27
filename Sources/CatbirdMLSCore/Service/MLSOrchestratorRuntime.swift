@@ -270,6 +270,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.ensureDeviceRegistered()
   }
 
+  public func replenishKeyPackagesIfNeeded() throws {
+    try bridge.replenishKeyPackagesIfNeeded()
+  }
+
   public func conversationRecoveryState(conversationId: String) throws -> ConversationRecoveryState {
     let ffiState = try bridge.getConversationRecoveryState(conversationId: conversationId)
     return ConversationRecoveryState(ffiRecoveryState: ffiState)

@@ -112,6 +112,59 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     )
   }
 
+  func testRustFullInitializeUsesRustDeviceAndKeyPackageReadinessBeforeSwiftMaintenance() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Lifecycle.swift"),
+      encoding: .utf8
+    )
+    let initializeBody = try XCTUnwrap(
+      extractFunctionBody(signature: "public func initialize() async throws", from: source)
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: initializeBody)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("prepareRustFullStartupDeviceAndKeyPackages"))
+    XCTAssertFalse(rustFullBranch.contains("MLSClient.shared.ensureDeviceRegistered"))
+    XCTAssertFalse(rustFullBranch.contains("MLSClient.shared.getKeyPackageBundleCount"))
+    XCTAssertFalse(rustFullBranch.contains("smartRefreshKeyPackages"))
+
+    let rustFullGuardIndex = try XCTUnwrap(
+      initializeBody.range(of: "protocolAuthorityMode == .rustFull")
+    ).lowerBound
+    let legacyStartupIndex = try XCTUnwrap(
+      initializeBody.range(of: "prepareSwiftLegacyStartupDeviceAndKeyPackages")
+    ).lowerBound
+    let initialSwiftRefreshIndex = try XCTUnwrap(
+      initializeBody.range(of: "smartRefreshKeyPackages")
+    ).lowerBound
+
+    XCTAssertLessThan(rustFullGuardIndex, legacyStartupIndex)
+    XCTAssertLessThan(rustFullGuardIndex, initialSwiftRefreshIndex)
+
+    let rustFullStartupBody = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "internal func prepareRustFullStartupDeviceAndKeyPackages(",
+        from: source
+      )
+    )
+    XCTAssertTrue(rustFullStartupBody.contains("runRustStartupReconcileIfNeeded"))
+    XCTAssertTrue(rustFullStartupBody.contains("runtime.ensureDeviceRegistered()"))
+    XCTAssertTrue(rustFullStartupBody.contains("runtime.replenishKeyPackagesIfNeeded()"))
+    XCTAssertFalse(rustFullStartupBody.contains("MLSClient.shared"))
+    XCTAssertFalse(rustFullStartupBody.contains("smartRefreshKeyPackages"))
+
+    let swiftLegacyStartupBody = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "private func prepareSwiftLegacyStartupDeviceAndKeyPackages(",
+        from: source
+      )
+    )
+    XCTAssertTrue(swiftLegacyStartupBody.contains("MLSClient.shared.ensureDeviceRegistered"))
+    XCTAssertTrue(swiftLegacyStartupBody.contains("MLSClient.shared.getKeyPackageBundleCount"))
+    XCTAssertTrue(swiftLegacyStartupBody.contains("MLSClient.shared.reconcileKeyPackagesWithServer"))
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

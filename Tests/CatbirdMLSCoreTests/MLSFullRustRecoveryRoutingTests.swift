@@ -166,6 +166,39 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(report.unrecoverableLocal, 0)
   }
 
+  func testRuntimeReplenishKeyPackagesWrapsBridgeCall() throws {
+    let bridge = RecordingStartupReconcileBridge()
+    let runtime = MLSOrchestratorRuntime(
+      userDID: "did:plc:alice",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try runtime.replenishKeyPackagesIfNeeded()
+
+    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
+  }
+
+  func testRustFullStartupDeviceAndKeyPackageReadinessUsesRustRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let prepared = await manager.prepareRustFullStartupDeviceAndKeyPackages(
+      userDid: "did:plc:testuser",
+      operation: "unitStartupReadiness"
+    )
+
+    XCTAssertTrue(prepared)
+    XCTAssertEqual(bridge.startupReconcileCallCount, 1)
+    XCTAssertEqual(bridge.ensureDeviceRegisteredCallCount, 1)
+    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
+  }
+
   func testRustFullValidateGroupStatesRoutesThroughRuntimeStartupReconcile() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()
@@ -606,6 +639,8 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
   private(set) var runDeferredRecoveryCallCount = 0
   private(set) var ensureConversationReadyCallCount = 0
   private(set) var joinOrRejoinCallCount = 0
+  private(set) var ensureDeviceRegisteredCallCount = 0
+  private(set) var replenishKeyPackagesCallCount = 0
   private(set) var syncWithServerCallCount = 0
   private(set) var listConversationsCallCount = 0
   private(set) var lastDeferredRecoveryReason: String?
@@ -646,6 +681,15 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
       epoch: conversationReadyResult.epoch ?? 0,
       recoveryState: conversationReadyResult.recoveryState
     )
+  }
+
+  override func ensureDeviceRegistered() throws -> String {
+    ensureDeviceRegisteredCallCount += 1
+    return "did:mls:test-device"
+  }
+
+  override func replenishKeyPackagesIfNeeded() throws {
+    replenishKeyPackagesCallCount += 1
   }
 
   override func syncWithServer(fullSync: Bool) throws {

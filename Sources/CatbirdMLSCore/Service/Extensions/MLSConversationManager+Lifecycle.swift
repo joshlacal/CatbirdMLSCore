@@ -777,89 +777,12 @@ extension MLSConversationManager {
       }
 
       if protocolAuthorityMode == .rustFull {
-        await runRustStartupReconcileIfNeeded(operation: "earlyStartupReconcile")
-      }
-
-      // CRITICAL FIX: Ensure device is registered with MLS server before proceeding
-      // This prevents "Missing key packages" errors if device registration was skipped/removed
-      do {
-        try await MLSClient.shared.ensureDeviceRegistered(userDid: userDid)
-        logger.info("✅ Device registered with MLS server")
-      } catch {
-        logger.error("❌ Failed to register device with MLS server: \(error.localizedDescription)")
-        // Continue initialization but warn - functionality may be limited
-      }
-
-      if !configuration.skipDeviceRecordPublishing {
-        do {
-          try await deviceRecordService.ensureDeviceRecordPublished(userDid: userDid)
-        } catch {
-          logger.error(
-            "❌ [MLS Init] Failed to publish device record: \(error.localizedDescription)"
-          )
-        }
+        await prepareRustFullStartupDeviceAndKeyPackages(
+          userDid: userDid,
+          operation: "earlyStartupReconcile"
+        )
       } else {
-        logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
-      }
-
-      logger.info("Loading persisted MLS storage for user: \(userDid)")
-      do {
-        logger.info("✅ MLS storage loaded successfully")
-
-        do {
-          let localBundleCount = try await MLSClient.shared.getKeyPackageBundleCount(for: userDid)
-          logger.info("📊 [MLS Init] Local bundle count: \(localBundleCount)")
-
-          keyPackageRefreshTask = Task { [weak self] in
-            guard let self = self else { return }
-
-            if localBundleCount == 0 {
-              self.logger.warning("⚠️ [MLS Init] No local bundles found - will need replenishment")
-              do {
-                let result = try await MLSClient.shared.reconcileKeyPackagesWithServer(for: userDid)
-                self.logger.info(
-                  "📊 [MLS Init] Reconciliation complete - server: \(result.serverAvailable), local: \(result.localBundles), desync: \(result.desyncDetected)"
-                )
-              } catch {
-                self.logger.error("❌ [MLS Init] Reconciliation failed: \(error.localizedDescription)")
-              }
-            }
-
-            do {
-              let syncResult = try await MLSClient.shared.syncKeyPackageHashes(for: userDid)
-              if syncResult.orphanedCount > 0 {
-                self.logger.warning(
-                  "🔄 [MLS Init] Synced key packages - deleted \(syncResult.deletedCount) ORPHANED packages"
-                )
-                self.logger.info("   Remaining valid packages: \(syncResult.remainingAvailable)")
-              } else {
-                self.logger.info("✅ [MLS Init] Key package hashes in sync - no orphans found")
-              }
-
-              // CRITICAL FIX: If server has 0 key packages for THIS device, we must upload immediately
-              // This can happen after app reinstall or device re-registration when old packages
-              // belong to a different device_id. Without this fix, invites fail with NoMatchingKeyPackage.
-              if syncResult.remainingAvailable == 0 {
-                self.logger.warning("🚨 [MLS Init] Server has 0 key packages for this device - uploading batch now")
-                do {
-                  try await self.keyPackageManager.uploadKeyPackageBatchSmart(for: userDid, count: 25)
-                  self.logger.info("✅ [MLS Init] Emergency key package upload complete")
-                } catch {
-                  self.logger.error("❌ [MLS Init] Emergency key package upload failed: \(error.localizedDescription)")
-                }
-              }
-            } catch {
-              self.logger.error(
-                "❌ [MLS Init] Key package hash sync failed: \(error.localizedDescription)")
-            }
-          }
-        } catch {
-          logger.warning(
-            "⚠️ [MLS Init] Failed to check local bundle count: \(error.localizedDescription)")
-        }
-      } catch {
-        logger.warning(
-          "⚠️ Failed to load MLS storage (will start fresh): \(error.localizedDescription)")
+        await prepareSwiftLegacyStartupDeviceAndKeyPackages(userDid: userDid)
       }
     } else {
       logger.warning("No user DID provided - MLS storage will not be persisted")
@@ -900,22 +823,26 @@ extension MLSConversationManager {
       }
     }
 
-    keyPackageRefreshTask = Task(priority: .utility) { [weak self] in
-      guard let self else { return }
-      do {
-        // Wait for app to settle before heavy FFI work.
-        // If user backgrounds immediately after launch, suspendMLSOperations() cancels
-        // this task and the sleep throws CancellationError — preventing the 0xdead10cc
-        // crash seen when create_key_package races against suspension (3-second crash).
-        try await Task.sleep(nanoseconds: 5_000_000_000)
-        try Task.checkCancellation()
-        try await self.smartRefreshKeyPackages()
-        try Task.checkCancellation()
-        await self.keyPackageManager.setLastRefresh(Date())
-      } catch is CancellationError {
-        self.logger.warning("⚠️ Initial key package upload cancelled - will retry on next trigger")
-      } catch {
-        self.logger.error("Failed to upload initial key packages: \(error.localizedDescription)")
+    if protocolAuthorityMode == .rustFull {
+      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift initial key package refresh; Rust owns replenishment")
+    } else {
+      keyPackageRefreshTask = Task(priority: .utility) { [weak self] in
+        guard let self else { return }
+        do {
+          // Wait for app to settle before heavy FFI work.
+          // If user backgrounds immediately after launch, suspendMLSOperations() cancels
+          // this task and the sleep throws CancellationError — preventing the 0xdead10cc
+          // crash seen when create_key_package races against suspension (3-second crash).
+          try await Task.sleep(nanoseconds: 5_000_000_000)
+          try Task.checkCancellation()
+          try await self.smartRefreshKeyPackages()
+          try Task.checkCancellation()
+          await self.keyPackageManager.setLastRefresh(Date())
+        } catch is CancellationError {
+          self.logger.warning("⚠️ Initial key package upload cancelled - will retry on next trigger")
+        } catch {
+          self.logger.error("Failed to upload initial key packages: \(error.localizedDescription)")
+        }
       }
     }
 
@@ -950,6 +877,131 @@ extension MLSConversationManager {
     startPeriodicSync()
     startOrphanAdoptionTask()
     startGroupInfoRefreshTask()
+  }
+
+  @discardableResult
+  internal func prepareRustFullStartupDeviceAndKeyPackages(
+    userDid: String,
+    operation: String
+  ) async -> Bool {
+    guard protocolAuthorityMode == .rustFull else { return false }
+
+    let reconciled = await runRustStartupReconcileIfNeeded(operation: operation)
+
+    do {
+      let mlsDid = try await withRustAuthoritativeRuntime(operation: "rustFullEnsureDeviceRegistered") { runtime in
+        try runtime.ensureDeviceRegistered()
+      }
+      logger.info(
+        "✅ [MLS-FULL-RUST] Device registered via Rust for \(userDid.prefix(20), privacy: .private) mlsDid=\(mlsDid.prefix(20), privacy: .private)"
+      )
+    } catch {
+      logger.error(
+        "❌ [MLS-FULL-RUST] Failed to register device via Rust: \(error.localizedDescription, privacy: .public)"
+      )
+      return false
+    }
+
+    do {
+      try await withRustAuthoritativeRuntime(operation: "rustFullReplenishKeyPackagesIfNeeded") { runtime in
+        try runtime.replenishKeyPackagesIfNeeded()
+      }
+      logger.info("✅ [MLS-FULL-RUST] Key package replenishment checked via Rust")
+    } catch {
+      logger.error(
+        "❌ [MLS-FULL-RUST] Rust key package replenishment failed: \(error.localizedDescription, privacy: .public)"
+      )
+      return false
+    }
+
+    if configuration.skipDeviceRecordPublishing {
+      logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
+    } else {
+      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device record publish; Rust owns MLS device readiness")
+    }
+
+    logger.info("Loading persisted MLS storage for user: \(userDid)")
+    logger.info("✅ MLS storage loaded successfully")
+    return reconciled
+  }
+
+  private func prepareSwiftLegacyStartupDeviceAndKeyPackages(userDid: String) async {
+    // CRITICAL FIX: Ensure device is registered with MLS server before proceeding
+    // This prevents "Missing key packages" errors if device registration was skipped/removed
+    do {
+      _ = try await MLSClient.shared.ensureDeviceRegistered(userDid: userDid)
+      logger.info("✅ Device registered with MLS server")
+    } catch {
+      logger.error("❌ Failed to register device with MLS server: \(error.localizedDescription)")
+      // Continue initialization but warn - functionality may be limited
+    }
+
+    if !configuration.skipDeviceRecordPublishing {
+      do {
+        try await deviceRecordService.ensureDeviceRecordPublished(userDid: userDid)
+      } catch {
+        logger.error(
+          "❌ [MLS Init] Failed to publish device record: \(error.localizedDescription)"
+        )
+      }
+    } else {
+      logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
+    }
+
+    logger.info("Loading persisted MLS storage for user: \(userDid)")
+    logger.info("✅ MLS storage loaded successfully")
+
+    do {
+      let localBundleCount = try await MLSClient.shared.getKeyPackageBundleCount(for: userDid)
+      logger.info("📊 [MLS Init] Local bundle count: \(localBundleCount)")
+
+      keyPackageRefreshTask = Task { [weak self] in
+        guard let self = self else { return }
+
+        if localBundleCount == 0 {
+          self.logger.warning("⚠️ [MLS Init] No local bundles found - will need replenishment")
+          do {
+            let result = try await MLSClient.shared.reconcileKeyPackagesWithServer(for: userDid)
+            self.logger.info(
+              "📊 [MLS Init] Reconciliation complete - server: \(result.serverAvailable), local: \(result.localBundles), desync: \(result.desyncDetected)"
+            )
+          } catch {
+            self.logger.error("❌ [MLS Init] Reconciliation failed: \(error.localizedDescription)")
+          }
+        }
+
+        do {
+          let syncResult = try await MLSClient.shared.syncKeyPackageHashes(for: userDid)
+          if syncResult.orphanedCount > 0 {
+            self.logger.warning(
+              "🔄 [MLS Init] Synced key packages - deleted \(syncResult.deletedCount) ORPHANED packages"
+            )
+            self.logger.info("   Remaining valid packages: \(syncResult.remainingAvailable)")
+          } else {
+            self.logger.info("✅ [MLS Init] Key package hashes in sync - no orphans found")
+          }
+
+          // CRITICAL FIX: If server has 0 key packages for THIS device, we must upload immediately
+          // This can happen after app reinstall or device re-registration when old packages
+          // belong to a different device_id. Without this fix, invites fail with NoMatchingKeyPackage.
+          if syncResult.remainingAvailable == 0 {
+            self.logger.warning("🚨 [MLS Init] Server has 0 key packages for this device - uploading batch now")
+            do {
+              try await self.keyPackageManager.uploadKeyPackageBatchSmart(for: userDid, count: 25)
+              self.logger.info("✅ [MLS Init] Emergency key package upload complete")
+            } catch {
+              self.logger.error("❌ [MLS Init] Emergency key package upload failed: \(error.localizedDescription)")
+            }
+          }
+        } catch {
+          self.logger.error(
+            "❌ [MLS Init] Key package hash sync failed: \(error.localizedDescription)")
+        }
+      }
+    } catch {
+      logger.warning(
+        "⚠️ [MLS Init] Failed to check local bundle count: \(error.localizedDescription)")
+    }
   }
 
   @discardableResult
