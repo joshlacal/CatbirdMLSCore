@@ -964,15 +964,21 @@ extension MLSConversationManager {
 
     // Delete MLS group from local OpenMLS storage
     if let groupIdData = Data(hexEncoded: groupId) {
-      do {
-        try await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
+      if protocolAuthorityMode == .rustFull {
         logger.info(
-          "✅ [FORCE DELETE] Deleted MLS group from local storage: \(groupId.prefix(16))...")
-      } catch {
-        logger.warning(
-          "⚠️ [FORCE DELETE] Failed to delete MLS group \(groupId.prefix(16))...: \(error.localizedDescription)"
+          "🔒 [FORCE DELETE] Skipping Swift OpenMLS group delete in rustFull mode: \(groupId.prefix(16))..."
         )
-        // Continue anyway - we still want to clean up database and memory
+      } else {
+        do {
+          try await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
+          logger.info(
+            "✅ [FORCE DELETE] Deleted MLS group from local storage: \(groupId.prefix(16))...")
+        } catch {
+          logger.warning(
+            "⚠️ [FORCE DELETE] Failed to delete MLS group \(groupId.prefix(16))...: \(error.localizedDescription)"
+          )
+          // Continue anyway - we still want to clean up database and memory
+        }
       }
     }
 

@@ -472,6 +472,62 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     }
   }
 
+  func testRustFullDirectDecryptWithSenderAssertsBeforeSwiftProcessing() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+MessageSender.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func decryptMessageWithSender(",
+        from: source
+      )
+    )
+
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"decryptMessageWithSender\")"))
+    let guardIndex = try XCTUnwrap(
+      body.range(of: "assertSwiftProtocolMutationAllowed(\"decryptMessageWithSender\")")
+    ).lowerBound
+    for swiftMutation in [
+      "mlsClient.processMessage",
+      "mlsClient.mergeIncomingCommit",
+    ] {
+      XCTAssertLessThan(
+        guardIndex,
+        try XCTUnwrap(body.range(of: swiftMutation)).lowerBound
+      )
+    }
+  }
+
+  func testRustFullForceDeleteSkipsOnlySwiftOpenMLSDelete() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(
+        relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Groups.swift"
+      ),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "internal func forceDeleteConversationLocally(convoId: String, groupId: String) async",
+        from: source
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("Skipping Swift OpenMLS group delete"))
+    XCTAssertFalse(rustFullBranch.contains("mlsClient.deleteGroup"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "mlsClient.deleteGroup")).lowerBound
+    )
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "mlsClient.deleteGroup")).lowerBound,
+      try XCTUnwrap(body.range(of: "deleteConversationsFromDatabase")).lowerBound
+    )
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

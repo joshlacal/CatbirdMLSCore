@@ -8,6 +8,7 @@ public extension MLSConversationManager {
   /// Returns tuple of (plaintext, senderDID)
   public func decryptMessageWithSender(groupId: String, ciphertext: Data) async throws -> (Data, String) {
     logger.info("Decrypting message with sender extraction for group \(groupId.prefix(8))...")
+    try assertSwiftProtocolMutationAllowed("decryptMessageWithSender")
 
     guard let groupIdData = Data(hexEncoded: groupId) else {
       logger.error("Invalid group ID format")
