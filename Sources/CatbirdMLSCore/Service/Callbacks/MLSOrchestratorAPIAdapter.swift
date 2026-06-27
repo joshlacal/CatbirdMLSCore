@@ -151,13 +151,22 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     )
   }
 
-  public func publishKeyPackage(keyPackage: Data, cipherSuite: String, expiresAt: String) throws {
+  public func publishKeyPackage(
+    keyPackage: Data,
+    cipherSuite: String,
+    expiresAt: String,
+    deviceId: String?
+  ) throws {
     let expires = Self.iso8601Formatter.date(from: expiresAt).map(ATProtocolDate.init(date:))
     try blocking {
+      // Pure relay: Rust owns the device identity and hands us the deviceId to
+      // scope this publish. The server rejects an unscoped publish (403) for a
+      // fresh device, so forward whatever Rust resolved — no Swift identity logic.
       try await self.apiClient.publishKeyPackage(
         keyPackage: keyPackage,
         cipherSuite: cipherSuite,
-        expiresAt: expires
+        expiresAt: expires,
+        deviceId: deviceId
       )
     }
   }

@@ -12260,7 +12260,7 @@ public protocol OrchestratorApiCallback: AnyObject {
      */
     func getMessages(convoId: String, cursor: String?, limit: UInt32, messageType: String?, fromEpoch: UInt32?, toEpoch: UInt32?) throws -> FfiMessagesPage
 
-    func publishKeyPackage(keyPackage: Data, cipherSuite: String, expiresAt: String) throws
+    func publishKeyPackage(keyPackage: Data, cipherSuite: String, expiresAt: String, deviceId: String?) throws
 
     func getKeyPackages(dids: [String]) throws -> [FfiKeyPackageRef]
 
@@ -12596,6 +12596,7 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             keyPackage: RustBuffer,
             cipherSuite: RustBuffer,
             expiresAt: RustBuffer,
+            deviceId: RustBuffer,
             _: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -12607,7 +12608,8 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                 return try uniffiObj.publishKeyPackage(
                     keyPackage: FfiConverterData.lift(keyPackage),
                     cipherSuite: FfiConverterString.lift(cipherSuite),
-                    expiresAt: FfiConverterString.lift(expiresAt)
+                    expiresAt: FfiConverterString.lift(expiresAt),
+                    deviceId: FfiConverterOptionString.lift(deviceId)
                 )
             }
 
@@ -16427,7 +16429,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 49094 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_package() != 61915 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_package() != 9588 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_packages() != 23387 {

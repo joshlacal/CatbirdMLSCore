@@ -286,11 +286,17 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo? {
-    guard let deviceUuid = try credentialAdapter?.getDeviceUuid(userDid: userDID) else {
+    // The credential store holds the SERVER-MINTED device id (the delivery
+    // service mints its own id and stores `device_uuid` as NULL), and
+    // `listDevices` identifies devices by `deviceId`. Match on `deviceId`, not
+    // `deviceUuid` — the latter is always empty server-side, so matching it
+    // returned nil and stranded push-token registration / device lookups in
+    // rustFull.
+    guard let registeredDeviceId = try credentialAdapter?.getDeviceUuid(userDid: userDID) else {
       return nil
     }
     return try bridge.listDevices()
-      .first { device in device.deviceUuid == deviceUuid }
+      .first { device in device.deviceId == registeredDeviceId }
       .map(MLSRegisteredDeviceInfo.init(ffiDeviceInfo:))
   }
 
