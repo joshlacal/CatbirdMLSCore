@@ -101,10 +101,21 @@ public extension MLSConversationManager {
   /// - Parameter fullSync: Whether to perform full sync or incremental
   public func syncWithServer(fullSync: Bool = false) async throws {
     if protocolAuthorityMode == .rustFull {
-      try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
+      let runtime = try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
         try runtime.syncWithServer(fullSync: fullSync)
+        return runtime
       }
-      try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer")
+      do {
+        try await hydrateSwiftCachesFromRustSnapshotsAfterRustSync(
+          runtime: runtime,
+          reason: "syncWithServer"
+        )
+      } catch {
+        logger.warning(
+          "⚠️ [MLS-FULL-RUST] Rust snapshot cache hydrate failed after syncWithServer; falling back to DB projection: \(error.localizedDescription, privacy: .public)"
+        )
+        try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer-fallback")
+      }
       return
     }
 
@@ -128,8 +139,7 @@ public extension MLSConversationManager {
       database: database
     )
 
-    var hydratedConversations: [(String, BlueCatbirdMlsChatDefs.ConvoView)] = []
-    var hydratedGroupStates: [(String, MLSGroupState)] = []
+    var hydratedConversations: [BlueCatbirdMlsChatDefs.ConvoView] = []
 
     for model in snapshot.conversations {
       let members = snapshot.membersByConvoID[model.conversationID] ?? []
@@ -183,33 +193,52 @@ public extension MLSConversationManager {
         sequencerDid: nil
       )
 
-      hydratedConversations.append((model.conversationID, convo))
-      hydratedGroupStates.append((
-        groupIdHex,
-        MLSGroupState(
-          groupId: groupIdHex,
-          convoId: model.conversationID,
-          epoch: UInt64(clamping: model.epoch),
-          members: Set(apiMembers.map { $0.userDid.description }),
-          knownServerEpoch: UInt64(clamping: model.epoch)
-        )
-      ))
+      hydratedConversations.append(convo)
     }
 
+    applySwiftCacheHydration(
+      hydratedConversations,
+      reason: reason,
+      source: "database fallback"
+    )
+  }
+
+  internal func hydrateSwiftCachesFromRustSnapshotsAfterRustSync(
+    runtime: MLSOrchestratorRuntime,
+    reason: String
+  ) async throws {
+    let hydratedConversations = try runtime.listConversations()
+    applySwiftCacheHydration(
+      hydratedConversations,
+      reason: reason,
+      source: "Rust snapshots"
+    )
+  }
+
+  private func applySwiftCacheHydration(
+    _ hydratedConversations: [BlueCatbirdMlsChatDefs.ConvoView],
+    reason: String,
+    source: String
+  ) {
     let oldConversationCount = conversations.count
     let oldGroupStateCount = groupStates.count
     conversations.removeAll()
     groupStates.removeAll()
-    for (conversationId, convo) in hydratedConversations {
-      conversations[conversationId] = convo
-      conversationStates[conversationId] = .active
-    }
-    for (groupId, state) in hydratedGroupStates {
-      groupStates[groupId] = state
+    for convo in hydratedConversations {
+      conversations[convo.conversationId] = convo
+      conversationStates[convo.conversationId] = .active
+      let epoch = UInt64(clamping: convo.epoch)
+      groupStates[convo.groupId] = MLSGroupState(
+        groupId: convo.groupId,
+        convoId: convo.conversationId,
+        epoch: epoch,
+        members: Set(convo.members.map { $0.userDid.description }),
+        knownServerEpoch: epoch
+      )
     }
 
     logger.info(
-      "✅ [MLS-FULL-RUST] Hydrated Swift caches after \(reason, privacy: .public): conversations \(oldConversationCount, privacy: .public)->\(hydratedConversations.count, privacy: .public), groups \(oldGroupStateCount, privacy: .public)->\(hydratedGroupStates.count, privacy: .public)"
+      "✅ [MLS-FULL-RUST] Hydrated Swift caches from \(source, privacy: .public) after \(reason, privacy: .public): conversations \(oldConversationCount, privacy: .public)->\(hydratedConversations.count, privacy: .public), groups \(oldGroupStateCount, privacy: .public)->\(self.groupStates.count, privacy: .public)"
     )
   }
 

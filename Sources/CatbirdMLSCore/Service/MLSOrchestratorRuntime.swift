@@ -97,6 +97,12 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.syncWithServer(fullSync: fullSync)
   }
 
+  public func listConversations() throws -> [BlueCatbirdMlsChatDefs.ConvoView] {
+    try bridge.listConversations(userDid: userDID).map { conversation in
+      try decodeConversationSnapshot(conversation, fallbackUserDID: userDID)
+    }
+  }
+
   public func startupReconcile() throws -> FfiStartupReconcileReport {
     try bridge.startupReconcile()
   }

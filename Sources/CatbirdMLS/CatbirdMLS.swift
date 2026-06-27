@@ -3234,6 +3234,12 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func leaveGroup(convoId: String) throws
 
     /**
+     * Return the Rust-orchestrator storage projection for full-authority
+     * clients that need to refresh platform UI caches after sync/recovery.
+     */
+    func listConversations(userDid: String) throws -> [FfiConversationView]
+
+    /**
      * List registered devices.
      */
     func listDevices() throws -> [FfiDeviceInfo]
@@ -3806,6 +3812,17 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_leave_group(self.uniffiClonePointer(),
                                                                         FfiConverterString.lower(convoId), $0)
         }
+    }
+
+    /**
+     * Return the Rust-orchestrator storage projection for full-authority
+     * clients that need to refresh platform UI caches after sync/recovery.
+     */
+    open func listConversations(userDid: String) throws -> [FfiConversationView] {
+        return try FfiConverterSequenceTypeFFIConversationView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_list_conversations(self.uniffiClonePointer(),
+                                                                               FfiConverterString.lower(userDid), $0)
+        })
     }
 
     /**
@@ -16144,6 +16161,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_group() != 23679 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_conversations() != 29206 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_devices() != 16449 {

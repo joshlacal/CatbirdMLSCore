@@ -472,6 +472,10 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
     syncCalls.append(fullSync)
   }
 
+  override func listConversations(userDid: String) throws -> [FfiConversationView] {
+    []
+  }
+
   override func interruptStorage(reason: String) throws {
     interruptCalls.append(LifecycleReasonCall(reason: reason))
   }

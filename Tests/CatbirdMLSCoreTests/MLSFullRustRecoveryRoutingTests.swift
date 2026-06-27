@@ -388,9 +388,10 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertNil(bridge.lastSyncWithServerFullSync)
   }
 
-  func testRustFullSyncHydratesSwiftCachesFromPersistedRustStorage() async throws {
+  func testRustFullSyncFallsBackToPersistedRustStorageWhenRustSnapshotsUnavailable() async throws {
     let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()
+    bridge.listConversationsError = TestOrchestratorBridgeError.listConversationsUnavailable
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
       mode: .rustFull,
@@ -435,12 +436,62 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
 
     let hydrated = try XCTUnwrap(manager.conversations[conversationID])
     XCTAssertEqual(bridge.syncWithServerCallCount, 1)
+    XCTAssertEqual(bridge.listConversationsCallCount, 1)
     XCTAssertEqual(hydrated.conversationId, conversationID)
     XCTAssertEqual(hydrated.groupId, groupID.hexEncodedString())
     XCTAssertEqual(hydrated.epoch, 7)
     XCTAssertEqual(hydrated.members.map(\.did.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
     XCTAssertEqual(manager.groupStates[groupID.hexEncodedString()]?.convoId, conversationID)
     XCTAssertEqual(manager.groupStates[groupID.hexEncodedString()]?.epoch, 7)
+  }
+
+  func testRustFullSyncHydratesSwiftCachesFromRustConversationSnapshotsBeforeDatabaseFallback() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    let conversationID = "rust-snapshot-convo"
+    let groupIDHex = "cafebabefeedface"
+    bridge.rustConversationSnapshots = [
+      FfiConversationView(
+        groupId: groupIDHex,
+        conversationId: conversationID,
+        epoch: 11,
+        members: [
+          FfiMemberView(did: "did:plc:testuser", role: "admin"),
+          FfiMemberView(did: "did:plc:bob", role: "member"),
+        ],
+        name: "Rust Snapshot",
+        description: nil,
+        avatarUrl: nil,
+        createdAt: "2026-06-26T12:00:00Z",
+        updatedAt: "2026-06-26T12:05:00Z"
+      )
+    ]
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    manager.conversations.removeAll()
+    manager.groupStates.removeAll()
+
+    try await manager.syncWithServer(fullSync: true)
+
+    let hydrated = try XCTUnwrap(manager.conversations[conversationID])
+    XCTAssertEqual(bridge.syncWithServerCallCount, 1)
+    XCTAssertEqual(bridge.listConversationsCallCount, 1)
+    XCTAssertEqual(bridge.lastListConversationsUserDid, "did:plc:testuser")
+    XCTAssertEqual(hydrated.conversationId, conversationID)
+    XCTAssertEqual(hydrated.groupId, groupIDHex)
+    XCTAssertEqual(hydrated.epoch, 11)
+    XCTAssertEqual(hydrated.members.map(\.did.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
+    XCTAssertEqual(manager.groupStates[groupIDHex]?.convoId, conversationID)
+    XCTAssertEqual(manager.groupStates[groupIDHex]?.epoch, 11)
+
+    let persistedConversationCount = try await manager.database.read { db in
+      try MLSConversationModel.fetchCount(db)
+    }
+    XCTAssertEqual(persistedConversationCount, 0)
   }
 
   private func makeManager(
@@ -556,9 +607,13 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
   private(set) var ensureConversationReadyCallCount = 0
   private(set) var joinOrRejoinCallCount = 0
   private(set) var syncWithServerCallCount = 0
+  private(set) var listConversationsCallCount = 0
   private(set) var lastDeferredRecoveryReason: String?
   private(set) var lastEnsureConversationReadyConversationId: String?
   private(set) var lastSyncWithServerFullSync: Bool?
+  private(set) var lastListConversationsUserDid: String?
+  var rustConversationSnapshots: [FfiConversationView] = []
+  var listConversationsError: Error?
 
   init() {
     super.init(noPointer: .init())
@@ -598,8 +653,21 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
     lastSyncWithServerFullSync = fullSync
   }
 
+  override func listConversations(userDid: String) throws -> [FfiConversationView] {
+    listConversationsCallCount += 1
+    lastListConversationsUserDid = userDid
+    if let listConversationsError {
+      throw listConversationsError
+    }
+    return rustConversationSnapshots
+  }
+
   override func shutdown() {
   }
+}
+
+private enum TestOrchestratorBridgeError: Error {
+  case listConversationsUnavailable
 }
 
 private func XCTAssertThrowsErrorAsync<T>(
