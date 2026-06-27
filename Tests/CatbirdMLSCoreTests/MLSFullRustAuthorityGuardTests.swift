@@ -336,6 +336,60 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     )
   }
 
+  func testRustFullSkipsSwiftGroupInfoRefreshTask() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+Messaging.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(signature: "internal func startGroupInfoRefreshTask()", from: source)
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("return"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "groupInfoRefreshTask = Task")).lowerBound
+    )
+  }
+
+  func testRustFullGroupInfoPublishEntrypointsReturnBeforeSwiftPublish() throws {
+    let messagingSource = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+Messaging.swift"),
+      encoding: .utf8
+    )
+    let refreshAllBody = try XCTUnwrap(
+      extractFunctionBody(signature: "internal func refreshAllGroupInfo() async", from: messagingSource)
+    )
+    let refreshAllRustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: refreshAllBody)
+    )
+    XCTAssertTrue(refreshAllRustFullBranch.contains("return"))
+    XCTAssertLessThan(
+      try XCTUnwrap(refreshAllBody.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(refreshAllBody.range(of: "mlsClient.publishGroupInfo")).lowerBound
+    )
+
+    let managerSource = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager.swift"),
+      encoding: .utf8
+    )
+    let requestBody = try XCTUnwrap(
+      extractFunctionBody(signature: "public func handleGroupInfoRefreshRequest(convoId: String) async", from: managerSource)
+    )
+    let requestRustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: requestBody)
+    )
+
+    XCTAssertTrue(requestRustFullBranch.contains("return"))
+    XCTAssertLessThan(
+      try XCTUnwrap(requestBody.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(requestBody.range(of: "mlsClient.publishGroupInfo")).lowerBound
+    )
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

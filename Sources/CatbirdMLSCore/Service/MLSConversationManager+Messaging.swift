@@ -5297,6 +5297,11 @@ public extension MLSConversationManager {
   /// This ensures External Commit has fresh GroupInfo available for new device joins
   internal func startGroupInfoRefreshTask() {
     groupInfoRefreshTask?.cancel()
+    if protocolAuthorityMode == .rustFull {
+      groupInfoRefreshTask = nil
+      logger.info("🔒 [GroupInfo] Skipping Swift GroupInfo refresh task in rustFull mode")
+      return
+    }
 
     groupInfoRefreshTask = Task { [weak self] in
       guard let self else { return }
@@ -5349,6 +5354,11 @@ public extension MLSConversationManager {
   /// Proactively refresh GroupInfo for all conversations where we have local group state
   /// This ensures other devices can External Commit to join any of our active conversations
   internal func refreshAllGroupInfo() async {
+    if protocolAuthorityMode == .rustFull {
+      logger.info("🔒 [GroupInfo] Skipping Swift GroupInfo publish refresh in rustFull mode")
+      return
+    }
+
     guard let userDid = userDid else {
       logger.warning("⚠️ [GroupInfo] Cannot refresh - no userDid")
       return

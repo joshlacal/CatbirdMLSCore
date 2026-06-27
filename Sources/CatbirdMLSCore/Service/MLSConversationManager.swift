@@ -999,6 +999,13 @@ public final class MLSConversationManager {
     public func handleGroupInfoRefreshRequest(convoId: String) async {
         logger.info("🔄 [handleGroupInfoRefreshRequest] Processing refresh request for \(convoId)")
 
+        if protocolAuthorityMode == .rustFull {
+            logger.info(
+                "🔒 [handleGroupInfoRefreshRequest] Skipping Swift GroupInfo publish in rustFull mode"
+            )
+            return
+        }
+
         guard let userDid = userDid else {
             logger.warning("⚠️ [handleGroupInfoRefreshRequest] No user DID available")
             return
