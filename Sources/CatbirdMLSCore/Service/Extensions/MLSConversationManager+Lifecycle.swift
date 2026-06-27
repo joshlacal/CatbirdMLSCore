@@ -220,11 +220,11 @@ extension MLSConversationManager {
       startGroupInfoRefreshTask()
     }
 
-    if let activeDid = userDid, !configuration.skipDeviceRecordPublishing {
+    if userDid != nil, !configuration.skipDeviceRecordPublishing {
       Task { [weak self] in
         guard let self else { return }
         do {
-          try await self.deviceRecordService.ensureDeviceRecordPublished(userDid: activeDid)
+          try await self.ensureDeviceRecordPublished()
         } catch {
           self.logger.error("Failed to publish device record on resume: \(error.localizedDescription)")
         }

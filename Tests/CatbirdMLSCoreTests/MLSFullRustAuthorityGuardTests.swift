@@ -213,6 +213,49 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     )
   }
 
+  func testRustFullEnsureDeviceRecordPublishedReturnsBeforeSwiftDeviceRecordService() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func ensureDeviceRecordPublished() async throws",
+        from: source
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("return"))
+    XCTAssertTrue(rustFullBranch.contains("Skipping Swift device record publish"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "deviceRecordService.ensureDeviceRecordPublished")).lowerBound
+    )
+  }
+
+  func testResumeDeviceRecordPublishUsesManagerAuthorityGuard() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Lifecycle.swift"),
+      encoding: .utf8
+    )
+    let resumeBody = try XCTUnwrap(
+      extractFunctionBody(signature: "public func resumeMLSOperations() async", from: source)
+    )
+    let deviceRecordSection = try XCTUnwrap(
+      extractSection(
+        startMarker: "if userDid != nil, !configuration.skipDeviceRecordPublishing",
+        endMarker: "// Note: missingConversationsTask",
+        from: resumeBody
+      )
+    )
+
+    XCTAssertTrue(deviceRecordSection.contains("self.ensureDeviceRecordPublished()"))
+    XCTAssertFalse(deviceRecordSection.contains("self.deviceRecordService.ensureDeviceRecordPublished"))
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

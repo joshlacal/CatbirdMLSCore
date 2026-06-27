@@ -610,6 +610,10 @@ public final class MLSConversationManager {
 
     public func ensureDeviceRecordPublished() async throws {
         try throwIfShuttingDown("ensureDeviceRecordPublished")
+        if protocolAuthorityMode == .rustFull {
+            logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device record publish; Rust owns MLS device readiness")
+            return
+        }
         guard let activeDid = userDid else {
             throw MLSConversationError.noAuthentication
         }
