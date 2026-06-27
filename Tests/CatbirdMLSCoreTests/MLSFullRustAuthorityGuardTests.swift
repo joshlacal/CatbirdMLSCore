@@ -256,6 +256,48 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     XCTAssertFalse(deviceRecordSection.contains("self.deviceRecordService.ensureDeviceRecordPublished"))
   }
 
+  func testRustFullDirectWelcomeJoinIsBlockedBeforeSwiftWelcomeProcessing() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Groups.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func joinGroup(welcomeMessage: String) async throws",
+        from: source
+      )
+    )
+
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"joinGroup(welcomeMessage:)\")"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "assertSwiftProtocolMutationAllowed(\"joinGroup(welcomeMessage:)\")")).lowerBound,
+      try XCTUnwrap(body.range(of: "processWelcome(welcomeData:")).lowerBound
+    )
+  }
+
+  func testRustFullJoinViaExternalCommitRoutesThroughRustJoinOrRejoin() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func joinViaExternalCommit(convoId: String) async throws",
+        from: source
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("joinOrRejoinConversation(conversationId: convoId)"))
+    XCTAssertTrue(rustFullBranch.contains("return"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "attemptExternalCommitFallback")).lowerBound
+    )
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

@@ -1829,6 +1829,12 @@ public final class MLSConversationManager {
             throw MLSConversationError.noAuthentication
         }
 
+        if protocolAuthorityMode == .rustFull {
+            _ = try await joinOrRejoinConversation(conversationId: convoId)
+            logger.info("✅ [joinViaExternalCommit] rustFull joinOrRejoin completed for \(convoId)")
+            return
+        }
+
         logger.info("📱 [joinViaExternalCommit] Attempting External Commit fallback for \(convoId)")
 
         // Use the existing External Commit fallback infrastructure

@@ -652,6 +652,7 @@ extension MLSConversationManager {
   public func joinGroup(welcomeMessage: String) async throws -> BlueCatbirdMlsChatDefs.ConvoView {
     logger.info("Joining group from Welcome message")
     try throwIfShuttingDown("joinGroup")
+    try assertSwiftProtocolMutationAllowed("joinGroup(welcomeMessage:)")
 
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
