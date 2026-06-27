@@ -390,6 +390,57 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     )
   }
 
+  func testRustFullWelcomeReissueResponderReturnsBeforeSwiftCommitMutation() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(
+        relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+WelcomeRecovery.swift"
+      ),
+      encoding: .utf8
+    )
+
+    let handleBody = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func handleWelcomeReissueRequested(",
+        from: source
+      )
+    )
+    let handleRustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: handleBody)
+    )
+
+    XCTAssertTrue(handleRustFullBranch.contains("return"))
+    XCTAssertLessThan(
+      try XCTUnwrap(handleBody.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(handleBody.range(of: "respondToWelcomeReissueRequest")).lowerBound
+    )
+
+    let respondBody = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "func respondToWelcomeReissueRequest(",
+        from: source
+      )
+    )
+    let respondRustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: respondBody)
+    )
+
+    XCTAssertTrue(respondRustFullBranch.contains("return"))
+    let rustFullGuardIndex = try XCTUnwrap(
+      respondBody.range(of: "protocolAuthorityMode == .rustFull")
+    ).lowerBound
+    for swiftMutation in [
+      "mlsClient.clearPendingCommit",
+      "mlsClient.stageCommit",
+      "mlsClient.exportPostCommitGroupInfo",
+      "mlsClient.confirmCommit",
+    ] {
+      XCTAssertLessThan(
+        rustFullGuardIndex,
+        try XCTUnwrap(respondBody.range(of: swiftMutation)).lowerBound
+      )
+    }
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

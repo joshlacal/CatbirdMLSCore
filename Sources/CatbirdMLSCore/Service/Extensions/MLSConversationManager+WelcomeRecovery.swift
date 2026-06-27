@@ -19,6 +19,13 @@ extension MLSConversationManager {
     public func handleWelcomeReissueRequested(
         event: BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent
     ) async {
+        if protocolAuthorityMode == .rustFull {
+            logger.info(
+                "🔒 [WELCOME-REISSUE] Skipping Swift Welcome reissue response in rustFull mode for \(event.convoId.prefix(16))"
+            )
+            return
+        }
+
         let shouldRespond = welcomeReissueResponseState.withLock { handled in
             if handled.contains(event.requestId) {
                 return false
@@ -55,6 +62,13 @@ extension MLSConversationManager {
         recipientDeviceDid: String,
         requestId: String
     ) async throws {
+        if protocolAuthorityMode == .rustFull {
+            logger.info(
+                "🔒 [WELCOME-REISSUE] Skipping Swift Welcome reissue responder mutation in rustFull mode for \(convoId.prefix(16))"
+            )
+            return
+        }
+
         try throwIfShuttingDown("respondToWelcomeReissueRequest")
 
         guard let userDid else {
