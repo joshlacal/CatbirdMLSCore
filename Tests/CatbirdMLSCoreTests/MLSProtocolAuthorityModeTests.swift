@@ -35,6 +35,19 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     XCTAssertFalse(MLSProtocolAuthorityMode.swiftLegacy.requiresRustOnlyProtocolMutations)
   }
 
+  func testSharedAuthorityModeStateRoundTripsForExtensions() {
+    MLSAuthorityModeSharedState.clearForTesting()
+    defer { MLSAuthorityModeSharedState.clearForTesting() }
+
+    XCTAssertEqual(MLSAuthorityModeSharedState.currentMode(), .defaultMode)
+    XCTAssertFalse(MLSAuthorityModeSharedState.isRustFullEnabled)
+
+    MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
+
+    XCTAssertEqual(MLSAuthorityModeSharedState.currentMode(), .rustFull)
+    XCTAssertTrue(MLSAuthorityModeSharedState.isRustFullEnabled)
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)
