@@ -736,6 +736,7 @@ public final class MLSConversationManager {
             "🔵 [MLSConversationManager.addDeviceWithKeyPackage] START - convoId: \(convoId), device: \(deviceCredentialDid)"
         )
         try throwIfShuttingDown("addDeviceWithKeyPackage")
+        try assertSwiftProtocolMutationAllowed("addDeviceWithKeyPackage")
 
         guard let userDid = userDid else {
             throw MLSConversationError.noAuthentication

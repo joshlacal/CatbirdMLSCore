@@ -800,7 +800,9 @@ extension MLSConversationManager {
       )
       logger.info("✅ Initialized smart key package monitoring")
 
-      if let deviceSyncManager = deviceSyncManager {
+      if protocolAuthorityMode == .rustFull {
+        logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device sync manager; Rust owns device membership changes")
+      } else if let deviceSyncManager = deviceSyncManager {
         let deviceInfo = await mlsClient.getDeviceInfo(for: userDid)
         let deviceUUID = deviceInfo?.deviceUUID
 

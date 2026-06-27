@@ -165,6 +165,54 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     XCTAssertTrue(swiftLegacyStartupBody.contains("MLSClient.shared.reconcileKeyPackagesWithServer"))
   }
 
+  func testRustFullInitializeSkipsSwiftDeviceSyncMutationLoop() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Lifecycle.swift"),
+      encoding: .utf8
+    )
+    let initializeBody = try XCTUnwrap(
+      extractFunctionBody(signature: "public func initialize() async throws", from: source)
+    )
+    let deviceSyncSection = try XCTUnwrap(
+      extractSection(
+        startMarker: "consumptionTracker = MLSConsumptionTracker",
+        endMarker: "keyPackageRefreshTask = Task",
+        from: initializeBody
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: deviceSyncSection)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("Skipping Swift device sync manager"))
+    XCTAssertFalse(rustFullBranch.contains("deviceSyncManager.configure"))
+    XCTAssertFalse(rustFullBranch.contains("deviceSyncManager.startPolling"))
+    XCTAssertFalse(rustFullBranch.contains("addDeviceWithKeyPackage"))
+    XCTAssertTrue(deviceSyncSection.contains("else if let deviceSyncManager = deviceSyncManager"))
+    XCTAssertTrue(deviceSyncSection.contains("deviceSyncManager.configure"))
+    XCTAssertTrue(deviceSyncSection.contains("deviceSyncManager.startPolling"))
+    XCTAssertTrue(deviceSyncSection.contains("return try await self.addDeviceWithKeyPackage"))
+  }
+
+  func testAddDeviceWithKeyPackageAssertsSwiftProtocolMutationAllowed() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func addDeviceWithKeyPackage(",
+        from: source
+      )
+    )
+
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"addDeviceWithKeyPackage\")"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "assertSwiftProtocolMutationAllowed(\"addDeviceWithKeyPackage\")")).lowerBound,
+      try XCTUnwrap(body.range(of: "mlsClient.stageCommit(")).lowerBound
+    )
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",
@@ -439,6 +487,19 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     }
 
     return nil
+  }
+
+  private func extractSection(
+    startMarker: String,
+    endMarker: String,
+    from source: String
+  ) -> String? {
+    guard let start = source.range(of: startMarker)?.lowerBound,
+          let end = source.range(of: endMarker, range: start..<source.endIndex)?.lowerBound
+    else {
+      return nil
+    }
+    return String(source[start..<end])
   }
 
   private func hasUngatedForbiddenCall(_ forbiddenCall: String, in functionBody: String) -> Bool {
