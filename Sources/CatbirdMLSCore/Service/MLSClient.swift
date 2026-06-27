@@ -421,6 +421,15 @@ public actor MLSClient {
   /// Force re-registration of device with fresh key packages
   /// Used by recovery manager for silent recovery from desync
   public func reregisterDevice(for userDid: String) async throws -> String {
+    if MLSAuthorityModeSharedState.isRustFullEnabled {
+      logger.warning(
+        "⏭️ [MLSClient.reregisterDevice] rustFull authority: blocking Swift device re-registration"
+      )
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "rustFull authority disables Swift device re-registration"
+      )
+    }
+
     let normalizedDID = normalizeUserDID(userDid)
     guard let deviceManager = deviceManagers[normalizedDID] else {
       logger.error(

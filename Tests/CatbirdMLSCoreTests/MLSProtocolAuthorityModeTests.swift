@@ -97,6 +97,24 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     }
   }
 
+  func testRustFullSharedStateBlocksSwiftDeviceReregistration() async throws {
+    MLSAuthorityModeSharedState.clearForTesting()
+    defer { MLSAuthorityModeSharedState.clearForTesting() }
+
+    MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
+
+    do {
+      _ = try await MLSClient.shared.reregisterDevice(for: "did:plc:rustfull-reregister-guard")
+      XCTFail("Expected rustFull to block Swift device re-registration")
+    } catch let error as MLSSQLCipherError {
+      guard case .storageUnavailable(let reason) = error else {
+        return XCTFail("Unexpected MLSSQLCipherError: \(error)")
+      }
+      XCTAssertTrue(reason.contains("rustFull"))
+      XCTAssertTrue(reason.contains("device re-registration"))
+    }
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)

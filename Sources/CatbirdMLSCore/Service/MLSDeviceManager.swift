@@ -569,6 +569,15 @@ public actor MLSDeviceManager {
   /// ⚠️ WARNING: This clears server-side bundles FIRST to prevent desync!
   public func reregisterDevice(userDid: String) async throws -> String {
     let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines)
+    if MLSAuthorityModeSharedState.isRustFullEnabled {
+      logger.warning(
+        "⏭️ [MLSDeviceManager.reregisterDevice] rustFull authority: blocking Swift device re-registration for \(normalizedUserDid.prefix(20))"
+      )
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "rustFull authority disables Swift device re-registration"
+      )
+    }
+
     logger.info("🔄 Starting full device re-registration for user \(normalizedUserDid.prefix(20))")
 
     // CRITICAL FIX: Delete device from server FIRST to clear corrupted key packages
