@@ -88,6 +88,7 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
         "withRustAuthoritativeRuntime",
       ],
       "internal func validateGroupStates() async": [
+        "runRustStartupReconcileIfNeeded",
         "withRustAuthoritativeRuntime",
       ],
       "public func detectAndRejoinMissingConversations() async throws": [

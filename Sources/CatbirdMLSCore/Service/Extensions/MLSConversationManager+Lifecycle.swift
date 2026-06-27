@@ -439,6 +439,7 @@ extension MLSConversationManager {
 
     isShuttingDown = true
     isSyncPaused = true  // CRITICAL: Reject any new sync attempts immediately
+    rustStartupReconcileCompleted = false
     resetOrchestratorRuntime(reason: "manager shutdown")
     var shutdownWasSafe = true
 
@@ -772,6 +773,10 @@ extension MLSConversationManager {
         }
       }
 
+      if protocolAuthorityMode == .rustFull {
+        await runRustStartupReconcileIfNeeded(operation: "earlyStartupReconcile")
+      }
+
       // CRITICAL FIX: Ensure device is registered with MLS server before proceeding
       // This prevents "Missing key packages" errors if device registration was skipped/removed
       do {
@@ -944,20 +949,37 @@ extension MLSConversationManager {
     startGroupInfoRefreshTask()
   }
 
+  @discardableResult
+  internal func runRustStartupReconcileIfNeeded(operation: String) async -> Bool {
+    guard protocolAuthorityMode == .rustFull else { return false }
+
+    guard !rustStartupReconcileCompleted else {
+      logger.info(
+        "⏭️ [MLS-FULL-RUST] Startup reconcile already completed; skipping \(operation, privacy: .public)"
+      )
+      return true
+    }
+
+    do {
+      let report = try await withRustAuthoritativeRuntime(operation: operation) { runtime in
+        try runtime.startupReconcile()
+      }
+      rustStartupReconcileCompleted = true
+      logger.info(
+        "✅ [MLS-FULL-RUST] Startup reconcile completed scanned=\(report.scanned, privacy: .public) healthy=\(report.healthy, privacy: .public) needsRejoin=\(report.needsRejoin, privacy: .public) resetPending=\(report.resetPending, privacy: .public) unrecoverableLocal=\(report.unrecoverableLocal, privacy: .public)"
+      )
+      return true
+    } catch {
+      logger.error(
+        "❌ [MLS-FULL-RUST] Startup reconcile failed: \(error.localizedDescription, privacy: .public)"
+      )
+      return false
+    }
+  }
+
   internal func validateGroupStates() async {
     if protocolAuthorityMode == .rustFull {
-      do {
-        let report = try await withRustAuthoritativeRuntime(operation: "startupReconcile") { runtime in
-          try runtime.startupReconcile()
-        }
-        logger.info(
-          "✅ [MLS-FULL-RUST] Startup reconcile completed scanned=\(report.scanned, privacy: .public) healthy=\(report.healthy, privacy: .public) needsRejoin=\(report.needsRejoin, privacy: .public) resetPending=\(report.resetPending, privacy: .public) unrecoverableLocal=\(report.unrecoverableLocal, privacy: .public)"
-        )
-      } catch {
-        logger.error(
-          "❌ [MLS-FULL-RUST] Startup reconcile failed: \(error.localizedDescription, privacy: .public)"
-        )
-      }
+      await runRustStartupReconcileIfNeeded(operation: "startupReconcile")
       return
     }
 

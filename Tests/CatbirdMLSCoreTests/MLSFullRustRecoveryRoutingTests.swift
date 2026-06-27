@@ -180,6 +180,21 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.startupReconcileCallCount, 1)
   }
 
+  func testRustFullStartupReconcileRunsOnlyOnceAcrossLifecycleHooks() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    await manager.validateGroupStates()
+    await manager.validateGroupStates()
+
+    XCTAssertEqual(bridge.startupReconcileCallCount, 1)
+  }
+
   func testRustFullValidateGroupStatesDoesNotRunLegacyEpochDeleteSweep() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()
