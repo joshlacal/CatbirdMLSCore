@@ -48,6 +48,30 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     XCTAssertTrue(MLSAuthorityModeSharedState.isRustFullEnabled)
   }
 
+  func testRustFullSharedStateBlocksDirectNotificationDecrypt() async throws {
+    MLSAuthorityModeSharedState.clearForTesting()
+    defer { MLSAuthorityModeSharedState.clearForTesting() }
+
+    MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
+
+    do {
+      _ = try await MLSCoreContext.shared.decryptForNotification(
+        userDid: "did:plc:rustfull-notification-guard",
+        groupId: Data([0x01, 0x02, 0x03]),
+        ciphertext: Data([0x04, 0x05, 0x06]),
+        conversationID: "convo-rustfull-notification-guard",
+        messageID: "msg-rustfull-notification-guard"
+      )
+      XCTFail("Expected rustFull to block direct notification decrypt")
+    } catch let error as MLSSQLCipherError {
+      guard case .storageUnavailable(let reason) = error else {
+        return XCTFail("Unexpected MLSSQLCipherError: \(error)")
+      }
+      XCTAssertTrue(reason.contains("rustFull"))
+      XCTAssertTrue(reason.contains("notification decrypt"))
+    }
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)

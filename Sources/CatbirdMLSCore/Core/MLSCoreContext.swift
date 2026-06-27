@@ -1742,6 +1742,14 @@ public actor MLSCoreContext {
     logger.debug("   userDid: \(userDid.prefix(20))...")
     logger.debug("   messageID: \(messageID.prefix(16))...")
 
+    if MLSAuthorityModeSharedState.isRustFullEnabled {
+      logger.warning(
+        "⏭️ [DECRYPT-NOTIF] rustFull authority: direct notification decrypt is disabled; use Rust orchestrator/cache path"
+      )
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "rustFull authority disables direct notification decrypt"
+      )
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // CRITICAL FIX (2024-12): Idempotency Check BEFORE File Coordination
