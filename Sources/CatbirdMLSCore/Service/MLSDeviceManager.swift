@@ -117,6 +117,14 @@ public actor MLSDeviceManager {
   public func ensureDeviceRegistered(userDid: String) async throws -> String {
     // Normalize userDID for consistent storage lookup
     let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines)
+    if MLSAuthorityModeSharedState.isRustFullEnabled {
+      logger.warning(
+        "⏭️ [MLSDeviceManager.ensureDeviceRegistered] rustFull authority: blocking Swift MLS key package mutation for \(normalizedUserDid.prefix(20))"
+      )
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "rustFull authority disables Swift MLS key package mutation: ensureDeviceRegistered"
+      )
+    }
 
     // CRITICAL FIX: Prevent concurrent registration race condition
     // If another call is already registering this user, wait for completion using async/await

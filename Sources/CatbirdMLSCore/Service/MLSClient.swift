@@ -389,6 +389,7 @@ public actor MLSClient {
   /// Ensure device is registered and get MLS DID
   /// Must be called before creating key packages
   public func ensureDeviceRegistered(userDid: String) async throws -> String {
+    try throwIfRustFullSwiftKeyPackageMutation("ensureDeviceRegistered")
     let normalizedDID = normalizeUserDID(userDid)
     guard let deviceManager = deviceManagers[normalizedDID] else {
       logger.error(
@@ -460,6 +461,18 @@ public actor MLSClient {
     guard MLSAuthorityModeSharedState.isRustFullEnabled else { return false }
     logRustFullSwiftProtocolMutationBlocked(operation)
     return true
+  }
+
+  private func throwIfRustFullSwiftKeyPackageMutation(_ operation: StaticString) throws {
+    guard !MLSAuthorityModeSharedState.isRustFullEnabled else {
+      let operationName = String(describing: operation)
+      logger.warning(
+        "⏭️ [MLSClient] rustFull authority: blocking Swift MLS key package mutation \(operationName, privacy: .public)"
+      )
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "rustFull authority disables Swift MLS key package mutation: \(operationName)"
+      )
+    }
   }
 
   /// Execute FFI operation on background thread to prevent MainActor blocking
@@ -704,6 +717,7 @@ public actor MLSClient {
     identity: String,
     count: Int
   ) async throws -> [KeyPackageResult] {
+    try throwIfRustFullSwiftKeyPackageMutation("batchCreateKeyPackageResults")
     logger.info("🔐 [MLSClient] Creating batch of \(count) key packages for \(identity.prefix(20))...")
 
     // Validate count
@@ -754,6 +768,7 @@ public actor MLSClient {
 
   /// Create a batch of serialized key package bytes in a single transaction.
   public func batchCreateKeyPackages(for userDID: String, identity: String, count: Int) async throws -> [Data] {
+    try throwIfRustFullSwiftKeyPackageMutation("batchCreateKeyPackages")
     let packages = try await batchCreateKeyPackageResults(
       for: userDID,
       identity: identity,
@@ -2180,6 +2195,7 @@ public actor MLSClient {
   /// Create a key package for this user (low-level with explicit identity)
   /// Use the convenience method without identity parameter for automatic bare DID usage
   public func createKeyPackage(for userDID: String, identity: String) async throws -> Data {
+    try throwIfRustFullSwiftKeyPackageMutation("createKeyPackage")
     // NOTE: very noisy in CLI runs
     // logger.info(
     //   "📍 [MLSClient.createKeyPackage] START - user: \(userDID.prefix(20)), identity: \(identity.prefix(30))"
@@ -2238,6 +2254,7 @@ public actor MLSClient {
   /// Create a key package for this user using client identity (did#deviceUUID)
   /// Each device is a unique MLS leaf node for proper multi-device support.
   public func createKeyPackage(for userDID: String) async throws -> Data {
+    try throwIfRustFullSwiftKeyPackageMutation("createKeyPackage")
     // Get client identity (did#deviceUUID) for this device
     guard let clientIdentity = await getClientIdentity(for: userDID) else {
       logger.error("❌ [MLSClient.createKeyPackage] Device not registered - cannot determine client identity")
@@ -3157,6 +3174,7 @@ public actor MLSClient {
   public func monitorAndReplenishBundles(for userDID: String) async throws -> (
     available: Int, uploaded: Int
   ) {
+    try throwIfRustFullSwiftKeyPackageMutation("monitorAndReplenishBundles")
     let normalizedDID = normalizeUserDID(userDID)
     guard let apiClient = self.apiClients[normalizedDID] else {
       logger.error(
@@ -3660,6 +3678,7 @@ public actor MLSClient {
   /// - Throws: MLSError if deletion fails
   public func deleteKeyPackageBundles(for userDID: String, hashRefs: [Data]) async throws -> UInt64
   {
+    try throwIfRustFullSwiftKeyPackageMutation("deleteKeyPackageBundles")
     let normalizedDID = normalizeUserDID(userDID)
 
     guard !hashRefs.isEmpty else {
@@ -3692,6 +3711,7 @@ public actor MLSClient {
   public func reconcileKeyPackagesWithServer(for userDID: String) async throws -> (
     serverAvailable: Int, localBundles: Int, desyncDetected: Bool
   ) {
+    try throwIfRustFullSwiftKeyPackageMutation("reconcileKeyPackagesWithServer")
     let normalizedDID = normalizeUserDID(userDID)
     guard let apiClient = self.apiClients[normalizedDID] else {
       logger.error(
@@ -3985,6 +4005,7 @@ public actor MLSClient {
   public func syncKeyPackageHashes(for userDID: String) async throws -> (
     orphanedCount: Int, deletedCount: Int, remainingAvailable: Int
   ) {
+    try throwIfRustFullSwiftKeyPackageMutation("syncKeyPackageHashes")
     let normalizedDID = normalizeUserDID(userDID)
     guard let apiClient = self.apiClients[normalizedDID] else {
       logger.error("❌ [SyncKeyPackages] API client not configured for user \(normalizedDID, privacy: .private)")

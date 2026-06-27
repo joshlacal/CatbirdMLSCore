@@ -150,6 +150,42 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     }
   }
 
+  func testRustFullSharedStateBlocksLowLevelSwiftKeyPackageMutations() async throws {
+    MLSAuthorityModeSharedState.clearForTesting()
+    defer { MLSAuthorityModeSharedState.clearForTesting() }
+
+    MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
+
+    try await assertRustFullBlocksKeyPackageMutation("ensureDeviceRegistered") {
+      _ = try await MLSClient.shared.ensureDeviceRegistered(
+        userDid: "did:plc:rustfull-keypackage-guard"
+      )
+    }
+    try await assertRustFullBlocksKeyPackageMutation("batchCreateKeyPackages") {
+      _ = try await MLSClient.shared.batchCreateKeyPackages(
+        for: "did:plc:rustfull-keypackage-guard",
+        identity: "did:plc:rustfull-keypackage-guard",
+        count: 1
+      )
+    }
+    try await assertRustFullBlocksKeyPackageMutation("createKeyPackage") {
+      _ = try await MLSClient.shared.createKeyPackage(
+        for: "did:plc:rustfull-keypackage-guard",
+        identity: "did:plc:rustfull-keypackage-guard"
+      )
+    }
+    try await assertRustFullBlocksKeyPackageMutation("monitorAndReplenishBundles") {
+      _ = try await MLSClient.shared.monitorAndReplenishBundles(
+        for: "did:plc:rustfull-keypackage-guard"
+      )
+    }
+    try await assertRustFullBlocksKeyPackageMutation("syncKeyPackageHashes") {
+      _ = try await MLSClient.shared.syncKeyPackageHashes(
+        for: "did:plc:rustfull-keypackage-guard"
+      )
+    }
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)
@@ -276,6 +312,22 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
       }
       XCTAssertTrue(reason.contains("rustFull"), operationName)
       XCTAssertTrue(reason.contains("Swift MLS protocol mutation"), operationName)
+    }
+  }
+
+  private func assertRustFullBlocksKeyPackageMutation(
+    _ operationName: String,
+    operation: () async throws -> Void
+  ) async throws {
+    do {
+      try await operation()
+      XCTFail("Expected rustFull to block \(operationName)")
+    } catch let error as MLSSQLCipherError {
+      guard case .storageUnavailable(let reason) = error else {
+        return XCTFail("Unexpected MLSSQLCipherError for \(operationName): \(error)")
+      }
+      XCTAssertTrue(reason.contains("rustFull"), operationName)
+      XCTAssertTrue(reason.contains("Swift MLS key package mutation"), operationName)
     }
   }
 }
