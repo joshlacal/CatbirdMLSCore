@@ -199,6 +199,43 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
   }
 
+  func testRustFullKeyPackageRefreshEntrypointsUseRustReplenishment() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    try await manager.smartRefreshKeyPackages(maxGeneratedPackages: 5)
+    try await manager.refreshKeyPackagesBasic()
+    try await manager.refreshKeyPackagesIfNeeded()
+    try await manager.uploadKeyPackageBatchSmart(count: 25, maxGeneratedPackages: 5)
+    try await manager.uploadKeyPackageBatch(count: 25)
+    try await manager.refreshKeyPackagesBasedOnInterval(maxGeneratedPackages: 5)
+
+    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 6)
+  }
+
+  func testRustFullPublishSingleKeyPackageFailsWithoutSwiftMutation() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    await XCTAssertThrowsErrorAsync(try await manager.publishKeyPackage()) { error in
+      guard case MLSConversationError.operationFailed(let message) = error else {
+        return XCTFail("Expected operationFailed, got \(error)")
+      }
+      XCTAssertEqual(message, "Swift MLS protocol mutation blocked in rustFull mode")
+    }
+    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 0)
+  }
+
   func testRustFullValidateGroupStatesRoutesThroughRuntimeStartupReconcile() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()

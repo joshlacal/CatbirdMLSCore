@@ -16,6 +16,7 @@ public extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
+    try assertSwiftProtocolMutationAllowed("publishKeyPackage")
     return try await keyPackageManager.publishKeyPackage(for: userDid, expiresAt: expiresAt)
   }
 
@@ -23,6 +24,10 @@ public extension MLSConversationManager {
   public func smartRefreshKeyPackages(maxGeneratedPackages: Int? = nil) async throws {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
+    }
+    if protocolAuthorityMode == .rustFull {
+      try await replenishKeyPackagesWithRustAuthority(operation: "smartRefreshKeyPackages")
+      return
     }
     try await keyPackageManager.smartRefreshKeyPackages(
       for: userDid,
@@ -35,6 +40,10 @@ public extension MLSConversationManager {
   public func refreshKeyPackagesBasic() async throws {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
+    }
+    if protocolAuthorityMode == .rustFull {
+      try await replenishKeyPackagesWithRustAuthority(operation: "refreshKeyPackagesBasic")
+      return
     }
     try await keyPackageManager.refreshKeyPackagesBasic(for: userDid)
   }
@@ -52,6 +61,10 @@ public extension MLSConversationManager {
   ) async throws {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
+    }
+    if protocolAuthorityMode == .rustFull {
+      try await replenishKeyPackagesWithRustAuthority(operation: "uploadKeyPackageBatchSmart")
+      return
     }
     try await keyPackageManager.uploadKeyPackageBatchSmart(
       for: userDid,
@@ -71,10 +84,23 @@ public extension MLSConversationManager {
       // If no userDid, we can't refresh. Just return.
       return
     }
+    if protocolAuthorityMode == .rustFull {
+      try await replenishKeyPackagesWithRustAuthority(operation: "refreshKeyPackagesBasedOnInterval")
+      return
+    }
     try await keyPackageManager.refreshKeyPackagesBasedOnInterval(
       for: userDid,
       isShuttingDown: isShuttingDown,
       maxGeneratedPackages: maxGeneratedPackages
+    )
+  }
+
+  private func replenishKeyPackagesWithRustAuthority(operation: String) async throws {
+    try await withRustAuthoritativeRuntime(operation: operation) { runtime in
+      try runtime.replenishKeyPackagesIfNeeded()
+    }
+    logger.info(
+      "✅ [MLS-FULL-RUST] \(operation, privacy: .public) routed through Rust key package replenishment"
     )
   }
 
