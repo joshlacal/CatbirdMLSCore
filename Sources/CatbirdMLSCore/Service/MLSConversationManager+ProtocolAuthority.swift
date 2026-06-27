@@ -2,6 +2,22 @@ import CatbirdMLS
 import Foundation
 import GRDB
 
+public struct MLSConversationDiagnosticsProjection: Equatable, Sendable {
+  public let recoveryState: ConversationRecoveryState
+  public let epoch: UInt64?
+  public let sendAllowed: Bool?
+
+  public init(
+    recoveryState: ConversationRecoveryState,
+    epoch: UInt64?,
+    sendAllowed: Bool?
+  ) {
+    self.recoveryState = recoveryState
+    self.epoch = epoch
+    self.sendAllowed = sendAllowed
+  }
+}
+
 public extension MLSConversationManager {
   var isRustProtocolAuthorityEnabled: Bool {
     protocolAuthorityMode != .swiftLegacy
@@ -47,6 +63,47 @@ public extension MLSConversationManager {
       mlsDid: deviceInfo.mlsDid,
       deviceUUID: deviceInfo.deviceUUID,
       createdAt: nil
+    )
+  }
+
+  func conversationDiagnosticsProjection(
+    conversationId: String,
+    ensureReady: Bool = false
+  ) async throws -> MLSConversationDiagnosticsProjection {
+    let fallback = await cachedOrStoredConversationProjection(conversationId: conversationId)
+
+    if protocolAuthorityMode == .rustFull {
+      return try await withRustAuthoritativeRuntime(
+        operation: ensureReady
+          ? "conversationDiagnosticsProjection.ensureReady"
+          : "conversationDiagnosticsProjection.readOnly"
+      ) { runtime in
+        if ensureReady {
+          let ready = try runtime.ensureConversationReady(conversationId: conversationId)
+          return MLSConversationDiagnosticsProjection(
+            recoveryState: ready.recoveryState,
+            epoch: ready.epoch ?? fallback?.epoch,
+            sendAllowed: ready.sendAllowed
+          )
+        }
+
+        let recoveryState = try runtime.conversationRecoveryState(conversationId: conversationId)
+        let rustEpoch = try? runtime.listConversations()
+          .first { $0.conversationId == conversationId }
+          .map { UInt64($0.epoch) }
+
+        return MLSConversationDiagnosticsProjection(
+          recoveryState: recoveryState,
+          epoch: rustEpoch ?? fallback?.epoch,
+          sendAllowed: nil
+        )
+      }
+    }
+
+    return MLSConversationDiagnosticsProjection(
+      recoveryState: await swiftRecoveryState(conversationId: conversationId),
+      epoch: await legacyLocalEpochForDiagnostics(conversationId: conversationId, fallback: fallback),
+      sendAllowed: nil
     )
   }
 }
@@ -233,5 +290,38 @@ extension MLSConversationManager {
 
     let exists = await mlsClient.groupExists(for: userDid, groupId: groupId)
     return exists ? .healthy : .groupMissing
+  }
+
+  private func cachedOrStoredConversationProjection(
+    conversationId: String
+  ) async -> (groupID: Data?, epoch: UInt64)? {
+    if let convo = conversations[conversationId] {
+      return (Data(hexEncoded: convo.groupId), UInt64(convo.epoch))
+    }
+
+    guard let userDid,
+          let model = try? await storage.fetchConversation(
+            conversationID: conversationId,
+            currentUserDID: userDid,
+            database: database
+          )
+    else {
+      return nil
+    }
+
+    return (model.groupID, UInt64(model.epoch))
+  }
+
+  private func legacyLocalEpochForDiagnostics(
+    conversationId: String,
+    fallback: (groupID: Data?, epoch: UInt64)?
+  ) async -> UInt64? {
+    guard let userDid,
+          let groupID = fallback?.groupID
+    else {
+      return fallback?.epoch
+    }
+
+    return (try? await mlsClient.getEpoch(for: userDid, groupId: groupID)) ?? fallback?.epoch
   }
 }

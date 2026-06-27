@@ -28,6 +28,71 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertFalse(result.sendAllowed)
   }
 
+  func testRustFullDiagnosticsProjectionCanEnsureReadyThroughRuntime() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.conversationReadyResult = FfiConversationReadyResult(
+      recoveryState: .healthy,
+      epoch: 42,
+      sendAllowed: true
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let projection = try await manager.conversationDiagnosticsProjection(
+      conversationId: "diagnostic-convo",
+      ensureReady: true
+    )
+
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 1)
+    XCTAssertEqual(bridge.lastEnsureConversationReadyConversationId, "diagnostic-convo")
+    XCTAssertEqual(bridge.conversationRecoveryStateCallCount, 0)
+    XCTAssertEqual(projection.recoveryState, .healthy)
+    XCTAssertEqual(projection.epoch, 42)
+    XCTAssertEqual(projection.sendAllowed, true)
+  }
+
+  func testRustFullDiagnosticsProjectionReadsRecoveryStateWithoutEnsuringReady() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingStartupReconcileBridge()
+    bridge.conversationRecoveryState = .groupMissing
+    bridge.rustConversationSnapshots = [
+      FfiConversationView(
+        groupId: "cafebabefeedface",
+        conversationId: "diagnostic-convo",
+        epoch: 9,
+        members: [
+          FfiMemberView(did: "did:plc:testuser", role: "admin"),
+        ],
+        name: "Diagnostics",
+        description: nil,
+        avatarUrl: nil,
+        createdAt: "2026-06-27T00:00:00Z",
+        updatedAt: "2026-06-27T00:00:00Z"
+      )
+    ]
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let projection = try await manager.conversationDiagnosticsProjection(
+      conversationId: "diagnostic-convo",
+      ensureReady: false
+    )
+
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 0)
+    XCTAssertEqual(bridge.conversationRecoveryStateCallCount, 1)
+    XCTAssertEqual(bridge.listConversationsCallCount, 1)
+    XCTAssertEqual(projection.recoveryState, .groupMissing)
+    XCTAssertEqual(projection.epoch, 9)
+    XCTAssertNil(projection.sendAllowed)
+  }
+
   func testRustFullEnsureGroupInitializedCallsOnlyRustEnsureConversationReady() async throws {
     let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
     try await seedConversation(conversationID: "convo-ready", on: manager)
@@ -680,12 +745,14 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
   private(set) var replenishKeyPackagesCallCount = 0
   private(set) var syncWithServerCallCount = 0
   private(set) var listConversationsCallCount = 0
+  private(set) var conversationRecoveryStateCallCount = 0
   private(set) var lastDeferredRecoveryReason: String?
   private(set) var lastEnsureConversationReadyConversationId: String?
   private(set) var lastSyncWithServerFullSync: Bool?
   private(set) var lastListConversationsUserDid: String?
   var rustConversationSnapshots: [FfiConversationView] = []
   var listConversationsError: Error?
+  var conversationRecoveryState: FfiConversationRecoveryState = .healthy
 
   init() {
     super.init(noPointer: .init())
@@ -741,6 +808,11 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
       throw listConversationsError
     }
     return rustConversationSnapshots
+  }
+
+  override func getConversationRecoveryState(conversationId: String) throws -> FfiConversationRecoveryState {
+    conversationRecoveryStateCallCount += 1
+    return conversationRecoveryState
   }
 
   override func shutdown() {
