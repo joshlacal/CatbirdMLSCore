@@ -69,12 +69,14 @@ extension MLSConversationManager {
     logger.info("🔄 [MLS-AUTHORITY] Resetting Rust orchestrator runtime: \(reason, privacy: .public)")
     runtime.shutdown()
     orchestratorRuntime = nil
+    rustStartupReconcileCompleted = false
   }
 
   internal func invalidateOrchestratorRuntime(reason: String) {
     guard orchestratorRuntime != nil else { return }
     logger.info("🔄 [MLS-AUTHORITY] Invalidating Rust orchestrator runtime: \(reason, privacy: .public)")
     orchestratorRuntime = nil
+    rustStartupReconcileCompleted = false
   }
 
   internal func restoreOrchestratorRuntimeAfterSuspendClose(
@@ -91,6 +93,7 @@ extension MLSConversationManager {
     do {
       try runtime.reattachAfterSuspend(reason: reason)
       orchestratorRuntime = runtime
+      rustStartupReconcileCompleted = false
       return runtime
     } catch {
       logger.error(

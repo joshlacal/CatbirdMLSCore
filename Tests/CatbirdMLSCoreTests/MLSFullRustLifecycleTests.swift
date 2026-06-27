@@ -191,6 +191,41 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(manager.rustRuntimeRequiresForegroundRestore)
   }
 
+  func testRustFullForceCloseRestoreRerunsStartupReconcileOnRebuiltRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let staleBridge = RecordingLifecycleBridge()
+    let rebuiltBridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: staleBridge
+    )
+    manager.orchestratorRuntimeResumeFactory = {
+      MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: rebuiltBridge
+      )
+    }
+
+    await manager.validateGroupStates()
+    XCTAssertEqual(staleBridge.startupReconcileCallCount, 1)
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+    XCTAssertTrue(rustPrepared)
+
+    await MainActor.run {
+      manager.markRustRuntimeClosedForSuspend(reason: "unit-test force close")
+    }
+
+    await manager.resumeMLSOperations()
+    await manager.validateGroupStates()
+
+    XCTAssertEqual(rebuiltBridge.startupReconcileCallCount, 1)
+  }
+
   func testRustFullForceCloseInvalidatesRuntimeAndAvoidsResumingStaleBridge() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let staleBridge = RecordingLifecycleBridge()
@@ -386,6 +421,7 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
   private(set) var syncCalls: [Bool] = []
   private(set) var interruptCalls: [LifecycleReasonCall] = []
   private(set) var emergencyCloseCalls: [LifecycleReasonCall] = []
+  private(set) var startupReconcileCallCount = 0
   private(set) var shutdownCalled = false
   var prepareError: Error?
 
@@ -411,6 +447,17 @@ private final class RecordingLifecycleBridge: OrchestratorBridge {
 
   override func storageLifecycleStatus() -> StorageLifecycleStatus {
     storageLifecycleStatusResult
+  }
+
+  override func startupReconcile() throws -> FfiStartupReconcileReport {
+    startupReconcileCallCount += 1
+    return FfiStartupReconcileReport(
+      scanned: 0,
+      healthy: 0,
+      needsRejoin: 0,
+      resetPending: 0,
+      unrecoverableLocal: 0
+    )
   }
 
   override func reattachAfterSuspend(userDid: String, reason: String) throws {

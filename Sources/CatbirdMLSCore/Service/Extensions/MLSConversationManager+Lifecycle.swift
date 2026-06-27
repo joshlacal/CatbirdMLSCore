@@ -58,6 +58,7 @@ extension MLSConversationManager {
           reason: "MLSConversationManager.suspendMLSOperations"
         )
         rustRuntimeRequiresForegroundRestore = false
+        rustStartupReconcileCompleted = false
         rustPrepareSucceeded = true
       } catch {
         rustPrepareSucceeded = false
@@ -135,6 +136,7 @@ extension MLSConversationManager {
   public func markRustRuntimeClosedForSuspend(reason: String) {
     guard protocolAuthorityMode == .rustFull else { return }
     rustRuntimeRequiresForegroundRestore = true
+    rustStartupReconcileCompleted = false
     invalidateOrchestratorRuntime(reason: reason)
   }
 
@@ -192,6 +194,7 @@ extension MLSConversationManager {
     isSyncPaused = false
     MLSCoreContext.clearSuspensionFlag()
     MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
+    await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
     schedulePostReloadSyncIfNeeded()
 
     // Restart background tasks (only if we're initialized)
