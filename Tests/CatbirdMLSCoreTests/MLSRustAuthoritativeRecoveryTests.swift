@@ -44,6 +44,24 @@ final class MLSRustAuthoritativeRecoveryTests: XCTestCase {
     XCTAssertEqual(result?.recoveryState, .healthy)
   }
 
+  func testPublicJoinOrRejoinConversationRoutesRustFullThroughRuntime() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingJoinOrRejoinBridge(
+      result: FfiJoinOrRejoinResult(epoch: 21, recoveryState: .needsRejoin)
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let result = try await manager.joinOrRejoinConversation(conversationId: "convo-public")
+
+    XCTAssertEqual(bridge.joinOrRejoinCalls, ["convo-public"])
+    XCTAssertEqual(result?.epoch, 21)
+    XCTAssertEqual(result?.recoveryState, .needsRejoin)
+  }
+
   func testRustShadowDoesNotMutateByCallingJoinOrRejoin() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustShadow)
     let bridge = RecordingJoinOrRejoinBridge(

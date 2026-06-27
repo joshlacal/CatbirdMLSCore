@@ -6,6 +6,23 @@ public extension MLSConversationManager {
   var isRustProtocolAuthorityEnabled: Bool {
     protocolAuthorityMode != .swiftLegacy
   }
+
+  @discardableResult
+  func joinOrRejoinConversation(conversationId: String) async throws -> MLSJoinOrRejoinResult? {
+    if protocolAuthorityMode.usesRustForDecisions {
+      return try await joinOrRejoinWithRustAuthorityIfNeeded(
+        conversationId: conversationId,
+        operation: "joinOrRejoinConversation"
+      )
+    }
+
+    guard let userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: conversationId)
+    return nil
+  }
 }
 
 extension MLSConversationManager {

@@ -61,6 +61,13 @@ extension MLSConversationManager {
   ///   - messageId: The server-assigned messageId that was just decrypted.
   ///   - conversationId: The conversation the message belongs to.
   func enqueueDeliveryAck(messageId: String, conversationId: String) {
+    if protocolAuthorityMode == .rustFull {
+      logger.info(
+        "[MLS-FULL-RUST] Skipping Swift deliveryAck send path; Rust authority owns encrypted control messages for \(conversationId.prefix(16), privacy: .private)"
+      )
+      return
+    }
+
     guard let userDid = userDid else { return }
 
     Task { [weak self] in
@@ -94,6 +101,7 @@ extension MLSConversationManager {
   /// Sends an encrypted `deliveryAck` MLS application message.
   /// Follows the same pre-cache-before-send pattern as `sendEncryptedReaction`.
   private func sendDeliveryAck(messageId: String, conversationId: String, userDid: String) async throws {
+    try assertSwiftProtocolMutationAllowed("sendDeliveryAck")
     try throwIfShuttingDown("sendDeliveryAck")
 
     guard let convo = conversations[conversationId] else { return }
@@ -220,6 +228,22 @@ extension MLSConversationManager {
     sequenceNumber: Int64,
     conversationId: String
   ) async {
+    if protocolAuthorityMode == .rustFull {
+      logger.info(
+        "[MLS-FULL-RUST] Skipping Swift recoveryRequest send path; Rust authority owns encrypted control messages for \(conversationId.prefix(16), privacy: .private)"
+      )
+      return
+    }
+
+    do {
+      try assertSwiftProtocolMutationAllowed("sendRecoveryRequest")
+    } catch {
+      logger.error(
+        "[MLS-FULL-RUST] Blocking Swift recoveryRequest send path: \(error.localizedDescription, privacy: .public)"
+      )
+      return
+    }
+
     guard let userDid = userDid, let convo = conversations[conversationId] else { return }
     guard let groupIdData = Data(hexEncoded: convo.groupId) else { return }
 
@@ -308,6 +332,22 @@ extension MLSConversationManager {
     requesterDID: String,
     conversationId: String
   ) async {
+    if protocolAuthorityMode == .rustFull {
+      logger.info(
+        "[MLS-FULL-RUST] Skipping Swift recoveryRequest response path; Rust authority owns encrypted control messages for \(conversationId.prefix(16), privacy: .private)"
+      )
+      return
+    }
+
+    do {
+      try assertSwiftProtocolMutationAllowed("handleRecoveryRequest")
+    } catch {
+      logger.error(
+        "[MLS-FULL-RUST] Blocking Swift recoveryRequest response path: \(error.localizedDescription, privacy: .public)"
+      )
+      return
+    }
+
     guard let userDid = userDid else { return }
     guard requesterDID != userDid else { return }
 

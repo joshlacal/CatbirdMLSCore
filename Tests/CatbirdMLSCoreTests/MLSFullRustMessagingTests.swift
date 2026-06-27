@@ -480,6 +480,10 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
     syncWithServerCallCount += 1
   }
 
+  override func listConversations(userDid: String) throws -> [FfiConversationView] {
+    []
+  }
+
   func lastServerEventJsonField(_ field: String) -> String? {
     guard let data = lastProcessServerEventJson?.data(using: .utf8),
           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

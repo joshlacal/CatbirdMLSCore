@@ -25,6 +25,93 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     XCTAssertNoThrow(try manager.assertSwiftProtocolMutationAllowed("testRustAuthoritativeStillAllowsSwiftProtocolMutations"))
   }
 
+  func testRustFullDeliveryAckEntryPointReturnsBeforeSwiftSend() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+DeliveryAcks.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(signature: "func enqueueDeliveryAck(messageId: String, conversationId: String)", from: source)
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("return"))
+    XCTAssertTrue(body.contains("sendDeliveryAck(messageId: messageId"))
+    let rustFullGuardIndex = try XCTUnwrap(
+      body.range(of: "protocolAuthorityMode == .rustFull")
+    ).lowerBound
+    let swiftSendIndex = try XCTUnwrap(
+      body.range(of: "sendDeliveryAck(messageId: messageId")
+    ).lowerBound
+    XCTAssertLessThan(
+      rustFullGuardIndex,
+      swiftSendIndex
+    )
+  }
+
+  func testDeliveryAckSendAssertsSwiftProtocolMutationAllowed() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+DeliveryAcks.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "private func sendDeliveryAck(messageId: String, conversationId: String, userDid: String) async throws",
+        from: source
+      )
+    )
+
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"sendDeliveryAck\")"))
+  }
+
+  func testRustFullRecoveryRequestSendPathReturnsBeforeSwiftSend() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+DeliveryAcks.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "func sendRecoveryRequest(",
+        from: source
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("return"))
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"sendRecoveryRequest\")"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "sendQueueCoordinator.enqueueSend")).lowerBound
+    )
+  }
+
+  func testRustFullRecoveryRequestResponsePathReturnsBeforeSwiftSend() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+DeliveryAcks.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "func handleRecoveryRequest(",
+        from: source
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("return"))
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"handleRecoveryRequest\")"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "sendQueueCoordinator.enqueueSend")).lowerBound
+    )
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",
