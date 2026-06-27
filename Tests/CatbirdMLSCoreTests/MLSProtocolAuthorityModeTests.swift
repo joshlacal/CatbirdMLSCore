@@ -115,6 +115,41 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     }
   }
 
+  func testRustFullSharedStateBlocksLowLevelSwiftProtocolMutations() async throws {
+    MLSAuthorityModeSharedState.clearForTesting()
+    defer { MLSAuthorityModeSharedState.clearForTesting() }
+
+    MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
+
+    try await assertRustFullBlocksProtocolMutation("createGroup") {
+      _ = try await MLSClient.shared.createGroup(for: "did:plc:rustfull-protocol-guard")
+    }
+    try await assertRustFullBlocksProtocolMutation("joinByExternalCommit") {
+      _ = try await MLSClient.shared.joinByExternalCommit(
+        for: "did:plc:rustfull-protocol-guard",
+        convoId: "convo-rustfull-protocol-guard"
+      )
+    }
+    try await assertRustFullBlocksProtocolMutation("deleteGroup") {
+      try await MLSClient.shared.deleteGroup(
+        for: "did:plc:rustfull-protocol-guard",
+        groupId: Data([0x01, 0x02, 0x03])
+      )
+    }
+    try await assertRustFullBlocksProtocolMutation("clearPendingCommit") {
+      try await MLSClient.shared.clearPendingCommit(
+        for: "did:plc:rustfull-protocol-guard",
+        groupId: Data([0x01, 0x02, 0x03])
+      )
+    }
+    try await assertRustFullBlocksProtocolMutation("commitPendingProposals") {
+      _ = try await MLSClient.shared.commitPendingProposals(
+        for: "did:plc:rustfull-protocol-guard",
+        groupId: Data([0x01, 0x02, 0x03])
+      )
+    }
+  }
+
   func testFFIRecoveryStateMapsToSwiftVocabulary() {
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .healthy), .healthy)
     XCTAssertEqual(ConversationRecoveryState(ffiRecoveryState: .epochBehind), .epochBehind)
@@ -226,5 +261,21 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )
+  }
+
+  private func assertRustFullBlocksProtocolMutation(
+    _ operationName: String,
+    operation: () async throws -> Void
+  ) async throws {
+    do {
+      try await operation()
+      XCTFail("Expected rustFull to block \(operationName)")
+    } catch let error as MLSSQLCipherError {
+      guard case .storageUnavailable(let reason) = error else {
+        return XCTFail("Unexpected MLSSQLCipherError for \(operationName): \(error)")
+      }
+      XCTAssertTrue(reason.contains("rustFull"), operationName)
+      XCTAssertTrue(reason.contains("Swift MLS protocol mutation"), operationName)
+    }
   }
 }

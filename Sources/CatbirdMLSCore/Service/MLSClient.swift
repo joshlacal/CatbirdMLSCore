@@ -439,6 +439,29 @@ public actor MLSClient {
     return try await deviceManager.reregisterDevice(userDid: userDid)
   }
 
+  private func logRustFullSwiftProtocolMutationBlocked(_ operation: StaticString) {
+    let operationName = String(describing: operation)
+    logger.warning(
+      "⏭️ [MLSClient] rustFull authority: blocking Swift MLS protocol mutation \(operationName, privacy: .public)"
+    )
+  }
+
+  private func throwIfRustFullSwiftProtocolMutation(_ operation: StaticString) throws {
+    guard !MLSAuthorityModeSharedState.isRustFullEnabled else {
+      let operationName = String(describing: operation)
+      logRustFullSwiftProtocolMutationBlocked(operation)
+      throw MLSSQLCipherError.storageUnavailable(
+        reason: "rustFull authority disables Swift MLS protocol mutation: \(operationName)"
+      )
+    }
+  }
+
+  private func shouldReturnForRustFullSwiftProtocolMutation(_ operation: StaticString) -> Bool {
+    guard MLSAuthorityModeSharedState.isRustFullEnabled else { return false }
+    logRustFullSwiftProtocolMutationBlocked(operation)
+    return true
+  }
+
   /// Execute FFI operation on background thread to prevent MainActor blocking
   private func runFFI<T: Sendable>(_ operation: @Sendable @escaping () throws -> T) async throws
     -> T
@@ -750,6 +773,7 @@ public actor MLSClient {
   public func createGroup(for userDID: String, configuration: MLSGroupConfiguration = .default)
     async throws -> Data
   {
+    try throwIfRustFullSwiftProtocolMutation("createGroup")
     logger.info("📍 [MLSClient.createGroup] START - user: \(userDID.prefix(20), privacy: .private)")
 
     // Get client identity (did#deviceUUID) for this device
@@ -828,6 +852,7 @@ public actor MLSClient {
     groupId: Data,
     configuration: MLSGroupConfiguration = .default
   ) async throws -> GroupCreationResult {
+    try throwIfRustFullSwiftProtocolMutation("createGroupWithId")
     logger.info(
       "📍 [MLSClient.createGroupWithId] START - user: \(userDID.prefix(20), privacy: .private), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -875,6 +900,7 @@ public actor MLSClient {
   public func createGroupV2(for userDID: String, configuration: MLSGroupConfiguration = .default)
     async throws -> GroupCreationResult
   {
+    try throwIfRustFullSwiftProtocolMutation("createGroupV2")
     logger.info("📍 [MLSClient.createGroupV2] START - user: \(userDID.prefix(20), privacy: .private)")
 
     guard let clientIdentity = await getClientIdentity(for: userDID) else {
@@ -956,6 +982,7 @@ public actor MLSClient {
     avatarBlobLocator: String? = nil,
     avatarContentType: String? = nil
   ) async throws -> UpdateGroupMetadataResultFfi {
+    try throwIfRustFullSwiftProtocolMutation("updateGroupMetadataEncrypted")
     return try await runFFIWithRecovery(for: userDID) { ctx in
       try ctx.updateGroupMetadataEncrypted(
         groupId: groupId,
@@ -973,6 +1000,7 @@ public actor MLSClient {
     for userDID: String, welcome: Data, identity: String,
     configuration: MLSGroupConfiguration = .default
   ) async throws -> Data {
+    try throwIfRustFullSwiftProtocolMutation("joinGroup")
     logger.info(
       "📍 [MLSClient.joinGroup] START - user: \(userDID.prefix(20), privacy: .private), identity: \(identity.prefix(30), privacy: .private), welcome size: \(welcome.count) bytes"
     )
@@ -1046,6 +1074,7 @@ public actor MLSClient {
   public func joinGroup(
     for userDID: String, welcome: Data, configuration: MLSGroupConfiguration = .default
   ) async throws -> Data {
+    try throwIfRustFullSwiftProtocolMutation("joinGroup")
     // Get client identity (did#deviceUUID) for this device
     guard let clientIdentity = await getClientIdentity(for: userDID) else {
       logger.error("❌ [MLSClient.joinGroup] Device not registered - cannot determine client identity")
@@ -1059,6 +1088,7 @@ public actor MLSClient {
   /// This allows joining without a Welcome message from an existing member
   /// Includes retry logic for transient deserialization errors (EndOfStream, truncated data)
   public func joinByExternalCommit(for userDID: String, convoId: String) async throws -> Data {
+    try throwIfRustFullSwiftProtocolMutation("joinByExternalCommit")
     let normalizedDID = normalizeUserDID(userDID)
     let dedupeKey = "\(normalizedDID)::\(convoId)"
 
@@ -1643,6 +1673,7 @@ public actor MLSClient {
   ///   fresh GroupInfo). Recursive retries pass `false` so the retry caps at 1.
   /// - Throws: MLSError if export fails, validation fails, or upload fails
   public func publishGroupInfo(for userDID: String, convoId: String, groupId: Data, knownServerEpoch: UInt64? = nil, allowRetry: Bool = true) async throws {
+    try throwIfRustFullSwiftProtocolMutation("publishGroupInfo")
     logger.info("📤 [MLSClient.publishGroupInfo] Starting for \(convoId)")
 
     let normalizedDID = normalizeUserDID(userDID)
@@ -1743,6 +1774,7 @@ public actor MLSClient {
   public func addMembers(for userDID: String, groupId: Data, keyPackages: [Data]) async throws
     -> AddMembersResult
   {
+    try throwIfRustFullSwiftProtocolMutation("addMembers")
     logger.info(
       "📍 [MLSClient.addMembers] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16)), keyPackages: \(keyPackages.count)"
     )
@@ -1796,6 +1828,7 @@ public actor MLSClient {
   ///
   /// - Note: After sending commit to server, caller MUST call mergePendingCommit()
   public func selfUpdate(for userDID: String, groupId: Data) async throws -> AddMembersResult {
+    try throwIfRustFullSwiftProtocolMutation("selfUpdate")
     logger.info(
       "📍 [MLSClient.selfUpdate] START - user: \(userDID.prefix(20)), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -1821,6 +1854,7 @@ public actor MLSClient {
   public func removeMembers(for userDID: String, groupId: Data, memberIdentities: [Data]) async throws
     -> Data
   {
+    try throwIfRustFullSwiftProtocolMutation("removeMembers")
     logger.info(
       "📍 [MLSClient.removeMembers] Removing \(memberIdentities.count) members from group \(groupId.hexEncodedString().prefix(16))"
     )
@@ -1849,6 +1883,7 @@ public actor MLSClient {
   public func proposeAddMember(for userDID: String, groupId: Data, keyPackageData: Data) async throws
     -> ProposeResult
   {
+    try throwIfRustFullSwiftProtocolMutation("proposeAddMember")
     logger.info(
       "📍 [MLSClient.proposeAddMember] Creating add proposal for group \(groupId.hexEncodedString().prefix(16))"
     )
@@ -1878,6 +1913,7 @@ public actor MLSClient {
   public func proposeRemoveMember(for userDID: String, groupId: Data, memberIdentity: Data) async throws
     -> ProposeResult
   {
+    try throwIfRustFullSwiftProtocolMutation("proposeRemoveMember")
     logger.info(
       "📍 [MLSClient.proposeRemoveMember] Creating remove proposal for member"
     )
@@ -1904,6 +1940,7 @@ public actor MLSClient {
   ///   - groupId: The MLS group identifier
   /// - Returns: ProposeResult with proposal message and reference
   public func proposeSelfUpdate(for userDID: String, groupId: Data) async throws -> ProposeResult {
+    try throwIfRustFullSwiftProtocolMutation("proposeSelfUpdate")
     logger.info(
       "📍 [MLSClient.proposeSelfUpdate] Creating self-update proposal for group \(groupId.hexEncodedString().prefix(16))"
     )
@@ -1925,6 +1962,7 @@ public actor MLSClient {
 
   /// Delete a group from MLS storage
   public func deleteGroup(for userDID: String, groupId: Data) async throws {
+    try throwIfRustFullSwiftProtocolMutation("deleteGroup")
     logger.info(
       "📍 [MLSClient.deleteGroup] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -1945,6 +1983,7 @@ public actor MLSClient {
   public func encryptMessage(for userDID: String, groupId: Data, plaintext: Data) async throws
     -> EncryptResult
   {
+    try throwIfRustFullSwiftProtocolMutation("encryptMessage")
     logger.info(
       "📍 [MLSClient.encryptMessage] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16)), plaintext: \(plaintext.count) bytes"
     )
@@ -1967,6 +2006,7 @@ public actor MLSClient {
   public func decryptMessage(
     for userDID: String, groupId: Data, ciphertext: Data, conversationID: String, messageID: String
   ) async throws -> DecryptResult {
+    try throwIfRustFullSwiftProtocolMutation("decryptMessage")
     logger.info(
       "📍 [MLSClient.decryptMessage] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16)), messageID: \(messageID)"
     )
@@ -2484,6 +2524,7 @@ public actor MLSClient {
   public func processCommit(for userDID: String, groupId: Data, commitData: Data) async throws
     -> ProcessCommitResult
   {
+    try throwIfRustFullSwiftProtocolMutation("processCommit")
     logger.info(
       "📍 [MLSClient.processCommit] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16)), commit: \(commitData.count) bytes"
     )
@@ -2513,12 +2554,14 @@ public actor MLSClient {
 
   /// Create a commit for pending proposals
   public func createCommit(for userDID: String, groupId: Data) async throws -> Data {
+    try throwIfRustFullSwiftProtocolMutation("createCommit")
     logger.error("Create commit not yet implemented in UniFFI API")
     throw MLSError.operationFailed
   }
 
   /// Clear pending commit for a group
   public func clearPendingCommit(for userDID: String, groupId: Data) async throws {
+    try throwIfRustFullSwiftProtocolMutation("clearPendingCommit")
     logger.info(
       "📍 [MLSClient.clearPendingCommit] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -2544,6 +2587,7 @@ public actor MLSClient {
   /// the server never accepted — every subsequent message send fails with
   /// TreeStateDiverged until next recovery.
   public func discardPendingExternalJoin(for userDID: String, groupId: Data) async throws {
+    try throwIfRustFullSwiftProtocolMutation("discardPendingExternalJoin")
     logger.info(
       "📍 [MLSClient.discardPendingExternalJoin] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -2562,6 +2606,7 @@ public actor MLSClient {
   public func mergePendingCommit(for userDID: String, groupId: Data, convoId: String? = nil) async throws
     -> UInt64
   {
+    try throwIfRustFullSwiftProtocolMutation("mergePendingCommit")
     logger.info(
       "📍 [MLSClient.mergePendingCommit] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -2593,6 +2638,7 @@ public actor MLSClient {
   public func mergePendingCommitV2(for userDID: String, groupId: Data, convoId: String? = nil)
     async throws -> (newEpoch: UInt64, metadataKey: Data?, metadataEpoch: UInt64?)
   {
+    try throwIfRustFullSwiftProtocolMutation("mergePendingCommitV2")
     logger.info(
       "📍 [MLSClient.mergePendingCommitV2] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16))"
     )
@@ -2624,6 +2670,7 @@ public actor MLSClient {
 
   /// Merge a staged commit after validation
   public func mergeStagedCommit(for userDID: String, groupId: Data) async throws -> UInt64 {
+    try throwIfRustFullSwiftProtocolMutation("mergeStagedCommit")
     do {
       let newEpoch = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.mergeStagedCommit(groupId: groupId)
@@ -2647,6 +2694,7 @@ public actor MLSClient {
   public func mergeIncomingCommit(
     for userDID: String, groupId: Data, targetEpoch: UInt64
   ) async throws -> UInt64 {
+    try throwIfRustFullSwiftProtocolMutation("mergeIncomingCommit")
     do {
       let mergedEpoch = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.mergeIncomingCommit(groupId: groupId, targetEpoch: targetEpoch)
@@ -2671,6 +2719,10 @@ public actor MLSClient {
   public func discardIncomingCommit(
     for userDID: String, groupId: Data, targetEpoch: UInt64
   ) async {
+    if shouldReturnForRustFullSwiftProtocolMutation("discardIncomingCommit") {
+      return
+    }
+
     do {
       try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.discardIncomingCommit(groupId: groupId, targetEpoch: targetEpoch)
@@ -2726,6 +2778,7 @@ public actor MLSClient {
     conversationId: String,
     kind: FfiCommitKind
   ) async throws -> FfiCommitPlan {
+    try throwIfRustFullSwiftProtocolMutation("stageCommit")
     logger.info(
       "📍 [MLSClient.stageCommit] START - user: \(userDID.prefix(20)), convo: \(conversationId.prefix(16)), kind: \(String(describing: kind).prefix(32))"
     )
@@ -2787,6 +2840,7 @@ public actor MLSClient {
     handle: FfiStagedCommitHandle,
     serverEpoch: UInt64
   ) async throws -> FfiConfirmedCommit {
+    try throwIfRustFullSwiftProtocolMutation("confirmCommit")
     logger.info(
       "📍 [MLSClient.confirmCommit] START - user: \(userDID.prefix(20)), group: \(handle.groupId.prefix(16)), nonce: \(handle.nonce), serverEpoch: \(serverEpoch)"
     )
@@ -2816,6 +2870,10 @@ public actor MLSClient {
     for userDID: String,
     handle: FfiStagedCommitHandle
   ) async {
+    if shouldReturnForRustFullSwiftProtocolMutation("discardPending") {
+      return
+    }
+
     do {
       try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.discardPending(handle: handle)
@@ -2839,6 +2897,7 @@ public actor MLSClient {
   public func processMessage(for userDID: String, groupId: Data, messageData: Data) async throws
     -> ProcessedContent
   {
+    try throwIfRustFullSwiftProtocolMutation("processMessage")
     // Padding is stripped by catbird-mls process_message internally.
     let actualMessageData = messageData
 
@@ -3033,6 +3092,7 @@ public actor MLSClient {
 
   /// Store a validated proposal in the proposal queue
   public func storeProposal(for userDID: String, groupId: Data, proposalRef: ProposalRef) async throws {
+    try throwIfRustFullSwiftProtocolMutation("storeProposal")
     do {
       try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.storeProposal(groupId: groupId, proposalRef: proposalRef)
@@ -3046,6 +3106,7 @@ public actor MLSClient {
 
   /// List all pending proposals for a group
   public func listPendingProposals(for userDID: String, groupId: Data) async throws -> [ProposalRef] {
+    try throwIfRustFullSwiftProtocolMutation("listPendingProposals")
     do {
       let proposals = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.listPendingProposals(groupId: groupId)
@@ -3060,6 +3121,7 @@ public actor MLSClient {
 
   /// Remove a proposal from the proposal queue
   public func removeProposal(for userDID: String, groupId: Data, proposalRef: ProposalRef) async throws {
+    try throwIfRustFullSwiftProtocolMutation("removeProposal")
     do {
       try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.removeProposal(groupId: groupId, proposalRef: proposalRef)
@@ -3073,6 +3135,7 @@ public actor MLSClient {
 
   /// Commit all pending proposals that have been validated
   public func commitPendingProposals(for userDID: String, groupId: Data) async throws -> Data {
+    try throwIfRustFullSwiftProtocolMutation("commitPendingProposals")
     do {
       let commitData = try await runFFIWithRecovery(for: userDID) { ctx in
         try ctx.commitPendingProposals(groupId: groupId)
