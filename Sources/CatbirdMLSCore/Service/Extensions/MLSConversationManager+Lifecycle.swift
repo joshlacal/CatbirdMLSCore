@@ -20,6 +20,10 @@ extension MLSConversationManager {
     set { Self._isSuspending.withLock { $0 = newValue } }
   }
 
+  internal nonisolated static func resetSuspensionStateForTesting() {
+    _isSuspending.withLock { $0 = false }
+  }
+
   /// Suspend all MLS operations when app enters background
   /// This prevents 0xdead10cc crashes by ensuring no database operations
   /// continue running when iOS suspends the app

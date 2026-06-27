@@ -6,6 +6,12 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSFullRustLifecycleTests: XCTestCase {
+  override func tearDownWithError() throws {
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSClient.clearSuspensionFlag(reason: "MLSFullRustLifecycleTests.tearDown")
+    try super.tearDownWithError()
+  }
+
   func testRuntimeStorageLifecycleStatusWrapsBridgeResult() throws {
     let bridge = RecordingLifecycleBridge()
     bridge.storageLifecycleStatusResult = StorageLifecycleStatus(
