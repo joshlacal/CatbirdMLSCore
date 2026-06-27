@@ -441,6 +441,37 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     }
   }
 
+  func testRustFullGroupMetadataUpdateAssertsBeforeSwiftMutation() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(
+        relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Groups.swift"
+      ),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func updateGroupMetadataEncrypted(",
+        from: source
+      )
+    )
+
+    XCTAssertTrue(body.contains("assertSwiftProtocolMutationAllowed(\"updateGroupMetadataEncrypted\")"))
+    let guardIndex = try XCTUnwrap(
+      body.range(of: "assertSwiftProtocolMutationAllowed(\"updateGroupMetadataEncrypted\")")
+    ).lowerBound
+    for swiftMutation in [
+      "mlsClient.updateGroupMetadataEncrypted",
+      "mlsClient.clearPendingCommit",
+      "mlsClient.mergePendingCommit",
+      "publishLatestGroupInfo",
+    ] {
+      XCTAssertLessThan(
+        guardIndex,
+        try XCTUnwrap(body.range(of: swiftMutation)).lowerBound
+      )
+    }
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

@@ -1197,6 +1197,7 @@ extension MLSConversationManager {
     logger.info(
       "🔵 [updateGroupMetadataEncrypted] START - convo: \(conversationId.prefix(16))..., title: \(title ?? "nil")"
     )
+    try assertSwiftProtocolMutationAllowed("updateGroupMetadataEncrypted")
 
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
