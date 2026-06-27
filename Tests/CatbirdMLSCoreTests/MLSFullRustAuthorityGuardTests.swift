@@ -298,6 +298,44 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     )
   }
 
+  func testRuntimeCurrentDeviceInfoUsesStoredDeviceUuidAndBridgeListDevices() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSOrchestratorRuntime.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(signature: "public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo?", from: source)
+    )
+
+    XCTAssertTrue(body.contains("credentialAdapter?.getDeviceUuid(userDid: userDID)"))
+    XCTAssertTrue(body.contains("bridge.listDevices()"))
+    XCTAssertTrue(body.contains("device.deviceUuid == deviceUuid"))
+  }
+
+  func testRegisteredDeviceInfoForPushTokenUsesRustRuntimeInRustFull() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+ProtocolAuthority.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "func registeredDeviceInfoForPushTokenRegistration() async throws -> MLSRegisteredDeviceInfo?",
+        from: source
+      )
+    )
+    let rustFullBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: body)
+    )
+
+    XCTAssertTrue(rustFullBranch.contains("runtime.ensureDeviceRegistered()"))
+    XCTAssertTrue(rustFullBranch.contains("runtime.currentDeviceInfo()"))
+    XCTAssertFalse(rustFullBranch.contains("MLSClient.shared"))
+    XCTAssertLessThan(
+      try XCTUnwrap(body.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
+      try XCTUnwrap(body.range(of: "mlsClient.ensureDeviceRegistered")).lowerBound
+    )
+  }
+
   func testRustFullManagerEntryPointsCompileGateLegacyLowLevelMLSClientCalls() throws {
     let forbiddenCalls = [
       ".getEpoch(",

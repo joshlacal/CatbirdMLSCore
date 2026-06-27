@@ -23,6 +23,32 @@ public extension MLSConversationManager {
     _ = try await mlsClient.joinByExternalCommit(for: userDid, convoId: conversationId)
     return nil
   }
+
+  func registeredDeviceInfoForPushTokenRegistration() async throws -> MLSRegisteredDeviceInfo? {
+    if protocolAuthorityMode == .rustFull {
+      return try await withRustAuthoritativeRuntime(
+        operation: "registeredDeviceInfoForPushTokenRegistration"
+      ) { runtime in
+        try runtime.ensureDeviceRegistered()
+        return try runtime.currentDeviceInfo()
+      }
+    }
+
+    guard let userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    _ = try await mlsClient.ensureDeviceRegistered(userDid: userDid)
+    guard let deviceInfo = await mlsClient.getDeviceInfo(for: userDid) else {
+      return nil
+    }
+    return MLSRegisteredDeviceInfo(
+      deviceId: deviceInfo.deviceId,
+      mlsDid: deviceInfo.mlsDid,
+      deviceUUID: deviceInfo.deviceUUID,
+      createdAt: nil
+    )
+  }
 }
 
 extension MLSConversationManager {

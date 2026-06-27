@@ -274,6 +274,19 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.replenishKeyPackagesIfNeeded()
   }
 
+  public func listDevices() throws -> [MLSRegisteredDeviceInfo] {
+    try bridge.listDevices().map(MLSRegisteredDeviceInfo.init(ffiDeviceInfo:))
+  }
+
+  public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo? {
+    guard let deviceUuid = try credentialAdapter?.getDeviceUuid(userDid: userDID) else {
+      return nil
+    }
+    return try bridge.listDevices()
+      .first { device in device.deviceUuid == deviceUuid }
+      .map(MLSRegisteredDeviceInfo.init(ffiDeviceInfo:))
+  }
+
   public func conversationRecoveryState(conversationId: String) throws -> ConversationRecoveryState {
     let ffiState = try bridge.getConversationRecoveryState(conversationId: conversationId)
     return ConversationRecoveryState(ffiRecoveryState: ffiState)
@@ -447,6 +460,29 @@ public struct MLSJoinOrRejoinResult: Equatable, Sendable {
   public init(epoch: UInt64, recoveryState: ConversationRecoveryState) {
     self.epoch = epoch
     self.recoveryState = recoveryState
+  }
+}
+
+public struct MLSRegisteredDeviceInfo: Equatable, Sendable {
+  public let deviceId: String
+  public let mlsDid: String
+  public let deviceUUID: String?
+  public let createdAt: String?
+
+  public init(deviceId: String, mlsDid: String, deviceUUID: String?, createdAt: String?) {
+    self.deviceId = deviceId
+    self.mlsDid = mlsDid
+    self.deviceUUID = deviceUUID
+    self.createdAt = createdAt
+  }
+
+  init(ffiDeviceInfo deviceInfo: FfiDeviceInfo) {
+    self.init(
+      deviceId: deviceInfo.deviceId,
+      mlsDid: deviceInfo.mlsDid,
+      deviceUUID: deviceInfo.deviceUuid.isEmpty ? nil : deviceInfo.deviceUuid,
+      createdAt: deviceInfo.createdAt
+    )
   }
 }
 
