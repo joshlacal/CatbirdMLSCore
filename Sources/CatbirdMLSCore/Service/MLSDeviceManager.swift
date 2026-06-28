@@ -111,6 +111,42 @@ public actor MLSDeviceManager {
     return firstKey
   }
 
+  private func publishLastResortKeyPackage(
+    userDid: String,
+    credentialIdentity: String,
+    deviceId: String,
+    expiresAt: Date
+  ) async throws {
+    logger.info("🔐 Creating reusable last-resort key package for device \(deviceId)")
+
+    let keyPackageData = try await mlsClient.createLastResortKeyPackage(
+      for: userDid,
+      identity: credentialIdentity
+    )
+
+    do {
+      let credentialIdentity = try mlsExtractKeyPackageIdentity(keyPackageBytes: keyPackageData)
+      let embeddedDID = Self.extractUserDID(from: credentialIdentity)
+      guard embeddedDID == userDid else {
+        logger.error(
+          "🚨 [DID CONTAMINATION] Refusing last-resort key package: credential DID \(embeddedDID) != expected \(userDid)"
+        )
+        throw MLSError.operationFailed
+      }
+    } catch {
+      logger.error("❌ Failed to validate last-resort key package identity: \(error.localizedDescription)")
+      throw error
+    }
+
+    try await mlsAPIClient.publishKeyPackage(
+      keyPackage: keyPackageData,
+      cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+      expiresAt: ATProtocolDate(date: expiresAt),
+      deviceId: deviceId,
+      lastResort: true
+    )
+  }
+
   /// Registers the device with the MLS service if not already registered
   /// - Parameter userDid: The user's DID for MLS context initialization
   /// - Returns: The MLS DID for this device
@@ -464,6 +500,19 @@ public actor MLSDeviceManager {
         logger.info("   keyPackages: \(keyPackageItems.count) uploaded")
         logger.info("   autoJoinedConvos: \(output.autoJoinedConvos.count)")
         logger.info("   welcomeMessages: \(output.welcomeMessages?.count ?? 0)")
+
+        do {
+          try await publishLastResortKeyPackage(
+            userDid: normalizedUserDid,
+            credentialIdentity: mlsCredentialIdentity,
+            deviceId: output.deviceId,
+            expiresAt: expirationDate
+          )
+          logger.info("✅ Published reusable last-resort key package for device \(output.deviceId)")
+        } catch {
+          logger.error("❌ Failed to publish last-resort key package: \(error.localizedDescription)")
+          logger.error("   Device registration succeeded, but fallback key-package availability is degraded")
+        }
 
         // ✅ CRITICAL: Call optIn to record that user has opted into MLS chat
         // This is required for other users to see this user as "available" for group invites

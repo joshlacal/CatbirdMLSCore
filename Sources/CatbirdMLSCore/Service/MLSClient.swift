@@ -2256,6 +2256,43 @@ public actor MLSClient {
     }
   }
 
+  /// Create a reusable last-resort key package for this user.
+  /// The credential identity follows the same bare-DID policy as regular key packages.
+  public func createLastResortKeyPackage(for userDID: String, identity: String) async throws -> Data {
+    try throwIfRustFullSwiftKeyPackageMutation("createLastResortKeyPackage")
+
+    let identityKeyKey = "mls_identity_key_\(userDID)"
+    if let savedKeyData = try? MLSKeychainManager.shared.retrieve(forKey: identityKeyKey) {
+      do {
+        try await runFFIWithRecovery(for: userDID) { ctx in
+          try ctx.importIdentityKey(identity: identity, keyData: savedKeyData)
+        }
+      } catch let error as MlsError {
+        logger.error("❌ Failed to restore identity key before last-resort KP: \(error.localizedDescription)")
+      } catch {
+        logger.error("❌ Failed to restore identity key before last-resort KP: \(error.localizedDescription)")
+      }
+    }
+
+    let identityBytes = Data(identity.utf8)
+    do {
+      let result = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.createLastResortKeyPackage(identityBytes: identityBytes)
+      }
+
+      if let identityKeyData = try? await runFFIWithRecovery(for: userDID, operation: { ctx in
+        try ctx.exportIdentityKey(identity: identity)
+      }) {
+        try? MLSKeychainManager.shared.store(identityKeyData, forKey: identityKeyKey)
+      }
+
+      return result.keyPackageData
+    } catch let error as MlsError {
+      logger.error("❌ [MLSClient.createLastResortKeyPackage] FAILED: \(error.localizedDescription)")
+      throw MLSError.operationFailed
+    }
+  }
+
   /// Create a key package for this user using client identity (did#deviceUUID)
   /// Each device is a unique MLS leaf node for proper multi-device support.
   public func createKeyPackage(for userDID: String) async throws -> Data {
@@ -2266,6 +2303,16 @@ public actor MLSClient {
       throw MLSError.configurationError
     }
     return try await createKeyPackage(for: userDID, identity: clientIdentity)
+  }
+
+  /// Create a reusable last-resort key package using the registered device identity.
+  public func createLastResortKeyPackage(for userDID: String) async throws -> Data {
+    try throwIfRustFullSwiftKeyPackageMutation("createLastResortKeyPackage")
+    guard let clientIdentity = await getClientIdentity(for: userDID) else {
+      logger.error("❌ [MLSClient.createLastResortKeyPackage] Device not registered - cannot determine client identity")
+      throw MLSError.configurationError
+    }
+    return try await createLastResortKeyPackage(for: userDID, identity: clientIdentity)
   }
 
   /// Compute the hash reference for a key package

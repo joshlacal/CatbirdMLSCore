@@ -1152,12 +1152,13 @@ public final class MLSAPIClient {
         cipherSuite: String,
         expiresAt: ATProtocolDate? = nil,
         idempotencyKey: String? = nil,
-        deviceId: String? = nil
+        deviceId: String? = nil,
+        lastResort: Bool = false
     ) async throws {
         // Generate idempotency key if not provided
         let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
         logger.debug(
-            "Publishing key package with cipher suite: \(cipherSuite), \(keyPackage.count) bytes, idempotencyKey: \(idemKey)"
+            "Publishing key package with cipher suite: \(cipherSuite), \(keyPackage.count) bytes, idempotencyKey: \(idemKey), lastResort: \(lastResort)"
         )
 
         let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
@@ -1165,7 +1166,8 @@ public final class MLSAPIClient {
             keyPackages: [BlueCatbirdMlsChatPublishKeyPackages.KeyPackageItem(
                 keyPackage: Bytes(data: keyPackage),
                 cipherSuite: cipherSuite,
-                expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
+                expires: expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60)),
+                lastResort: lastResort ? true : nil
             )],
             deviceId: deviceId
         )
@@ -3091,7 +3093,8 @@ public final class MLSAPIClient {
                 keyPackage: Bytes(data: pkg.keyPackage),
                 cipherSuite: pkg.cipherSuite,
                 expires: pkg.expires.map { ATProtocolDate(date: $0) }
-                    ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
+                    ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60)),
+                lastResort: pkg.lastResort ? true : nil
             )
         }
 
@@ -3151,7 +3154,9 @@ public final class MLSAPIClient {
                                 keyPackage: package.keyPackage,
                                 cipherSuite: package.cipherSuite,
                                 expiresAt: package.expires.map { ATProtocolDate(date: $0) },
-                                idempotencyKey: package.idempotencyKey
+                                idempotencyKey: package.idempotencyKey,
+                                deviceId: package.deviceId,
+                                lastResort: package.lastResort
                             )
 
                             return (globalIndex, true, nil)

@@ -93,13 +93,17 @@ public struct MLSKeyPackageUploadData: Codable, Sendable {
   /// Credential DID (did:plc:user#device-uuid) for multi-device support
   public let credentialDid: String?
 
+  /// Whether this package is a reusable MLS last-resort key package.
+  public let lastResort: Bool
+
   public init(
     keyPackage: Data,
     cipherSuite: String = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
     expires: Date? = nil,
     idempotencyKey: String = UUID().uuidString,
     deviceId: String? = nil,
-    credentialDid: String? = nil
+    credentialDid: String? = nil,
+    lastResort: Bool = false
   ) {
     self.keyPackage = keyPackage
     self.cipherSuite = cipherSuite
@@ -107,6 +111,7 @@ public struct MLSKeyPackageUploadData: Codable, Sendable {
     self.idempotencyKey = idempotencyKey
     self.deviceId = deviceId
     self.credentialDid = credentialDid
+    self.lastResort = lastResort
   }
 }
 
