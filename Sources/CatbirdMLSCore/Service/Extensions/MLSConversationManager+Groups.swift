@@ -860,16 +860,46 @@ extension MLSConversationManager {
     }
 
     if protocolAuthorityMode == .rustFull {
-      let result = try await withRustAuthoritativeRuntime(operation: "leaveConversation") { runtime in
-        try runtime.leaveConversation(conversationId: convoId)
+      do {
+        let result = try await withRustAuthoritativeRuntime(operation: "leaveConversation") { runtime in
+          try runtime.leaveConversation(conversationId: convoId)
+        }
+        try await removeRustConversationSnapshot(
+          conversationId: result.conversationId,
+          groupId: result.groupId
+        )
+        notifyObservers(.conversationLeft(result.conversationId))
+        logger.info("✅ [MLSConversationManager.leaveConversation] rustFull complete: \(result.conversationId)")
+        return
+      } catch {
+        // GHOST/ZOMBIE RECOVERY (rustFull parity with the legacy orphan path below).
+        // The Rust authority threw on leave — typically because it has no live group
+        // for this conversation (group state was never initialized or was lost).
+        // Without this fallback the local snapshot is permanently undeletable in
+        // rustFull mode: the throw aborts before any cleanup runs. Tear it down
+        // locally so the user can clear the ghost; if they are in fact still a
+        // healthy server-side member, the next sync re-creates the snapshot.
+        logger.warning(
+          "⚠️ [leaveConversation] rustFull leave threw for \(convoId.prefix(16))...: \(error.localizedDescription) — tearing down local snapshot as a ghost"
+        )
+        let groupIdHex: String?
+        if let memoryGroupId = conversations[convoId]?.groupId {
+          groupIdHex = memoryGroupId
+        } else {
+          let dbConvo = try? await database.read { db in
+            try MLSConversationModel
+              .filter(MLSConversationModel.Columns.conversationID == convoId)
+              .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+              .fetchOne(db)
+          }
+          groupIdHex = dbConvo?.groupID.hexEncodedString()
+        }
+        try await removeRustConversationSnapshot(conversationId: convoId, groupId: groupIdHex)
+        notifyObservers(.conversationLeft(convoId))
+        logger.info(
+          "✅ [leaveConversation] Cleaned up ghost conversation (rustFull): \(convoId.prefix(16))...")
+        return
       }
-      try await removeRustConversationSnapshot(
-        conversationId: result.conversationId,
-        groupId: result.groupId
-      )
-      notifyObservers(.conversationLeft(result.conversationId))
-      logger.info("✅ [MLSConversationManager.leaveConversation] rustFull complete: \(result.conversationId)")
-      return
     }
 
     // Try to get conversation from memory first, or look up from database
@@ -898,6 +928,27 @@ extension MLSConversationManager {
         return
       } else {
         throw MLSConversationError.conversationNotFound
+      }
+    }
+
+    // GHOST GUARD: the conversation is in memory but its local MLS group may be
+    // absent (group init failed during sync). The server-leave path below would
+    // throw on the resulting non-200 and leave the convo permanently undeletable,
+    // so when the local group is missing we tear it down locally — reusing the same
+    // existence signal `forceDeleteConversationLocally` already trusts. A best-effort
+    // server leave still removes us if we ARE a live member; its failure is ignored.
+    if let groupIdData = Data(hexEncoded: convo.groupId) {
+      let groupExists = await mlsClient.groupExists(for: userDid, groupId: groupIdData)
+      if !groupExists {
+        logger.warning(
+          "⚠️ [leaveConversation] Local MLS group absent for \(convoId.prefix(16))... — treating as ghost; best-effort server leave then force delete locally"
+        )
+        _ = try? await apiClient.leaveConversation(convoId: convoId)
+        await forceDeleteConversationLocally(convoId: convoId, groupId: convo.groupId)
+        notifyObservers(.conversationLeft(convoId))
+        logger.info(
+          "✅ [leaveConversation] Cleaned up ghost conversation: \(convoId.prefix(16))...")
+        return
       }
     }
 
@@ -933,6 +984,26 @@ extension MLSConversationManager {
         logger.error("Failed to leave conversation: \(networkError.localizedDescription)")
         throw MLSConversationError.serverError(networkError)
       }
+    } catch let apiError as MLSAPIError {
+      // `MLSAPIClient.leaveConversation` throws `MLSAPIError.httpError`, NOT
+      // `NetworkError`, so the branch above never matched for MLS chat. Treat the
+      // client-side "already gone / cannot leave" statuses as success-with-local-
+      // cleanup, so a server-desynced membership (e.g. getConvos lists the convo but
+      // `is_member` returns false → 403) can no longer make the convo undeletable.
+      if case let .httpError(statusCode, _) = apiError,
+        [400, 403, 404, 409, 410].contains(statusCode) {
+        logger.warning(
+          "⚠️ [leaveConversation] Server returned \(statusCode) (MLSAPIError) - treating as already removed, cleaning up locally"
+        )
+        await forceDeleteConversationLocally(convoId: convoId, groupId: convo.groupId)
+        notifyObservers(.conversationLeft(convoId))
+        logger.info(
+          "✅ [leaveConversation] Cleaned up stale conversation after server \(statusCode): \(convoId.prefix(16))..."
+        )
+        return
+      }
+      logger.error("Failed to leave conversation: \(apiError.localizedDescription)")
+      throw MLSConversationError.serverError(apiError)
     } catch {
       logger.error("Failed to leave conversation: \(error.localizedDescription)")
       throw MLSConversationError.serverError(error)

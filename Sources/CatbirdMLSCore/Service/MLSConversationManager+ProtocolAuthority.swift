@@ -221,6 +221,22 @@ extension MLSConversationManager {
     }
   }
 
+  /// Dedicated executor for the synchronous Rust orchestrator bridge.
+  ///
+  /// The UniFFI bridge body blocks its calling thread for the entire crypto +
+  /// network round-trip (`block_in_place` on the Rust side) and re-enters Swift
+  /// synchronously through `MLSOrchestratorAPIAdapter.blocking` — a
+  /// `DispatchSemaphore.wait()`. Running that on the Swift cooperative thread
+  /// pool (or the main thread) starves the bounded pool: every blocked worker
+  /// also spawns a `Task.detached` that needs a *free* cooperative worker to make
+  /// progress, so under concurrency the pool deadlocks and the app hard-freezes.
+  /// GCD grows this concurrent pool on demand, so blocking its threads is safe.
+  private static let rustAuthorityExecutionQueue = DispatchQueue(
+    label: "blue.catbird.mls.rust-authority",
+    qos: .userInitiated,
+    attributes: .concurrent
+  )
+
   internal func withRustAuthoritativeRuntime<T>(
     operation: String,
     body: (MLSOrchestratorRuntime) throws -> T
@@ -231,7 +247,18 @@ extension MLSConversationManager {
     guard let runtime = await ensureOrchestratorRuntime() else {
       throw MLSConversationError.operationFailed("Rust orchestrator runtime unavailable for \(operation)")
     }
-    return try body(runtime)
+
+    // Execute the synchronous bridge body OFF the caller's executor (main thread
+    // or Swift cooperative pool). The body never outlives this call — we await
+    // its completion before returning — so `withoutActuallyEscaping` is sound and
+    // we avoid forcing `@Sendable`/`Sendable` constraints onto all ~28 call sites.
+    return try await withoutActuallyEscaping(body) { escapingBody in
+      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+        Self.rustAuthorityExecutionQueue.async {
+          continuation.resume(with: Result { try escapingBody(runtime) })
+        }
+      }
+    }
   }
 
   internal func joinOrRejoinWithRustAuthorityIfNeeded(
