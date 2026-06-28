@@ -7602,36 +7602,7 @@ public extension MLSConversationManager {
       }
 
       if !optedInButEmpty.isEmpty {
-        var replenishMessage =
-          "They need to open Catbird to refresh device keys."
-
-        let optedInButEmptySet = Set(optedInButEmpty.map { $0.lowercased() })
-        let replenishTargets = dids.filter { did in
-          optedInButEmptySet.contains(did.description.lowercased())
-        }
-        if !replenishTargets.isEmpty {
-          do {
-            // Phase F: see requestKeyPackageReplenish removal in MLSAPIClient.
-            let replenishResult = (
-              requested: false, targetCount: 0, deviceCount: 0, deliveredCount: 0
-            )
-
-            if replenishResult.deliveredCount > 0 {
-              replenishMessage =
-                "We sent a replenish signal to \(replenishResult.deliveredCount) device(s). They may need to open Catbird if keys do not refresh automatically."
-            } else if replenishResult.deviceCount > 0 {
-              replenishMessage =
-                "A replenish signal was attempted but not yet confirmed as delivered."
-            } else {
-              replenishMessage =
-                "No target devices currently have push enabled; they need to open Catbird to refresh keys."
-            }
-          } catch {
-            logger.warning(
-              "⚠️ Failed to send replenish signal to peers: \(error.localizedDescription)")
-          }
-        }
-
+        let replenishMessage = "They need to open Catbird so their devices can publish fresh key packages."
         return
           "Members are opted in but have no available key packages: \(optedInButEmpty.joined(separator: ", ")). \(replenishMessage)"
       }
