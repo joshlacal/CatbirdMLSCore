@@ -51,6 +51,35 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
     )
   }
 
+  func testRustFullGetEpochSkipsSwiftContextReload() throws {
+    // getEpoch's read is legitimate in any mode, but its GroupNotFound /
+    // ContextNotInitialized / ContextClosed recovery branch reopens the OpenMLS /
+    // SQLCipher context from Swift — a forbidden rustFull action (Rust owns context
+    // recovery), and its "attempting context reload" log is a forbidden device-gate
+    // pattern. The rustFull guard must therefore precede reloadContextFromStorage.
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSClient.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "public func getEpoch(for userDID: String, groupId: Data) async throws -> UInt64",
+        from: source
+      )
+    )
+    let rustFullGuardIndex = try XCTUnwrap(
+      body.range(of: "shouldReturnForRustFullSwiftProtocolMutation")
+    ).lowerBound
+    let reloadIndex = try XCTUnwrap(
+      body.range(of: "reloadContextFromStorage")
+    ).lowerBound
+    XCTAssertLessThan(
+      rustFullGuardIndex,
+      reloadIndex,
+      "rustFull guard must precede the Swift context reload in getEpoch"
+    )
+  }
+
   func testDeliveryAckSendAssertsSwiftProtocolMutationAllowed() throws {
     let source = try String(
       contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+DeliveryAcks.swift"),
@@ -309,7 +338,10 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
 
     XCTAssertTrue(body.contains("credentialAdapter?.getDeviceUuid(userDid: userDID)"))
     XCTAssertTrue(body.contains("bridge.listDevices()"))
-    XCTAssertTrue(body.contains("device.deviceUuid == deviceUuid"))
+    // The delivery service mints its own device_id and stores device_uuid as NULL,
+    // so currentDeviceInfo matches on the server-minted deviceId (returned by
+    // getDeviceUuid), NOT deviceUuid (see project_mls_device_id_minting_contract).
+    XCTAssertTrue(body.contains("device.deviceId == registeredDeviceId"))
   }
 
   func testRegisteredDeviceInfoForPushTokenUsesRustRuntimeInRustFull() throws {
@@ -404,15 +436,29 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
         from: source
       )
     )
-    let handleRustFullBranch = try XCTUnwrap(
-      extractConditionalBranchBody(matching: "if protocolAuthorityMode == .rustFull", from: handleBody)
+    // W3 #1: in rustFull the handler no longer early-returns — it routes the
+    // mutation to the Rust orchestrator. welcomeReissueRouting selects
+    // .rustRuntime (-> respondToWelcomeReissueViaRust, which delegates via
+    // withRustAuthoritativeRuntime) for rustFull, and .swiftResponder
+    // (-> respondToWelcomeReissueRequest) otherwise.
+    XCTAssertTrue(handleBody.contains("welcomeReissueRouting(mode: protocolAuthorityMode)"))
+    XCTAssertTrue(handleBody.contains("respondToWelcomeReissueViaRust"))
+    XCTAssertTrue(handleBody.contains("respondToWelcomeReissueRequest"))
+    XCTAssertLessThan(
+      try XCTUnwrap(handleBody.range(of: "welcomeReissueRouting(mode: protocolAuthorityMode)")).lowerBound,
+      try XCTUnwrap(handleBody.range(of: "respondToWelcomeReissueViaRust")).lowerBound
     )
 
-    XCTAssertTrue(handleRustFullBranch.contains("return"))
-    XCTAssertLessThan(
-      try XCTUnwrap(handleBody.range(of: "protocolAuthorityMode == .rustFull")).lowerBound,
-      try XCTUnwrap(handleBody.range(of: "respondToWelcomeReissueRequest")).lowerBound
+    // The rustFull mutation must go through the Rust runtime, never a direct Swift
+    // commit: respondToWelcomeReissueViaRust delegates via withRustAuthoritativeRuntime.
+    let viaRustBody = try XCTUnwrap(
+      extractFunctionBody(
+        signature: "func respondToWelcomeReissueViaRust(",
+        from: source
+      )
     )
+    XCTAssertTrue(viaRustBody.contains("withRustAuthoritativeRuntime"))
+    XCTAssertFalse(viaRustBody.contains("mlsClient.stageCommit"))
 
     let respondBody = try XCTUnwrap(
       extractFunctionBody(

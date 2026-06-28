@@ -2392,6 +2392,16 @@ public actor MLSClient {
         try ctx.getEpoch(groupId: groupId)
       }
     } catch let error as MlsError {
+      // rustFull: Rust owns context recovery. Never reopen OpenMLS/SQLCipher state
+      // from Swift here — and don't even log "attempting context reload", which is a
+      // forbidden device-gate pattern. Surface the failure; the Rust engine recovers.
+      if shouldReturnForRustFullSwiftProtocolMutation("getEpochContextReload") {
+        logger.error(
+          "Get epoch failed (rustFull: deferring context recovery to Rust): \(error.localizedDescription)"
+        )
+        throw MLSError.operationFailed
+      }
+
       let shouldReload: Bool
       switch error {
       case .GroupNotFound:
