@@ -455,17 +455,32 @@ public extension MLSConversationManager {
     }
 
     if protocolAuthorityMode == .rustFull {
-      let result = try await withRustAuthoritativeRuntime(operation: "removeMember") { runtime in
-        try runtime.removeMembers(conversationId: convoId, memberDids: [memberDid])
+      do {
+        let result = try await withRustAuthoritativeRuntime(operation: "removeMember") { runtime in
+          try runtime.removeMembers(conversationId: convoId, memberDids: [memberDid])
+        }
+        try await applyRustConversationSnapshot(result.conversation, metadata: result.metadata)
+        let targetDid = try DID(didString: memberDid)
+        notifyObservers(.membershipChanged(convoId: convoId, did: targetDid, action: .removed))
+        notifyObservers(.epochUpdated(convoId, result.conversation.epoch))
+        logger.info(
+          "✅ [MLSConversationManager.removeMember] rustFull complete - convoId: \(convoId), epoch: \(result.conversation.epoch)"
+        )
+        return
+      } catch {
+        // W4: the target may be a roster ghost — on the server roster but never
+        // joined the MLS tree (no leaf), so the runtime cannot author a removal
+        // commit ("No members found to remove"). Reconcile via a commitless
+        // removeMember; the next rustFull sync picks up the roster change.
+        guard Self.isRosterGhostRemovalError(error) else { throw error }
+        logger.info(
+          "🫥 [MLSConversationManager.removeMember] rustFull: '\(memberDid.prefix(20))' has no ratchet-tree leaf (roster ghost) — sending commitless removeMember"
+        )
+        try await sendCommitlessRosterGhostRemoval(
+          convoId: convoId, targetDid: try DID(didString: memberDid), reason: reason
+        )
+        return
       }
-      try await applyRustConversationSnapshot(result.conversation, metadata: result.metadata)
-      let targetDid = try DID(didString: memberDid)
-      notifyObservers(.membershipChanged(convoId: convoId, did: targetDid, action: .removed))
-      notifyObservers(.epochUpdated(convoId, result.conversation.epoch))
-      logger.info(
-        "✅ [MLSConversationManager.removeMember] rustFull complete - convoId: \(convoId), epoch: \(result.conversation.epoch)"
-      )
-      return
     }
 
     guard let convo = conversations[convoId] else {
@@ -489,11 +504,47 @@ public extension MLSConversationManager {
         // The removeMember HTTP endpoint returns only an optional epochHint
         // (no authoritative newEpoch echo), so we fence with the skip sentinel
         // and rely on the staged target_epoch.
-        let plan = try await mlsClient.stageCommit(
-          for: userDid,
-          conversationId: convo.groupId,
-          kind: .removeMembers(memberDids: [memberDid])
-        )
+        let plan: FfiCommitPlan
+        do {
+          plan = try await mlsClient.stageCommit(
+            for: userDid,
+            conversationId: convo.groupId,
+            kind: .removeMembers(memberDids: [memberDid])
+          )
+        } catch {
+          // W4: a roster ghost (server-roster member who never joined the MLS
+          // tree, so `leaf_index IS NULL`) has no leaf for stageCommit to
+          // remove → "No members found to remove". Reconcile the server roster
+          // with a commitless removeMember instead of failing the operation.
+          guard Self.isRosterGhostRemovalError(error) else { throw error }
+          logger.info(
+            "🫥 [MLSConversationManager.removeMember] '\(memberDid.prefix(20))' has no ratchet-tree leaf (roster ghost) — sending commitless removeMember"
+          )
+          let ghostTargetDid = try DID(didString: memberDid)
+          try await sendCommitlessRosterGhostRemoval(
+            convoId: convoId, targetDid: ghostTargetDid, reason: reason
+          )
+          // Roster-only change: no epoch advance. Record the membership event at
+          // the unchanged epoch and let sync reconcile.
+          do {
+            let event = MLSMembershipEventModel(
+              conversationID: convoId,
+              currentUserDID: userDid,
+              memberDID: memberDid,
+              eventType: .left,
+              epoch: Int64(convo.epoch)
+            )
+            try await storage.recordMembershipEvent(event, database: database)
+            try await storage.updateConversationMembershipTimestamp(
+              conversationID: convoId, currentUserDID: userDid, database: database)
+          } catch {
+            logger.error(
+              "Failed to record membership event for roster-ghost removal: \(error.localizedDescription)"
+            )
+          }
+          try? await syncGroupState(for: convoId)
+          return
+        }
 
         let idempotencyKey = UUID().uuidString.lowercased()
         let targetDid = try DID(didString: memberDid)
@@ -592,6 +643,55 @@ public extension MLSConversationManager {
       logger.error("❌ [MLSConversationManager.removeMember] Failed: \(error.localizedDescription)")
       throw MLSConversationError.serverError(error)
     }
+  }
+
+  /// True when an MLS removal failed because the target has no ratchet-tree leaf
+  /// — i.e. a "roster ghost": present on the server roster (`members` row) but
+  /// never joined the group via a Welcome, so `leaf_index IS NULL`. The Rust
+  /// layer surfaces this as `MlsError.InvalidInput("No members found to
+  /// remove")`. Such a member cannot be removed with a commit (there is no leaf
+  /// to remove); the server reconciles them via a commitless removeMember (W4).
+  ///
+  /// Matched both on the typed FFI case and on the message text so a wrapped
+  /// error still classifies. Deliberately narrow: a generic `InvalidInput` with
+  /// any other message is NOT treated as a ghost (it must not silently swallow
+  /// unrelated failures into a server roster mutation).
+  static func isRosterGhostRemovalError(_ error: Error) -> Bool {
+    if case let MlsError.InvalidInput(message) = error {
+      return messageIndicatesNoTreeLeaf(message)
+    }
+    return messageIndicatesNoTreeLeaf(error.localizedDescription)
+  }
+
+  static func messageIndicatesNoTreeLeaf(_ message: String) -> Bool {
+    let normalized = message.lowercased()
+    return normalized.contains("no members found to remove")
+      || normalized.contains("no valid members found to remove")
+  }
+
+  /// Reconcile a roster ghost by asking the server to soft-remove it via a
+  /// commitless removeMember (W4 server path). No local crypto/epoch change —
+  /// the member has no leaf in our group. Throws if the server rejects it.
+  private func sendCommitlessRosterGhostRemoval(
+    convoId: String,
+    targetDid: DID,
+    reason: String?
+  ) async throws {
+    let (ok, _) = try await apiClient.removeMember(
+      convoId: convoId,
+      targetDid: targetDid,
+      reason: reason,
+      commit: nil, // commitless: server soft-removes the ghost roster row (left_at)
+      groupInfo: nil,
+      idempotencyKey: UUID().uuidString.lowercased()
+    )
+    guard ok else {
+      throw MLSConversationError.operationFailed("Server rejected roster-ghost removal")
+    }
+    notifyObservers(.membershipChanged(convoId: convoId, did: targetDid, action: .removed))
+    logger.info(
+      "✅ [MLSConversationManager.removeMember] roster ghost reconciled (commitless) for \(targetDid.didString().prefix(20)) in \(convoId.prefix(16))"
+    )
   }
 
   /// Promote a member to admin
