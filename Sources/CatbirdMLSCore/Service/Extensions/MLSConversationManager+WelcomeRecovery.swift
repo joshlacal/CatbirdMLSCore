@@ -16,6 +16,35 @@ extension MLSConversationManager {
         return !recipient.isEmpty && recipient == current
     }
 
+    /// True when a Welcome-reissue response failed because THIS device genuinely
+    /// cannot fulfill it: it does not hold the conversation's group state, so it
+    /// can never seal a Welcome (only a current member with the group secrets
+    /// can). Such failures must NOT trigger endless re-attempts on this device —
+    /// another admin (or this device, once a cursor replay delivers the group)
+    /// fulfills it. Transient/networky failures are deliberately excluded so they
+    /// still retry.
+    static func isWelcomeReissueUnfulfillableHere(_ error: Error) -> Bool {
+        switch error {
+        case MLSConversationError.conversationNotFound,
+             MLSConversationError.groupStateNotFound:
+            return true
+        default:
+            break
+        }
+        if let mlsError = error as? MlsError {
+            switch mlsError {
+            case .GroupNotFound:
+                return true
+            default:
+                break
+            }
+        }
+        // Wrapped/rethrown variants surface only through the message.
+        let message = error.localizedDescription.lowercased()
+        return message.contains("group not found")
+            || message.contains("not present in local mls group state")
+    }
+
     public func handleWelcomeReissueRequested(
         event: BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent
     ) async {
@@ -48,12 +77,26 @@ extension MLSConversationManager {
                 requestId: event.requestId
             )
         } catch {
-            welcomeReissueResponseState.withLock { handled in
-                _ = handled.remove(event.requestId)
+            if Self.isWelcomeReissueUnfulfillableHere(error) {
+                // W3: this device genuinely cannot fulfill — it does not hold the
+                // conversation's group state, so it can never seal a Welcome.
+                // Keep the request marked handled so we stop re-attempting on
+                // every event (capture Scenario 3b: endless no-op retries on a
+                // GroupNotFound admin). Cursor-replay or another admin device
+                // that holds the group fulfills it instead.
+                logger.warning(
+                    "🚫 [WELCOME-REISSUE] This device cannot fulfill reissue \(event.requestId.prefix(16)) for \(event.convoId.prefix(16)) (no local group state) — leaving for another admin: \(error.localizedDescription)"
+                )
+            } else {
+                // Transient failure (network, epoch race, etc.) — allow a retry
+                // on the next event by clearing the handled marker.
+                welcomeReissueResponseState.withLock { handled in
+                    _ = handled.remove(event.requestId)
+                }
+                logger.warning(
+                    "⚠️ [WELCOME-REISSUE] Auto-response failed (will retry) for \(event.convoId.prefix(16)) request \(event.requestId.prefix(16)): \(error.localizedDescription)"
+                )
             }
-            logger.warning(
-                "⚠️ [WELCOME-REISSUE] Auto-response failed for \(event.convoId.prefix(16)) request \(event.requestId.prefix(16)): \(error.localizedDescription)"
-            )
         }
     }
 
@@ -95,6 +138,18 @@ extension MLSConversationManager {
                 "⚠️ [WELCOME-REISSUE] Ignoring same-user reissue request for \(convoId.prefix(16)) because current device DID is unavailable"
             )
             return
+        }
+
+        // W3: the admin may be a legitimate member who simply hasn't loaded this
+        // conversation into memory yet (fresh launch / not-yet-synced convo).
+        // Hydrate from local DB / server before giving up, so a transient
+        // "not synced" state doesn't strand the requester in a reissue loop
+        // (capture Scenario 3a: the responder threw "Conversation not found").
+        if conversations[convoId] == nil {
+            logger.info(
+                "📨 [WELCOME-REISSUE] Conversation \(convoId.prefix(16)) not in memory — hydrating before responding"
+            )
+            _ = await fetchConversationForRejoin(convoId: convoId)
         }
 
         guard let convo = conversations[convoId] else {
