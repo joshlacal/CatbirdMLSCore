@@ -91,6 +91,26 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     return FfiAddMembersResult(success: result.success, newEpoch: UInt64(clamping: result.newEpoch))
   }
 
+  public func addMembersWithIdempotency(
+    convoId: String,
+    memberDids: [String],
+    commitData: Data,
+    welcomeData: Data?,
+    idempotencyKey: String
+  ) throws -> FfiAddMembersResult {
+    let dids = try memberDids.map { try DID(didString: $0) }
+    let result = try blocking {
+      try await self.apiClient.addMembers(
+        convoId: convoId,
+        didList: dids,
+        commit: commitData,
+        welcomeMessage: welcomeData,
+        idempotencyKey: idempotencyKey
+      )
+    }
+    return FfiAddMembersResult(success: result.success, newEpoch: UInt64(clamping: result.newEpoch))
+  }
+
   public func removeMembers(convoId: String, memberDids: [String], commitData: Data) throws {
     for memberDid in memberDids {
       let did = try DID(didString: memberDid)

@@ -45,16 +45,18 @@ extension MLSConversationManager {
             || message.contains("not present in local mls group state")
     }
 
+    enum WelcomeReissueRouting: Equatable {
+        case swiftResponder  // swiftLegacy / shadow: Swift stages the commit
+        case rustRuntime     // rustFull: delegate the mutation to the Rust orchestrator
+    }
+
+    static func welcomeReissueRouting(mode: MLSProtocolAuthorityMode) -> WelcomeReissueRouting {
+        mode == .rustFull ? .rustRuntime : .swiftResponder
+    }
+
     public func handleWelcomeReissueRequested(
         event: BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent
     ) async {
-        if protocolAuthorityMode == .rustFull {
-            logger.info(
-                "🔒 [WELCOME-REISSUE] Skipping Swift Welcome reissue response in rustFull mode for \(event.convoId.prefix(16))"
-            )
-            return
-        }
-
         let shouldRespond = welcomeReissueResponseState.withLock { handled in
             if handled.contains(event.requestId) {
                 return false
@@ -71,11 +73,20 @@ extension MLSConversationManager {
         }
 
         do {
-            try await respondToWelcomeReissueRequest(
-                convoId: event.convoId,
-                recipientDeviceDid: event.recipientDeviceDid,
-                requestId: event.requestId
-            )
+            switch Self.welcomeReissueRouting(mode: protocolAuthorityMode) {
+            case .rustRuntime:
+                try await respondToWelcomeReissueViaRust(
+                    convoId: event.convoId,
+                    recipientDeviceDid: event.recipientDeviceDid,
+                    requestId: event.requestId
+                )
+            case .swiftResponder:
+                try await respondToWelcomeReissueRequest(
+                    convoId: event.convoId,
+                    recipientDeviceDid: event.recipientDeviceDid,
+                    requestId: event.requestId
+                )
+            }
         } catch {
             if Self.isWelcomeReissueUnfulfillableHere(error) {
                 // W3: this device genuinely cannot fulfill — it does not hold the
@@ -280,6 +291,61 @@ extension MLSConversationManager {
                 throw error
             }
         }
+    }
+
+    /// rustFull responder: delegate the Welcome-reissue mutation to the Rust
+    /// orchestrator (`respond_to_welcome_reissue` → swap_members + idempotency
+    /// key). Swift still owns the trigger, dedup, hydration, and own-device
+    /// guard; only the MLS mutation lives in Rust. Hydration MUST happen before
+    /// entering the runtime so a fresh-launch admin doesn't make the Rust
+    /// resolver return None → unfulfillable → requester loops forever (burning
+    /// recipient key packages).
+    func respondToWelcomeReissueViaRust(
+        convoId: String,
+        recipientDeviceDid: String,
+        requestId: String
+    ) async throws {
+        guard let userDid else { throw MLSConversationError.noAuthentication }
+
+        // Ignore our own request (mirror the swiftLegacy guard).
+        let currentDeviceDid = await mlsClient.getDeviceInfo(for: userDid)?.mlsDid
+        if let currentDeviceDid,
+           Self.isWelcomeReissueRequestForCurrentDevice(
+               recipientDeviceDid: recipientDeviceDid,
+               currentDeviceDid: currentDeviceDid
+           )
+        {
+            logger.info(
+                "📨 [WELCOME-REISSUE] Ignoring own reissue request (rustFull) for \(convoId.prefix(16))"
+            )
+            return
+        }
+
+        // CRITICAL: hydrate before delegating, exactly like the swiftLegacy path
+        // (respondToWelcomeReissueRequest hydrates via fetchConversationForRejoin).
+        // A fresh-launch admin that hasn't synced this convo would otherwise make
+        // the Rust resolver return None → unfulfillable → the requester loops
+        // forever and burns recipient KPs.
+        if conversations[convoId] == nil {
+            logger.info(
+                "📨 [WELCOME-REISSUE] Conversation \(convoId.prefix(16)) not in memory — hydrating before rustFull response"
+            )
+            _ = await fetchConversationForRejoin(convoId: convoId)
+        }
+
+        // withRustAuthoritativeRuntime already guards usesRustForDecisions and
+        // ensures the engine; it throws MLSConversationError.operationFailed if
+        // the runtime is unavailable. No manual guard needed.
+        try await withRustAuthoritativeRuntime(operation: "respondToWelcomeReissue") { runtime in
+            try runtime.respondToWelcomeReissue(
+                conversationId: convoId,
+                recipientDeviceDid: recipientDeviceDid,
+                requestId: requestId
+            )
+        }
+        logger.info(
+            "✅ [WELCOME-REISSUE] rustFull auto-responded to \(requestId.prefix(16)) for \(convoId.prefix(16))"
+        )
     }
 
     func decideWelcomeRecovery(

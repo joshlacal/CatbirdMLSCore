@@ -340,6 +340,18 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return try MLSGroupMutationResult(ffiResult: ffiResult, userDID: userDID)
   }
 
+  public func respondToWelcomeReissue(
+    conversationId: String,
+    recipientDeviceDid: String,
+    requestId: String
+  ) throws {
+    try bridge.respondToWelcomeReissue(
+      convoId: conversationId,
+      recipientDeviceDid: recipientDeviceDid,
+      requestId: requestId
+    )
+  }
+
   public func leaveConversation(
     conversationId: String
   ) throws -> MLSLeaveConversationResult {
