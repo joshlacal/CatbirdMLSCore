@@ -260,17 +260,26 @@ internal actor MLSDeviceRecordService {
       return cached.keys
     }
 
-    let did = try DID(didString: targetDid)
-    let records = try await fetchDeviceRecordsFromPDS(did: did)
-
-    if records.isEmpty { return nil }
-
-    var keys: Set<String> = []
-    for record in records {
-      guard let device = decodeDeviceRecord(from: record.value) else { continue }
-      keys.insert(device.mlsSignaturePublicKey.data.base64EncodedString())
+    // W6: read the TARGET's device records from its own hosting PDS (unauthenticated), not
+    // through the BFF — which only routes to the session user's PDS and returns 400 for a
+    // foreign repo. A resolution/network failure is treated as "unknown" (nil → TOFU), not a
+    // hard error, to preserve warn-only credential-binding semantics.
+    let keysData: [Data]
+    do {
+      keysData = try await MLSPublicPDSReader.fetchDeviceSignatureKeys(
+        did: targetDid,
+        resolvePDS: { [atProtoClient] did in try await atProtoClient.resolveDIDToPDSURL(did: did) }
+      )
+    } catch {
+      logger.warning(
+        "Device-record fetch failed for \(targetDid, privacy: .private): \(error.localizedDescription) — TOFU"
+      )
+      return nil
     }
 
+    if keysData.isEmpty { return nil }
+
+    let keys = Set(keysData.map { $0.base64EncodedString() })
     deviceKeyCache[targetDid] = (keys: keys, fetchedAt: Date())
     return keys
   }
