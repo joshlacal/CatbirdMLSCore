@@ -14,7 +14,7 @@ public enum MLSProtocolAuthorityMode: String, Codable, CaseIterable, Sendable {
   /// Rust orchestrator owns both protocol decisions and protocol mutations.
   case rustFull
 
-  public static let defaultMode: MLSProtocolAuthorityMode = .rustFull
+  public static let defaultMode: MLSProtocolAuthorityMode = .swiftLegacy
 
   public init?(rawRuntimeValue: String) {
     switch rawRuntimeValue {

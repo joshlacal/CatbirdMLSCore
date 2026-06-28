@@ -6,13 +6,9 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSProtocolAuthorityModeTests: XCTestCase {
-  func testDefaultModeIsRustFull() {
-    // Migration complete: rustFull is the default authority mode — Rust owns
-    // protocol decisions and mutations by default. swiftLegacy remains for
-    // explicit opt-out / rollback.
-    XCTAssertEqual(MLSProtocolAuthorityMode.defaultMode, .rustFull)
-    XCTAssertTrue(MLSProtocolAuthorityMode.defaultMode.usesRustForDecisions)
-    XCTAssertTrue(MLSProtocolAuthorityMode.defaultMode.requiresRustOnlyProtocolMutations)
+  func testDefaultModeKeepsSwiftAuthoritative() {
+    XCTAssertEqual(MLSProtocolAuthorityMode.defaultMode, .swiftLegacy)
+    XCTAssertFalse(MLSProtocolAuthorityMode.swiftLegacy.mirrorsRustDecisions)
     XCTAssertFalse(MLSProtocolAuthorityMode.swiftLegacy.usesRustForDecisions)
   }
 
@@ -44,8 +40,7 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     defer { MLSAuthorityModeSharedState.clearForTesting() }
 
     XCTAssertEqual(MLSAuthorityModeSharedState.currentMode(), .defaultMode)
-    // defaultMode is now .rustFull, so the cleared/fallback state is rustFull-enabled.
-    XCTAssertTrue(MLSAuthorityModeSharedState.isRustFullEnabled)
+    XCTAssertFalse(MLSAuthorityModeSharedState.isRustFullEnabled)
 
     MLSAuthorityModeSharedState.setCurrentMode(.rustFull)
 
@@ -270,13 +265,11 @@ final class MLSProtocolAuthorityModeTests: XCTestCase {
     }
   }
 
-  func testManagerDefaultsToRustFullAuthority() async throws {
+  func testManagerDefaultsToSwiftLegacyAuthority() async throws {
     let manager = try await makeManager()
 
-    XCTAssertEqual(manager.protocolAuthorityMode, .rustFull)
-    XCTAssertTrue(manager.isRustProtocolAuthorityEnabled)
-    // Runtime is created lazily and not for a non-pool DatabaseQueue, so it is
-    // still nil at init until ensureOrchestratorRuntime() runs against a pool DB.
+    XCTAssertEqual(manager.protocolAuthorityMode, .swiftLegacy)
+    XCTAssertFalse(manager.isRustProtocolAuthorityEnabled)
     XCTAssertNil(manager.orchestratorRuntime)
   }
 

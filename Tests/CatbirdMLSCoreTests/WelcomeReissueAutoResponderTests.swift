@@ -114,15 +114,10 @@ final class WelcomeReissueAutoResponderTests: XCTestCase {
             client: atProtoClient,
             environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
         )
-        // These tests exercise the swiftLegacy Welcome auto-responder
-        // (respondToWelcomeReissueRequest staging a Swift commit). Pin the mode
-        // explicitly so they keep testing swiftLegacy behavior independent of the
-        // now-rustFull defaultMode.
         return MLSConversationManager(
             apiClient: apiClient,
             database: database,
-            atProtoClient: atProtoClient,
-            protocolAuthorityMode: .swiftLegacy
+            atProtoClient: atProtoClient
         )
     }
 
