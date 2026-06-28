@@ -281,6 +281,11 @@ public actor MLSClient {
   /// Deduplicates concurrent External Commit joins per (user, conversation).
   private var inFlightExternalCommits: [String: Task<Data, any Error>] = [:]
 
+  /// W5: Coalesces device-wide key-package replenish/publish so concurrent
+  /// bootstrap/recovery callers don't stampede the server's `publishKeyPackages`
+  /// quota (20/min/DID ⇒ 429). Single-flight + debounce + Retry-After backoff.
+  private let keyPackagePublishCoordinator = KeyPackagePublishCoordinator()
+
   /// Optional app-provided coordinator for storage maintenance flows.
   private var storageMaintenanceCoordinator: MLSStorageMaintenanceCoordinating?
 
@@ -3171,10 +3176,31 @@ public actor MLSClient {
   /// Proactively checks server inventory and uploads bundles when running low
   /// - Parameter userDID: User DID to monitor bundles for
   /// - Returns: Tuple of (available bundles on server, bundles uploaded)
+  /// Device-wide key-package replenish entry point.
+  ///
+  /// W5: Routed through ``KeyPackagePublishCoordinator`` so concurrent /
+  /// rapid-fire callers (device bootstrap + per-conversation Welcome recovery +
+  /// group create + send-time replenish) collapse into a single in-flight
+  /// publish, skip redundant publishes within a short debounce window, and back
+  /// off on server 429s — instead of each independently firing the full batch
+  /// loop and exhausting the per-DID `publishKeyPackages` quota. The actual work
+  /// lives in ``monitorAndReplenishBundlesUncoalesced(for:)``.
   public func monitorAndReplenishBundles(for userDID: String) async throws -> (
     available: Int, uploaded: Int
   ) {
     try throwIfRustFullSwiftKeyPackageMutation("monitorAndReplenishBundles")
+    let normalizedDID = normalizeUserDID(userDID)
+    let outcome = try await keyPackagePublishCoordinator.run(key: normalizedDID) { [self] in
+      let result = try await self.monitorAndReplenishBundlesUncoalesced(for: userDID)
+      return KeyPackagePublishCoordinator.ReplenishOutcome(
+        available: result.available, uploaded: result.uploaded)
+    }
+    return (available: outcome.available, uploaded: outcome.uploaded)
+  }
+
+  private func monitorAndReplenishBundlesUncoalesced(for userDID: String) async throws -> (
+    available: Int, uploaded: Int
+  ) {
     let normalizedDID = normalizeUserDID(userDID)
     guard let apiClient = self.apiClients[normalizedDID] else {
       logger.error(
