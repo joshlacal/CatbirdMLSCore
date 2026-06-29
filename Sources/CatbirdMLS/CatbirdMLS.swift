@@ -12496,6 +12496,24 @@ public protocol OrchestratorApiCallback: AnyObject {
      * does not retry, since the local state is already terminal.
      */
     func reportRecoveryFailure(convoId: String, failureType: String, epochAuthenticator: String?, failureMode: String?) throws
+
+    /**
+     * Upload an encrypted group metadata blob via
+     * `blue.catbird.mlsChat.putGroupMetadataBlob`. `kind` is `"metadata"` or
+     * `"avatar"`; `metadata_version` is the monotonic counter from the
+     * corresponding `MetadataReference`. Platform impls forward the args
+     * untouched into the XRPC body.
+     */
+    func putGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String, ciphertext: Data, kind: String, metadataVersion: UInt64, resetGeneration: Int32?) throws
+
+    /**
+     * Download an encrypted group metadata blob via
+     * `blue.catbird.mlsChat.getGroupMetadataBlob`. Returns the raw ciphertext
+     * (`nonce || ciphertext || tag`) for `blob_locator`. On `BlobNotFound`
+     * (GC'd / never uploaded) return `ServerError { status: 404 }` so the
+     * orchestrator can skip metadata hydration without treating it as fatal.
+     */
+    func getGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String) throws -> Data
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -13090,6 +13108,70 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        putGroupMetadataBlob: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            groupIdHex: RustBuffer,
+            blobLocator: RustBuffer,
+            ciphertext: RustBuffer,
+            kind: RustBuffer,
+            metadataVersion: UInt64,
+            resetGeneration: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.putGroupMetadataBlob(
+                    convoId: FfiConverterString.lift(convoId),
+                    groupIdHex: FfiConverterString.lift(groupIdHex),
+                    blobLocator: FfiConverterString.lift(blobLocator),
+                    ciphertext: FfiConverterData.lift(ciphertext),
+                    kind: FfiConverterString.lift(kind),
+                    metadataVersion: FfiConverterUInt64.lift(metadataVersion),
+                    resetGeneration: FfiConverterOptionInt32.lift(resetGeneration)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getGroupMetadataBlob: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            groupIdHex: RustBuffer,
+            blobLocator: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getGroupMetadataBlob(
+                    convoId: FfiConverterString.lift(convoId),
+                    groupIdHex: FfiConverterString.lift(groupIdHex),
+                    blobLocator: FfiConverterString.lift(blobLocator)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -16667,6 +16749,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 48657 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_group_metadata_blob() != 41040 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 61601 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272 {

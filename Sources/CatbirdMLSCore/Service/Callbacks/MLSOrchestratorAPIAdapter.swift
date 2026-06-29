@@ -342,6 +342,43 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  public func putGroupMetadataBlob(
+    convoId: String,
+    groupIdHex: String,
+    blobLocator: String,
+    ciphertext: Data,
+    kind: String,
+    metadataVersion: UInt64,
+    resetGeneration: Int32?
+  ) throws {
+    _ = try blocking {
+      try await self.apiClient.putGroupMetadataBlob(
+        blobLocator: blobLocator,
+        groupId: groupIdHex,
+        conversationId: convoId,
+        resetGeneration: resetGeneration.map { Int($0) },
+        metadataVersion: metadataVersion,
+        kind: kind,
+        encryptedBlob: ciphertext
+      )
+    }
+  }
+
+  public func getGroupMetadataBlob(
+    convoId: String,
+    groupIdHex: String,
+    blobLocator: String
+  ) throws -> Data {
+    try blocking {
+      try await self.apiClient.getGroupMetadataBlob(
+        blobLocator: blobLocator,
+        groupId: groupIdHex,
+        conversationId: convoId,
+        kind: "metadata"
+      )
+    }
+  }
+
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
     let semaphore = DispatchSemaphore(value: 0)
     let lock = NSLock()

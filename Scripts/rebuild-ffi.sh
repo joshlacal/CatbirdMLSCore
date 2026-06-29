@@ -9,15 +9,22 @@ ensure_ios_sdk() {
         return
     fi
 
-    if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
-        echo "ℹ️  iphoneos SDK not found with current developer directory; using /Applications/Xcode.app"
-        export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
-    fi
+    # Current developer dir (often CommandLineTools) lacks the iOS SDK.
+    # Fall back to any installed Xcode — release first, then beta.
+    for candidate in /Applications/Xcode.app /Applications/Xcode-beta.app; do
+        if [ -d "$candidate/Contents/Developer" ]; then
+            echo "ℹ️  iphoneos SDK not found with current developer directory; using $candidate"
+            export DEVELOPER_DIR="$candidate/Contents/Developer"
+            if xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+                return
+            fi
+        fi
+    done
 
     if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
         echo "❌ iOS SDK (iphoneos) cannot be located."
-        echo "   Fix by installing Xcode and selecting it:"
-        echo "   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer"
+        echo "   Fix permanently by selecting your Xcode:"
+        echo "   sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer"
         exit 1
     fi
 }
