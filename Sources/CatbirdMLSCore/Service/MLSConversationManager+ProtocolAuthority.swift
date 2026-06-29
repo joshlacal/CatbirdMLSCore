@@ -239,7 +239,7 @@ extension MLSConversationManager {
 
   internal func withRustAuthoritativeRuntime<T>(
     operation: String,
-    body: (MLSOrchestratorRuntime) throws -> T
+    body: @escaping (MLSOrchestratorRuntime) throws -> T
   ) async throws -> T {
     guard protocolAuthorityMode.usesRustForDecisions else {
       throw MLSConversationError.operationFailed("Rust authority requested while mode is \(protocolAuthorityMode.rawValue)")
@@ -248,15 +248,23 @@ extension MLSConversationManager {
       throw MLSConversationError.operationFailed("Rust orchestrator runtime unavailable for \(operation)")
     }
 
-    // Execute the synchronous bridge body OFF the caller's executor (main thread
-    // or Swift cooperative pool). The body never outlives this call — we await
-    // its completion before returning — so `withoutActuallyEscaping` is sound and
-    // we avoid forcing `@Sendable`/`Sendable` constraints onto all ~28 call sites.
-    return try await withoutActuallyEscaping(body) { escapingBody in
-      try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-        Self.rustAuthorityExecutionQueue.async {
-          continuation.resume(with: Result { try escapingBody(runtime) })
-        }
+    // Execute the synchronous bridge body OFF the caller's executor (main thread or
+    // Swift cooperative pool) on the dedicated concurrent GCD queue, freeing the
+    // bounded cooperative pool while the FFI `block_in_place` + nested
+    // `DispatchSemaphore.wait()` runs (otherwise the pool starves and the app
+    // hard-freezes — the original rustFull deadlock).
+    //
+    // `body` is `@escaping` here ON PURPOSE. The earlier `withoutActuallyEscaping`
+    // wrapper trapped at runtime (`swift_isEscapingClosureAtFileLocation`): a
+    // `CheckedContinuation` may resume INLINE on the resuming thread, so the awaiting
+    // task can return out of the `withoutActuallyEscaping` scope while the dispatched
+    // block still references the closure (refcount > 1) → fatal escape assertion. With
+    // a genuinely escaping body, ARC owns its lifetime and there is no escape check to
+    // race. The body still does not outlive this call — we await its completion before
+    // returning.
+    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+      Self.rustAuthorityExecutionQueue.async {
+        continuation.resume(with: Result { try body(runtime) })
       }
     }
   }

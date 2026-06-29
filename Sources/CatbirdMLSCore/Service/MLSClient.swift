@@ -312,6 +312,15 @@ public actor MLSClient {
   private init() {
     logger.info("🔐 MLSClient initialized with per-user context isolation")
 
+    // Install the Rust → OSLog bridge. Without this the global Rust logger is
+    // nil and EVERY catbird-mls `*_log!` (debug/info/warn/error) is silently
+    // dropped (see catbird-mls logging.rs: "If no logger set, silently
+    // ignore"). That includes all `[MLS-FFI]` traces and the orchestrator
+    // `[REJOIN-DIAG]` recovery breadcrumbs. Process-global, set once here at
+    // the singleton init so it covers the whole app lifetime.
+    mlsSetLogger(logger: MLSLoggerImplementation())
+    logger.info("🔌 Installed Rust→OSLog logger bridge (subsystem blue.catbird.mls)")
+
     // Configure keychain access group for shared access between app and extensions
     // This allows NotificationServiceExtension to access MLS encryption keys
     #if os(iOS)
