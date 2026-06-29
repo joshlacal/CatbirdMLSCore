@@ -218,11 +218,15 @@ public extension MLSConversationManager {
     keyPackagesArray: [Data],
     keyPackagesWithHashes: [KeyPackageWithHash]
   ) async throws {
-    // Three-phase sender lifecycle (task #44/#62): stageCommit → POST →
-    // confirmCommit(serverEpoch) on success, discardPending on failure.
-    // Handle is declared up here so the outer `catch` can discard if the
-    // stage succeeded but a later step threw before we confirmed.
-    var stagedHandleForCleanup: FfiStagedCommitHandle?
+    // Phase F-aligned single-shot add: stage the add commit (+ Welcome) and,
+    // when the conversation already has metadata, re-seal `GroupMetadataV1` at
+    // the post-add epoch in ONE FFI call, then upload the blob, ship the
+    // commit, and merge — mirroring `updateGroupMetadataEncrypted`. This
+    // replaces the legacy three-phase stageCommit/confirmCommit lifecycle so
+    // the add commit carries a fresh `MetadataReference` (0x8001) that the
+    // newly-added members can resolve and decrypt at their join epoch.
+    // (Bug fix: plain add_members never re-sealed metadata, so new members
+    // got a dangling reference and could not decrypt name/description.)
     do {
       // 0. Clear any stale pending commit from a previous failed operation
       do {
@@ -231,30 +235,90 @@ public extension MLSConversationManager {
         // Ignore errors
       }
 
-      // 1. Stage commit locally (creates pending outgoing commit — NOT merged)
-      let plan = try await mlsClient.stageCommit(
-        for: userDid,
-        conversationId: convo.groupId,
-        kind: .addMembers(memberDids: memberDids, keyPackages: keyPackagesArray)
-      )
-      stagedHandleForCleanup = plan.handle
-      let welcomeData = plan.welcomeBytes ?? Data()
+      // 1. Source the conversation's CURRENT cached metadata so the new
+      //    members can decrypt the group name/description. The plaintext lives
+      //    on the local conversation row (title/description/avatarImageData),
+      //    populated by bootstrapMetadataAfterJoin / updateGroupMetadataEncrypted.
+      //    When no title is set we pass nils and the FFI behaves exactly like
+      //    the plain addMembers (nil blob fields).
+      let cachedMetadata = try? await database.read { db in
+        try MLSConversationMetadataSQL.loadLocalDisplayMetadata(
+          db: db,
+          currentUserDID: userDid,
+          groupIdHex: convo.groupId
+        )
+      }
+      let metadataTitle: String?
+      let metadataDescription: String?
+      if let title = cachedMetadata?.title, !title.isEmpty {
+        metadataTitle = title
+        metadataDescription = cachedMetadata?.description ?? ""
+      } else {
+        metadataTitle = nil
+        metadataDescription = nil
+      }
 
-      // 2. Send commit and welcome to server
+      // 2. Atomic FFI: stages the add commit (+ Welcome) and, when metadata is
+      //    supplied, re-seals it at the post-add epoch. Leaves a pending commit
+      //    that must be merged (success) or cleared (failure).
+      //    Avatar re-seal across an add is intentionally NOT attempted here:
+      //    the FFI returns only the metadata-JSON blob (not a re-encrypted
+      //    avatar), and emitting an avatar locator without uploading its blob
+      //    would re-introduce a dangling reference. The avatar recovers on the
+      //    next metadata update / re-wrap.
+      let addResult = try await mlsClient.addMembersWithMetadata(
+        for: userDid,
+        groupId: groupIdData,
+        keyPackages: keyPackagesArray,
+        title: metadataTitle,
+        description: metadataDescription,
+        avatarBlobLocator: nil,
+        avatarContentType: nil
+      )
+      let welcomeData = addResult.welcomeData
+
       // Build key package hash entries for server lifecycle tracking
       let keyPackageHashEntries: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry] =
         keyPackagesWithHashes.map { kp in
           BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry(did: kp.did, hash: kp.hash)
         }
 
-      // PHASE 3 FIX: Protect server send + commit merge + state update from cancellation
-      let (newEpoch, confirmed) = try await withTaskCancellationHandler {
+      // PHASE 3 FIX: Protect blob upload + server send + merge from cancellation
+      let newEpoch: Int = try await withTaskCancellationHandler {
         // Track this commit as our own to prevent re-processing via SSE
-        trackOwnCommit(plan.commitBytes)
+        trackOwnCommit(addResult.commitData)
 
-        // Export POST-commit GroupInfo from local FFI state. After stageCommit,
-        // the FFI holds the new state at epoch N+1 — pass that to the server
-        // so it's stored atomically inside the same txn that records the
+        // 3. Upload the re-sealed metadata blob FIRST. If this fails we must
+        //    clear the pending commit so the local epoch doesn't advance into a
+        //    state new members can't reach (no blob → dangling reference).
+        //    Mirrors updateGroupMetadataEncrypted's upload-then-commit ordering.
+        if let blobCiphertext = addResult.metadataBlobCiphertext,
+          let blobLocator = addResult.metadataBlobLocator
+        {
+          do {
+            _ = try await apiClient.putGroupMetadataBlob(
+              blobLocator: blobLocator,
+              groupId: convo.groupId,
+              conversationId: convoId,
+              metadataVersion: addResult.metadataVersion,
+              kind: "metadata",
+              encryptedBlob: blobCiphertext
+            )
+            logger.info(
+              "📤 [MLSConversationManager.addMembers] Uploaded re-sealed metadata blob - locator: \(blobLocator.prefix(8))..., version: \(addResult.metadataVersion ?? 0)"
+            )
+          } catch {
+            logger.error(
+              "❌ [MLSConversationManager.addMembers] Metadata blob upload failed - discarding pending commit: \(error.localizedDescription)"
+            )
+            try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
+            throw error
+          }
+        }
+
+        // Export POST-commit GroupInfo from local FFI state. After the staged
+        // add, the FFI holds the new state at epoch N+1 — pass that to the
+        // server so it's stored atomically inside the same txn that records the
         // commit (closes the External-Commit joiner stale-state race; the
         // followup publishGroupInfo retry remains as a safety net).
         let postCommitGroupInfo = await mlsClient.exportPostCommitGroupInfo(
@@ -267,17 +331,22 @@ public extension MLSConversationManager {
           )
         }
 
+        // 4. Send commit and welcome to server
         let addMembersResult: (success: Bool, newEpoch: Int)
         do {
           addMembersResult = try await apiClient.addMembers(
             convoId: convoId,
             didList: dids,
-            commit: plan.commitBytes,
+            commit: addResult.commitData,
             welcomeMessage: welcomeData,
             groupInfo: postCommitGroupInfo,
             keyPackageHashes: keyPackageHashEntries
           )
         } catch let apiError as MLSAPIError {
+          // A server rejection means the commit never took effect remotely —
+          // clear the staged pending commit so we don't merge locally past a
+          // state peers can't reach.
+          try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
           let normalizedError = normalizeKeyPackageError(apiError)
           switch normalizedError {
           case .keyPackageNotFound(let detail):
@@ -307,30 +376,23 @@ public extension MLSConversationManager {
         }
 
         guard addMembersResult.success else {
+          try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
           throw MLSConversationError.operationFailed("Server rejected member addition")
         }
-        let newEpoch = addMembersResult.newEpoch
 
-        // ✅ RATCHET DESYNC FIX: Confirm commit ONLY after server confirmation.
-        // Server echoes newEpoch for addMembers — use it to fence against a
-        // stale confirm against a different target epoch.
-        // Idempotency-hit: server may nil-default newEpoch to 0 when the
-        // commit was already applied in a prior attempt (see createGroup
-        // fallback at Groups.swift). In that case we cannot fence against
-        // the echoed epoch; pass the skip sentinel and trust the staged
-        // target_epoch.
-        let serverEpochForConfirm: UInt64 =
-          newEpoch > 0 ? UInt64(newEpoch) : mlsSkipServerEpochFence()
-        let confirmed = try await mlsClient.confirmCommit(
-          for: userDid, handle: plan.handle, serverEpoch: serverEpochForConfirm)
-        stagedHandleForCleanup = nil  // confirmed — no cleanup needed
-        return (newEpoch, confirmed)
+        // 5. Merge locally — advances epoch and applies the new
+        //    MetadataReference (0x8001) carried in the add commit.
+        let mergedEpoch = try await mlsClient.mergePendingCommit(
+          for: userDid, groupId: groupIdData)
+        logger.info(
+          "✅ [MLSConversationManager.addMembers] Commit merged - local epoch now: \(mergedEpoch), server epoch: \(addMembersResult.newEpoch)"
+        )
+        return Int(mergedEpoch)
       } onCancel: {
         logger.warning(
           "⚠️ [addMembers] Commit operation was cancelled - allowing completion to prevent epoch desync"
         )
       }
-      _ = confirmed
 
       // 3. Update local state
       var updatedState = groupStates[convo.groupId] ?? groupState
@@ -394,12 +456,10 @@ public extension MLSConversationManager {
       logger.error(
         "❌ [MLSConversationManager.addMembers] Error, cleaning up: \(error.localizedDescription)")
 
-      // Task #44/#62: discard the staged commit via its handle if we have
-      // one; fall back to clearPendingCommit (OpenMLS-level) defensively to
-      // cover pre-stage failures and any stale state.
-      if let handle = stagedHandleForCleanup {
-        await mlsClient.discardPending(for: userDid, handle: handle)
-      }
+      // Single-shot add leaves the OpenMLS-level pending commit; clear it so we
+      // don't carry stale sender state into the next operation. (The success
+      // and per-step failure paths above already clear on their own; this is a
+      // defensive backstop for any throw before/after those.)
       do {
         try await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
       } catch {

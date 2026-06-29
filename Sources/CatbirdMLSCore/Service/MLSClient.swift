@@ -1845,6 +1845,77 @@ public actor MLSClient {
     }
   }
 
+  /// Add members to an existing group, re-sealing the group's current
+  /// metadata at the post-add epoch in the same atomic FFI call.
+  ///
+  /// This is the metadata-aware analog of `addMembers`. When `title` (and the
+  /// rest of the current metadata) is supplied, the FFI stages the add commit
+  /// with a fresh `MetadataReference` (AppDataDictionary 0x8001) and returns
+  /// the re-sealed `GroupMetadataV1` blob. The caller MUST upload that blob via
+  /// `putGroupMetadataBlob(locator, version)` before/with submitting the commit
+  /// so newly-added members can decrypt metadata at their join epoch.
+  ///
+  /// When all metadata params are nil the result's `metadataBlob*` fields come
+  /// back nil and this behaves exactly like `addMembers`.
+  ///
+  /// Like `addMembers`/`updateGroupMetadataEncrypted`, this leaves a pending
+  /// commit that the caller merges via `mergePendingCommit` after the server
+  /// ACKs, or discards via `clearPendingCommit` on failure.
+  public func addMembersWithMetadata(
+    for userDID: String,
+    groupId: Data,
+    keyPackages: [Data],
+    title: String?,
+    description: String?,
+    avatarBlobLocator: String? = nil,
+    avatarContentType: String? = nil
+  ) async throws -> AddMembersResult {
+    try throwIfRustFullSwiftProtocolMutation("addMembersWithMetadata")
+    logger.info(
+      "📍 [MLSClient.addMembersWithMetadata] START - user: \(userDID), groupId: \(groupId.hexEncodedString().prefix(16)), keyPackages: \(keyPackages.count), hasMetadata: \(title != nil)"
+    )
+    guard !keyPackages.isEmpty else {
+      logger.error("❌ [MLSClient.addMembersWithMetadata] No key packages provided")
+      throw MLSError.operationFailed
+    }
+    let keyPackageData = keyPackages.map { KeyPackageData(data: $0) }
+    do {
+      let result = try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.addMembersWithMetadata(
+          groupId: groupId,
+          keyPackages: keyPackageData,
+          title: title,
+          description: description,
+          avatarBlobLocator: avatarBlobLocator,
+          avatarContentType: avatarContentType
+        )
+      }
+      logger.info(
+        "✅ [MLSClient.addMembersWithMetadata] Success - commit: \(result.commitData.count) bytes, welcome: \(result.welcomeData.count) bytes, metadataBlob: \(result.metadataBlobCiphertext?.count ?? 0) bytes"
+      )
+      return result
+    } catch let error as MlsError {
+      let errorMessage: String
+      switch error {
+      case .InvalidInput(let msg): errorMessage = msg
+      case .OpenMlsError(let msg): errorMessage = msg
+      default: errorMessage = error.localizedDescription
+      }
+
+      logger.error("❌ [MLSClient.addMembersWithMetadata] FAILED: \(errorMessage)")
+
+      if errorMessage.lowercased().contains("member already in group")
+        || errorMessage.lowercased().contains("already in group")
+      {
+        logger.warning(
+          "⚠️ [MLSClient.addMembersWithMetadata] Member already exists - UI may be out of sync with MLS state")
+        throw MLSError.memberAlreadyInGroup(member: "unknown")
+      }
+
+      throw MLSError.operationFailed
+    }
+  }
+
   /// Create a self-update commit to force epoch advancement
   /// This is used to prevent ratchet desynchronization when changing senders
   /// Returns commit data to be sent to server (no welcome for self-updates)

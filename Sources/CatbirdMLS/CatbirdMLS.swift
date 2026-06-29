@@ -905,12 +905,39 @@ public func FfiConverterTypeCatbirdClientBridge_lower(_ value: CatbirdClientBrid
  * - Per-DID contexts are isolated (no shared state across accounts)
  */
 public protocol MlsContextProtocol: AnyObject {
+    /**
+     * Add members to a group.
+     *
+     * Backwards-compatible variant: does NOT re-seal group metadata at the new
+     * epoch (the three `metadata_*` fields of [`AddMembersResult`] are `None`).
+     * Prefer [`Self::add_members_with_metadata`] so newly-added members can
+     * decrypt group metadata at their join epoch.
+     */
     func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult
 
     /**
      * Async variant of add_members - offloads crypto work to avoid blocking
      */
     func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult
+
+    /**
+     * Add members to a group AND re-seal the group metadata at the post-add
+     * epoch so the newly-added member can decrypt it.
+     *
+     * The add commit embeds a fresh `MetadataReference` (new blob locator) and
+     * advances the epoch. Without a re-sealed blob at that locator, a Welcome'd
+     * member joins at the new epoch but the only metadata blob on the server is
+     * sealed at the creation epoch — which forward secrecy prevents them from
+     * decrypting. This variant seals the supplied metadata at `epoch + 1` under
+     * the same locator/version embedded in the commit. The caller MUST upload
+     * the returned `metadata_blob_ciphertext` via
+     * `putGroupMetadataBlob(metadata_blob_locator, metadata_version)`.
+     *
+     * Pass the group's CURRENT metadata content (title/description/avatar) —
+     * this method does not bump the metadata version for a content change, it
+     * re-seals the existing content at the new epoch.
+     */
+    func addMembersWithMetadata(groupId: Data, keyPackages: [KeyPackageData], title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> AddMembersResult
 
     /**
      * Check if suspension has been requested. Returns MLSError::ContextClosed if so.
@@ -1745,6 +1772,14 @@ open class MlsContext:
         try! rustCall { uniffi_catbird_mls_fn_free_mlscontext(pointer, $0) }
     }
 
+    /**
+     * Add members to a group.
+     *
+     * Backwards-compatible variant: does NOT re-seal group metadata at the new
+     * epoch (the three `metadata_*` fields of [`AddMembersResult`] are `None`).
+     * Prefer [`Self::add_members_with_metadata`] so newly-added members can
+     * decrypt group metadata at their join epoch.
+     */
     open func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult {
         return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_mlscontext_add_members(self.uniffiClonePointer(),
@@ -1771,6 +1806,35 @@ open class MlsContext:
                 liftFunc: FfiConverterTypeAddMembersResult.lift,
                 errorHandler: FfiConverterTypeMLSError.lift
             )
+    }
+
+    /**
+     * Add members to a group AND re-seal the group metadata at the post-add
+     * epoch so the newly-added member can decrypt it.
+     *
+     * The add commit embeds a fresh `MetadataReference` (new blob locator) and
+     * advances the epoch. Without a re-sealed blob at that locator, a Welcome'd
+     * member joins at the new epoch but the only metadata blob on the server is
+     * sealed at the creation epoch — which forward secrecy prevents them from
+     * decrypting. This variant seals the supplied metadata at `epoch + 1` under
+     * the same locator/version embedded in the commit. The caller MUST upload
+     * the returned `metadata_blob_ciphertext` via
+     * `putGroupMetadataBlob(metadata_blob_locator, metadata_version)`.
+     *
+     * Pass the group's CURRENT metadata content (title/description/avatar) —
+     * this method does not bump the metadata version for a content change, it
+     * re-seals the existing content at the new epoch.
+     */
+    open func addMembersWithMetadata(groupId: Data, keyPackages: [KeyPackageData], title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> AddMembersResult {
+        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_add_members_with_metadata(self.uniffiClonePointer(),
+                                                                              FfiConverterData.lower(groupId),
+                                                                              FfiConverterSequenceTypeKeyPackageData.lower(keyPackages),
+                                                                              FfiConverterOptionString.lower(title),
+                                                                              FfiConverterOptionString.lower(description),
+                                                                              FfiConverterOptionString.lower(avatarBlobLocator),
+                                                                              FfiConverterOptionString.lower(avatarContentType), $0)
+        })
     }
 
     /**
@@ -4358,12 +4422,49 @@ public func FfiConverterTypeOrchestratorBridge_lower(_ value: OrchestratorBridge
 public struct AddMembersResult {
     public var commitData: Data
     public var welcomeData: Data
+    /**
+     * Re-sealed group metadata for the post-add epoch. Present only when the
+     * caller supplied current metadata content (via `add_members_with_metadata`).
+     * The caller MUST upload this blob via `putGroupMetadataBlob(locator, version)`
+     * when (or before) submitting the commit, so newly-added members can decrypt
+     * metadata at their join epoch.
+     */
+    public var metadataBlobLocator: String?
+    /**
+     * See `metadata_blob_locator`. The encrypted `GroupMetadataV1` blob
+     * (`nonce || ciphertext || tag`) sealed at the post-add epoch.
+     */
+    public var metadataBlobCiphertext: Data?
+    /**
+     * See `metadata_blob_locator`. The metadata version embedded in the
+     * committed `MetadataReference`; pass it to `putGroupMetadataBlob`.
+     */
+    public var metadataVersion: UInt64?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(commitData: Data, welcomeData: Data) {
+    public init(commitData: Data, welcomeData: Data,
+                /* 
+                    * Re-sealed group metadata for the post-add epoch. Present only when the
+                    * caller supplied current metadata content (via `add_members_with_metadata`).
+                    * The caller MUST upload this blob via `putGroupMetadataBlob(locator, version)`
+                    * when (or before) submitting the commit, so newly-added members can decrypt
+                    * metadata at their join epoch.
+                    */ metadataBlobLocator: String?,
+                /* 
+                    * See `metadata_blob_locator`. The encrypted `GroupMetadataV1` blob
+                    * (`nonce || ciphertext || tag`) sealed at the post-add epoch.
+                    */ metadataBlobCiphertext: Data?,
+                /* 
+                    * See `metadata_blob_locator`. The metadata version embedded in the
+                    * committed `MetadataReference`; pass it to `putGroupMetadataBlob`.
+                    */ metadataVersion: UInt64?)
+    {
         self.commitData = commitData
         self.welcomeData = welcomeData
+        self.metadataBlobLocator = metadataBlobLocator
+        self.metadataBlobCiphertext = metadataBlobCiphertext
+        self.metadataVersion = metadataVersion
     }
 }
 
@@ -4375,12 +4476,24 @@ extension AddMembersResult: Equatable, Hashable {
         if lhs.welcomeData != rhs.welcomeData {
             return false
         }
+        if lhs.metadataBlobLocator != rhs.metadataBlobLocator {
+            return false
+        }
+        if lhs.metadataBlobCiphertext != rhs.metadataBlobCiphertext {
+            return false
+        }
+        if lhs.metadataVersion != rhs.metadataVersion {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(commitData)
         hasher.combine(welcomeData)
+        hasher.combine(metadataBlobLocator)
+        hasher.combine(metadataBlobCiphertext)
+        hasher.combine(metadataVersion)
     }
 }
 
@@ -4392,13 +4505,19 @@ public struct FfiConverterTypeAddMembersResult: FfiConverterRustBuffer {
         return
             try AddMembersResult(
                 commitData: FfiConverterData.read(from: &buf),
-                welcomeData: FfiConverterData.read(from: &buf)
+                welcomeData: FfiConverterData.read(from: &buf),
+                metadataBlobLocator: FfiConverterOptionString.read(from: &buf),
+                metadataBlobCiphertext: FfiConverterOptionData.read(from: &buf),
+                metadataVersion: FfiConverterOptionUInt64.read(from: &buf)
             )
     }
 
     public static func write(_ value: AddMembersResult, into buf: inout [UInt8]) {
         FfiConverterData.write(value.commitData, into: &buf)
         FfiConverterData.write(value.welcomeData, into: &buf)
+        FfiConverterOptionString.write(value.metadataBlobLocator, into: &buf)
+        FfiConverterOptionData.write(value.metadataBlobCiphertext, into: &buf)
+        FfiConverterOptionUInt64.write(value.metadataVersion, into: &buf)
     }
 }
 
@@ -15998,10 +16117,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_user_did() != 20723 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_add_members() != 54491 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_add_members() != 1237 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_add_members_async() != 21247 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_mlscontext_add_members_with_metadata() != 60117 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_check_suspended() != 40714 {
