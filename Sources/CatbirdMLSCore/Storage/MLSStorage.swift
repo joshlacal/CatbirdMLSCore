@@ -1262,8 +1262,13 @@ public final class MLSStorage: @unchecked Sendable {
       .fetchOne(db)
 
     if existing == nil {
-      // Convert groupID string to Data
-      let groupIDData = Data(groupID.utf8)
+      // `groupID` is a HEX string (the MLS group id). Store the RAW group bytes,
+      // not the hex string's ASCII bytes. `Data(groupID.utf8)` was wrong: it
+      // stored e.g. the 32 ASCII bytes of "4c71…", so `asConvoView()`'s later
+      // `groupID.hexEncodedString()` produced a DOUBLE-hex-encoded id ("3463…" =
+      // hex of ASCII "4c71…"), which then failed every FFI group lookup
+      // (get_epoch → GroupNotFound) on the DB-projection fallback path.
+      let groupIDData = Data(hexEncoded: groupID) ?? Data(groupID.utf8)
 
       // Create minimal placeholder conversation
       let conversation = MLSConversationModel(
