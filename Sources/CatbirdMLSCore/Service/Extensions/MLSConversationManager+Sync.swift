@@ -116,6 +116,7 @@ public extension MLSConversationManager {
         )
         try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer-fallback")
       }
+      await bridgeMissingMetadataTitlesAfterRustSync()
       return
     }
 
@@ -213,6 +214,52 @@ public extension MLSConversationManager {
       reason: reason,
       source: "Rust snapshots"
     )
+  }
+
+  /// Bridge the orchestrator-decrypted group name into the durable
+  /// `MLSConversationModel.title` for rustFull recipients.
+  ///
+  /// In `.rustFull`, incoming Welcomes/commits are processed by the Rust
+  /// orchestrator (`join_group` → `hydrate_conversation_metadata`), which
+  /// decrypts the group name into the orchestrator's IN-MEMORY conversation
+  /// cache but never writes it to GRDB. The legacy `initializeGroupFromWelcome`
+  /// path — the only recipient path that called `bootstrapMetadataAfterJoin`
+  /// — is short-circuited here (`syncWithServer` returns right after the Rust
+  /// sync), and `listConversations()` snapshots can't carry the name because
+  /// `ConvoView.metadata` was removed from the lexicon (Phase F). So the title
+  /// stays nil and the UI's `navigationTitle` falls back to "Secure Chat".
+  ///
+  /// For every hydrated conversation whose persisted title is still empty, run
+  /// the same `bootstrapMetadataAfterJoin` the legacy path used: it derives the
+  /// metadata key from the current epoch exporter via FFI `getCurrentMetadata`
+  /// (available in rustFull since M = native `MLSContext`), fetches + decrypts
+  /// the blob, and writes the title via `updateDecryptedMetadata`. Gated on an
+  /// empty title so already-named groups skip the network blob fetch; permanent
+  /// failures are suppressed by `bootstrapMetadataAfterJoin`'s own
+  /// failed-blob tracking. 1:1 chats legitimately have no group name and simply
+  /// no-op (UI shows the participant's name).
+  private func bridgeMissingMetadataTitlesAfterRustSync() async {
+    guard let userDid else { return }
+
+    let hydrated = Array(conversations.values)
+    for convo in hydrated {
+      let existingTitle: String? = try? await database.read { db in
+        try MLSConversationModel
+          .filter(MLSConversationModel.Columns.conversationID == convo.conversationId)
+          .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+          .fetchOne(db)?
+          .title
+      } ?? nil
+
+      if let existingTitle, !existingTitle.isEmpty {
+        continue
+      }
+
+      await bootstrapMetadataAfterJoin(
+        groupIdHex: convo.groupId,
+        joinSource: "rustFull sync hydrate"
+      )
+    }
   }
 
   private func applySwiftCacheHydration(
