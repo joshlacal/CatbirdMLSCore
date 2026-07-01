@@ -1285,8 +1285,14 @@ extension MLSConversationManager {
     let effectiveAvatar = avatarData ?? existing?.avatarImageData
 
     if protocolAuthorityMode == .rustFull {
-      // The metadata blob references this locator; the orchestrator encrypts +
-      // uploads the avatar bytes to it at the post-commit (epoch, version).
+      // Route through the Rust orchestrator, which stages an `updateMetadata`
+      // commit, uploads the re-sealed metadata blob, SUBMITS the commit to the
+      // server (`commitGroupChange` action=updateMetadata — the server
+      // CAS-advances current_epoch), merges locally, then encrypts+uploads the
+      // avatar blob at the post-commit (epoch, version). Because the commit is
+      // submitted-then-merged, the client and server epochs stay in lockstep —
+      // a failed submit discards the pending commit instead of isolating the
+      // sender (the earlier 409 send-break regression).
       let avatarLocator = effectiveAvatar != nil ? UUID().uuidString.lowercased() : nil
       try await withRustAuthoritativeRuntime(operation: "updateGroupMetadata") { runtime in
         try runtime.updateGroupMetadataEncrypted(
@@ -1299,8 +1305,8 @@ extension MLSConversationManager {
         )
       }
 
-      // Reflect the change on the creator's own row immediately (joiners pick
-      // it up via bootstrapMetadataAfterJoin on their next sync).
+      // Reflect the change on the creator's own row immediately (other members
+      // pick it up via bootstrapMetadataAfterJoin on their next sync).
       let now = Date()
       try await database.write { db in
         _ = try MLSConversationMetadataSQL.updateDecryptedMetadata(

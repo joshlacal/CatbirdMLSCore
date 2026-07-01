@@ -12556,6 +12556,21 @@ public protocol OrchestratorApiCallback: AnyObject {
      * orchestrator can skip metadata hydration without treating it as fatal.
      */
     func getGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String) throws -> Data
+
+    /**
+     * Submit a non-membership commit (e.g. a metadata update) via
+     * `blue.catbird.mlsChat.commitGroupChange`. Platform impls POST
+     * `{ convoId, action, commit }`; on success the server CAS-advances the
+     * authoritative `current_epoch`. `action` is e.g. `"updateMetadata"`.
+     * `confirmation_tag` is the optional base64 MLS confirmation tag.
+     *
+     * This MUST reach the server before the orchestrator merges the commit
+     * locally: a local merge without server acceptance advances the client
+     * epoch past the server and isolates the sender (every `sendMessage`
+     * 409s). On 409 (stale/raced epoch) return `ServerError { status: 409 }`
+     * so the orchestrator discards the pending commit instead of merging.
+     */
+    func commitGroupChange(convoId: String, commitData: Data, action: String, confirmationTag: String?) throws
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -13214,6 +13229,36 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        commitGroupChange: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            commitData: RustBuffer,
+            action: RustBuffer,
+            confirmationTag: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.commitGroupChange(
+                    convoId: FfiConverterString.lift(convoId),
+                    commitData: FfiConverterData.lift(commitData),
+                    action: FfiConverterString.lift(action),
+                    confirmationTag: FfiConverterOptionString.lift(confirmationTag)
+                )
+            }
+
+            let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -16800,6 +16845,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 61601 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_commit_group_change() != 27655 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272 {

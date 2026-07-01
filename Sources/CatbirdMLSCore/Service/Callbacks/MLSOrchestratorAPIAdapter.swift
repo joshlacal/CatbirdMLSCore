@@ -379,6 +379,22 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  public func commitGroupChange(
+    convoId: String,
+    commitData: Data,
+    action: String,
+    confirmationTag: String?
+  ) throws {
+    _ = try blocking {
+      try await self.apiClient.commitGroupChange(
+        convoId: convoId,
+        action: action,
+        commit: commitData,
+        confirmationTag: confirmationTag
+      )
+    }
+  }
+
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
     let semaphore = DispatchSemaphore(value: 0)
     let lock = NSLock()

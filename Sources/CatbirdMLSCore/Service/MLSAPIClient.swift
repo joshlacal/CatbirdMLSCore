@@ -2199,6 +2199,38 @@ public final class MLSAPIClient {
         return (output.success, newEpoch)
     }
 
+    /// Submit a non-membership group commit (e.g. `updateMetadata`) via
+    /// `blue.catbird.mlsChat.commitGroupChange`. On success the server
+    /// CAS-advances the authoritative `current_epoch`. Throws on non-200
+    /// (e.g. 409 stale/raced epoch) so the caller discards the pending commit
+    /// rather than advancing its local epoch past the server.
+    public func commitGroupChange(
+        convoId: String,
+        action: String,
+        commit: Data,
+        confirmationTag: String? = nil
+    ) async throws {
+        logger.info(
+            "🌐 [MLSAPIClient.commitGroupChange] START - convoId: \(convoId), action: \(action), commit: \(commit.count) bytes"
+        )
+        _ = confirmationTag
+        let input = BlueCatbirdMlsChatCommitGroupChange.Input(
+            convoId: convoId,
+            action: action,
+            commit: Bytes(data: commit)
+        )
+        let (responseCode, _) = try await client.blue.catbird.mlsChat.commitGroupChange(input: input)
+        guard responseCode == 200 else {
+            logger.error(
+                "❌ [MLSAPIClient.commitGroupChange] HTTP \(responseCode) for action \(action) convo \(convoId)"
+            )
+            throw MLSAPIError.httpError(
+                statusCode: responseCode, message: "commitGroupChange(\(action)) failed"
+            )
+        }
+        logger.info("✅ [MLSAPIClient.commitGroupChange] SUCCESS - action: \(action)")
+    }
+
     /// Get list of expected conversations for auto-rejoin detection
     /// - Parameter deviceId: Optional device ID to check (defaults to current device from auth)
     /// - Returns: List of conversations user should be in but may be missing locally
