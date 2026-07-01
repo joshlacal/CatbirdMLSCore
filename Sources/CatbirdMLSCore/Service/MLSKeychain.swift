@@ -61,92 +61,56 @@ public class MLSKeychain {
             throw MLSKeychainError.invalidData
         }
 
+        _ = useSecureEnclave  // no longer used — see note below
+
         let tag = "blue.catbird.mls.sig.\(identity)"
         let skipDP = MLSKeychainManager.shared.skipDataProtection
 
-        // Delete existing key first
+        // Delete any existing item first — covers both the current
+        // GenericPassword storage AND the legacy kSecClassKey storage.
         try? deleteSignatureKey(forIdentity: identity)
 
-        // Non-sandboxed CLI tools on macOS cannot use kSecClassKey with key-type
-        // attributes (errSecNoSuchAttr -25303). Fall back to GenericPassword storage.
-        if skipDP {
-            var query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: signatureKeyService,
-                kSecAttrAccount as String: tag,
-                kSecValueData as String: key,
-            ]
-
-            let status = SecItemAdd(query as CFDictionary, nil)
-            if status == errSecDuplicateItem {
-                let updateQuery: [String: Any] = [
-                    kSecClass as String: kSecClassGenericPassword,
-                    kSecAttrService as String: signatureKeyService,
-                    kSecAttrAccount as String: tag,
-                ]
-                let updateAttrs: [String: Any] = [kSecValueData as String: key]
-                let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
-                guard updateStatus == errSecSuccess else {
-                    throw MLSKeychainError.storeFailed(updateStatus)
-                }
-            } else if status != errSecSuccess {
-                throw MLSKeychainError.storeFailed(status)
-            }
-            logger.info("Stored MLS signature key (GenericPassword) for identity: \(identity, privacy: .private)")
-            return
-        }
-
-        // Standard kSecClassKey path for sandboxed apps (iOS / macOS app sandbox)
+        // Store as an OPAQUE GenericPassword item on every platform.
+        //
+        // The blob is a serialized OpenMLS `SignatureKeyPair` (JSON, hundreds of
+        // bytes) — NOT a raw 32-byte EC key. An earlier version stored it under
+        // `kSecClassKey` with `kSecAttrKeyType = ECSECPrimeRandom` +
+        // `kSecAttrKeySizeInBits = 256`, i.e. it told the keychain "this is a
+        // 256-bit EC key." The keychain does not round-trip an arbitrary blob
+        // under that key-class/attribute contract, so `get_signing_key` handed
+        // the orchestrator unusable bytes, `import_identity_key` failed to
+        // deserialize, `durable_signer_in_sync` stayed false, and the device
+        // DESTRUCTIVELY re-registered on every launch/account-switch (fresh
+        // device_uuid, remove_device deleting its published key packages, then
+        // 20 republishes) — churning key packages and stranding new members
+        // whose Welcomes referenced the deleted packages. GenericPassword
+        // round-trips arbitrary `Data` reliably, so the durable signer survives
+        // and the device registers ONCE. (Secure Enclave can only hold EC
+        // private keys, never this composite blob, so `useSecureEnclave` was
+        // never valid here and is ignored.)
         var query: [String: Any] = [
-            kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: tag,
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: signatureKeyService,
+            kSecAttrAccount as String: tag,
             kSecValueData as String: key,
-            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeySizeInBits as String: 256,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
-
-        // Attempt Secure Enclave storage if requested and available
-        if useSecureEnclave {
-            if isSecureEnclaveAvailable() {
-                query[kSecAttrTokenID as String] = kSecAttrTokenIDSecureEnclave
-                query[kSecAttrIsPermanent as String] = true
-            } else {
-                logger.warning("Secure Enclave not available; using regular Keychain")
-            }
+        if !skipDP {
+            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         }
 
         let status = SecItemAdd(query as CFDictionary, nil)
-
         if status == errSecDuplicateItem {
             let updateQuery: [String: Any] = [
-                kSecClass as String: kSecClassKey,
-                kSecAttrApplicationTag as String: tag
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: signatureKeyService,
+                kSecAttrAccount as String: tag,
             ]
-            let updateAttributes: [String: Any] = [
-                kSecValueData as String: key,
-                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            ]
-
-            let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
-            if updateStatus == errSecSuccess {
-                logger.info("Updated existing MLS signature key after duplicate detection")
-                return
+            let updateAttrs: [String: Any] = [kSecValueData as String: key]
+            let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+            guard updateStatus == errSecSuccess else {
+                throw MLSKeychainError.storeFailed(updateStatus)
             }
-
-            logger.warning("Failed to update duplicate MLS signature key (status: \(updateStatus)); retrying delete+add")
-            SecItemDelete(updateQuery as CFDictionary)
-            let retryStatus = SecItemAdd(query as CFDictionary, nil)
-
-            guard retryStatus == errSecSuccess else {
-                throw MLSKeychainError.storeFailed(retryStatus)
-            }
-
-            logger.info("Rewrote MLS signature key after clearing duplicate")
-            return
-        }
-
-        if status != errSecSuccess {
+        } else if status != errSecSuccess {
             throw MLSKeychainError.storeFailed(status)
         }
 
@@ -159,33 +123,37 @@ public class MLSKeychain {
     /// - Throws: MLSKeychainError if retrieval fails
     public static func retrieveSignatureKey(forIdentity identity: String) throws -> Data {
         let tag = "blue.catbird.mls.sig.\(identity)"
-        let skipDP = MLSKeychainManager.shared.skipDataProtection
 
-        let query: [String: Any]
-        if skipDP {
-            query = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: signatureKeyService,
-                kSecAttrAccount as String: tag,
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne
-            ]
-        } else {
-            query = [
-                kSecClass as String: kSecClassKey,
-                kSecAttrApplicationTag as String: tag,
-                kSecReturnData as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne
-            ]
+        // Current storage: opaque GenericPassword.
+        let gpQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: signatureKeyService,
+            kSecAttrAccount as String: tag,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        var status = SecItemCopyMatching(gpQuery as CFDictionary, &result)
+        if status == errSecSuccess, let keyData = result as? Data {
+            return keyData
         }
 
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
+        // Migration fallback: adopt a durable signer written by the legacy
+        // kSecClassKey path (present only on devices upgraded from the version
+        // that mis-stored the blob as an EC key). The next store rewrites it as
+        // a GenericPassword, so this path is hit at most once per identity.
+        let legacyQuery: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        result = nil
+        status = SecItemCopyMatching(legacyQuery as CFDictionary, &result)
         guard status == errSecSuccess, let keyData = result as? Data else {
+            // Surface not-found so the caller (get_signing_key) can return nil.
             throw MLSKeychainError.retrieveFailed(status)
         }
-
         return keyData
     }
     
@@ -194,27 +162,27 @@ public class MLSKeychain {
     /// - Throws: MLSKeychainError if deletion fails
     public static func deleteSignatureKey(forIdentity identity: String) throws {
         let tag = "blue.catbird.mls.sig.\(identity)"
-        let skipDP = MLSKeychainManager.shared.skipDataProtection
 
-        let query: [String: Any]
-        if skipDP {
-            query = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: signatureKeyService,
-                kSecAttrAccount as String: tag,
-            ]
-        } else {
-            query = [
-                kSecClass as String: kSecClassKey,
-                kSecAttrApplicationTag as String: tag
-            ]
+        // Current GenericPassword storage.
+        let gpQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: signatureKeyService,
+            kSecAttrAccount as String: tag,
+        ]
+        let gpStatus = SecItemDelete(gpQuery as CFDictionary)
+        guard gpStatus == errSecSuccess || gpStatus == errSecItemNotFound else {
+            throw MLSKeychainError.deleteFailed(gpStatus)
         }
 
-        let status = SecItemDelete(query as CFDictionary)
-
-        // errSecItemNotFound is acceptable (key didn't exist)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw MLSKeychainError.deleteFailed(status)
+        // Legacy kSecClassKey storage (migration cleanup so a stale item can't
+        // shadow the GenericPassword one on read).
+        let legacyQuery: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+        ]
+        let legacyStatus = SecItemDelete(legacyQuery as CFDictionary)
+        guard legacyStatus == errSecSuccess || legacyStatus == errSecItemNotFound else {
+            throw MLSKeychainError.deleteFailed(legacyStatus)
         }
     }
     
