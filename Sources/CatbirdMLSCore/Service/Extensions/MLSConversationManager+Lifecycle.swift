@@ -904,16 +904,36 @@ extension MLSConversationManager {
       return false
     }
 
-    do {
-      try await withRustAuthoritativeRuntime(operation: "rustFullReplenishKeyPackagesIfNeeded") { runtime in
-        try runtime.replenishKeyPackagesIfNeeded()
+    // Key-package replenishment tops the server pool back up to the target (50)
+    // by publishing fresh KPs — and the Rust orchestrator's publish callback is
+    // single-KP, so a full refill is ~50 SEQUENTIAL HTTP POSTs. Awaiting that
+    // here blocked `initialize()` → `isInitialized` → manager-ready, which is
+    // why messages "take forever" to appear after an account switch (the app's
+    // 30s init timeout was firing on it). Replenishment is NOT needed to open,
+    // read, or send in existing groups — it only refills the pool OTHERS draw
+    // from to add us to FUTURE groups — so detach it onto the tracked,
+    // shutdown-cancellable `keyPackageRefreshTask` and let init return now. The
+    // 5s settle sleep mirrors the legacy path: it keeps `create_key_package`
+    // FFI writes clear of an immediate background/suspend (0xdead10cc).
+    keyPackageRefreshTask?.cancel()
+    keyPackageRefreshTask = Task(priority: .utility) { [weak self] in
+      guard let self else { return }
+      do {
+        try await Task.sleep(nanoseconds: 5_000_000_000)
+        try Task.checkCancellation()
+        try await self.withRustAuthoritativeRuntime(operation: "rustFullReplenishKeyPackagesIfNeeded") { runtime in
+          try runtime.replenishKeyPackagesIfNeeded()
+        }
+        self.logger.info("✅ [MLS-FULL-RUST] Key package replenishment checked via Rust (background)")
+      } catch is CancellationError {
+        self.logger.info(
+          "⚠️ [MLS-FULL-RUST] Background key package replenishment cancelled (expected during shutdown)"
+        )
+      } catch {
+        self.logger.error(
+          "❌ [MLS-FULL-RUST] Rust key package replenishment failed: \(error.localizedDescription, privacy: .public)"
+        )
       }
-      logger.info("✅ [MLS-FULL-RUST] Key package replenishment checked via Rust")
-    } catch {
-      logger.error(
-        "❌ [MLS-FULL-RUST] Rust key package replenishment failed: \(error.localizedDescription, privacy: .public)"
-      )
-      return false
     }
 
     if configuration.skipDeviceRecordPublishing {

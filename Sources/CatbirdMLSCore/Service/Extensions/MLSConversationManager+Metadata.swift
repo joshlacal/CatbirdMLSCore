@@ -667,7 +667,8 @@ extension MLSConversationManager {
       let encryptedAvatar = try await apiClient.getGroupMetadataBlob(
         blobLocator: blobLocator,
         groupId: groupIdHex,
-        metadataVersion: metadataVersion
+        metadataVersion: metadataVersion,
+        kind: "avatar"
       )
       logger.debug(
         "📥 [Metadata] Fetched encrypted avatar blob: \(encryptedAvatar.count) bytes"

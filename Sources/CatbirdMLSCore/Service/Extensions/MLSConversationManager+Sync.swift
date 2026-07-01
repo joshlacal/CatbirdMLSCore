@@ -234,7 +234,66 @@ public extension MLSConversationManager {
   /// can't wipe a good member list (`persistMembersToDatabase` marks all active
   /// rows inactive before re-inserting from `convo.members`).
   private func persistRustHydratedMembers() async {
-    let rosters = conversations.values.filter { !$0.members.isEmpty }
+    guard let userDid = userDid else { return }
+    var rosters = conversations.values.filter { !$0.members.isEmpty }
+
+    // Freshly-joined groups: right after a Welcome join the server `getConvos`
+    // snapshot hasn't populated the roster yet, so the orchestrator's
+    // `ConvoView.members` is empty and the join gets filtered out above. That
+    // left the JOINER's `MLSMemberModel` table empty → the UI showed
+    // "0 members" and hydrated no participant profiles until a send forced a
+    // roster fallback. The authoritative source at this point is the local MLS
+    // group state itself, so for any locally-present group whose hydrated
+    // roster is empty, fall back to the FFI `debugGroupMembers` roster. `try?`
+    // silently skips groups with no local MLS group (the NeedsRejoin backlog
+    // throws GroupNotFound), and the empty guard avoids wiping a good list.
+    let emptyRosterConvos = conversations.values.filter { $0.members.isEmpty }
+    for convo in emptyRosterConvos {
+      guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
+      guard
+        let debugInfo = try? await mlsClient.debugGroupMembers(for: userDid, groupId: groupIdData),
+        !debugInfo.members.isEmpty
+      else { continue }
+
+      let creatorDIDString = convo.creator.didString()
+      let memberViews: [BlueCatbirdMlsChatDefs.MemberView] = debugInfo.members.compactMap { member in
+        guard
+          let didString = String(data: member.credentialIdentity, encoding: .utf8),
+          let did = try? DID(didString: MLSStorageHelpers.normalizeDID(didString))
+        else { return nil }
+        return BlueCatbirdMlsChatDefs.MemberView(
+          did: did,
+          userDid: did,
+          deviceId: nil,
+          deviceName: nil,
+          joinedAt: ATProtocolDate(date: convo.createdAt.date),
+          isAdmin: did.didString().caseInsensitiveCompare(creatorDIDString) == .orderedSame,
+          isModerator: false,
+          promotedAt: nil,
+          promotedBy: nil,
+          leafIndex: Int(member.leafIndex),
+          credential: nil
+        )
+      }
+      guard !memberViews.isEmpty else { continue }
+
+      rosters.append(
+        BlueCatbirdMlsChatDefs.ConvoView(
+          conversationId: convo.conversationId,
+          groupId: convo.groupId,
+          creator: convo.creator,
+          members: memberViews,
+          epoch: convo.epoch,
+          cipherSuite: convo.cipherSuite,
+          createdAt: convo.createdAt,
+          lastMessageAt: convo.lastMessageAt,
+          confirmationTag: convo.confirmationTag,
+          resetGeneration: convo.resetGeneration,
+          sequencerDid: convo.sequencerDid
+        )
+      )
+    }
+
     guard !rosters.isEmpty else { return }
     do {
       try await persistMembersToDatabase(Array(rosters))
