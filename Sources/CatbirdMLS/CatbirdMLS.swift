@@ -3549,6 +3549,22 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func syncWithServer(fullSync: Bool) throws
 
     /**
+     * Update a group's encrypted metadata (title / description / avatar) for
+     * full-authority (rustFull) clients.
+     *
+     * Stages a GroupContextExtensions commit that embeds a fresh
+     * `MetadataReference`, uploads the re-encrypted metadata blob, submits the
+     * commit, and merges locally. When `avatar_bytes` is provided the avatar
+     * image is encrypted at the SAME post-commit (epoch, metadata_version) and
+     * uploaded to `avatar_blob_locator`, so joiners can fetch + decrypt it.
+     *
+     * The whole desired metadata state must be supplied on every call (the
+     * commit replaces the blob): to rename without dropping the avatar, pass
+     * the current avatar bytes + locator alongside the new title.
+     */
+    func updateGroupMetadataEncrypted(conversationId: String, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, avatarBytes: Data?) throws
+
+    /**
      * User explicitly tapped Reset conversation in the UI. Reports a vote
      * to the server (spec section 8.6 quorum) and clears local quarantine.
      */
@@ -4357,6 +4373,32 @@ open class OrchestratorBridge:
         try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_sync_with_server(self.uniffiClonePointer(),
                                                                              FfiConverterBool.lower(fullSync), $0)
+        }
+    }
+
+    /**
+     * Update a group's encrypted metadata (title / description / avatar) for
+     * full-authority (rustFull) clients.
+     *
+     * Stages a GroupContextExtensions commit that embeds a fresh
+     * `MetadataReference`, uploads the re-encrypted metadata blob, submits the
+     * commit, and merges locally. When `avatar_bytes` is provided the avatar
+     * image is encrypted at the SAME post-commit (epoch, metadata_version) and
+     * uploaded to `avatar_blob_locator`, so joiners can fetch + decrypt it.
+     *
+     * The whole desired metadata state must be supplied on every call (the
+     * commit replaces the blob): to rename without dropping the avatar, pass
+     * the current avatar bytes + locator alongside the new title.
+     */
+    open func updateGroupMetadataEncrypted(conversationId: String, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, avatarBytes: Data?) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_update_group_metadata_encrypted(self.uniffiClonePointer(),
+                                                                                            FfiConverterString.lower(conversationId),
+                                                                                            FfiConverterOptionString.lower(title),
+                                                                                            FfiConverterOptionString.lower(description),
+                                                                                            FfiConverterOptionString.lower(avatarBlobLocator),
+                                                                                            FfiConverterOptionString.lower(avatarContentType),
+                                                                                            FfiConverterOptionData.lower(avatarBytes), $0)
         }
     }
 
@@ -16641,6 +16683,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_sync_with_server() != 17558 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_update_group_metadata_encrypted() != 53135 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_user_confirmed_manual_reset() != 5441 {

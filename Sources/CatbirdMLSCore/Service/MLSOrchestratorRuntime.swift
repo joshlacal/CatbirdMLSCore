@@ -340,6 +340,28 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return try MLSGroupMutationResult(ffiResult: ffiResult, userDID: userDID)
   }
 
+  /// Update a group's encrypted metadata (title / description / avatar) via the
+  /// Rust orchestrator (rustFull authority). Supply the full desired state:
+  /// the commit replaces the metadata blob, so pass current avatar bytes +
+  /// locator when renaming to avoid dropping the avatar.
+  public func updateGroupMetadataEncrypted(
+    conversationId: String,
+    title: String?,
+    description: String?,
+    avatarBlobLocator: String?,
+    avatarContentType: String?,
+    avatarBytes: Data?
+  ) throws {
+    try bridge.updateGroupMetadataEncrypted(
+      conversationId: conversationId,
+      title: title,
+      description: description,
+      avatarBlobLocator: avatarBlobLocator,
+      avatarContentType: avatarContentType,
+      avatarBytes: avatarBytes
+    )
+  }
+
   public func respondToWelcomeReissue(
     conversationId: String,
     recipientDeviceDid: String,

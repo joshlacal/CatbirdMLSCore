@@ -1250,6 +1250,84 @@ extension MLSConversationManager {
   // Use `updateGroupMetadataEncrypted` below — same end result in a
   // single atomic FFI call.
 
+  /// Update group metadata (title / description / avatar) with a raw avatar
+  /// image — the rustFull-capable entry point UI edit flows should call.
+  ///
+  /// The metadata commit REPLACES the whole encrypted blob, so this resolves
+  /// the full desired state from the existing row first: any field left `nil`
+  /// keeps its current value (e.g. renaming preserves the avatar; setting an
+  /// avatar preserves the title). Pass `avatarData` (raw JPEG bytes) to set the
+  /// avatar.
+  ///
+  /// In `.rustFull` this routes through the Rust orchestrator
+  /// (`update_group_metadata_encrypted`), which stages + commits the metadata
+  /// change AND encrypts+uploads the avatar blob at the post-commit
+  /// (epoch, version) so joiners can fetch it. In legacy mode it falls back to
+  /// the Swift `updateGroupMetadataEncrypted` path.
+  public func updateGroupMetadata(
+    conversationId: String,
+    title: String? = nil,
+    description: String? = nil,
+    avatarData: Data? = nil
+  ) async throws {
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+
+    let existing: MLSConversationModel? = (try? await database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDid)
+        .fetchOne(db)
+    }) ?? nil
+    let effectiveTitle = title ?? existing?.title
+    let effectiveDescription = description ?? existing?.description
+    let effectiveAvatar = avatarData ?? existing?.avatarImageData
+
+    if protocolAuthorityMode == .rustFull {
+      // The metadata blob references this locator; the orchestrator encrypts +
+      // uploads the avatar bytes to it at the post-commit (epoch, version).
+      let avatarLocator = effectiveAvatar != nil ? UUID().uuidString.lowercased() : nil
+      try await withRustAuthoritativeRuntime(operation: "updateGroupMetadata") { runtime in
+        try runtime.updateGroupMetadataEncrypted(
+          conversationId: conversationId,
+          title: effectiveTitle,
+          description: effectiveDescription,
+          avatarBlobLocator: avatarLocator,
+          avatarContentType: effectiveAvatar != nil ? "image/jpeg" : nil,
+          avatarBytes: effectiveAvatar
+        )
+      }
+
+      // Reflect the change on the creator's own row immediately (joiners pick
+      // it up via bootstrapMetadataAfterJoin on their next sync).
+      let now = Date()
+      try await database.write { db in
+        _ = try MLSConversationMetadataSQL.updateDecryptedMetadata(
+          db: db,
+          currentUserDID: userDid,
+          groupIdHex: conversationId,
+          title: effectiveTitle,
+          description: effectiveDescription,
+          avatarImageData: effectiveAvatar,
+          now: now
+        )
+      }
+      notifyObservers(.syncCompleted(1))
+      return
+    }
+
+    // Legacy (non-rustFull): reuse the Swift encrypted-update path. Avatar blob
+    // propagation is handled by the metadata re-wrap machinery there.
+    try await updateGroupMetadataEncrypted(
+      conversationId: conversationId,
+      title: effectiveTitle,
+      description: effectiveDescription,
+      avatarBlobLocator: nil,
+      avatarContentType: nil
+    )
+  }
+
   /// Atomic encrypted metadata update (Phase A.2 / Phase F).
   ///
   /// Uses `MLSContext.updateGroupMetadataEncrypted` to stage the
