@@ -12464,6 +12464,13 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     func publishKeyPackage(keyPackage: Data, cipherSuite: String, expiresAt: String, deviceId: String?) throws
 
+    /**
+     * Publish multiple key packages in ONE request. The platform impl POSTs
+     * the whole array to `blue.catbird.mlsChat.publishKeyPackages` (server cap
+     * 100), collapsing a full replenishment refill into a single round-trip.
+     */
+    func publishKeyPackages(keyPackages: [Data], cipherSuite: String, expiresAt: String, deviceId: String?) throws
+
     func getKeyPackages(dids: [String]) throws -> [FfiKeyPackageRef]
 
     func getKeyPackageStats() throws -> FfiKeyPackageStats
@@ -12874,6 +12881,36 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                 }
                 return try uniffiObj.publishKeyPackage(
                     keyPackage: FfiConverterData.lift(keyPackage),
+                    cipherSuite: FfiConverterString.lift(cipherSuite),
+                    expiresAt: FfiConverterString.lift(expiresAt),
+                    deviceId: FfiConverterOptionString.lift(deviceId)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        publishKeyPackages: { (
+            uniffiHandle: UInt64,
+            keyPackages: RustBuffer,
+            cipherSuite: RustBuffer,
+            expiresAt: RustBuffer,
+            deviceId: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.publishKeyPackages(
+                    keyPackages: FfiConverterSequenceData.lift(keyPackages),
                     cipherSuite: FfiConverterString.lift(cipherSuite),
                     expiresAt: FfiConverterString.lift(expiresAt),
                     deviceId: FfiConverterOptionString.lift(deviceId)
@@ -16808,46 +16845,49 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_package() != 53529 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_packages() != 42104 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_packages() != 21647 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_package_stats() != 41549 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_packages() != 4755 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_sync_key_packages() != 37672 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_package_stats() != 27036 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_register_device() != 10211 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_sync_key_packages() != 46258 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_list_devices() != 7443 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_register_device() != 1730 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_remove_device() != 13763 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_list_devices() != 44240 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_group_info() != 37667 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_remove_device() != 38848 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_info() != 29579 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_group_info() != 63714 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 63298 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_info() != 7959 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 18656 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 14448 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 48657 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 39089 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_group_metadata_blob() != 41040 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 46497 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 61601 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_group_metadata_blob() != 23395 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_commit_group_change() != 27655 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 1124 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_commit_group_change() != 20031 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272 {

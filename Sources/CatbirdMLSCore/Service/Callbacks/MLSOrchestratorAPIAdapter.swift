@@ -191,6 +191,26 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  public func publishKeyPackages(
+    keyPackages: [Data],
+    cipherSuite: String,
+    expiresAt: String,
+    deviceId: String?
+  ) throws {
+    let expires = Self.iso8601Formatter.date(from: expiresAt).map(ATProtocolDate.init(date:))
+    try blocking {
+      // Batched relay: the Rust orchestrator generates the whole replenishment
+      // batch and hands it over in one call so we POST it as a single request
+      // (server cap 100). Same device-scoping rules as the single publish.
+      try await self.apiClient.publishKeyPackages(
+        keyPackages: keyPackages,
+        cipherSuite: cipherSuite,
+        expiresAt: expires,
+        deviceId: deviceId
+      )
+    }
+  }
+
   public func getKeyPackages(dids: [String]) throws -> [FfiKeyPackageRef] {
     let didObjects = try dids.map { try DID(didString: $0) }
     let result = try blocking {

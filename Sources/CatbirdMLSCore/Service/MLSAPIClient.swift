@@ -1183,6 +1183,52 @@ public final class MLSAPIClient {
         logger.debug("Published key package successfully")
     }
 
+    /// Publish MULTIPLE key packages in a SINGLE request (one POST).
+    ///
+    /// Mirrors `publishKeyPackage` but batches the whole array into one
+    /// `blue.catbird.mlsChat.publishKeyPackages` call. Used by the Rust
+    /// orchestrator's `publishKeyPackages` FFI callback so a full replenishment
+    /// refill is one round-trip instead of ~50 sequential POSTs. All items share
+    /// the same cipher suite, expiry, and device scope (the replenishment
+    /// invariant). The server accepts up to `MAX_BATCH_SIZE` (100) per call.
+    public func publishKeyPackages(
+        keyPackages: [Data],
+        cipherSuite: String,
+        expiresAt: ATProtocolDate? = nil,
+        deviceId: String? = nil
+    ) async throws {
+        guard !keyPackages.isEmpty else { return }
+        let expires = expiresAt ?? ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
+        let items = keyPackages.map {
+            BlueCatbirdMlsChatPublishKeyPackages.KeyPackageItem(
+                keyPackage: Bytes(data: $0),
+                cipherSuite: cipherSuite,
+                expires: expires,
+                lastResort: nil
+            )
+        }
+        logger.info(
+            "🌐 [MLSAPIClient.publishKeyPackages] START - batch count: \(items.count), deviceId: \(deviceId ?? "nil")"
+        )
+
+        let input = BlueCatbirdMlsChatPublishKeyPackages.Input(
+            action: "publish",
+            keyPackages: items,
+            deviceId: deviceId
+        )
+
+        let (responseCode, _) = try await client.blue.catbird.mlsChat.publishKeyPackages(input: input)
+
+        guard responseCode == 200 else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to publish key package batch (count: \(items.count))"
+            )
+        }
+
+        logger.info("✅ [MLSAPIClient.publishKeyPackages] SUCCESS - batch count: \(items.count)")
+    }
+
     /// Get key packages for one or more DIDs using Petrel client
     /// - Parameters:
     ///   - dids: Array of DIDs to fetch key packages for
