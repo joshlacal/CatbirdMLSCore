@@ -117,6 +117,7 @@ public extension MLSConversationManager {
         try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer-fallback")
       }
       await bridgeMissingMetadataTitlesAfterRustSync()
+      await persistRustHydratedMembers()
       return
     }
 
@@ -214,6 +215,34 @@ public extension MLSConversationManager {
       reason: reason,
       source: "Rust snapshots"
     )
+  }
+
+  /// Persist the orchestrator-hydrated member roster into the durable GRDB
+  /// `MLSMemberModel` table for rustFull recipients.
+  ///
+  /// In `.rustFull`, `syncWithServer` returns right after the Rust sync +
+  /// `applySwiftCacheHydration` (which populates the IN-MEMORY `conversations`
+  /// dict + `groupStates`, but NOT the GRDB member table). The only writers of
+  /// `MLSMemberModel` are the legacy sync body (`persistMembersToDatabase` at
+  /// the end of `syncWithServerLegacy`, short-circuited in rustFull) and the
+  /// local ADMIN actions (createGroup/addMembers/removeMember via
+  /// `applyRustConversationSnapshot`). So a JOINER's member table stays empty
+  /// and the UI's `memberCount()` / `fetchMembers()` read 0 → "0 members".
+  ///
+  /// Mirror the legacy contract: write the hydrated roster to GRDB after every
+  /// rustFull sync. Guarded on a non-empty roster so a transient empty snapshot
+  /// can't wipe a good member list (`persistMembersToDatabase` marks all active
+  /// rows inactive before re-inserting from `convo.members`).
+  private func persistRustHydratedMembers() async {
+    let rosters = conversations.values.filter { !$0.members.isEmpty }
+    guard !rosters.isEmpty else { return }
+    do {
+      try await persistMembersToDatabase(Array(rosters))
+    } catch {
+      logger.warning(
+        "⚠️ [MLS-FULL-RUST] Failed to persist hydrated member roster to GRDB: \(error.localizedDescription, privacy: .public)"
+      )
+    }
   }
 
   /// Bridge the orchestrator-decrypted group name into the durable
