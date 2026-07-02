@@ -7660,6 +7660,79 @@ public func FfiConverterTypeFFIQuarantineState_lower(_ value: FfiQuarantineState
     return FfiConverterTypeFFIQuarantineState.lower(value)
 }
 
+/**
+ * Server acknowledgment for a sent message. `seq` is the server-assigned
+ * conversation-global sequence number — the sole message-ordering authority.
+ */
+public struct FfiSendMessageResponse {
+    public var messageId: String
+    public var seq: UInt64
+    public var epoch: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String, seq: UInt64, epoch: UInt64) {
+        self.messageId = messageId
+        self.seq = seq
+        self.epoch = epoch
+    }
+}
+
+extension FfiSendMessageResponse: Equatable, Hashable {
+    public static func == (lhs: FfiSendMessageResponse, rhs: FfiSendMessageResponse) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.seq != rhs.seq {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(seq)
+        hasher.combine(epoch)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFISendMessageResponse: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSendMessageResponse {
+        return
+            try FfiSendMessageResponse(
+                messageId: FfiConverterString.read(from: &buf),
+                seq: FfiConverterUInt64.read(from: &buf),
+                epoch: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiSendMessageResponse, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterUInt64.write(value.seq, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISendMessageResponse_lift(_ buf: RustBuffer) throws -> FfiSendMessageResponse {
+    return try FfiConverterTypeFFISendMessageResponse.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISendMessageResponse_lower(_ value: FfiSendMessageResponse) -> RustBuffer {
+    return FfiConverterTypeFFISendMessageResponse.lower(value)
+}
+
 public struct FfiSendResult {
     public var message: FfiMessage
     public var events: [FfiEngineEvent]
@@ -12448,7 +12521,15 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     func removeMembers(convoId: String, memberDids: [String], commitData: Data) throws
 
-    func sendMessage(convoId: String, ciphertext: Data, epoch: UInt64) throws
+    /**
+     * Send an encrypted message. `msg_id` is the orchestrator-generated
+     * message ID — platform implementations MUST forward it to the server
+     * (so local storage and server agree on the ID) and MUST return the
+     * server's `{messageId, seq, epoch}` acknowledgment. Dropping the
+     * response (or substituting a different msg_id) leaves locally-stored
+     * own messages with `sequenceNumber = 0`, which breaks display ordering.
+     */
+    func sendMessage(convoId: String, ciphertext: Data, epoch: UInt64, msgId: String) throws -> FfiSendMessageResponse
 
     /**
      * Fetch encrypted envelopes for a conversation.
@@ -12808,22 +12889,24 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             convoId: RustBuffer,
             ciphertext: RustBuffer,
             epoch: UInt64,
-            _: UnsafeMutableRawPointer,
+            msgId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
             let makeCall = {
-                () throws in
+                () throws -> FfiSendMessageResponse in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try uniffiObj.sendMessage(
                     convoId: FfiConverterString.lift(convoId),
                     ciphertext: FfiConverterData.lift(ciphertext),
-                    epoch: FfiConverterUInt64.lift(epoch)
+                    epoch: FfiConverterUInt64.lift(epoch),
+                    msgId: FfiConverterString.lift(msgId)
                 )
             }
 
-            let writeReturn = { () }
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFISendMessageResponse.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -16836,7 +16919,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_remove_members() != 5614 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_send_message() != 22932 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_send_message() != 35312 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 11438 {

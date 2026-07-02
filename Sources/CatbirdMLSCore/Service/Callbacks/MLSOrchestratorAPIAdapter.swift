@@ -124,21 +124,28 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
-  public func sendMessage(convoId: String, ciphertext: Data, epoch: UInt64) throws {
+  public func sendMessage(
+    convoId: String, ciphertext: Data, epoch: UInt64, msgId: String
+  ) throws -> FfiSendMessageResponse {
     guard let didString = currentDid() else {
       throw OrchestratorBridgeError.NotAuthenticated
     }
     let did = try DID(didString: didString)
-    _ = try blocking {
+    let result = try blocking {
       try await self.apiClient.sendMessage(
         convoId: convoId,
-        msgId: UUID().uuidString.lowercased(),
+        msgId: msgId,
         ciphertext: ciphertext,
         epoch: Int(clamping: epoch),
         paddedSize: ciphertext.count,
         senderDid: did
       )
     }
+    return FfiSendMessageResponse(
+      messageId: result.messageId,
+      seq: UInt64(clamping: result.sequenceNumber),
+      epoch: UInt64(clamping: result.epoch)
+    )
   }
 
   public func getMessages(
