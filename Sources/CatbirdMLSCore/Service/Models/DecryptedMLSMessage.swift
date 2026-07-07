@@ -78,7 +78,9 @@ public extension DecryptedMLSMessage {
     case .reaction:
       return true
     case .text, .readReceipt, .typing, .adminRoster, .adminAction, .system,
-         .deliveryAck, .recoveryRequest:
+         .deliveryAck, .recoveryRequest,
+         // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
+         .edit, .delete, .unknown:
       return false
     }
   }

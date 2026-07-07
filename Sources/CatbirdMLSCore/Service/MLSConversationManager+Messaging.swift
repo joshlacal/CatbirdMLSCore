@@ -1872,6 +1872,11 @@ public extension MLSConversationManager {
 
     case .readReceipt, .typing, .adminRoster, .adminAction, .system:
       break
+
+    // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
+    // No side effects yet — treated as a non-displayable control message.
+    case .edit, .delete, .unknown:
+      break
     }
   }
 
@@ -2705,6 +2710,19 @@ public extension MLSConversationManager {
               conversationId: message.convoId
             )
           }
+
+        // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
+        // Persist for sequence advancement only, like .typing/.adminRoster — never
+        // render, never count as a decrypt failure, never trigger recovery.
+        case .edit, .delete, .unknown:
+          _ = try await persistProcessedPayload(
+            message: message,
+            payload: payload,
+            senderID: senderDID,
+            processingError: nil,
+            validationReason: nil,
+            context: context
+          )
         }
 
         return .application(payload: payload, sender: senderDID)

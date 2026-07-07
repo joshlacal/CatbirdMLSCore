@@ -1313,6 +1313,13 @@ public actor MLSCoreContext {
         case .deliveryAck, .recoveryRequest:
           plaintext = ""
           embedData = nil
+
+        // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
+        // Treat like deliveryAck/recoveryRequest for now: non-displayable, still
+        // persisted below so sequence numbers advance correctly.
+        case .edit, .delete, .unknown:
+          plaintext = ""
+          embedData = nil
         }
       } else {
         plaintext = String(data: payloadData, encoding: .utf8) ?? ""
@@ -2218,6 +2225,9 @@ public actor MLSCoreContext {
       return payload.text ?? "System message"
     case .deliveryAck, .recoveryRequest:
       return ""
+    // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
+    case .edit, .delete, .unknown:
+      return ""
     }
   }
 
@@ -2242,6 +2252,9 @@ public actor MLSCoreContext {
     case .system:
       return payload.text ?? "System message"
     case .deliveryAck, .recoveryRequest:
+      return nil
+    // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
+    case .edit, .delete, .unknown:
       return nil
     }
   }
