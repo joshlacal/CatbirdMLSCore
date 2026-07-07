@@ -5415,6 +5415,49 @@ public actor MLSGRDBManager {
       }
     }
 
+    // MARK: v34 — message edit/unsend (§5.7 / §5.8)
+    // Adds edit metadata to MLSMessageModel (mirrors the v31 isTombstone/deletedAt
+    // pattern) and a parking-lot table for edits/deletes that arrive before their
+    // target message is persisted locally (mirrors MLSOrphanedReactionModel, keyed
+    // by targetMessageID instead of messageID).
+    //
+    // `appliedEditSeq` is not part of the wire protocol — it is a local-only
+    // bookkeeping column recording the `seq` of the last-applied edit so
+    // last-writer-wins (spec §5.7.2 step 3) survives process restarts, not just
+    // in-memory ordering within a single decrypt session.
+    migrator.registerMigration("v34_message_edit_unsend") { db in
+      let existing = try db.columns(in: "MLSMessageModel").map { $0.name }
+      if !existing.contains("isEdited") {
+        try db.execute(
+          sql: "ALTER TABLE MLSMessageModel ADD COLUMN isEdited INTEGER NOT NULL DEFAULT 0")
+      }
+      if !existing.contains("editedAt") {
+        try db.execute(sql: "ALTER TABLE MLSMessageModel ADD COLUMN editedAt DATETIME")
+      }
+      if !existing.contains("appliedEditSeq") {
+        try db.execute(sql: "ALTER TABLE MLSMessageModel ADD COLUMN appliedEditSeq INTEGER")
+      }
+
+      try db.create(table: "MLSOrphanedMutationModel", ifNotExists: true) { t in
+        t.primaryKey("mutationID", .text).notNull()
+        // Note: No ForeignKey on targetMessageID as that's the whole point.
+        t.column("targetMessageID", .text).notNull()
+        t.column("conversationID", .text).notNull()
+        t.column("currentUserDID", .text).notNull()
+        t.column("applierDID", .text).notNull()
+        t.column("mutationType", .text).notNull()
+        t.column("newText", .text)
+        t.column("mutationSeq", .integer).notNull()
+        t.column("createdAt", .datetime).notNull()
+      }
+
+      try db.execute(
+        sql: """
+            CREATE INDEX IF NOT EXISTS idx_orphaned_mutation_target
+            ON MLSOrphanedMutationModel(targetMessageID, currentUserDID);
+          """)
+    }
+
     return migrator
   }
 

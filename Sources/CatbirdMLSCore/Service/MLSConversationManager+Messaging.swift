@@ -997,6 +997,365 @@ public extension MLSConversationManager {
     }
   }
 
+  // MARK: - Edit / Unsend (spec §5.7 / §5.8)
+
+  /// Edit reuses the exact same encrypted-message channel as every other message
+  /// type (spec §5.7) — it is sent via `SEND_MESSAGE` like a normal message, gets
+  /// its own `seq`, and goes through the identical pre-send sync/encrypt/send flow.
+  public func editMessage(
+    convoId: String,
+    messageId: String,
+    newText: String
+  ) async throws -> (
+    messageId: String, receivedAt: ATProtocolDate, sequenceNumber: Int64, epoch: Int64
+  ) {
+    try throwIfShuttingDown("editMessage")
+
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+    guard conversations[convoId] != nil else {
+      throw MLSConversationError.conversationNotFound
+    }
+
+    // Pre-validate locally: target must exist and must have been sent by self.
+    // Server-side authorization (spec §5.7.2 step 2) is re-checked on every
+    // receiving client too — this is purely a fast local fail for the sender's
+    // own UI.
+    guard
+      let targetRow = try await storage.fetchMessage(
+        messageID: messageId,
+        currentUserDID: userDid,
+        database: database
+      )
+    else {
+      throw MLSConversationError.invalidMessage
+    }
+    let normalizedSelf = MLSStorageHelpers.normalizeDID(MLSCredentialBinding.credentialRootDID(userDid))
+    let normalizedTargetSender = MLSStorageHelpers.normalizeDID(
+      MLSCredentialBinding.credentialRootDID(targetRow.senderID))
+    guard normalizedSelf == normalizedTargetSender else {
+      throw MLSConversationError.operationFailed("Cannot edit a message you did not send")
+    }
+
+    let payload = MLSMessagePayload.edit(targetMessageId: messageId, newText: newText)
+
+    if protocolAuthorityMode == .rustFull {
+      let sendResult = try await withRustAuthoritativeRuntime(operation: "editMessage") { runtime in
+        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+      }
+      await handleRustEngineEvents(sendResult.events, source: "editMessage")
+
+      let editSeq = Int64(clamping: sendResult.message.sequenceNumber)
+      await applyLocalEdit(
+        convoId: convoId, messageId: messageId, newText: newText, editSeq: editSeq, userDid: userDid
+      )
+
+      let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
+      return (
+        messageId: sendResult.message.id,
+        receivedAt: ATProtocolDate(date: timestamp),
+        sequenceNumber: editSeq,
+        epoch: Int64(clamping: sendResult.message.epoch)
+      )
+    }
+
+    // Legacy path — mirrors `sendEncryptedReaction`'s structure (control message
+    // sent through the queued/locked encrypt+send flow, own row cached so the SSE
+    // echo doesn't hit CannotDecryptOwnMessage).
+    guard let convo = conversations[convoId] else {
+      throw MLSConversationError.conversationNotFound
+    }
+    guard let groupIdData = Data(hexEncoded: convo.groupId) else {
+      throw MLSConversationError.invalidGroupId
+    }
+
+    return try await sendQueueCoordinator.enqueueSend(conversationID: convoId) { [self] in
+      try throwIfShuttingDown("editMessage-queued")
+
+      let payloadData = try payload.encodeToJSON()
+
+      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+        let tagB64 = tagData?.base64EncodedString()
+
+        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+        let paddedCiphertext = ciphertext
+        let paddedSize = ciphertext.count
+
+        let localMsgId = UUID().uuidString
+
+        let optimisticSeq: Int
+        if let cursor = try? await storage.fetchLastMessageCursor(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          optimisticSeq = Int(cursor.seq) + 1
+        } else {
+          optimisticSeq = 1
+        }
+
+        try throwIfShuttingDown("editMessage-preCache")
+        try await cacheControlMessageEnvelope(
+          message: BlueCatbirdMlsChatDefs.MessageView(
+            id: localMsgId,
+            convoId: convoId,
+            ciphertext: Bytes(data: paddedCiphertext),
+            epoch: Int(localEpoch),
+            seq: optimisticSeq,
+            createdAt: ATProtocolDate(date: Date()),
+            messageType: "edit"
+          ),
+          payload: payload,
+          senderDID: userDid,
+          currentUserDID: userDid,
+          processingState: MLSMessageProcessingState.pendingSelfSend
+        )
+
+        let sendResult = try await apiClient.sendMessage(
+          convoId: convoId,
+          msgId: localMsgId,
+          ciphertext: paddedCiphertext,
+          epoch: Int(localEpoch),
+          paddedSize: paddedSize,
+          senderDid: try DID(didString: userDid),
+          confirmationTag: tagB64
+        )
+        return (localMsgId, sendResult)
+      }
+
+      let localMsgId = result.0
+      let sendResult = result.1
+
+      do {
+        try await storage.updateMessageMetadata(
+          messageID: localMsgId,
+          currentUserDID: userDid,
+          epoch: sendResult.epoch,
+          sequenceNumber: sendResult.sequenceNumber,
+          timestamp: sendResult.receivedAt.date,
+          database: database,
+          newMessageID: sendResult.messageId
+        )
+      } catch {
+        logger.error(
+          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata after edit send) for \(convoId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+
+      await applyLocalEdit(
+        convoId: convoId, messageId: messageId, newText: newText,
+        editSeq: sendResult.sequenceNumber, userDid: userDid
+      )
+
+      return (
+        messageId: sendResult.messageId,
+        receivedAt: sendResult.receivedAt,
+        sequenceNumber: sendResult.sequenceNumber,
+        epoch: sendResult.epoch
+      )
+    }
+  }
+
+  /// Unsend/delete reuses the exact same encrypted-message channel as every other
+  /// message type (spec §5.8) — the server never learns a send is an unsend.
+  public func unsendMessage(
+    convoId: String,
+    messageId: String
+  ) async throws -> (
+    messageId: String, receivedAt: ATProtocolDate, sequenceNumber: Int64, epoch: Int64
+  ) {
+    try throwIfShuttingDown("unsendMessage")
+
+    guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+    guard conversations[convoId] != nil else {
+      throw MLSConversationError.conversationNotFound
+    }
+
+    guard
+      let targetRow = try await storage.fetchMessage(
+        messageID: messageId,
+        currentUserDID: userDid,
+        database: database
+      )
+    else {
+      throw MLSConversationError.invalidMessage
+    }
+    let normalizedSelf = MLSStorageHelpers.normalizeDID(MLSCredentialBinding.credentialRootDID(userDid))
+    let normalizedTargetSender = MLSStorageHelpers.normalizeDID(
+      MLSCredentialBinding.credentialRootDID(targetRow.senderID))
+    guard normalizedSelf == normalizedTargetSender else {
+      throw MLSConversationError.operationFailed("Cannot unsend a message you did not send")
+    }
+
+    let payload = MLSMessagePayload.unsend(targetMessageId: messageId)
+
+    if protocolAuthorityMode == .rustFull {
+      let sendResult = try await withRustAuthoritativeRuntime(operation: "unsendMessage") { runtime in
+        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+      }
+      await handleRustEngineEvents(sendResult.events, source: "unsendMessage")
+
+      await applyLocalDelete(convoId: convoId, messageId: messageId, userDid: userDid)
+
+      let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
+      return (
+        messageId: sendResult.message.id,
+        receivedAt: ATProtocolDate(date: timestamp),
+        sequenceNumber: Int64(clamping: sendResult.message.sequenceNumber),
+        epoch: Int64(clamping: sendResult.message.epoch)
+      )
+    }
+
+    guard let convo = conversations[convoId] else {
+      throw MLSConversationError.conversationNotFound
+    }
+    guard let groupIdData = Data(hexEncoded: convo.groupId) else {
+      throw MLSConversationError.invalidGroupId
+    }
+
+    return try await sendQueueCoordinator.enqueueSend(conversationID: convoId) { [self] in
+      try throwIfShuttingDown("unsendMessage-queued")
+
+      let payloadData = try payload.encodeToJSON()
+
+      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+        let tagB64 = tagData?.base64EncodedString()
+
+        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+        let paddedCiphertext = ciphertext
+        let paddedSize = ciphertext.count
+
+        let localMsgId = UUID().uuidString
+
+        let optimisticSeq: Int
+        if let cursor = try? await storage.fetchLastMessageCursor(
+          conversationID: convoId,
+          currentUserDID: userDid,
+          database: database
+        ) {
+          optimisticSeq = Int(cursor.seq) + 1
+        } else {
+          optimisticSeq = 1
+        }
+
+        try throwIfShuttingDown("unsendMessage-preCache")
+        try await cacheControlMessageEnvelope(
+          message: BlueCatbirdMlsChatDefs.MessageView(
+            id: localMsgId,
+            convoId: convoId,
+            ciphertext: Bytes(data: paddedCiphertext),
+            epoch: Int(localEpoch),
+            seq: optimisticSeq,
+            createdAt: ATProtocolDate(date: Date()),
+            messageType: "delete"
+          ),
+          payload: payload,
+          senderDID: userDid,
+          currentUserDID: userDid,
+          processingState: MLSMessageProcessingState.pendingSelfSend
+        )
+
+        let sendResult = try await apiClient.sendMessage(
+          convoId: convoId,
+          msgId: localMsgId,
+          ciphertext: paddedCiphertext,
+          epoch: Int(localEpoch),
+          paddedSize: paddedSize,
+          senderDid: try DID(didString: userDid),
+          confirmationTag: tagB64
+        )
+        return (localMsgId, sendResult)
+      }
+
+      let localMsgId = result.0
+      let sendResult = result.1
+
+      do {
+        try await storage.updateMessageMetadata(
+          messageID: localMsgId,
+          currentUserDID: userDid,
+          epoch: sendResult.epoch,
+          sequenceNumber: sendResult.sequenceNumber,
+          timestamp: sendResult.receivedAt.date,
+          database: database,
+          newMessageID: sendResult.messageId
+        )
+      } catch {
+        logger.error(
+          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata after unsend send) for \(convoId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+
+      await applyLocalDelete(convoId: convoId, messageId: messageId, userDid: userDid)
+
+      return (
+        messageId: sendResult.messageId,
+        receivedAt: sendResult.receivedAt,
+        sequenceNumber: sendResult.sequenceNumber,
+        epoch: sendResult.epoch
+      )
+    }
+  }
+
+  /// Optimistically apply a self-sent edit to the local target row once the send
+  /// has been accepted by the server. Best-effort: failures are logged, not thrown
+  /// — the send itself already succeeded, and the authoritative edit will still
+  /// arrive back through the normal receive path via SSE echo.
+  private func applyLocalEdit(
+    convoId: String, messageId: String, newText: String, editSeq: Int64, userDid: String
+  ) async {
+    do {
+      let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+      let result = try await storage.applyEdit(
+        conversationID: convoId,
+        targetMessageID: messageId,
+        newText: newText,
+        editorUserDID: userDid,
+        editSeq: editSeq,
+        currentUserDID: userDid,
+        context: mlsContext,
+        database: database
+      )
+      if result.mutated {
+        notifyObservers(.messageEdited(conversationID: convoId, messageID: messageId))
+      }
+    } catch {
+      logger.error(
+        "❌ [EDIT] Failed to optimistically apply local edit for \(messageId.prefix(16)): \(error.localizedDescription)"
+      )
+    }
+  }
+
+  /// Optimistically apply a self-sent unsend to the local target row once the send
+  /// has been accepted by the server. Best-effort — see `applyLocalEdit`.
+  private func applyLocalDelete(convoId: String, messageId: String, userDid: String) async {
+    do {
+      let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+      let result = try await storage.applyTombstone(
+        conversationID: convoId,
+        targetMessageID: messageId,
+        senderUserDID: userDid,
+        currentUserDID: userDid,
+        context: mlsContext,
+        database: database
+      )
+      if result.mutated {
+        notifyObservers(.messageUnsent(conversationID: convoId, messageID: messageId))
+      }
+    } catch {
+      logger.error(
+        "❌ [DELETE] Failed to optimistically apply local unsend for \(messageId.prefix(16)): \(error.localizedDescription)"
+      )
+    }
+  }
+
   public func sendTypingIndicator(convoId: String, isTyping: Bool) async throws {
     try throwIfShuttingDown("sendTypingIndicator")
 
@@ -1455,6 +1814,17 @@ public extension MLSConversationManager {
               return .controlMessage
             }
 
+            if cachedPayload.messageType == .edit || cachedPayload.messageType == .delete {
+              await applyCachedMutationPayload(
+                cachedPayload,
+                cachedMessage: cachedMessage,
+                convoId: message.convoId,
+                seq: message.seq,
+                userDid: userDid
+              )
+              return .controlMessage
+            }
+
             // Fix ordering: update NSE-cached metadata with server values
             do {
               try await storage.updateMessageMetadata(
@@ -1589,6 +1959,21 @@ public extension MLSConversationManager {
                 return .controlMessage
               }
 
+              if cachedPayload.messageType == .readReceipt {
+                return .controlMessage
+              }
+
+              if cachedPayload.messageType == .edit || cachedPayload.messageType == .delete {
+                await applyCachedMutationPayload(
+                  cachedPayload,
+                  cachedMessage: cachedMessage,
+                  convoId: message.convoId,
+                  seq: message.seq,
+                  userDid: userDid
+                )
+                return .controlMessage
+              }
+
               // Fix ordering: update NSE-cached metadata with server values
               do {
                 try await storage.updateMessageMetadata(
@@ -1630,6 +2015,76 @@ public extension MLSConversationManager {
       throw lastError
     }
     throw MLSConversationError.operationFailed("Processing failed with unknown error")
+  }
+
+  /// Cache-hit recovery for an edit/delete control message (spec §5.7.2 /
+  /// §5.8.2): the edit/delete message's OWN row may already be cached (e.g.
+  /// decrypted earlier by the NotificationServiceExtension), but the mutation
+  /// it carries was never applied to its *target* row because the legacy
+  /// decrypt path short-circuited on the cache hit before reaching the normal
+  /// decrypt switch (which is where `.edit`/`.delete` apply/park normally
+  /// happens). Mirrors the `.reaction` cache-recovery handling at each of this
+  /// legacy path's three cache-hit call sites.
+  ///
+  /// Best-effort: failures are logged, not thrown — same contract as the
+  /// reaction recovery this mirrors.
+  private func applyCachedMutationPayload(
+    _ cachedPayload: MLSMessagePayload,
+    cachedMessage: MLSMessageModel,
+    convoId: String,
+    seq: Int,
+    userDid: String
+  ) async {
+    let applierDID = cachedMessage.senderID ?? "unknown"
+    guard !applierDID.isEmpty, applierDID != "unknown" else {
+      logger.error(
+        "❌ [MLS-RECOVERY] Cannot recover cached \(cachedPayload.messageType.rawValue) mutation — sender unknown (would misattribute)"
+      )
+      return
+    }
+
+    do {
+      let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+      switch cachedPayload.messageType {
+      case .edit:
+        guard let editPayload = cachedPayload.edit else { return }
+        let result = try await storage.applyOrPersistOrphanedEdit(
+          conversationID: convoId,
+          targetMessageID: editPayload.targetMessageId,
+          newText: editPayload.newText,
+          editorUserDID: applierDID,
+          editSeq: Int64(seq),
+          currentUserDID: userDid,
+          context: mlsContext,
+          database: database
+        )
+        if result.mutated {
+          notifyObservers(.messageEdited(
+            conversationID: convoId, messageID: editPayload.targetMessageId))
+        }
+      case .delete:
+        guard let deletePayload = cachedPayload.delete else { return }
+        let result = try await storage.applyOrPersistOrphanedDelete(
+          conversationID: convoId,
+          targetMessageID: deletePayload.targetMessageId,
+          senderUserDID: applierDID,
+          deleteSeq: Int64(seq),
+          currentUserDID: userDid,
+          context: mlsContext,
+          database: database
+        )
+        if result.mutated {
+          notifyObservers(.messageUnsent(
+            conversationID: convoId, messageID: deletePayload.targetMessageId))
+        }
+      default:
+        break
+      }
+    } catch {
+      logger.error(
+        "❌ [MLS-RECOVERY] Failed to apply cached \(cachedPayload.messageType.rawValue) mutation: \(error.localizedDescription)"
+      )
+    }
   }
 
   private func processServerMessageWithRustAuthority(
@@ -1812,6 +2267,34 @@ public extension MLSConversationManager {
         ))
       }
 
+      // Orphan adoption (spec §5.7.2 / §5.8.2 step 5): whenever a message is
+      // first persisted locally, apply any edit/delete that was parked waiting
+      // for this exact message ID to arrive.
+      do {
+        let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+        let adoptedMutations = try await storage.adoptOrphanedMutationsForMessage(
+          message.id,
+          conversationID: message.convoId,
+          currentUserDID: userDid,
+          context: mlsContext,
+          database: database
+        )
+        for mutation in adoptedMutations {
+          switch mutation.kind {
+          case .edit:
+            notifyObservers(.messageEdited(
+              conversationID: mutation.conversationID, messageID: mutation.targetMessageID))
+          case .delete:
+            notifyObservers(.messageUnsent(
+              conversationID: mutation.conversationID, messageID: mutation.targetMessageID))
+          }
+        }
+      } catch {
+        logger.error(
+          "❌ [MLS-AUTHORITY] Failed to adopt orphaned mutations for \(message.id.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+
     case .reaction:
       guard let reaction = payload.reaction else {
         logger.warning("⚠️ [MLS-AUTHORITY] Reaction payload missing reaction body for \(message.id.prefix(16))")
@@ -1873,9 +2356,60 @@ public extension MLSConversationManager {
     case .readReceipt, .typing, .adminRoster, .adminAction, .system:
       break
 
-    // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
-    // No side effects yet — treated as a non-displayable control message.
-    case .edit, .delete, .unknown:
+    case .edit:
+      guard let editPayload = payload.edit else {
+        logger.warning("⚠️ [MLS-AUTHORITY] Edit payload missing edit body for \(message.id.prefix(16))")
+        return
+      }
+      do {
+        let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+        let result = try await storage.applyOrPersistOrphanedEdit(
+          conversationID: message.convoId,
+          targetMessageID: editPayload.targetMessageId,
+          newText: editPayload.newText,
+          editorUserDID: senderDID,
+          editSeq: Int64(message.seq),
+          currentUserDID: userDid,
+          context: mlsContext,
+          database: database
+        )
+        if result.mutated {
+          notifyObservers(.messageEdited(
+            conversationID: message.convoId, messageID: editPayload.targetMessageId))
+        }
+      } catch {
+        logger.error(
+          "❌ [MLS-AUTHORITY] Failed to apply edit for target \(editPayload.targetMessageId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+
+    case .delete:
+      guard let deletePayload = payload.delete else {
+        logger.warning("⚠️ [MLS-AUTHORITY] Delete payload missing delete body for \(message.id.prefix(16))")
+        return
+      }
+      do {
+        let mlsContext = try await MLSCoreContext.shared.getContext(for: userDid)
+        let result = try await storage.applyOrPersistOrphanedDelete(
+          conversationID: message.convoId,
+          targetMessageID: deletePayload.targetMessageId,
+          senderUserDID: senderDID,
+          deleteSeq: Int64(message.seq),
+          currentUserDID: userDid,
+          context: mlsContext,
+          database: database
+        )
+        if result.mutated {
+          notifyObservers(.messageUnsent(
+            conversationID: message.convoId, messageID: deletePayload.targetMessageId))
+        }
+      } catch {
+        logger.error(
+          "❌ [MLS-AUTHORITY] Failed to apply delete for target \(deletePayload.targetMessageId.prefix(16)): \(error.localizedDescription)"
+        )
+      }
+
+    case .unknown:
       break
     }
   }
@@ -2453,6 +2987,17 @@ public extension MLSConversationManager {
             return .controlMessage
           }
 
+          if cachedPayload.messageType == .edit || cachedPayload.messageType == .delete {
+            await applyCachedMutationPayload(
+              cachedPayload,
+              cachedMessage: cachedMessage,
+              convoId: message.convoId,
+              seq: message.seq,
+              userDid: userDid
+            )
+            return .controlMessage
+          }
+
           logger.debug("♻️ Using cached payload for message \(message.id)")
           clearSelfDecryptFailures(conversationID: message.convoId)
 
@@ -2563,6 +3108,33 @@ public extension MLSConversationManager {
           // Only ack messages from other users (not our own SSE echo).
           if senderDID != userDid {
             enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
+          }
+
+          // Orphan adoption (spec §5.7.2 / §5.8.2 step 5): apply any edit/delete
+          // that was parked waiting for this exact message ID to arrive.
+          do {
+            let mlsFieldContext = try await MLSCoreContext.shared.getContext(for: userDid)
+            let adoptedMutations = try await storage.adoptOrphanedMutationsForMessage(
+              message.id,
+              conversationID: message.convoId,
+              currentUserDID: userDid,
+              context: mlsFieldContext,
+              database: database
+            )
+            for mutation in adoptedMutations {
+              switch mutation.kind {
+              case .edit:
+                notifyObservers(.messageEdited(
+                  conversationID: mutation.conversationID, messageID: mutation.targetMessageID))
+              case .delete:
+                notifyObservers(.messageUnsent(
+                  conversationID: mutation.conversationID, messageID: mutation.targetMessageID))
+              }
+            }
+          } catch {
+            logger.error(
+              "❌ Failed to adopt orphaned mutations for \(message.id.prefix(16)): \(error.localizedDescription)"
+            )
           }
 
         case .reaction:
@@ -2711,10 +3283,76 @@ public extension MLSConversationManager {
             )
           }
 
-        // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
-        // Persist for sequence advancement only, like .typing/.adminRoster — never
-        // render, never count as a decrypt failure, never trigger recovery.
-        case .edit, .delete, .unknown:
+        case .edit:
+          // Persist for sequence advancement first (like every other control
+          // message), then apply/park the mutation.
+          _ = try await persistProcessedPayload(
+            message: message,
+            payload: payload,
+            senderID: senderDID,
+            processingError: nil,
+            validationReason: nil,
+            context: context
+          )
+          if let editPayload = payload.edit {
+            do {
+              let mlsFieldContext = try await MLSCoreContext.shared.getContext(for: userDid)
+              let result = try await storage.applyOrPersistOrphanedEdit(
+                conversationID: message.convoId,
+                targetMessageID: editPayload.targetMessageId,
+                newText: editPayload.newText,
+                editorUserDID: senderDID,
+                editSeq: Int64(message.seq),
+                currentUserDID: userDid,
+                context: mlsFieldContext,
+                database: database
+              )
+              if result.mutated {
+                notifyObservers(.messageEdited(
+                  conversationID: message.convoId, messageID: editPayload.targetMessageId))
+              }
+            } catch {
+              logger.error(
+                "❌ [EDIT] Failed to apply edit for target \(editPayload.targetMessageId.prefix(16)): \(error.localizedDescription)"
+              )
+            }
+          }
+
+        case .delete:
+          _ = try await persistProcessedPayload(
+            message: message,
+            payload: payload,
+            senderID: senderDID,
+            processingError: nil,
+            validationReason: nil,
+            context: context
+          )
+          if let deletePayload = payload.delete {
+            do {
+              let mlsFieldContext = try await MLSCoreContext.shared.getContext(for: userDid)
+              let result = try await storage.applyOrPersistOrphanedDelete(
+                conversationID: message.convoId,
+                targetMessageID: deletePayload.targetMessageId,
+                senderUserDID: senderDID,
+                deleteSeq: Int64(message.seq),
+                currentUserDID: userDid,
+                context: mlsFieldContext,
+                database: database
+              )
+              if result.mutated {
+                notifyObservers(.messageUnsent(
+                  conversationID: message.convoId, messageID: deletePayload.targetMessageId))
+              }
+            } catch {
+              logger.error(
+                "❌ [DELETE] Failed to apply delete for target \(deletePayload.targetMessageId.prefix(16)): \(error.localizedDescription)"
+              )
+            }
+          }
+
+        case .unknown:
+          // Persist for sequence advancement only — never render, never count as
+          // a decrypt failure, never trigger recovery (persist-and-skip contract).
           _ = try await persistProcessedPayload(
             message: message,
             payload: payload,
@@ -5631,6 +6269,19 @@ public extension MLSConversationManager {
       // Clean up expired key packages
       try await storage.deleteExpiredKeyPackages(userDID: userDid, database: database)
       logger.debug("Deleted expired key packages")
+
+      // Reap orphaned edit/delete mutations + reactions whose target message
+      // never arrived (parking-lot tables would otherwise grow unbounded).
+      let orphanThreshold = Calendar.current.date(
+        byAdding: .day,
+        value: -MLSStorage.orphanedMutationRetentionDays,
+        to: Date()
+      ) ?? Date()
+      try await storage.reapExpiredOrphanedMutations(
+        userDID: userDid, olderThan: orphanThreshold, database: database)
+      try await storage.reapExpiredOrphanedReactions(
+        userDID: userDid, olderThan: orphanThreshold, database: database)
+      logger.debug("Reaped orphaned mutations/reactions older than \(orphanThreshold)")
 
       // Refresh key packages if needed
       try await refreshKeyPackagesBasedOnInterval()

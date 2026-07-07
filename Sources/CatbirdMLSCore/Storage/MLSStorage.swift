@@ -1460,6 +1460,68 @@ public final class MLSStorage: @unchecked Sendable {
     logger.info("Deleted \(deletedCount) expired key packages")
   }
 
+  /// Default retention window for parked (orphaned) edit/delete mutations and
+  /// reactions whose target message never arrives. Without a reap, these
+  /// parking-lot tables grow unbounded (e.g. a target permanently lost to a
+  /// gap-fill failure, or a mutation for a message from a since-left
+  /// conversation). Mirrors `messageKeyCleanupThreshold`'s retention style.
+  public static let orphanedMutationRetentionDays = 30
+
+  /// Reap orphaned edit/delete mutations (`MLSOrphanedMutationModel`) whose
+  /// target message never arrived within the retention window. Call from the
+  /// same background-cleanup pass as `cleanupMessageKeys` /
+  /// `deleteExpiredKeyPackages`.
+  /// - Parameters:
+  ///   - userDID: User's decentralized identifier
+  ///   - date: Delete orphaned mutations recorded before this date
+  ///   - database: MLSDatabase to use for operations
+  /// - Throws: MLSStorageError if deletion fails
+  public func reapExpiredOrphanedMutations(
+    userDID: String,
+    olderThan date: Date,
+    database: MLSDatabase
+  ) async throws {
+    let normalizedUserDID = normalizeDID(userDID)
+    let deletedCount = try await database.write { db -> Int in
+      try db.execute(
+        sql: """
+            DELETE FROM MLSOrphanedMutationModel
+            WHERE currentUserDID = ? AND createdAt < ?;
+          """, arguments: [normalizedUserDID, date])
+
+      return db.changesCount
+    }
+
+    logger.info("Reaped \(deletedCount) expired orphaned mutation(s) older than \(date)")
+  }
+
+  /// Reap orphaned reactions (`MLSOrphanedReactionModel`) whose target message
+  /// never arrived within the retention window. Pre-existing gap: this table
+  /// was never swept by background cleanup prior to this fix.
+  /// - Parameters:
+  ///   - userDID: User's decentralized identifier
+  ///   - date: Delete orphaned reactions recorded before this date
+  ///   - database: MLSDatabase to use for operations
+  /// - Throws: MLSStorageError if deletion fails
+  public func reapExpiredOrphanedReactions(
+    userDID: String,
+    olderThan date: Date,
+    database: MLSDatabase
+  ) async throws {
+    let normalizedUserDID = normalizeDID(userDID)
+    let deletedCount = try await database.write { db -> Int in
+      try db.execute(
+        sql: """
+            DELETE FROM MLSOrphanedReactionModel
+            WHERE currentUserDID = ? AND timestamp < ?;
+          """, arguments: [normalizedUserDID, date])
+
+      return db.changesCount
+    }
+
+    logger.info("Reaped \(deletedCount) expired orphaned reaction(s) older than \(date)")
+  }
+
   // MARK: - Member Queries
 
   /// Get count of active members in a conversation
@@ -2630,6 +2692,538 @@ public final class MLSStorage: @unchecked Sendable {
         (messageID: row["messageID"] as String, conversationID: row["conversationID"] as String)
       }
     }
+  }
+
+  // MARK: - Message Edit / Unsend Application (spec §5.7 / §5.8)
+
+  /// A mutation (edit or delete) that was adopted from the orphan table, or applied
+  /// live at receive time. Returned so callers can notify UI observers.
+  public struct AdoptedMutation {
+    public let kind: MLSMutationKind
+    public let conversationID: String
+    public let targetMessageID: String
+  }
+
+  /// Result of attempting to apply an edit/delete mutation against a target
+  /// message. Distinguishes "target row exists" from "the mutation actually
+  /// changed persisted state" — callers must only notify UI observers when
+  /// `mutated` is `true`. A target that exists but silently rejects the
+  /// mutation (authorization mismatch, stale `editSeq`, already-tombstoned,
+  /// non-text target, idempotent replay) reports `found: true, mutated: false`.
+  public struct MLSMutationApplyResult: Sendable, Equatable {
+    /// `true` if the target message row exists locally — the mutation was
+    /// evaluated (applied or silently dropped). `false` only when the target
+    /// doesn't exist yet, in which case the caller should park an orphan.
+    public let found: Bool
+    /// `true` only if the mutation was actually applied (the row was
+    /// rewritten). `false` when the target exists but the mutation was
+    /// silently dropped.
+    public let mutated: Bool
+
+    public init(found: Bool, mutated: Bool) {
+      self.found = found
+      self.mutated = mutated
+    }
+
+    /// Target row doesn't exist locally yet — caller should park an orphan.
+    public static let notFound = MLSMutationApplyResult(found: false, mutated: false)
+    /// Target exists and the mutation was applied — notify observers.
+    public static let applied = MLSMutationApplyResult(found: true, mutated: true)
+    /// Target exists but the mutation was silently dropped — do NOT notify.
+    public static let dropped = MLSMutationApplyResult(found: true, mutated: false)
+  }
+
+  /// Apply an in-place edit (spec §5.7.2) to an already-persisted target message.
+  ///
+  /// Authorization: `editorUserDID` must equal the target's original sender DID,
+  /// both DID-root-normalized (device-suffix stripped via
+  /// `MLSCredentialBinding.credentialRootDID`) and case/whitespace-normalized —
+  /// mirroring the sender-identity comparison used for reactions/roster elsewhere
+  /// in this file. A mismatch is a silent no-op (no error), per spec.
+  ///
+  /// Last-writer-wins: an edit whose `editSeq` is <= the target's persisted
+  /// `appliedEditSeq` is silently dropped.
+  ///
+  /// A tombstoned target can never be resurrected by a later-arriving edit — the
+  /// edit is silently dropped.
+  ///
+  /// Idempotent: safe to call twice with the same edit (the second call is a no-op
+  /// once `appliedEditSeq` has advanced past `editSeq`).
+  ///
+  /// - Returns: `.notFound` if the target does not exist yet locally (caller
+  ///   should park the edit as an orphan — see `applyOrPersistOrphanedEdit`).
+  ///   `.applied` if the edit was actually applied. `.dropped` if the target
+  ///   exists but the edit was silently rejected (per the rules above) — the
+  ///   caller must NOT notify observers in that case.
+  @discardableResult
+  public func applyEdit(
+    conversationID: String,
+    targetMessageID: String,
+    newText: String,
+    editorUserDID: String,
+    editSeq: Int64,
+    currentUserDID: String,
+    context: MlsContext,
+    database: MLSDatabase
+  ) async throws -> MLSMutationApplyResult {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    let normalizedEditorDID = normalizeDID(MLSCredentialBinding.credentialRootDID(editorUserDID))
+
+    return try await database.write { db -> MLSMutationApplyResult in
+      guard
+        let existing = try MLSMessageModel
+          .filter(MLSMessageModel.Columns.messageID == targetMessageID)
+          .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db)
+      else {
+        return .notFound
+      }
+
+      // A tombstoned message has no text left to edit — delete always wins.
+      if existing.isTombstone == 1 {
+        self.logger.info(
+          "[EDIT] Dropping edit for tombstoned message \(targetMessageID.prefix(16))...")
+        return .dropped
+      }
+
+      let normalizedSenderDID = self.normalizeDID(
+        MLSCredentialBinding.credentialRootDID(existing.senderID))
+      guard normalizedSenderDID == normalizedEditorDID else {
+        self.logger.warning(
+          "[EDIT] Rejected — editor \(normalizedEditorDID.prefix(16))... != sender \(normalizedSenderDID.prefix(16))... for \(targetMessageID.prefix(16))..."
+        )
+        return .dropped
+      }
+
+      if let appliedSeq = existing.appliedEditSeq, editSeq <= appliedSeq {
+        self.logger.info(
+          "[EDIT] Dropping stale edit seq=\(editSeq) <= applied=\(appliedSeq) for \(targetMessageID.prefix(16))..."
+        )
+        return .dropped
+      }
+
+      let existingPayload = existing.decryptedPayload(context: context)
+      // v1 is text-only: refuse to "edit" a non-text control message.
+      guard existingPayload == nil || existingPayload?.messageType == .text else {
+        self.logger.warning(
+          "[EDIT] Target \(targetMessageID.prefix(16))... is not a text message — dropping edit")
+        return .dropped
+      }
+
+      // Replace `text` only — embed is preserved unchanged (spec §5.7: "MUST NOT
+      // alter the target message's existing embed").
+      let updatedPayload = MLSMessagePayload.text(newText, embed: existingPayload?.embed)
+      let payloadData = try updatedPayload.encodeToJSON()
+      let encryptedWire = try MLSFieldEncryption.encrypt(
+        context: context,
+        conversationID: conversationID,
+        plaintext: payloadData
+      )
+      // Best-effort HMAC re-seal against the current tail, mirroring
+      // `savePayloadForMessage`'s UPDATE path for mid-chain rewrites.
+      let prevHMAC = try Self.fetchLastEntryHMACSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        legacyUserDID: nil,
+        db: db
+      )
+      let entryHMAC = try MLSFieldEncryption.computeHMAC(
+        context: context,
+        conversationID: conversationID,
+        previousHMAC: prevHMAC,
+        messageID: targetMessageID,
+        payloadWire: encryptedWire
+      )
+
+      try db.execute(
+        sql: """
+          UPDATE MLSMessageModel
+          SET payloadJSON = NULL,
+              payloadEncrypted = ?,
+              entryHMAC = ?,
+              isEdited = 1,
+              editedAt = ?,
+              appliedEditSeq = ?
+          WHERE messageID = ? AND currentUserDID = ?;
+          """,
+        arguments: [
+          encryptedWire, entryHMAC, Date(), editSeq, targetMessageID, normalizedUserDID,
+        ])
+
+      self.logger.info("[EDIT] Applied edit seq=\(editSeq) to \(targetMessageID.prefix(16))...")
+      return .applied
+    }
+  }
+
+  /// Apply a tombstone/unsend (spec §5.8.2) to an already-persisted target message.
+  ///
+  /// Authorization: identical rule to `applyEdit` — `senderUserDID` must equal the
+  /// target's original sender DID (DID-root-normalized). Mismatch is a silent no-op.
+  ///
+  /// Idempotent: a second delete for an already-tombstoned message is a no-op that
+  /// still reports the target as existing (but does NOT report as mutated).
+  ///
+  /// - Returns: `.notFound` if the target does not exist yet locally (caller
+  ///   should park as an orphan). `.applied` if the tombstone was actually
+  ///   applied. `.dropped` if the target exists but the delete was silently
+  ///   rejected or was already applied — the caller must NOT notify observers
+  ///   in that case.
+  @discardableResult
+  public func applyTombstone(
+    conversationID: String,
+    targetMessageID: String,
+    senderUserDID: String,
+    currentUserDID: String,
+    context: MlsContext,
+    database: MLSDatabase
+  ) async throws -> MLSMutationApplyResult {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    let normalizedApplierDID = normalizeDID(MLSCredentialBinding.credentialRootDID(senderUserDID))
+
+    return try await database.write { db -> MLSMutationApplyResult in
+      guard
+        let existing = try MLSMessageModel
+          .filter(MLSMessageModel.Columns.messageID == targetMessageID)
+          .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db)
+      else {
+        return .notFound
+      }
+
+      if existing.isTombstone == 1 {
+        // Idempotent no-op.
+        return .dropped
+      }
+
+      let normalizedSenderDID = self.normalizeDID(
+        MLSCredentialBinding.credentialRootDID(existing.senderID))
+      guard normalizedSenderDID == normalizedApplierDID else {
+        self.logger.warning(
+          "[DELETE] Rejected — applier \(normalizedApplierDID.prefix(16))... != sender \(normalizedSenderDID.prefix(16))... for \(targetMessageID.prefix(16))..."
+        )
+        return .dropped
+      }
+
+      // Blank the local plaintext/embed through the same encrypted path everything
+      // else uses (spec §5.8.2 step 3).
+      let blanked = MLSMessagePayload.text("")
+      let payloadData = try blanked.encodeToJSON()
+      let encryptedWire = try MLSFieldEncryption.encrypt(
+        context: context,
+        conversationID: conversationID,
+        plaintext: payloadData
+      )
+      let prevHMAC = try Self.fetchLastEntryHMACSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        legacyUserDID: nil,
+        db: db
+      )
+      let entryHMAC = try MLSFieldEncryption.computeHMAC(
+        context: context,
+        conversationID: conversationID,
+        previousHMAC: prevHMAC,
+        messageID: targetMessageID,
+        payloadWire: encryptedWire
+      )
+
+      try db.execute(
+        sql: """
+          UPDATE MLSMessageModel
+          SET payloadJSON = NULL,
+              payloadEncrypted = ?,
+              entryHMAC = ?,
+              isTombstone = 1,
+              deletedAt = ?
+          WHERE messageID = ? AND currentUserDID = ?;
+          """,
+        arguments: [
+          encryptedWire, entryHMAC, Int64(Date().timeIntervalSince1970 * 1000), targetMessageID,
+          normalizedUserDID,
+        ])
+
+      // Remove all reactions attached to the target, including still-pending
+      // orphaned reactions keyed to it (spec §5.8.2 step 3).
+      _ =
+        try MLSReactionModel
+        .filter(MLSReactionModel.Columns.messageID == targetMessageID)
+        .filter(MLSReactionModel.Columns.currentUserDID == normalizedUserDID)
+        .deleteAll(db)
+      _ =
+        try MLSOrphanedReactionModel
+        .filter(MLSOrphanedReactionModel.Columns.messageID == targetMessageID)
+        .filter(MLSOrphanedReactionModel.Columns.currentUserDID == normalizedUserDID)
+        .deleteAll(db)
+
+      // A delete wins over any still-pending orphaned edit for the same target
+      // (spec §5.8.2 "Interaction with edit") — it can never be shown again.
+      _ =
+        try MLSOrphanedMutationModel
+        .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+        .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.edit.rawValue)
+        .deleteAll(db)
+
+      self.logger.info("[DELETE] Applied tombstone to \(targetMessageID.prefix(16))...")
+      return .applied
+    }
+  }
+
+  /// Park an edit/delete whose target does not exist locally yet (spec §5.7.2 /
+  /// §5.8.2 step 1). Mirrors `saveOrphanedReaction`'s dedupe-then-insert shape.
+  private func saveOrphanedMutation(
+    targetMessageID: String,
+    conversationID: String,
+    currentUserDID: String,
+    applierDID: String,
+    kind: MLSMutationKind,
+    newText: String?,
+    mutationSeq: Int64,
+    database: MLSDatabase
+  ) async throws {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    let normalizedApplierDID = normalizeDID(MLSCredentialBinding.credentialRootDID(applierDID))
+
+    try await database.write { db in
+      let hasPendingDelete =
+        try MLSOrphanedMutationModel
+        .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+        .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.delete.rawValue)
+        .fetchCount(db) > 0
+
+      if kind == .edit {
+        // A pending delete always wins — a later-arriving edit orphan can never
+        // resurrect a message that will be tombstoned once its target adopts.
+        guard !hasPendingDelete else {
+          self.logger.info(
+            "[ORPHAN] Dropping orphaned edit — pending delete already wins for \(targetMessageID.prefix(16))..."
+          )
+          return
+        }
+
+        // Keep only the latest (highest mutationSeq) pending edit per target+applier
+        // so last-writer-wins holds even while still orphaned.
+        let existingEdits =
+          try MLSOrphanedMutationModel
+          .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+          .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+          .filter(MLSOrphanedMutationModel.Columns.applierDID == normalizedApplierDID)
+          .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.edit.rawValue)
+          .fetchAll(db)
+
+        if let latest = existingEdits.max(by: { $0.mutationSeq < $1.mutationSeq }),
+          latest.mutationSeq >= mutationSeq
+        {
+          self.logger.info(
+            "[ORPHAN] Dropping stale orphaned edit seq=\(mutationSeq) <= pending=\(latest.mutationSeq) for \(targetMessageID.prefix(16))..."
+          )
+          return
+        }
+        for stale in existingEdits {
+          try stale.delete(db)
+        }
+      } else {
+        // Delete wins: discard any pending edit orphans for this target, and
+        // dedupe against an already-pending delete (idempotent).
+        _ =
+          try MLSOrphanedMutationModel
+          .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+          .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+          .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.edit.rawValue)
+          .deleteAll(db)
+        _ =
+          try MLSOrphanedMutationModel
+          .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+          .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+          .filter(
+            MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.delete.rawValue
+          )
+          .deleteAll(db)
+      }
+
+      let orphan = MLSOrphanedMutationModel(
+        targetMessageID: targetMessageID,
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        applierDID: normalizedApplierDID,
+        mutationType: kind.rawValue,
+        newText: kind == .edit ? newText : nil,
+        mutationSeq: mutationSeq
+      )
+      try orphan.insert(db)
+      self.logger.info(
+        "[ORPHAN] Saved orphaned \(kind.rawValue) for missing message \(targetMessageID.prefix(16))..."
+      )
+    }
+  }
+
+  /// Attempt to apply an edit now; if the target doesn't exist locally yet, park it
+  /// as an orphan (spec §5.7.2 steps 1/5). Mirrors the FK-error-driven orphan
+  /// fallback `saveReaction` uses for reactions, but check-then-park rather than
+  /// insert-then-catch since edits mutate an existing row instead of inserting one.
+  @discardableResult
+  public func applyOrPersistOrphanedEdit(
+    conversationID: String,
+    targetMessageID: String,
+    newText: String,
+    editorUserDID: String,
+    editSeq: Int64,
+    currentUserDID: String,
+    context: MlsContext,
+    database: MLSDatabase
+  ) async throws -> MLSMutationApplyResult {
+    let result = try await applyEdit(
+      conversationID: conversationID,
+      targetMessageID: targetMessageID,
+      newText: newText,
+      editorUserDID: editorUserDID,
+      editSeq: editSeq,
+      currentUserDID: currentUserDID,
+      context: context,
+      database: database
+    )
+    if !result.found {
+      try await saveOrphanedMutation(
+        targetMessageID: targetMessageID,
+        conversationID: conversationID,
+        currentUserDID: currentUserDID,
+        applierDID: editorUserDID,
+        kind: .edit,
+        newText: newText,
+        mutationSeq: editSeq,
+        database: database
+      )
+    }
+    return result
+  }
+
+  /// Attempt to apply a delete now; if the target doesn't exist locally yet, park
+  /// it as an orphan (spec §5.8.2 step 1).
+  @discardableResult
+  public func applyOrPersistOrphanedDelete(
+    conversationID: String,
+    targetMessageID: String,
+    senderUserDID: String,
+    deleteSeq: Int64,
+    currentUserDID: String,
+    context: MlsContext,
+    database: MLSDatabase
+  ) async throws -> MLSMutationApplyResult {
+    let result = try await applyTombstone(
+      conversationID: conversationID,
+      targetMessageID: targetMessageID,
+      senderUserDID: senderUserDID,
+      currentUserDID: currentUserDID,
+      context: context,
+      database: database
+    )
+    if !result.found {
+      try await saveOrphanedMutation(
+        targetMessageID: targetMessageID,
+        conversationID: conversationID,
+        currentUserDID: currentUserDID,
+        applierDID: senderUserDID,
+        kind: .delete,
+        newText: nil,
+        mutationSeq: deleteSeq,
+        database: database
+      )
+    }
+    return result
+  }
+
+  /// Adopt any orphaned edit/delete mutations for a newly arrived message (spec
+  /// §5.7.2 / §5.8.2 step 5). Call whenever a message row is first persisted
+  /// locally — mirrors `adoptOrphansForMessage` (reactions).
+  ///
+  /// A pending delete always wins over pending edits, regardless of seq ordering
+  /// (spec §5.8.2 "Interaction with edit"). Otherwise pending edits are applied in
+  /// ascending `mutationSeq` order so last-writer-wins holds across the batch.
+  @discardableResult
+  public func adoptOrphanedMutationsForMessage(
+    _ messageID: String,
+    conversationID: String,
+    currentUserDID: String,
+    context: MlsContext,
+    database: MLSDatabase
+  ) async throws -> [AdoptedMutation] {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+
+    let orphans = try await database.read { db in
+      try MLSOrphanedMutationModel
+        .filter(MLSOrphanedMutationModel.Columns.targetMessageID == messageID)
+        .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchAll(db)
+    }
+    guard !orphans.isEmpty else { return [] }
+
+    var results: [AdoptedMutation] = []
+
+    if let deleteOrphan = orphans.first(where: {
+      $0.mutationType == MLSMutationKind.delete.rawValue
+    }) {
+      let applied = try await applyTombstone(
+        conversationID: conversationID,
+        targetMessageID: messageID,
+        senderUserDID: deleteOrphan.applierDID,
+        currentUserDID: currentUserDID,
+        context: context,
+        database: database
+      )
+      if applied.mutated {
+        results.append(
+          AdoptedMutation(kind: .delete, conversationID: conversationID, targetMessageID: messageID)
+        )
+      }
+      try await database.write { db in
+        _ =
+          try MLSOrphanedMutationModel
+          .filter(MLSOrphanedMutationModel.Columns.targetMessageID == messageID)
+          .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+          .deleteAll(db)
+      }
+      if !results.isEmpty {
+        logger.info("[ORPHAN-ADOPT] Adopted delete for message \(messageID.prefix(16))...")
+      }
+      return results
+    }
+
+    let edits = orphans
+      .filter { $0.mutationType == MLSMutationKind.edit.rawValue }
+      .sorted { $0.mutationSeq < $1.mutationSeq }
+
+    for edit in edits {
+      let applied = try await applyEdit(
+        conversationID: conversationID,
+        targetMessageID: messageID,
+        newText: edit.newText ?? "",
+        editorUserDID: edit.applierDID,
+        editSeq: edit.mutationSeq,
+        currentUserDID: currentUserDID,
+        context: context,
+        database: database
+      )
+      if applied.mutated {
+        results.append(
+          AdoptedMutation(kind: .edit, conversationID: conversationID, targetMessageID: messageID)
+        )
+      }
+    }
+
+    try await database.write { db in
+      _ =
+        try MLSOrphanedMutationModel
+        .filter(MLSOrphanedMutationModel.Columns.targetMessageID == messageID)
+        .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
+        .deleteAll(db)
+    }
+
+    if !results.isEmpty {
+      logger.info(
+        "[ORPHAN-ADOPT] Adopted \(results.count) edit(s) for message \(messageID.prefix(16))...")
+    }
+    return results
   }
 
   // MARK: - Message Ordering (Cross-Process Coordination)

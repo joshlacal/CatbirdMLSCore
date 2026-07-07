@@ -244,7 +244,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
   }
 
-  func testRustFullStartupDeviceAndKeyPackageReadinessUsesRustRuntime() async throws {
+  func testRustFullStartupDeviceReadinessUsesRustRuntimeAndDefersKeyPackageReplenishment() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
@@ -261,7 +261,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertTrue(prepared)
     XCTAssertEqual(bridge.startupReconcileCallCount, 1)
     XCTAssertEqual(bridge.ensureDeviceRegisteredCallCount, 1)
-    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
+    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 0)
   }
 
   func testRustFullKeyPackageRefreshEntrypointsUseRustReplenishment() async throws {

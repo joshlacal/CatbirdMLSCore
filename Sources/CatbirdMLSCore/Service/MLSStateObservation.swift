@@ -20,6 +20,12 @@ public enum MLSStateEvent {
   case reactionReceived(
     convoId: String, messageId: String, emoji: String, senderDID: String, action: String)
   case groupReset(convoId: String, newGroupId: String, resetGeneration: Int, resetBy: DID?, reason: String?)
+  /// A message was edited in-place (spec §5.7). `messageID` is the target
+  /// message's server-assigned ID (`MessageView.id`), not the edit message's own ID.
+  case messageEdited(conversationID: String, messageID: String)
+  /// A message was unsent/tombstoned (spec §5.8). `messageID` is the target
+  /// message's server-assigned ID (`MessageView.id`), not the delete message's own ID.
+  case messageUnsent(conversationID: String, messageID: String)
 
   public var description: String {
     switch self {
@@ -53,6 +59,10 @@ public enum MLSStateEvent {
       return "Reaction \(action) in \(convoId): \(emoji) on \(messageId) by \(senderDID)"
     case .groupReset(let convoId, let newGroupId, let resetGeneration, let resetBy, let reason):
       return "Group reset in \(convoId): newGroup=\(newGroupId), gen=\(resetGeneration), by=\(resetBy)\(reason.map { ": \($0)" } ?? "")"
+    case .messageEdited(let conversationID, let messageID):
+      return "Message edited in \(conversationID): \(messageID)"
+    case .messageUnsent(let conversationID, let messageID):
+      return "Message unsent in \(conversationID): \(messageID)"
     }
   }
 }

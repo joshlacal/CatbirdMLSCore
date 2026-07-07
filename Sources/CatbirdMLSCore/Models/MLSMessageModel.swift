@@ -51,6 +51,14 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   public let isTombstone: Int
   /// Tombstone timestamp (unix epoch milliseconds). Nil when not tombstoned.
   public let deletedAt: Int64?
+  /// Edit flag (0 = never edited, 1 = edited at least once). Stored as Int for SQLite compatibility.
+  public let isEdited: Int
+  /// Timestamp of the most recently applied edit. Nil when never edited.
+  public let editedAt: Date?
+  /// Local-only bookkeeping: the `seq` of the last-applied edit message, used to
+  /// enforce last-writer-wins (spec §5.7.2 step 3) across process restarts. Not
+  /// part of the wire protocol.
+  public let appliedEditSeq: Int64?
 
   public var id: String { messageID }
 
@@ -139,7 +147,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     entryHMAC: Data? = nil,
     payloadKeyVersion: Int? = nil,
     isTombstone: Int = 0,
-    deletedAt: Int64? = nil
+    deletedAt: Int64? = nil,
+    isEdited: Int = 0,
+    editedAt: Date? = nil,
+    appliedEditSeq: Int64? = nil
   ) {
     self.messageID = messageID
     self.currentUserDID = currentUserDID
@@ -169,6 +180,9 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.payloadKeyVersion = payloadKeyVersion
     self.isTombstone = isTombstone
     self.deletedAt = deletedAt
+    self.isEdited = isEdited
+    self.editedAt = editedAt
+    self.appliedEditSeq = appliedEditSeq
   }
 
   // MARK: - Codable
@@ -210,6 +224,9 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.payloadKeyVersion = try container.decodeIfPresent(Int.self, forKey: .payloadKeyVersion)
     self.isTombstone = try container.decodeIfPresent(Int.self, forKey: .isTombstone) ?? 0
     self.deletedAt = try container.decodeIfPresent(Int64.self, forKey: .deletedAt)
+    self.isEdited = try container.decodeIfPresent(Int.self, forKey: .isEdited) ?? 0
+    self.editedAt = try container.decodeIfPresent(Date.self, forKey: .editedAt)
+    self.appliedEditSeq = try container.decodeIfPresent(Int64.self, forKey: .appliedEditSeq)
   }
 
   // MARK: - Update Methods
@@ -245,7 +262,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       entryHMAC: entryHMAC,
       payloadKeyVersion: payloadKeyVersion,
       isTombstone: isTombstone,
-      deletedAt: deletedAt
+      deletedAt: deletedAt,
+      isEdited: isEdited,
+      editedAt: editedAt,
+      appliedEditSeq: appliedEditSeq
     )
   }
 
@@ -279,7 +299,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       entryHMAC: entryHMAC,
       payloadKeyVersion: payloadKeyVersion,
       isTombstone: isTombstone,
-      deletedAt: deletedAt
+      deletedAt: deletedAt,
+      isEdited: isEdited,
+      editedAt: editedAt,
+      appliedEditSeq: appliedEditSeq
     )
   }
 
@@ -313,7 +336,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       entryHMAC: entryHMAC,
       payloadKeyVersion: payloadKeyVersion,
       isTombstone: isTombstone,
-      deletedAt: deletedAt
+      deletedAt: deletedAt,
+      isEdited: isEdited,
+      editedAt: editedAt,
+      appliedEditSeq: appliedEditSeq
     )
   }
 
@@ -347,7 +373,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       entryHMAC: entryHMAC,
       payloadKeyVersion: payloadKeyVersion,
       isTombstone: isTombstone,
-      deletedAt: deletedAt
+      deletedAt: deletedAt,
+      isEdited: isEdited,
+      editedAt: editedAt,
+      appliedEditSeq: appliedEditSeq
     )
   }
 
@@ -381,7 +410,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       entryHMAC: entryHMAC,
       payloadKeyVersion: payloadKeyVersion,
       isTombstone: isTombstone,
-      deletedAt: deletedAt
+      deletedAt: deletedAt,
+      isEdited: isEdited,
+      editedAt: editedAt,
+      appliedEditSeq: appliedEditSeq
     )
   }
 
@@ -417,7 +449,10 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       entryHMAC: entryHMAC,
       payloadKeyVersion: payloadKeyVersion,
       isTombstone: isTombstone,
-      deletedAt: deletedAt
+      deletedAt: deletedAt,
+      isEdited: isEdited,
+      editedAt: editedAt,
+      appliedEditSeq: appliedEditSeq
     )
   }
 }
@@ -455,6 +490,9 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     public static let payloadKeyVersion = Column("payloadKeyVersion")
     public static let isTombstone = Column("isTombstone")
     public static let deletedAt = Column("deletedAt")
+    public static let isEdited = Column("isEdited")
+    public static let editedAt = Column("editedAt")
+    public static let appliedEditSeq = Column("appliedEditSeq")
   }
 
   /// Custom init to handle both old (plaintext/embedData) and new (payloadJSON) column names
@@ -516,6 +554,9 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     payloadKeyVersion = row["payloadKeyVersion"]
     isTombstone = row["isTombstone"] ?? 0
     deletedAt = row["deletedAt"]
+    isEdited = row["isEdited"] ?? 0
+    editedAt = row["editedAt"]
+    appliedEditSeq = row["appliedEditSeq"]
   }
 
   /// Encode for persistence (only uses new column names)
@@ -548,6 +589,9 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     container["payloadKeyVersion"] = payloadKeyVersion
     container["isTombstone"] = isTombstone
     container["deletedAt"] = deletedAt
+    container["isEdited"] = isEdited
+    container["editedAt"] = editedAt
+    container["appliedEditSeq"] = appliedEditSeq
   }
 }
 

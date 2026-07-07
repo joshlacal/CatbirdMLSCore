@@ -2,7 +2,27 @@ import XCTest
 @testable import CatbirdMLSCore
 
 final class MLSStorageSuspensionTests: XCTestCase {
-  private let manager = MLSGRDBManager.shared
+  private var manager: MLSGRDBManager!
+  private var tempBaseDirectory: URL!
+
+  override func setUp() async throws {
+    try await super.setUp()
+    tempBaseDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("MLSStorageSuspensionTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: tempBaseDirectory, withIntermediateDirectories: true)
+    MLSStoragePaths.setBaseDirectoryOverride(tempBaseDirectory)
+    manager = MLSGRDBManager()
+  }
+
+  override func tearDown() async throws {
+    manager = nil
+    MLSStoragePaths.setBaseDirectoryOverride(nil)
+    if let tempBaseDirectory {
+      try? FileManager.default.removeItem(at: tempBaseDirectory)
+    }
+    tempBaseDirectory = nil
+    try await super.tearDown()
+  }
 
   func testSuspendedReadFailsFast() async throws {
     let userDID = "did:plc:storage-suspension-read-\(UUID().uuidString)"
@@ -79,7 +99,7 @@ final class MLSStorageSuspensionTests: XCTestCase {
   func testForegroundResumePreparationBlocksDatabaseOpenUntilCleared() async throws {
     let userDID = "did:plc:foreground-resume-\(UUID().uuidString)"
     await manager.beginForegroundResumePreparationForTesting(for: userDID)
-    let manager = self.manager
+        let manager = try XCTUnwrap(self.manager)
 
     let start = Date()
     let openTask = Task { try await manager.getDatabasePool(for: userDID) }

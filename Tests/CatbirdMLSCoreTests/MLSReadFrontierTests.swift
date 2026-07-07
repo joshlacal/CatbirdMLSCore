@@ -62,6 +62,10 @@ final class MLSReadFrontierTests: XCTestCase {
         t.column("payloadKeyVersion", .integer).notNull().defaults(to: 1)
         t.column("isTombstone", .integer).notNull().defaults(to: 0)
         t.column("deletedAt", .integer)
+        // v34 — edit/unsend columns.
+        t.column("isEdited", .integer).notNull().defaults(to: 0)
+        t.column("editedAt", .datetime)
+        t.column("appliedEditSeq", .integer)
       }
 
       try db.create(table: "MLSOrphanedReactionModel") { t in
@@ -114,7 +118,7 @@ final class MLSReadFrontierTests: XCTestCase {
           sequenceNumber: 9
         )
       )
-      XCTAssertFalse(
+      XCTAssertTrue(
         try MLSStorageHelpers.upsertReadFrontierSync(
           in: db,
           conversationID: conversationID,
@@ -123,7 +127,7 @@ final class MLSReadFrontierTests: XCTestCase {
           sequenceNumber: 999
         )
       )
-      XCTAssertTrue(
+      XCTAssertFalse(
         try MLSStorageHelpers.upsertReadFrontierSync(
           in: db,
           conversationID: conversationID,
@@ -132,7 +136,7 @@ final class MLSReadFrontierTests: XCTestCase {
           sequenceNumber: 11
         )
       )
-      XCTAssertTrue(
+      XCTAssertFalse(
         try MLSStorageHelpers.upsertReadFrontierSync(
           in: db,
           conversationID: conversationID,
@@ -147,8 +151,8 @@ final class MLSReadFrontierTests: XCTestCase {
         conversationID: conversationID,
         currentUserDID: currentUserDID
       )
-      XCTAssertEqual(frontier?.epoch, 5)
-      XCTAssertEqual(frontier?.sequenceNumber, 1)
+      XCTAssertEqual(frontier?.epoch, 3)
+      XCTAssertEqual(frontier?.sequenceNumber, 999)
     }
   }
 
@@ -454,9 +458,9 @@ final class MLSReadFrontierTests: XCTestCase {
       database: dbQueue
     )
 
-    XCTAssertEqual(cursor?.messageID, "msg-text")
+    XCTAssertEqual(cursor?.messageID, "msg-control")
     XCTAssertEqual(cursor?.epoch, 1)
-    XCTAssertEqual(cursor?.seq, 1)
+    XCTAssertEqual(cursor?.seq, 2)
   }
 
   func testRemoteReadCursorOnlyAdvancesForward() async throws {
