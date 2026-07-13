@@ -699,7 +699,7 @@ open class CatbirdClientBridge:
      * - `credentials`: Platform credential store callback (same as OrchestratorBridge)
      * - `config`: Orchestrator configuration
      */
-    public convenience init(userDid: String, mlsContext: MlsContext, storage: OrchestratorStorageCallback, apiClient: OrchestratorApiCallback, credentials: OrchestratorCredentialCallback, config: FfiOrchestratorConfig) throws {
+    public convenience init(userDid: String, mlsContext: MlsContext, storage: OrchestratorStorageCallback, apiClient: OrchestratorApiCallback, credentials: OrchestratorCredentialCallback, capabilities: SecurityStorageCapabilities, config: FfiOrchestratorConfig) throws {
         let pointer =
             try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
                 uniffi_catbird_mls_fn_constructor_catbirdclientbridge_new(
@@ -708,6 +708,7 @@ open class CatbirdClientBridge:
                     FfiConverterCallbackInterfaceOrchestratorStorageCallback.lower(storage),
                     FfiConverterCallbackInterfaceOrchestratorApiCallback.lower(apiClient),
                     FfiConverterCallbackInterfaceOrchestratorCredentialCallback.lower(credentials),
+                    FfiConverterTypeSecurityStorageCapabilities.lower(capabilities),
                     FfiConverterTypeFFIOrchestratorConfig.lower(config), $0
                 )
             }
@@ -3625,14 +3626,15 @@ open class OrchestratorBridge:
      * - `credentials`: Platform credential store callback
      * - `config`: Orchestrator configuration
      */
-    public convenience init(mlsContext: MlsContext, storage: OrchestratorStorageCallback, apiClient: OrchestratorApiCallback, credentials: OrchestratorCredentialCallback, config: FfiOrchestratorConfig) {
+    public convenience init(mlsContext: MlsContext, storage: OrchestratorStorageCallback, apiClient: OrchestratorApiCallback, credentials: OrchestratorCredentialCallback, capabilities: SecurityStorageCapabilities, config: FfiOrchestratorConfig) throws {
         let pointer =
-            try! rustCall {
+            try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
                 uniffi_catbird_mls_fn_constructor_orchestratorbridge_new(
                     FfiConverterTypeMLSContext.lower(mlsContext),
                     FfiConverterCallbackInterfaceOrchestratorStorageCallback.lower(storage),
                     FfiConverterCallbackInterfaceOrchestratorApiCallback.lower(apiClient),
                     FfiConverterCallbackInterfaceOrchestratorCredentialCallback.lower(credentials),
+                    FfiConverterTypeSecurityStorageCapabilities.lower(capabilities),
                     FfiConverterTypeFFIOrchestratorConfig.lower(config), $0
                 )
             }
@@ -5412,12 +5414,14 @@ public func FfiConverterTypeExternalCommitResult_lower(_ value: ExternalCommitRe
 public struct FfiAddMembersResult {
     public var success: Bool
     public var newEpoch: UInt64
+    public var receipt: FfiSequencerReceipt?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(success: Bool, newEpoch: UInt64) {
+    public init(success: Bool, newEpoch: UInt64, receipt: FfiSequencerReceipt?) {
         self.success = success
         self.newEpoch = newEpoch
+        self.receipt = receipt
     }
 }
 
@@ -5429,12 +5433,16 @@ extension FfiAddMembersResult: Equatable, Hashable {
         if lhs.newEpoch != rhs.newEpoch {
             return false
         }
+        if lhs.receipt != rhs.receipt {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(success)
         hasher.combine(newEpoch)
+        hasher.combine(receipt)
     }
 }
 
@@ -5446,13 +5454,15 @@ public struct FfiConverterTypeFFIAddMembersResult: FfiConverterRustBuffer {
         return
             try FfiAddMembersResult(
                 success: FfiConverterBool.read(from: &buf),
-                newEpoch: FfiConverterUInt64.read(from: &buf)
+                newEpoch: FfiConverterUInt64.read(from: &buf),
+                receipt: FfiConverterOptionTypeFFISequencerReceipt.read(from: &buf)
             )
     }
 
     public static func write(_ value: FfiAddMembersResult, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.success, into: &buf)
         FfiConverterUInt64.write(value.newEpoch, into: &buf)
+        FfiConverterOptionTypeFFISequencerReceipt.write(value.receipt, into: &buf)
     }
 }
 
@@ -5766,6 +5776,99 @@ public func FfiConverterTypeFFIConversationReadyResult_lift(_ buf: RustBuffer) t
 #endif
 public func FfiConverterTypeFFIConversationReadyResult_lower(_ value: FfiConversationReadyResult) -> RustBuffer {
     return FfiConverterTypeFFIConversationReadyResult.lower(value)
+}
+
+public struct FfiConversationState {
+    public var state: String
+    public var newGroupId: String?
+    public var resetGeneration: Int32?
+    public var notifiedAtMs: Int64?
+    public var quarantineReason: String?
+    public var quarantinedSinceMs: Int64?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(state: String, newGroupId: String?, resetGeneration: Int32?, notifiedAtMs: Int64?, quarantineReason: String?, quarantinedSinceMs: Int64?) {
+        self.state = state
+        self.newGroupId = newGroupId
+        self.resetGeneration = resetGeneration
+        self.notifiedAtMs = notifiedAtMs
+        self.quarantineReason = quarantineReason
+        self.quarantinedSinceMs = quarantinedSinceMs
+    }
+}
+
+extension FfiConversationState: Equatable, Hashable {
+    public static func == (lhs: FfiConversationState, rhs: FfiConversationState) -> Bool {
+        if lhs.state != rhs.state {
+            return false
+        }
+        if lhs.newGroupId != rhs.newGroupId {
+            return false
+        }
+        if lhs.resetGeneration != rhs.resetGeneration {
+            return false
+        }
+        if lhs.notifiedAtMs != rhs.notifiedAtMs {
+            return false
+        }
+        if lhs.quarantineReason != rhs.quarantineReason {
+            return false
+        }
+        if lhs.quarantinedSinceMs != rhs.quarantinedSinceMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(state)
+        hasher.combine(newGroupId)
+        hasher.combine(resetGeneration)
+        hasher.combine(notifiedAtMs)
+        hasher.combine(quarantineReason)
+        hasher.combine(quarantinedSinceMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIConversationState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationState {
+        return
+            try FfiConversationState(
+                state: FfiConverterString.read(from: &buf),
+                newGroupId: FfiConverterOptionString.read(from: &buf),
+                resetGeneration: FfiConverterOptionInt32.read(from: &buf),
+                notifiedAtMs: FfiConverterOptionInt64.read(from: &buf),
+                quarantineReason: FfiConverterOptionString.read(from: &buf),
+                quarantinedSinceMs: FfiConverterOptionInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiConversationState, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterOptionString.write(value.newGroupId, into: &buf)
+        FfiConverterOptionInt32.write(value.resetGeneration, into: &buf)
+        FfiConverterOptionInt64.write(value.notifiedAtMs, into: &buf)
+        FfiConverterOptionString.write(value.quarantineReason, into: &buf)
+        FfiConverterOptionInt64.write(value.quarantinedSinceMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConversationState_lift(_ buf: RustBuffer) throws -> FfiConversationState {
+    return try FfiConverterTypeFFIConversationState.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIConversationState_lower(_ value: FfiConversationState) -> RustBuffer {
+    return FfiConverterTypeFFIConversationState.lower(value)
 }
 
 public struct FfiConversationView {
@@ -7533,12 +7636,14 @@ public func FfiConverterTypeFFIPersistedRecoveryState_lower(_ value: FfiPersiste
 public struct FfiProcessExternalCommitResult {
     public var epoch: UInt64
     public var rejoinedAt: String
+    public var receipt: FfiSequencerReceipt?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(epoch: UInt64, rejoinedAt: String) {
+    public init(epoch: UInt64, rejoinedAt: String, receipt: FfiSequencerReceipt?) {
         self.epoch = epoch
         self.rejoinedAt = rejoinedAt
+        self.receipt = receipt
     }
 }
 
@@ -7550,12 +7655,16 @@ extension FfiProcessExternalCommitResult: Equatable, Hashable {
         if lhs.rejoinedAt != rhs.rejoinedAt {
             return false
         }
+        if lhs.receipt != rhs.receipt {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(epoch)
         hasher.combine(rejoinedAt)
+        hasher.combine(receipt)
     }
 }
 
@@ -7567,13 +7676,15 @@ public struct FfiConverterTypeFFIProcessExternalCommitResult: FfiConverterRustBu
         return
             try FfiProcessExternalCommitResult(
                 epoch: FfiConverterUInt64.read(from: &buf),
-                rejoinedAt: FfiConverterString.read(from: &buf)
+                rejoinedAt: FfiConverterString.read(from: &buf),
+                receipt: FfiConverterOptionTypeFFISequencerReceipt.read(from: &buf)
             )
     }
 
     public static func write(_ value: FfiProcessExternalCommitResult, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.epoch, into: &buf)
         FfiConverterString.write(value.rejoinedAt, into: &buf)
+        FfiConverterOptionTypeFFISequencerReceipt.write(value.receipt, into: &buf)
     }
 }
 
@@ -7792,6 +7903,99 @@ public func FfiConverterTypeFFISendResult_lift(_ buf: RustBuffer) throws -> FfiS
 #endif
 public func FfiConverterTypeFFISendResult_lower(_ value: FfiSendResult) -> RustBuffer {
     return FfiConverterTypeFFISendResult.lower(value)
+}
+
+public struct FfiSequencerReceipt {
+    public var convoId: String
+    public var epoch: Int32
+    public var commitHash: Data
+    public var sequencerDid: String
+    public var issuedAt: Int64
+    public var signature: Data
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(convoId: String, epoch: Int32, commitHash: Data, sequencerDid: String, issuedAt: Int64, signature: Data) {
+        self.convoId = convoId
+        self.epoch = epoch
+        self.commitHash = commitHash
+        self.sequencerDid = sequencerDid
+        self.issuedAt = issuedAt
+        self.signature = signature
+    }
+}
+
+extension FfiSequencerReceipt: Equatable, Hashable {
+    public static func == (lhs: FfiSequencerReceipt, rhs: FfiSequencerReceipt) -> Bool {
+        if lhs.convoId != rhs.convoId {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.commitHash != rhs.commitHash {
+            return false
+        }
+        if lhs.sequencerDid != rhs.sequencerDid {
+            return false
+        }
+        if lhs.issuedAt != rhs.issuedAt {
+            return false
+        }
+        if lhs.signature != rhs.signature {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(convoId)
+        hasher.combine(epoch)
+        hasher.combine(commitHash)
+        hasher.combine(sequencerDid)
+        hasher.combine(issuedAt)
+        hasher.combine(signature)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFISequencerReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSequencerReceipt {
+        return
+            try FfiSequencerReceipt(
+                convoId: FfiConverterString.read(from: &buf),
+                epoch: FfiConverterInt32.read(from: &buf),
+                commitHash: FfiConverterData.read(from: &buf),
+                sequencerDid: FfiConverterString.read(from: &buf),
+                issuedAt: FfiConverterInt64.read(from: &buf),
+                signature: FfiConverterData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiSequencerReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.convoId, into: &buf)
+        FfiConverterInt32.write(value.epoch, into: &buf)
+        FfiConverterData.write(value.commitHash, into: &buf)
+        FfiConverterString.write(value.sequencerDid, into: &buf)
+        FfiConverterInt64.write(value.issuedAt, into: &buf)
+        FfiConverterData.write(value.signature, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISequencerReceipt_lift(_ buf: RustBuffer) throws -> FfiSequencerReceipt {
+    return try FfiConverterTypeFFISequencerReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFISequencerReceipt_lower(_ value: FfiSequencerReceipt) -> RustBuffer {
+    return FfiConverterTypeFFISequencerReceipt.lower(value)
 }
 
 /**
@@ -9501,6 +9705,120 @@ public func FfiConverterTypeRemoveProposalInfo_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeRemoveProposalInfo_lower(_ value: RemoveProposalInfo) -> RustBuffer {
     return FfiConverterTypeRemoveProposalInfo.lower(value)
+}
+
+/**
+ * Versioned declaration of security-bearing persistence and credential
+ * operations enabled for a bridge instance. Construction validates this
+ * record before creating any orchestrator state.
+ */
+public struct SecurityStorageCapabilities {
+    public var version: UInt16
+    public var resetState: Bool
+    public var quarantine: Bool
+    public var pendingMessageProtection: Bool
+    public var sequencerReceipts: Bool
+    public var recoveryBackoff: Bool
+    public var pendingDeletion: Bool
+    public var authorizedDeviceResolution: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(version: UInt16, resetState: Bool, quarantine: Bool, pendingMessageProtection: Bool, sequencerReceipts: Bool, recoveryBackoff: Bool, pendingDeletion: Bool, authorizedDeviceResolution: Bool) {
+        self.version = version
+        self.resetState = resetState
+        self.quarantine = quarantine
+        self.pendingMessageProtection = pendingMessageProtection
+        self.sequencerReceipts = sequencerReceipts
+        self.recoveryBackoff = recoveryBackoff
+        self.pendingDeletion = pendingDeletion
+        self.authorizedDeviceResolution = authorizedDeviceResolution
+    }
+}
+
+extension SecurityStorageCapabilities: Equatable, Hashable {
+    public static func == (lhs: SecurityStorageCapabilities, rhs: SecurityStorageCapabilities) -> Bool {
+        if lhs.version != rhs.version {
+            return false
+        }
+        if lhs.resetState != rhs.resetState {
+            return false
+        }
+        if lhs.quarantine != rhs.quarantine {
+            return false
+        }
+        if lhs.pendingMessageProtection != rhs.pendingMessageProtection {
+            return false
+        }
+        if lhs.sequencerReceipts != rhs.sequencerReceipts {
+            return false
+        }
+        if lhs.recoveryBackoff != rhs.recoveryBackoff {
+            return false
+        }
+        if lhs.pendingDeletion != rhs.pendingDeletion {
+            return false
+        }
+        if lhs.authorizedDeviceResolution != rhs.authorizedDeviceResolution {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(version)
+        hasher.combine(resetState)
+        hasher.combine(quarantine)
+        hasher.combine(pendingMessageProtection)
+        hasher.combine(sequencerReceipts)
+        hasher.combine(recoveryBackoff)
+        hasher.combine(pendingDeletion)
+        hasher.combine(authorizedDeviceResolution)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSecurityStorageCapabilities: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SecurityStorageCapabilities {
+        return
+            try SecurityStorageCapabilities(
+                version: FfiConverterUInt16.read(from: &buf),
+                resetState: FfiConverterBool.read(from: &buf),
+                quarantine: FfiConverterBool.read(from: &buf),
+                pendingMessageProtection: FfiConverterBool.read(from: &buf),
+                sequencerReceipts: FfiConverterBool.read(from: &buf),
+                recoveryBackoff: FfiConverterBool.read(from: &buf),
+                pendingDeletion: FfiConverterBool.read(from: &buf),
+                authorizedDeviceResolution: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: SecurityStorageCapabilities, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.version, into: &buf)
+        FfiConverterBool.write(value.resetState, into: &buf)
+        FfiConverterBool.write(value.quarantine, into: &buf)
+        FfiConverterBool.write(value.pendingMessageProtection, into: &buf)
+        FfiConverterBool.write(value.sequencerReceipts, into: &buf)
+        FfiConverterBool.write(value.recoveryBackoff, into: &buf)
+        FfiConverterBool.write(value.pendingDeletion, into: &buf)
+        FfiConverterBool.write(value.authorizedDeviceResolution, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSecurityStorageCapabilities_lift(_ buf: RustBuffer) throws -> SecurityStorageCapabilities {
+    return try FfiConverterTypeSecurityStorageCapabilities.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSecurityStorageCapabilities_lower(_ value: SecurityStorageCapabilities) -> RustBuffer {
+    return FfiConverterTypeSecurityStorageCapabilities.lower(value)
 }
 
 public struct StagedCommitInfo {
@@ -11351,6 +11669,7 @@ public enum OrchestratorBridgeError {
      * available for this device") from transport-level failures.
      */
     case ServerError(status: UInt16, body: String)
+    case MissingSecurityCapability(capability: String, requiredVersion: UInt16, declaredVersion: UInt16)
     /**
      * Layer 3 quarantine: send/encrypt or auto-rejoin was refused because the
      * conversation is in Quarantined state. Platforms should surface this to
@@ -11405,7 +11724,12 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
                 status: FfiConverterUInt16.read(from: &buf),
                 body: FfiConverterString.read(from: &buf)
             )
-        case 14: return try .ConversationQuarantined(
+        case 14: return try .MissingSecurityCapability(
+                capability: FfiConverterString.read(from: &buf),
+                requiredVersion: FfiConverterUInt16.read(from: &buf),
+                declaredVersion: FfiConverterUInt16.read(from: &buf)
+            )
+        case 15: return try .ConversationQuarantined(
                 convoId: FfiConverterString.read(from: &buf),
                 reason: FfiConverterString.read(from: &buf)
             )
@@ -11466,8 +11790,14 @@ public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
             FfiConverterUInt16.write(status, into: &buf)
             FfiConverterString.write(body, into: &buf)
 
-        case let .ConversationQuarantined(convoId, reason):
+        case let .MissingSecurityCapability(capability, requiredVersion, declaredVersion):
             writeInt(&buf, Int32(14))
+            FfiConverterString.write(capability, into: &buf)
+            FfiConverterUInt16.write(requiredVersion, into: &buf)
+            FfiConverterUInt16.write(declaredVersion, into: &buf)
+
+        case let .ConversationQuarantined(convoId, reason):
+            writeInt(&buf, Int32(15))
             FfiConverterString.write(convoId, into: &buf)
             FfiConverterString.write(reason, into: &buf)
         }
@@ -14041,6 +14371,8 @@ public protocol OrchestratorStorageCallback: AnyObject {
 
     func setConversationState(conversationId: String, state: String) throws
 
+    func getConversationState(conversationId: String) throws -> FfiConversationState?
+
     /**
      * Persist the `RESET_PENDING` payload for a server-initiated group reset.
      *
@@ -14065,6 +14397,10 @@ public protocol OrchestratorStorageCallback: AnyObject {
      */
     func clearResetPending(conversationId: String) throws
 
+    func markQuarantined(conversationId: String, reasonTag: String, sinceMs: Int64) throws
+
+    func clearQuarantine(conversationId: String) throws
+
     func markNeedsRejoin(conversationId: String) throws
 
     func needsRejoin(conversationId: String) throws -> Bool
@@ -14076,6 +14412,16 @@ public protocol OrchestratorStorageCallback: AnyObject {
     func getMessages(conversationId: String, limit: UInt32, beforeSequence: UInt64?) throws -> [FfiMessage]
 
     func messageExists(messageId: String) throws -> Bool
+
+    func storePendingMessage(conversationId: String, messageId: String) throws
+
+    func removePendingMessage(messageId: String) throws -> Bool
+
+    func storeSequencerReceipt(receipt: FfiSequencerReceipt) throws
+
+    func getSequencerReceipts(conversationId: String, sinceEpoch: Int32?) throws -> [FfiSequencerReceipt]
+
+    func clearSequencerReceipts(conversationId: String) throws
 
     func getSyncCursor(userDid: String) throws -> FfiSyncCursor
 
@@ -14295,6 +14641,30 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
                 lowerError: FfiConverterTypeOrchestratorBridgeError.lower
             )
         },
+        getConversationState: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiConversationState? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getConversationState(
+                    conversationId: FfiConverterString.lift(conversationId)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFFIConversationState.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         markResetPending: { (
             uniffiHandle: UInt64,
             conversationId: RustBuffer,
@@ -14337,6 +14707,58 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try uniffiObj.clearResetPending(
+                    conversationId: FfiConverterString.lift(conversationId)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        markQuarantined: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            reasonTag: RustBuffer,
+            sinceMs: Int64,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.markQuarantined(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    reasonTag: FfiConverterString.lift(reasonTag),
+                    sinceMs: FfiConverterInt64.lift(sinceMs)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        clearQuarantine: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.clearQuarantine(
                     conversationId: FfiConverterString.lift(conversationId)
                 )
             }
@@ -14490,6 +14912,130 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        storePendingMessage: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            messageId: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.storePendingMessage(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    messageId: FfiConverterString.lift(messageId)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        removePendingMessage: { (
+            uniffiHandle: UInt64,
+            messageId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.removePendingMessage(
+                    messageId: FfiConverterString.lift(messageId)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        storeSequencerReceipt: { (
+            uniffiHandle: UInt64,
+            receipt: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.storeSequencerReceipt(
+                    receipt: FfiConverterTypeFFISequencerReceipt.lift(receipt)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getSequencerReceipts: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            sinceEpoch: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [FfiSequencerReceipt] in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getSequencerReceipts(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    sinceEpoch: FfiConverterOptionInt32.lift(sinceEpoch)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFISequencerReceipt.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        clearSequencerReceipts: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.clearSequencerReceipts(
+                    conversationId: FfiConverterString.lift(conversationId)
+                )
+            }
+
+            let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -15086,6 +15632,30 @@ private struct FfiConverterOptionTypeCurrentMetadataInfo: FfiConverterRustBuffer
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeFFIConversationState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConversationState?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFFIConversationState.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFFIConversationState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeFFIConversationView: FfiConverterRustBuffer {
     typealias SwiftType = FfiConversationView?
 
@@ -15174,6 +15744,30 @@ private struct FfiConverterOptionTypeFFIQuarantineState: FfiConverterRustBuffer 
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFFIQuarantineState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeFFISequencerReceipt: FfiConverterRustBuffer {
+    typealias SwiftType = FfiSequencerReceipt?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFFISequencerReceipt.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFFISequencerReceipt.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -15693,6 +16287,31 @@ private struct FfiConverterSequenceTypeFFIPersistedRecoveryBackoff: FfiConverter
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeFFIPersistedRecoveryBackoff.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFFISequencerReceipt: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiSequencerReceipt]
+
+    static func write(_ value: [FfiSequencerReceipt], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFFISequencerReceipt.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiSequencerReceipt] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiSequencerReceipt]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFFISequencerReceipt.read(from: &buf))
         }
         return seq
     }
@@ -16856,13 +17475,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_user_confirmed_manual_reset() != 5441 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_constructor_catbirdclientbridge_new() != 35621 {
+    if uniffi_catbird_mls_checksum_constructor_catbirdclientbridge_new() != 17879 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_constructor_mlscontext_new() != 26721 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_constructor_orchestratorbridge_new() != 27606 {
+    if uniffi_catbird_mls_checksum_constructor_orchestratorbridge_new() != 39213 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_credentialvalidator_validate_credential() != 26399 {
@@ -17036,64 +17655,88 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 59265 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 63566 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 39371 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending() != 43217 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 54157 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 39469 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending() != 23175 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 11158 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 14855 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 37902 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 22788 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 766 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 47045 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 44068 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 19120 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 57134 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 9569 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 3215 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 62279 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 25140 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 21771 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 28722 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 20850 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 6074 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 40387 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 19736 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 43671 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 14043 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 40131 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 21943 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 32336 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 47849 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 62544 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 40111 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 15814 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 48514 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 53919 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 32490 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 60477 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 52490 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 51718 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 23759 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 48900 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 28930 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 241 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 64743 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 56447 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 10000 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 58449 {
         return InitializationResult.apiChecksumMismatch
     }
 
