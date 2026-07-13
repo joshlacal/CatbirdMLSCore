@@ -512,8 +512,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   }
 
   public func setConversationState(conversationId: String, state: String) throws {
-    // The Rust orchestrator uses a string "state" field (e.g. "active", "left", "error").
-    // Map this to the existing MLSConversationModel fields.
+    // Sealed Rust emits `active`, `needs_rejoin`, and `failed` for the durable
+    // scalar states handled here. Payload-bearing reset/quarantine states use
+    // their dedicated callbacks. Legacy platform `left`/`inactive` remains
+    // supported; every other tag fails closed.
     try dbPool.write { db in
       try requireOwnedConversation(conversationId, in: db)
       guard let conversation = try MLSConversationModel
@@ -543,6 +545,19 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         try conversation
           .withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
           .update(db)
+      case "failed":
+        try clearResetState(conversationId: conversationId, in: db)
+        try db.execute(
+          sql: """
+            UPDATE MLSConversationModel
+            SET isActive = 0,
+                needsRejoin = 0,
+                isUnrecoverable = 1,
+                updatedAt = ?
+            WHERE conversationID = ? AND currentUserDID = ?
+            """,
+          arguments: [Date(), conversationId, userDID]
+        )
       default:
         throw storageFailure("unknown conversation state")
       }
@@ -554,7 +569,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       guard let row = try Row.fetchOne(
         db,
         sql: """
-          SELECT isActive, needsRejoin, needsReset, pendingNewGroupId,
+          SELECT isActive, needsRejoin, needsReset, isUnrecoverable, pendingNewGroupId,
                  pendingResetGeneration
           FROM MLSConversationModel
           WHERE conversationID = ? AND currentUserDID = ?
@@ -602,9 +617,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         throw storageFailure("stored quarantine timestamp has no reason")
       }
       let needsReset: Bool = try row.decode(forColumn: "needsReset")
+      let isUnrecoverable: Bool = try row.decode(forColumn: "isUnrecoverable")
       let needsRejoin: Bool = try row.decode(forColumn: "needsRejoin")
       let isActive: Bool = try row.decode(forColumn: "isActive")
-      let state = reason != nil ? "quarantined" : needsReset ? "reset_pending" : needsRejoin ? "needs_rejoin" : isActive ? "active" : "left"
+      let state = reason != nil ? "quarantined" : needsReset ? "reset_pending" : isUnrecoverable ? "failed" : needsRejoin ? "needs_rejoin" : isActive ? "active" : "left"
       return FfiConversationState(
         state: state,
         newGroupId: newGroupId,
@@ -623,8 +639,8 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   /// mutates local MLS state. Writes go to the `pendingNewGroupId` +
   /// `pendingResetGeneration` columns on `MLSConversationModel` (schema v28).
   ///
-  /// A stale-generation guard rejects writes where the stored generation is
-  /// ≥ the incoming one. This defends against duplicate SSE/poll deliveries.
+  /// A stale-generation guard rejects older writes. An exact replay verifies
+  /// its payload and backfills security metadata for pre-capability rows.
   public func markResetPending(
     conversationId: String,
     newGroupIdHex: String,
@@ -660,7 +676,18 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           guard storedGroupId == newGroupIdHex else {
             throw storageFailure("conflicting pending reset target for the same generation")
           }
-          return
+          let storedNotifiedAt = try Int64.fetchOne(
+            db,
+            sql: """
+              SELECT reset_notified_at_ms
+              FROM mls_orchestrator_security_state
+              WHERE conversation_id = ? AND user_did = ?
+              """,
+            arguments: [conversationId, userDID]
+          )
+          if let storedNotifiedAt, storedNotifiedAt != notifiedAtMs {
+            throw storageFailure("conflicting reset notification for the same generation")
+          }
         }
       }
       try db.execute(
@@ -1237,8 +1264,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   /// and storage deletes run. Idempotent — re-marking updates the group id
   /// but keeps the original intent timestamp.
   public func markPendingLocalDelete(conversationId: String, groupIdHex: String?) throws {
-    if let groupIdHex, Data(hexEncoded: groupIdHex) == nil {
-      throw storageFailure("pending deletion group id must be valid hexadecimal")
+    if let groupIdHex {
+      try requireNonEmptyIdentifier(groupIdHex, field: "pending deletion group id")
+      guard Data(hexEncoded: groupIdHex) != nil else {
+        throw storageFailure("pending deletion group id must be valid hexadecimal")
+      }
     }
     try dbPool.write { db in
       try requireOwnedConversation(conversationId, in: db)

@@ -211,6 +211,48 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertNil(state.notifiedAtMs)
   }
 
+  func testUnrecoverableStateHydratesAsRustFailedBeforeActiveOrNeedsRejoin() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-unrecoverable",
+      groupId: "01020304"
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET isActive = 1, needsRejoin = 1, isUnrecoverable = 1
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: ["convo-unrecoverable", "did:plc:receiver"]
+      )
+    }
+
+    let restartedAdapter = try makeAdapter()
+    let state = try XCTUnwrap(
+      restartedAdapter.getConversationState(conversationId: "convo-unrecoverable")
+    )
+    XCTAssertEqual(state.state, "failed")
+  }
+
+  func testRustDoesNotEmitErrorConversationStateTag() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-error-tag",
+      groupId: "01020304"
+    )
+
+    assertThrowsStorageError("unsupported error tag") {
+      try adapter.setConversationState(conversationId: "convo-error-tag", state: "error")
+    }
+    XCTAssertEqual(
+      try adapter.getConversationState(conversationId: "convo-error-tag")?.state,
+      "active"
+    )
+  }
+
   func testPendingMessageProtectionIsDurableIdempotentAndPrincipalScoped() throws {
     let receiver = try makeAdapter()
     let other = try makeAdapter(userDID: "did:plc:other")
@@ -310,6 +352,24 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
         groupIdHex: "01020304"
       )
     )
+  }
+
+  func testPendingLocalDeleteRejectsEmptyOptionalGroupId() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-pending-delete",
+      groupId: "01020304"
+    )
+
+    for malformed in ["", " ", "\t\n"] {
+      assertThrowsStorageError("empty optional group id") {
+        try adapter.markPendingLocalDelete(
+          conversationId: "convo-pending-delete",
+          groupIdHex: malformed
+        )
+      }
+    }
   }
 
   func testReceiptReplayRequiresEverySignedFieldToMatch() throws {
@@ -481,6 +541,58 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(state.newGroupId, "05060708")
     XCTAssertEqual(state.resetGeneration, 4)
     XCTAssertEqual(state.notifiedAtMs, 100)
+  }
+
+  func testEqualResetGenerationBackfillsNotificationForLegacyPayload() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-upgrade",
+      groupId: "01020304"
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsReset = 1,
+              pendingNewGroupId = '05060708',
+              pendingResetGeneration = 7
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: ["convo-reset-upgrade", "did:plc:receiver"]
+      )
+    }
+
+    try adapter.markResetPending(
+      conversationId: "convo-reset-upgrade",
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-upgrade",
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+
+    let restartedAdapter = try makeAdapter()
+    let state = try XCTUnwrap(
+      restartedAdapter.getConversationState(conversationId: "convo-reset-upgrade")
+    )
+    XCTAssertEqual(state.state, "reset_pending")
+    XCTAssertEqual(state.newGroupId, "05060708")
+    XCTAssertEqual(state.resetGeneration, 7)
+    XCTAssertEqual(state.notifiedAtMs, 700)
+
+    assertThrowsStorageError("conflicting reset notification") {
+      try restartedAdapter.markResetPending(
+        conversationId: "convo-reset-upgrade",
+        newGroupIdHex: "05060708",
+        resetGeneration: 7,
+        notifiedAtMs: 701
+      )
+    }
   }
 
   func testRecoveryHydrationRejectsNegativeCountersAndTimestamps() throws {
