@@ -7908,6 +7908,7 @@ public func FfiConverterTypeFFISendResult_lower(_ value: FfiSendResult) -> RustB
 public struct FfiSequencerReceipt {
     public var convoId: String
     public var epoch: Int32
+    public var sequencerTerm: UInt64
     public var commitHash: Data
     public var sequencerDid: String
     public var issuedAt: Int64
@@ -7915,9 +7916,10 @@ public struct FfiSequencerReceipt {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(convoId: String, epoch: Int32, commitHash: Data, sequencerDid: String, issuedAt: Int64, signature: Data) {
+    public init(convoId: String, epoch: Int32, sequencerTerm: UInt64, commitHash: Data, sequencerDid: String, issuedAt: Int64, signature: Data) {
         self.convoId = convoId
         self.epoch = epoch
+        self.sequencerTerm = sequencerTerm
         self.commitHash = commitHash
         self.sequencerDid = sequencerDid
         self.issuedAt = issuedAt
@@ -7931,6 +7933,9 @@ extension FfiSequencerReceipt: Equatable, Hashable {
             return false
         }
         if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.sequencerTerm != rhs.sequencerTerm {
             return false
         }
         if lhs.commitHash != rhs.commitHash {
@@ -7951,6 +7956,7 @@ extension FfiSequencerReceipt: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(convoId)
         hasher.combine(epoch)
+        hasher.combine(sequencerTerm)
         hasher.combine(commitHash)
         hasher.combine(sequencerDid)
         hasher.combine(issuedAt)
@@ -7967,6 +7973,7 @@ public struct FfiConverterTypeFFISequencerReceipt: FfiConverterRustBuffer {
             try FfiSequencerReceipt(
                 convoId: FfiConverterString.read(from: &buf),
                 epoch: FfiConverterInt32.read(from: &buf),
+                sequencerTerm: FfiConverterUInt64.read(from: &buf),
                 commitHash: FfiConverterData.read(from: &buf),
                 sequencerDid: FfiConverterString.read(from: &buf),
                 issuedAt: FfiConverterInt64.read(from: &buf),
@@ -7977,6 +7984,7 @@ public struct FfiConverterTypeFFISequencerReceipt: FfiConverterRustBuffer {
     public static func write(_ value: FfiSequencerReceipt, into buf: inout [UInt8]) {
         FfiConverterString.write(value.convoId, into: &buf)
         FfiConverterInt32.write(value.epoch, into: &buf)
+        FfiConverterUInt64.write(value.sequencerTerm, into: &buf)
         FfiConverterData.write(value.commitHash, into: &buf)
         FfiConverterString.write(value.sequencerDid, into: &buf)
         FfiConverterInt64.write(value.issuedAt, into: &buf)
