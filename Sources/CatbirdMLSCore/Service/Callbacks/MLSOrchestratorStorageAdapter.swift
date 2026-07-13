@@ -57,7 +57,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   ///   - dbPool: A GRDB DatabasePool for the current user's MLS database.
   ///   - userDID: The current user's DID (normalized).
   ///   - mlsContext: The active Rust context used for field-level payload encryption.
-  public init(dbPool: DatabasePool, userDID: String, mlsContext: MlsContext) {
+  public init(dbPool: DatabasePool, userDID: String, mlsContext: MlsContext) throws {
     self.dbPool = dbPool
     self.userDID = MLSStorageHelpers.normalizeDID(userDID)
     self.mlsContext = mlsContext
@@ -65,6 +65,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     // Create orchestrator-specific tables up front so read-only paths
     // never need to issue DDL on a WAL snapshot connection.
     do {
+      try requireValidDID(self.userDID, field: "bound user DID")
       try dbPool.write { db in
         try db.execute(sql: """
           CREATE TABLE IF NOT EXISTS mls_orchestrator_sync_cursors (
@@ -92,11 +93,127 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             PRIMARY KEY (conversation_id, user_did)
           )
           """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_security_state (
+            conversation_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            quarantine_reason TEXT,
+            quarantined_since_ms INTEGER,
+            reset_notified_at_ms INTEGER,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (conversation_id, user_did)
+          )
+          """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_pending_messages (
+            message_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            created_at DATETIME NOT NULL,
+            PRIMARY KEY (message_id, user_did)
+          )
+          """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_sequencer_receipts (
+            conversation_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            epoch INTEGER NOT NULL CHECK (epoch >= 0),
+            sequencer_term INTEGER NOT NULL CHECK (sequencer_term >= 0),
+            commit_hash BLOB NOT NULL CHECK (length(commit_hash) = 32),
+            sequencer_did TEXT NOT NULL,
+            issued_at INTEGER NOT NULL CHECK (issued_at >= 0),
+            signature BLOB NOT NULL CHECK (length(signature) = 64),
+            PRIMARY KEY (conversation_id, user_did, epoch)
+          )
+          """)
+        let requiredTables = [
+          "mls_orchestrator_security_state",
+          "mls_orchestrator_pending_messages",
+          "mls_orchestrator_sequencer_receipts",
+          "mls_orchestrator_pending_local_deletes",
+        ]
+        for table in requiredTables {
+          guard try db.tableExists(table) else {
+            throw OrchestratorBridgeError.Storage(message: "required security table missing: \(table)")
+          }
+        }
+        let requiredExistingSchema: [(String, Set<String>)] = [
+          (
+            "mls_orchestrator_security_state",
+            [
+              "conversation_id", "user_did", "quarantine_reason",
+              "quarantined_since_ms", "reset_notified_at_ms", "updated_at",
+            ]
+          ),
+          (
+            "mls_orchestrator_pending_messages",
+            ["message_id", "user_did", "conversation_id", "created_at"]
+          ),
+          (
+            "mls_orchestrator_sequencer_receipts",
+            [
+              "conversation_id", "user_did", "epoch", "sequencer_term",
+              "commit_hash", "sequencer_did", "issued_at", "signature",
+            ]
+          ),
+          (
+            "mls_orchestrator_pending_local_deletes",
+            ["conversation_id", "user_did", "group_id_hex", "created_at"]
+          ),
+          (
+            MLSConversationModel.databaseTableName,
+            [
+              "conversationID", "currentUserDID", "isActive", "needsRejoin",
+              "needsReset", "isUnrecoverable", "pendingNewGroupId",
+              "pendingResetGeneration", "updatedAt",
+            ]
+          ),
+          (
+            MLSRecoveryAttemptStateModel.databaseTableName,
+            [
+              "conversationID", "currentUserDID", "failedRejoinCount",
+              "lastAttemptAtMs", "quarantinedUntilMs",
+            ]
+          ),
+          (
+            MLSRecoveryGlobalStateModel.databaseTableName,
+            ["currentUserDID", "lastGlobalRejoinAttemptAtMs"]
+          ),
+        ]
+        for (table, requiredColumns) in requiredExistingSchema {
+          guard try db.tableExists(table) else {
+            throw OrchestratorBridgeError.Storage(message: "required security table missing: \(table)")
+          }
+          let availableColumns = Set(try db.columns(in: table).map(\.name))
+          let missingColumns = requiredColumns.subtracting(availableColumns).sorted()
+          guard missingColumns.isEmpty else {
+            throw OrchestratorBridgeError.Storage(
+              message: "required security columns missing from \(table): \(missingColumns.joined(separator: ","))"
+            )
+          }
+        }
+        let requiredPrimaryKeys: [(String, [String])] = [
+          ("mls_orchestrator_security_state", ["conversation_id", "user_did"]),
+          ("mls_orchestrator_pending_messages", ["message_id", "user_did"]),
+          (
+            "mls_orchestrator_sequencer_receipts",
+            ["conversation_id", "user_did", "epoch"]
+          ),
+          ("mls_orchestrator_pending_local_deletes", ["conversation_id", "user_did"]),
+        ]
+        for (table, expectedColumns) in requiredPrimaryKeys {
+          let actualColumns = try db.primaryKey(table).columns
+          guard actualColumns == expectedColumns else {
+            throw OrchestratorBridgeError.Storage(
+              message: "required security primary key mismatch for \(table)"
+            )
+          }
+        }
       }
     } catch {
-      // Non-fatal: tables may already exist or will be created on first write.
-      Logger(subsystem: "blue.catbird.mls", category: "OrchestratorStorageAdapter")
-        .warning("Failed to pre-create orchestrator tables: \(error)")
+      throw OrchestratorBridgeError.Storage(
+        message: "failed to initialize required security storage: \(error.localizedDescription)"
+      )
     }
 
     logger.debug("OrchestratorStorageAdapter initialized for \(userDID.prefix(20), privacy: .private)")
@@ -115,6 +232,131 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     return Self.iso8601Formatter.string(from: date)
   }
 
+  // MARK: - Security Boundary Validation
+
+  private func storageFailure(_ message: String) -> OrchestratorBridgeError {
+    .Storage(message: message)
+  }
+
+  private func requireBoundUser(_ suppliedDID: String) throws -> String {
+    let normalizedDID = MLSStorageHelpers.normalizeDID(suppliedDID)
+    guard normalizedDID == userDID else {
+      throw storageFailure("storage callback principal does not match the bound user")
+    }
+    return normalizedDID
+  }
+
+  private func requireNonEmptyIdentifier(_ value: String, field: String) throws {
+    guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw storageFailure("\(field) must not be empty")
+    }
+  }
+
+  private func requireValidDID(_ value: String, field: String) throws {
+    let components = value.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+    guard components.count == 3,
+          components[0] == "did",
+          !components[1].isEmpty,
+          !components[2].isEmpty
+    else {
+      throw storageFailure("\(field) is not a valid DID")
+    }
+  }
+
+  private func requireOwnedConversation(_ conversationId: String, in db: Database) throws {
+    try requireNonEmptyIdentifier(conversationId, field: "conversation id")
+    let exists = try Bool.fetchOne(
+      db,
+      sql: """
+        SELECT EXISTS(
+          SELECT 1 FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
+        )
+        """,
+      arguments: [conversationId, userDID]
+    ) ?? false
+    guard exists else {
+      throw storageFailure("conversation is not owned by the bound user")
+    }
+  }
+
+  private func clearResetState(conversationId: String, in db: Database) throws {
+    try db.execute(
+      sql: """
+        UPDATE MLSConversationModel
+        SET needsReset = 0,
+            pendingNewGroupId = NULL,
+            pendingResetGeneration = NULL,
+            updatedAt = ?
+        WHERE conversationID = ? AND currentUserDID = ?
+        """,
+      arguments: [Date(), conversationId, userDID]
+    )
+    try db.execute(
+      sql: """
+        UPDATE mls_orchestrator_security_state
+        SET reset_notified_at_ms = NULL, updated_at = ?
+        WHERE conversation_id = ? AND user_did = ?
+        """,
+      arguments: [Date(), conversationId, userDID]
+    )
+    try db.execute(
+      sql: """
+        DELETE FROM mls_orchestrator_security_state
+        WHERE conversation_id = ? AND user_did = ?
+          AND quarantine_reason IS NULL
+          AND quarantined_since_ms IS NULL
+          AND reset_notified_at_ms IS NULL
+        """,
+      arguments: [conversationId, userDID]
+    )
+  }
+
+  private func validatedReceiptTerm(_ receipt: FfiSequencerReceipt) throws -> Int64 {
+    try requireNonEmptyIdentifier(receipt.convoId, field: "receipt conversation id")
+    guard receipt.epoch >= 0 else {
+      throw storageFailure("sequencer receipt epoch must not be negative")
+    }
+    guard let term = Int64(exactly: receipt.sequencerTerm) else {
+      throw storageFailure("sequencer receipt term exceeds durable storage range")
+    }
+    guard receipt.commitHash.count == 32 else {
+      throw storageFailure("sequencer receipt commit hash must be 32 bytes")
+    }
+    try requireValidDID(receipt.sequencerDid, field: "sequencer DID")
+    guard receipt.issuedAt >= 0 else {
+      throw storageFailure("sequencer receipt issued-at must not be negative")
+    }
+    guard receipt.signature.count == 64 else {
+      throw storageFailure("sequencer receipt signature must be 64 bytes")
+    }
+    return term
+  }
+
+  private func decodeReceipt(_ row: Row) throws -> FfiSequencerReceipt {
+    let conversationId: String = try row.decode(forColumn: "conversation_id")
+    let epoch: Int64 = try row.decode(forColumn: "epoch")
+    let term: Int64 = try row.decode(forColumn: "sequencer_term")
+    let commitHash: Data = try row.decode(forColumn: "commit_hash")
+    let sequencerDID: String = try row.decode(forColumn: "sequencer_did")
+    let issuedAt: Int64 = try row.decode(forColumn: "issued_at")
+    let signature: Data = try row.decode(forColumn: "signature")
+    guard let epoch32 = Int32(exactly: epoch), epoch32 >= 0, term >= 0 else {
+      throw storageFailure("stored sequencer receipt has an invalid epoch or term")
+    }
+    let receipt = FfiSequencerReceipt(
+      convoId: conversationId,
+      epoch: epoch32,
+      sequencerTerm: UInt64(term),
+      commitHash: commitHash,
+      sequencerDid: sequencerDID,
+      issuedAt: issuedAt,
+      signature: signature
+    )
+    _ = try validatedReceiptTerm(receipt)
+    return receipt
+  }
+
   // MARK: - Conversation Operations
 
   public func ensureConversationExists(
@@ -122,7 +364,8 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     conversationId: String,
     groupId: String
   ) throws {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
+    try requireNonEmptyIdentifier(conversationId, field: "conversation id")
 
     try dbPool.write { db in
       // Check if conversation already exists
@@ -170,7 +413,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     joinMethod: String,
     joinEpoch: UInt64
   ) throws {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
     let method: MLSJoinMethod = {
       switch joinMethod.lowercased() {
       case "welcome": return .welcome
@@ -196,7 +439,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     userDid: String,
     conversationId: String
   ) throws -> FfiConversationView? {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
 
     return try dbPool.read { db in
       guard let conversation = try MLSConversationModel
@@ -219,7 +462,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   }
 
   public func listConversations(userDid: String) throws -> [FfiConversationView] {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
 
     return try dbPool.read { db in
       let conversations = try MLSConversationModel
@@ -248,7 +491,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   }
 
   public func deleteConversations(userDid: String, ids: [String]) throws {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
 
     try dbPool.write { db in
       // Mark conversations as inactive rather than hard-deleting,
@@ -272,27 +515,104 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     // The Rust orchestrator uses a string "state" field (e.g. "active", "left", "error").
     // Map this to the existing MLSConversationModel fields.
     try dbPool.write { db in
-      if let conversation = try MLSConversationModel
+      try requireOwnedConversation(conversationId, in: db)
+      guard let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
-      {
-        let updated: MLSConversationModel
-        switch state.lowercased() {
-        case "left", "inactive":
-          updated = conversation.withActiveStatus(false)
-        case "active":
-          updated = conversation.withActiveStatus(true)
-        case "needs_rejoin":
-          updated = conversation.withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
-        default:
-          // Unknown state -- log warning and store as-is via active status
-          logger.warning(
-            "Unknown conversation state from orchestrator: \(state) for \(conversationId)"
-          )
-          updated = conversation
-        }
-        try updated.update(db)
+      else {
+        throw storageFailure("conversation disappeared during state transition")
       }
+      switch state.lowercased() {
+      case "left", "inactive":
+        try conversation.withActiveStatus(false).update(db)
+      case "active":
+        try clearResetState(conversationId: conversationId, in: db)
+        try db.execute(
+          sql: """
+            UPDATE MLSConversationModel
+            SET isActive = 1,
+                needsRejoin = 0,
+                isUnrecoverable = 0,
+                updatedAt = ?
+            WHERE conversationID = ? AND currentUserDID = ?
+            """,
+          arguments: [Date(), conversationId, userDID]
+        )
+      case "needs_rejoin":
+        try conversation
+          .withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
+          .update(db)
+      default:
+        throw storageFailure("unknown conversation state")
+      }
+    }
+  }
+
+  public func getConversationState(conversationId: String) throws -> FfiConversationState? {
+    try dbPool.read { db in
+      guard let row = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT isActive, needsRejoin, needsReset, pendingNewGroupId,
+                 pendingResetGeneration
+          FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationId, userDID]
+      ) else { return nil }
+
+      let security = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT quarantine_reason, quarantined_since_ms, reset_notified_at_ms
+          FROM mls_orchestrator_security_state
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationId, userDID]
+      )
+      let reason: String? = try security?.decode(forColumn: "quarantine_reason")
+      let since: Int64? = try security?.decode(forColumn: "quarantined_since_ms")
+      let notifiedAt: Int64? = try security?.decode(forColumn: "reset_notified_at_ms")
+      let newGroupId: String? = try row.decode(forColumn: "pendingNewGroupId")
+      let generation64: Int64? = try row.decode(forColumn: "pendingResetGeneration")
+      let generation: Int32?
+      if let generation64 {
+        guard let exact = Int32(exactly: generation64), exact >= 0 else {
+          throw storageFailure("stored reset generation is invalid")
+        }
+        generation = exact
+      } else {
+        generation = nil
+      }
+      if let newGroupId, Data(hexEncoded: newGroupId) == nil {
+        throw storageFailure("stored reset group id is malformed")
+      }
+      if let notifiedAt, notifiedAt < 0 {
+        throw storageFailure("stored reset notification time is invalid")
+      }
+      if let reason {
+        guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let since,
+              since >= 0
+        else {
+          throw storageFailure("stored quarantine state is malformed")
+        }
+      } else if since != nil {
+        throw storageFailure("stored quarantine timestamp has no reason")
+      }
+      let needsReset: Bool = try row.decode(forColumn: "needsReset")
+      let needsRejoin: Bool = try row.decode(forColumn: "needsRejoin")
+      let isActive: Bool = try row.decode(forColumn: "isActive")
+      let state = reason != nil ? "quarantined" : needsReset ? "reset_pending" : needsRejoin ? "needs_rejoin" : isActive ? "active" : "left"
+      return FfiConversationState(
+        state: state,
+        newGroupId: newGroupId,
+        resetGeneration: generation,
+        notifiedAtMs: notifiedAt,
+        quarantineReason: reason,
+        quarantinedSinceMs: since
+      )
     }
   }
 
@@ -311,18 +631,37 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     resetGeneration: Int32,
     notifiedAtMs: Int64
   ) throws {
+    try requireNonEmptyIdentifier(newGroupIdHex, field: "pending reset group id")
+    guard Data(hexEncoded: newGroupIdHex) != nil else {
+      throw storageFailure("pending reset group id must be valid hexadecimal")
+    }
+    guard resetGeneration >= 0, notifiedAtMs >= 0 else {
+      throw storageFailure("pending reset generation and notification time must not be negative")
+    }
     let incomingGen = Int64(resetGeneration)
     try dbPool.write { db in
-      let stored = try Int64.fetchOne(
+      try requireOwnedConversation(conversationId, in: db)
+      let stored = try Row.fetchOne(
         db,
         sql: """
-          SELECT pendingResetGeneration FROM MLSConversationModel
-          WHERE conversationID = ?
+          SELECT pendingResetGeneration, pendingNewGroupId
+          FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
           """,
-        arguments: [conversationId]
+        arguments: [conversationId, userDID]
       )
-      if let stored, stored >= incomingGen {
-        return
+      let storedGeneration: Int64? = try stored?.decode(forColumn: "pendingResetGeneration")
+      if let storedGeneration {
+        guard storedGeneration <= incomingGen else {
+          throw storageFailure("pending reset generation must advance monotonically")
+        }
+        if storedGeneration == incomingGen {
+          let storedGroupId: String? = try stored?.decode(forColumn: "pendingNewGroupId")
+          guard storedGroupId == newGroupIdHex else {
+            throw storageFailure("conflicting pending reset target for the same generation")
+          }
+          return
+        }
       }
       try db.execute(
         sql: """
@@ -333,27 +672,79 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
               pendingNewGroupId = ?,
               pendingResetGeneration = ?,
               updatedAt = ?
-          WHERE conversationID = ?
+          WHERE conversationID = ? AND currentUserDID = ?
           """,
-        arguments: [newGroupIdHex, incomingGen, Date(), conversationId]
+        arguments: [newGroupIdHex, incomingGen, Date(), conversationId, userDID]
+      )
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_security_state
+            (conversation_id, user_did, reset_notified_at_ms, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(conversation_id, user_did) DO UPDATE SET
+            reset_notified_at_ms = excluded.reset_notified_at_ms,
+            updated_at = excluded.updated_at
+          """,
+        arguments: [conversationId, userDID, notifiedAtMs, Date()]
       )
     }
   }
 
-  /// Clear the staged pending-reset pointer after the conversation has
-  /// adopted the new group. Leaves `needsReset` untouched — callers handle
-  /// that via the usual clear path.
+  /// Clear the reset marker and its full payload after the conversation has
+  /// adopted the new group. An independent quarantine overlay is preserved.
   public func clearResetPending(conversationId: String) throws {
     try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
+      try clearResetState(conversationId: conversationId, in: db)
+    }
+  }
+
+  public func markQuarantined(conversationId: String, reasonTag: String, sinceMs: Int64) throws {
+    guard !reasonTag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      throw OrchestratorBridgeError.Storage(message: "quarantine reason must not be empty")
+    }
+    guard sinceMs >= 0 else {
+      throw storageFailure("quarantine timestamp must not be negative")
+    }
+    try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
       try db.execute(
         sql: """
-          UPDATE MLSConversationModel
-          SET pendingNewGroupId = NULL,
-              pendingResetGeneration = NULL,
-              updatedAt = ?
-          WHERE conversationID = ?
+          INSERT INTO mls_orchestrator_security_state
+            (conversation_id, user_did, quarantine_reason, quarantined_since_ms, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(conversation_id, user_did) DO UPDATE SET
+            quarantine_reason = excluded.quarantine_reason,
+            quarantined_since_ms = excluded.quarantined_since_ms,
+            updated_at = excluded.updated_at
           """,
-        arguments: [Date(), conversationId]
+        arguments: [conversationId, userDID, reasonTag, sinceMs, Date()]
+      )
+    }
+  }
+
+  public func clearQuarantine(conversationId: String) throws {
+    try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
+      try db.execute(
+        sql: """
+          UPDATE mls_orchestrator_security_state
+          SET quarantine_reason = NULL,
+              quarantined_since_ms = NULL,
+              updated_at = ?
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [Date(), conversationId, userDID]
+      )
+      try db.execute(
+        sql: """
+          DELETE FROM mls_orchestrator_security_state
+          WHERE conversation_id = ? AND user_did = ?
+            AND quarantine_reason IS NULL
+            AND quarantined_since_ms IS NULL
+            AND reset_notified_at_ms IS NULL
+          """,
+        arguments: [conversationId, userDID]
       )
     }
   }
@@ -362,6 +753,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     try dbPool.write { db in
       if let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       {
         let updated = conversation.withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
@@ -374,6 +766,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     try dbPool.read { db in
       let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       return conversation?.needsRejoin ?? false
     }
@@ -383,6 +776,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     try dbPool.write { db in
       if let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       {
         let updated = conversation.withRejoinState(needsRejoin: false, rejoinRequestedAt: nil)
@@ -498,6 +892,108 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  public func storePendingMessage(conversationId: String, messageId: String) throws {
+    try requireNonEmptyIdentifier(messageId, field: "pending message id")
+    try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_pending_messages
+            (message_id, user_did, conversation_id, created_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(message_id, user_did) DO UPDATE SET
+            conversation_id = excluded.conversation_id
+          """,
+        arguments: [messageId, userDID, conversationId, Date()]
+      )
+    }
+  }
+
+  public func removePendingMessage(messageId: String) throws -> Bool {
+    try requireNonEmptyIdentifier(messageId, field: "pending message id")
+    return try dbPool.write { db in
+      try db.execute(
+        sql: """
+          DELETE FROM mls_orchestrator_pending_messages
+          WHERE message_id = ? AND user_did = ?
+          """,
+        arguments: [messageId, userDID]
+      )
+      return db.changesCount > 0
+    }
+  }
+
+  public func storeSequencerReceipt(receipt: FfiSequencerReceipt) throws {
+    let sequencerTerm = try validatedReceiptTerm(receipt)
+    try dbPool.write { db in
+      try requireOwnedConversation(receipt.convoId, in: db)
+      if let existing = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT conversation_id, epoch, sequencer_term, commit_hash,
+                 sequencer_did, issued_at, signature
+          FROM mls_orchestrator_sequencer_receipts
+          WHERE conversation_id = ? AND user_did = ? AND epoch = ?
+          """,
+        arguments: [receipt.convoId, userDID, receipt.epoch]
+      ) {
+        guard try decodeReceipt(existing) == receipt else {
+          throw OrchestratorBridgeError.Storage(
+            message: "sequencer receipt equivocation for \(receipt.convoId) epoch \(receipt.epoch)"
+          )
+        }
+        return
+      }
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_sequencer_receipts
+            (conversation_id, user_did, epoch, sequencer_term, commit_hash,
+             sequencer_did, issued_at, signature)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+        arguments: [
+          receipt.convoId, userDID, receipt.epoch, sequencerTerm,
+          receipt.commitHash, receipt.sequencerDid, receipt.issuedAt, receipt.signature,
+        ]
+      )
+    }
+  }
+
+  public func getSequencerReceipts(conversationId: String, sinceEpoch: Int32?) throws -> [FfiSequencerReceipt] {
+    if let sinceEpoch, sinceEpoch < 0 {
+      throw storageFailure("receipt epoch filter must not be negative")
+    }
+    return try dbPool.read { db in
+      try requireOwnedConversation(conversationId, in: db)
+      let rows = try Row.fetchAll(
+        db,
+        sql: """
+          SELECT conversation_id, epoch, sequencer_term, commit_hash,
+                 sequencer_did, issued_at, signature
+          FROM mls_orchestrator_sequencer_receipts
+          WHERE conversation_id = ? AND user_did = ?
+            AND (? IS NULL OR epoch >= ?)
+          ORDER BY epoch ASC, issued_at ASC
+          """,
+        arguments: [conversationId, userDID, sinceEpoch, sinceEpoch]
+      )
+      return try rows.map(decodeReceipt)
+    }
+  }
+
+  public func clearSequencerReceipts(conversationId: String) throws {
+    try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
+      try db.execute(
+        sql: """
+          DELETE FROM mls_orchestrator_sequencer_receipts
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationId, userDID]
+      )
+    }
+  }
+
   // MARK: - Sync Cursor Operations
 
   /// Sync cursors are stored in a lightweight table. Since no existing GRDB model
@@ -505,7 +1001,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   /// If the table does not exist yet (pre-migration), we create it on first access.
 
   public func getSyncCursor(userDid: String) throws -> FfiSyncCursor {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
 
     return try dbPool.read { db in
       // Table is created at init; if somehow missing, return empty cursor.
@@ -531,7 +1027,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   }
 
   public func setSyncCursor(userDid: String, cursor: FfiSyncCursor) throws {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    let normalizedDID = try requireBoundUser(userDid)
 
     try dbPool.write { db in
       ensureSyncCursorTableExists(db)
@@ -655,15 +1151,27 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       let global = try MLSRecoveryGlobalStateModel
         .filter(MLSRecoveryGlobalStateModel.Columns.currentUserDID == normalizedDID)
         .fetchOne(db)
+      let entries = try rows.map { row -> FfiPersistedRecoveryBackoff in
+        guard let failedRejoinCount = UInt32(exactly: row.failedRejoinCount) else {
+          throw storageFailure("stored recovery failure count is invalid")
+        }
+        guard row.lastAttemptAtMs >= 0,
+              row.quarantinedUntilMs.map({ $0 >= 0 }) ?? true
+        else {
+          throw storageFailure("stored recovery timestamp is invalid")
+        }
+        return FfiPersistedRecoveryBackoff(
+          conversationId: row.conversationID,
+          failedRejoinCount: failedRejoinCount,
+          lastAttemptAtMs: row.lastAttemptAtMs,
+          quarantinedUntilMs: row.quarantinedUntilMs
+        )
+      }
+      if let globalTimestamp = global?.lastGlobalRejoinAttemptAtMs, globalTimestamp < 0 {
+        throw storageFailure("stored global recovery timestamp is invalid")
+      }
       return FfiPersistedRecoveryState(
-        entries: rows.map { row in
-          FfiPersistedRecoveryBackoff(
-            conversationId: row.conversationID,
-            failedRejoinCount: UInt32(clamping: row.failedRejoinCount),
-            lastAttemptAtMs: row.lastAttemptAtMs,
-            quarantinedUntilMs: row.quarantinedUntilMs
-          )
-        },
+        entries: entries,
         lastGlobalRejoinAttemptAtMs: global?.lastGlobalRejoinAttemptAtMs
       )
     }
@@ -671,6 +1179,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   /// Write-through one conversation's rejoin-backoff snapshot.
   public func setRecoveryBackoff(entry: FfiPersistedRecoveryBackoff) throws {
+    guard entry.lastAttemptAtMs >= 0,
+          entry.quarantinedUntilMs.map({ $0 >= 0 }) ?? true
+    else {
+      throw storageFailure("recovery timestamp must not be negative")
+    }
     let model = MLSRecoveryAttemptStateModel(
       conversationID: entry.conversationId,
       currentUserDID: userDID,
@@ -701,6 +1214,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   /// Persist the global last-rejoin-attempt timestamp (epoch ms).
   public func setLastGlobalRejoinAttemptAt(atMs: Int64) throws {
+    guard atMs >= 0 else {
+      throw storageFailure("global recovery timestamp must not be negative")
+    }
     let model = MLSRecoveryGlobalStateModel(
       currentUserDID: userDID,
       lastGlobalRejoinAttemptAtMs: atMs
@@ -721,7 +1237,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   /// and storage deletes run. Idempotent — re-marking updates the group id
   /// but keeps the original intent timestamp.
   public func markPendingLocalDelete(conversationId: String, groupIdHex: String?) throws {
+    if let groupIdHex, Data(hexEncoded: groupIdHex) == nil {
+      throw storageFailure("pending deletion group id must be valid hexadecimal")
+    }
     try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
       ensurePendingLocalDeleteTableExists(db)
       try db.execute(
         sql: """
