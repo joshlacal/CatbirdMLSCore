@@ -935,6 +935,36 @@ public final class MLSAPIClient {
         confirmationTag: String? = nil,
         idempotencyKey: String? = nil
     ) async throws -> (success: Bool, newEpoch: Int) {
+        let result = try await addMembersWithReceipt(
+            convoId: convoId,
+            didList: didList,
+            commit: commit,
+            welcomeMessage: welcomeMessage,
+            groupInfo: groupInfo,
+            keyPackageHashes: keyPackageHashes,
+            confirmationTag: confirmationTag,
+            idempotencyKey: idempotencyKey
+        )
+        return (result.success, result.newEpoch)
+    }
+
+    /// Receipt-preserving variant used by the Rust orchestrator bridge.
+    /// Legacy direct callers retain the two-field wrapper above until their
+    /// Wave 2 transition gates consume receipts as well.
+    public func addMembersWithReceipt(
+        convoId: String,
+        didList: [DID],
+        commit: Data? = nil,
+        welcomeMessage: Data? = nil,
+        groupInfo: Data? = nil,
+        keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry]? = nil,
+        confirmationTag: String? = nil,
+        idempotencyKey: String? = nil
+    ) async throws -> (
+        success: Bool,
+        newEpoch: Int,
+        receipt: BlueCatbirdMlsChatCommitGroupChange.SequencerReceipt?
+    ) {
         // Generate idempotency key if not provided
         let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
         logger.debug(
@@ -960,7 +990,7 @@ public final class MLSAPIClient {
             }
 
             logger.debug("Added members to conversation: \(convoId), new epoch: \(output.newEpoch ?? 0)")
-            return (output.success, output.newEpoch ?? 0)
+            return (output.success, output.newEpoch ?? 0, output.receipt)
         } catch let error as ATProtoError<BlueCatbirdMlsChatCommitGroupChange.Error> {
             logger.error(
                 "❌ [MLSAPIClient.addMembers] Lexicon error: \(error.error.errorName) - \(error.message ?? "no details")"
@@ -2211,6 +2241,28 @@ public final class MLSAPIClient {
         confirmationTag: String? = nil,
         idempotencyKey: String? = nil
     ) async throws -> (success: Bool, newEpoch: Int) {
+        let result = try await processExternalCommitWithReceipt(
+            convoId: convoId,
+            externalCommit: externalCommit,
+            groupInfo: groupInfo,
+            confirmationTag: confirmationTag,
+            idempotencyKey: idempotencyKey
+        )
+        return (result.success, result.newEpoch)
+    }
+
+    /// Receipt-preserving variant used by the Rust orchestrator bridge.
+    public func processExternalCommitWithReceipt(
+        convoId: String,
+        externalCommit: Data,
+        groupInfo: Data? = nil,
+        confirmationTag: String? = nil,
+        idempotencyKey: String? = nil
+    ) async throws -> (
+        success: Bool,
+        newEpoch: Int,
+        receipt: BlueCatbirdMlsChatCommitGroupChange.SequencerReceipt?
+    ) {
         let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
         logger.info(
             "🌐 [MLSAPIClient.processExternalCommit] START - convoId: \(convoId), commit: \(externalCommit.count) bytes, idempotencyKey: \(idemKey)"
@@ -2242,7 +2294,7 @@ public final class MLSAPIClient {
         }
 
         logger.info("✅ [MLSAPIClient.processExternalCommit] SUCCESS - newEpoch: \(newEpoch)")
-        return (output.success, newEpoch)
+        return (output.success, newEpoch, output.receipt)
     }
 
     /// Submit a non-membership group commit (e.g. `updateMetadata`) via

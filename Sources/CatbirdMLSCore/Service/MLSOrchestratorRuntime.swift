@@ -37,9 +37,9 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil,
     config: FfiOrchestratorConfig? = nil,
     eventCallback: OrchestratorEventCallback? = nil
-  ) {
+  ) throws {
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
-    let storageAdapter = MLSOrchestratorStorageAdapter(
+    let storageAdapter = try MLSOrchestratorStorageAdapter(
       dbPool: databasePool,
       userDID: normalizedDID,
       mlsContext: mlsContext
@@ -48,6 +48,16 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       keychainManager: keychainManager,
       authorizedDeviceKeyResolver: authorizedDeviceKeyResolver
     )
+    let capabilities = SecurityStorageCapabilities(
+      version: 1,
+      resetState: true,
+      quarantine: true,
+      pendingMessageProtection: true,
+      sequencerReceipts: true,
+      recoveryBackoff: true,
+      pendingDeletion: true,
+      authorizedDeviceResolution: authorizedDeviceKeyResolver != nil
+    )
 
     self.userDID = normalizedDID
     self.mode = mode
@@ -55,11 +65,12 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     self.apiClient = apiClient
     self.credentialAdapter = credentialAdapter
     self.eventCallback = eventCallback
-    bridge = OrchestratorBridge(
+    bridge = try OrchestratorBridge(
       mlsContext: mlsContext,
       storage: storageAdapter,
       apiClient: apiClient,
       credentials: credentialAdapter,
+      capabilities: capabilities,
       config: config ?? .default
     )
     bridge.setEventCallback(callback: eventCallback)

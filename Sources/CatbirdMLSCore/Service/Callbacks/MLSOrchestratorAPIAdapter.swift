@@ -26,6 +26,54 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     self.apiClient = apiClient
   }
 
+  static func sequencerReceipt(
+    _ receipt: BlueCatbirdMlsChatCommitGroupChange.SequencerReceipt?,
+    expectedConversationId: String
+  ) throws -> FfiSequencerReceipt? {
+    guard let receipt else { return nil }
+    guard !expectedConversationId.isEmpty,
+      receipt.convoId == expectedConversationId,
+      let epoch = Int32(exactly: receipt.epoch), epoch >= 0,
+      let sequencerTerm = UInt64(exactly: receipt.sequencerTerm),
+      receipt.commitHash.data.count == 32,
+      let issuedAt = Int64(exactly: receipt.issuedAt), issuedAt >= 0,
+      receipt.signature.data.count == 64
+    else {
+      throw MLSAPIError.invalidResponse(message: "Malformed sequencer receipt")
+    }
+
+    return FfiSequencerReceipt(
+      convoId: receipt.convoId,
+      epoch: epoch,
+      sequencerTerm: sequencerTerm,
+      commitHash: receipt.commitHash.data,
+      sequencerDid: receipt.sequencerDid.description,
+      issuedAt: issuedAt,
+      signature: receipt.signature.data
+    )
+  }
+
+  static func addMembersReceipt(
+    _ receipt: BlueCatbirdMlsChatCommitGroupChange.SequencerReceipt?,
+    expectedConversationId: String
+  ) throws -> FfiSequencerReceipt? {
+    try sequencerReceipt(receipt, expectedConversationId: expectedConversationId)
+  }
+
+  static func idempotentAddMembersReceipt(
+    _ receipt: BlueCatbirdMlsChatCommitGroupChange.SequencerReceipt?,
+    expectedConversationId: String
+  ) throws -> FfiSequencerReceipt? {
+    try sequencerReceipt(receipt, expectedConversationId: expectedConversationId)
+  }
+
+  static func externalCommitReceipt(
+    _ receipt: BlueCatbirdMlsChatCommitGroupChange.SequencerReceipt?,
+    expectedConversationId: String
+  ) throws -> FfiSequencerReceipt? {
+    try sequencerReceipt(receipt, expectedConversationId: expectedConversationId)
+  }
+
   public func isAuthenticatedAs(did: String) -> Bool {
     (try? blocking { await self.apiClient.isAuthenticatedAs(did) }) ?? false
   }
@@ -81,14 +129,21 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   ) throws -> FfiAddMembersResult {
     let dids = try memberDids.map { try DID(didString: $0) }
     let result = try blocking {
-      try await self.apiClient.addMembers(
+      try await self.apiClient.addMembersWithReceipt(
         convoId: convoId,
         didList: dids,
         commit: commitData,
         welcomeMessage: welcomeData
       )
     }
-    return FfiAddMembersResult(success: result.success, newEpoch: UInt64(clamping: result.newEpoch))
+    return FfiAddMembersResult(
+      success: result.success,
+      newEpoch: UInt64(clamping: result.newEpoch),
+      receipt: try Self.addMembersReceipt(
+        result.receipt,
+        expectedConversationId: convoId
+      )
+    )
   }
 
   public func addMembersWithIdempotency(
@@ -100,7 +155,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   ) throws -> FfiAddMembersResult {
     let dids = try memberDids.map { try DID(didString: $0) }
     let result = try blocking {
-      try await self.apiClient.addMembers(
+      try await self.apiClient.addMembersWithReceipt(
         convoId: convoId,
         didList: dids,
         commit: commitData,
@@ -108,7 +163,14 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         idempotencyKey: idempotencyKey
       )
     }
-    return FfiAddMembersResult(success: result.success, newEpoch: UInt64(clamping: result.newEpoch))
+    return FfiAddMembersResult(
+      success: result.success,
+      newEpoch: UInt64(clamping: result.newEpoch),
+      receipt: try Self.idempotentAddMembersReceipt(
+        result.receipt,
+        expectedConversationId: convoId
+      )
+    )
   }
 
   public func removeMembers(convoId: String, memberDids: [String], commitData: Data) throws {
@@ -340,7 +402,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     confirmationTag: String?
   ) throws -> FfiProcessExternalCommitResult {
     let result = try blocking {
-      try await self.apiClient.processExternalCommit(
+      try await self.apiClient.processExternalCommitWithReceipt(
         convoId: convoId,
         externalCommit: commitData,
         groupInfo: groupInfo,
@@ -349,7 +411,11 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
     return FfiProcessExternalCommitResult(
       epoch: UInt64(clamping: result.newEpoch),
-      rejoinedAt: Self.iso8601Formatter.string(from: Date())
+      rejoinedAt: Self.iso8601Formatter.string(from: Date()),
+      receipt: try Self.externalCommitReceipt(
+        result.receipt,
+        expectedConversationId: convoId
+      )
     )
   }
 
