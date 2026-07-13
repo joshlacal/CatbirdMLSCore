@@ -141,7 +141,7 @@ extension MLSConversationManager {
     do {
       let context = try await MLSCoreContext.shared.getContext(for: userDid)
       let apiAdapter = MLSOrchestratorAPIAdapter(apiClient: apiClient)
-      return MLSOrchestratorRuntime(
+      return try MLSOrchestratorRuntime(
         userDID: userDid,
         mode: protocolAuthorityMode,
         mlsContext: context,
