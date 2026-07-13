@@ -3529,6 +3529,17 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func shutdown()
 
     /**
+     * Sign a server-issued device-authentication challenge with the
+     * initialized user's persistent MLS identity key.
+     *
+     * The caller cannot select an identity or access key material. The
+     * signature is bound to the user DID owned by this orchestrator's active
+     * lifecycle, and is therefore refused before initialization or after
+     * shutdown.
+     */
+    func signDeviceAuthChallenge(challenge: Data) throws -> Data
+
+    /**
      * Stage a commit without sending or merging it. Returns a plan; call
      * [`confirm_commit`](Self::confirm_commit) on DS success or
      * [`discard_pending`](Self::discard_pending) on failure.
@@ -4329,6 +4340,22 @@ open class OrchestratorBridge:
         try! rustCall {
             uniffi_catbird_mls_fn_method_orchestratorbridge_shutdown(self.uniffiClonePointer(), $0)
         }
+    }
+
+    /**
+     * Sign a server-issued device-authentication challenge with the
+     * initialized user's persistent MLS identity key.
+     *
+     * The caller cannot select an identity or access key material. The
+     * signature is bound to the user DID owned by this orchestrator's active
+     * lifecycle, and is therefore refused before initialization or after
+     * shutdown.
+     */
+    open func signDeviceAuthChallenge(challenge: Data) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_sign_device_auth_challenge(self.uniffiClonePointer(),
+                                                                                       FfiConverterData.lower(challenge), $0)
+        })
     }
 
     /**
@@ -17460,6 +17487,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_sign_device_auth_challenge() != 36742 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_stage_commit() != 32523 {
