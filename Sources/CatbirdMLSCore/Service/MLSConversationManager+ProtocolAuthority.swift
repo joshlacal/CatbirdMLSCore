@@ -1,6 +1,9 @@
 import CatbirdMLS
 import Foundation
 import GRDB
+import Synchronization
+
+private let trackedRustRuntimePostBodyTestOverride = Mutex<(@Sendable () -> Void)?>(nil)
 
 public struct MLSConversationDiagnosticsProjection: Equatable, Sendable {
   public let recoveryState: ConversationRecoveryState
@@ -42,12 +45,19 @@ public extension MLSConversationManager {
 
   func registeredDeviceInfoForPushTokenRegistration() async throws -> MLSRegisteredDeviceInfo? {
     if protocolAuthorityMode == .rustFull {
-      return try await withRustAuthoritativeRuntime(
+      let deviceInfo = try await withRustAuthoritativeRuntime(
         operation: "registeredDeviceInfoForPushTokenRegistration"
       ) { runtime in
         try runtime.ensureDeviceRegistered()
         return try runtime.currentDeviceInfo()
       }
+      if deviceInfo != nil, let userDid {
+        // Push-token lookups are benign readiness checks. Reuse or coalesce an
+        // enrollment already started by device registration; only explicit
+        // rebind/reset flows may invalidate the binding generation.
+        _ = try await bindRustDeviceAuthentication(userDid: userDid)
+      }
+      return deviceInfo
     }
 
     guard let userDid else {
@@ -127,7 +137,15 @@ public extension MLSConversationManager {
 }
 
 extension MLSConversationManager {
-  internal func buildOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
+  internal nonisolated static func setTrackedRustRuntimePostBodyTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    trackedRustRuntimePostBodyTestOverride.withLock { $0 = operation }
+  }
+
+  internal func buildOrchestratorRuntime(
+    suspendedResumeCapability: MLSClient.SuspendedResumeCapability? = nil
+  ) async -> MLSOrchestratorRuntime? {
     guard protocolAuthorityMode != .swiftLegacy else { return nil }
     guard let userDid else { return nil }
 
@@ -138,8 +156,42 @@ extension MLSConversationManager {
       return nil
     }
 
+    var acquiredContextIdentity: ObjectIdentifier?
     do {
-      let context = try await MLSCoreContext.shared.getContext(for: userDid)
+      try Task.checkCancellation()
+      let context: MlsContext
+      if let suspendedResumeCapability {
+        guard
+          MLSClient.isCurrentSuspendedResumeCapability(
+            suspendedResumeCapability,
+            for: userDid
+          )
+        else {
+          return nil
+        }
+        context = try await MLSCoreContext.shared.contextForSuspendedResume(
+          for: userDid,
+          capability: suspendedResumeCapability
+        )
+        acquiredContextIdentity = ObjectIdentifier(context)
+        try Task.checkCancellation()
+        guard
+          MLSClient.isCurrentSuspendedResumeCapability(
+            suspendedResumeCapability,
+            for: userDid
+          )
+        else {
+          if let acquiredContextIdentity {
+            _ = await MLSCoreContext.shared.removeContext(
+              for: userDid,
+              matching: acquiredContextIdentity
+            )
+          }
+          return nil
+        }
+      } else {
+        context = try await MLSCoreContext.shared.getContext(for: userDid)
+      }
       let apiAdapter = MLSOrchestratorAPIAdapter(apiClient: apiClient)
       return try MLSOrchestratorRuntime(
         userDID: userDid,
@@ -149,6 +201,12 @@ extension MLSConversationManager {
         apiClient: apiAdapter
       )
     } catch {
+      if suspendedResumeCapability != nil, let acquiredContextIdentity {
+        _ = await MLSCoreContext.shared.removeContext(
+          for: userDid,
+          matching: acquiredContextIdentity
+        )
+      }
       logger.error(
         "❌ [MLS-AUTHORITY] Failed to build Rust orchestrator runtime: \(error.localizedDescription, privacy: .public)"
       )
@@ -167,12 +225,40 @@ extension MLSConversationManager {
 
   internal func ensureOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
     guard protocolAuthorityMode != .swiftLegacy else { return nil }
-    if let orchestratorRuntime { return orchestratorRuntime }
-    guard let runtime = await buildOrchestratorRuntime() else { return nil }
+    var reservationToken: UUID?
+    while reservationToken == nil {
+      switch orchestratorRuntimeStorage.beginInitialization() {
+      case .existing(let runtime):
+        return runtime
+      case .reserved(let token):
+        reservationToken = token
+      case .wait:
+        guard !Task.isCancelled, rustRuntimeAdmissionIsAllowed(nil) else { return nil }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        continue
+      }
+    }
+    guard let reservationToken else { return nil }
+    let runtime =
+      if let orchestratorRuntimeFactory {
+        await orchestratorRuntimeFactory()
+      } else {
+        await buildOrchestratorRuntime()
+      }
+    guard let runtime else {
+      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
+      return nil
+    }
 
     do {
-      try runtime.initialize()
-      orchestratorRuntime = runtime
+      try await withTrackedRustRuntime(
+        runtime,
+        operation: "initializeOrchestratorRuntime",
+        runtimeInstallationReservationToken: reservationToken
+      ) { runtime in
+        try runtime.initialize()
+      }
+      rustStartupReconcileCompleted = false
       return runtime
     } catch {
       logger.error(
@@ -183,37 +269,96 @@ extension MLSConversationManager {
   }
 
   internal func resetOrchestratorRuntime(reason: String) {
-    guard let runtime = orchestratorRuntime else { return }
+    guard let runtime = orchestratorRuntimeStorage.take() else { return }
     logger.info("🔄 [MLS-AUTHORITY] Resetting Rust orchestrator runtime: \(reason, privacy: .public)")
     runtime.shutdown()
-    orchestratorRuntime = nil
     rustStartupReconcileCompleted = false
   }
 
   internal func invalidateOrchestratorRuntime(reason: String) {
-    guard orchestratorRuntime != nil else { return }
+    guard orchestratorRuntimeStorage.take() != nil else { return }
     logger.info("🔄 [MLS-AUTHORITY] Invalidating Rust orchestrator runtime: \(reason, privacy: .public)")
-    orchestratorRuntime = nil
     rustStartupReconcileCompleted = false
   }
 
   internal func restoreOrchestratorRuntimeAfterSuspendClose(
-    reason: String
+    reason: String,
+    suspendedResumeCapability: MLSClient.SuspendedResumeCapability
   ) async -> MLSOrchestratorRuntime? {
+    guard let userDid,
+      !Task.isCancelled,
+      MLSClient.isCurrentSuspendedResumeCapability(suspendedResumeCapability, for: userDid)
+    else {
+      return nil
+    }
+    guard case .reserved(let reservationToken) =
+      orchestratorRuntimeStorage.beginInitialization()
+    else {
+      return nil
+    }
     let runtime: MLSOrchestratorRuntime?
     if let runtimeFactory = orchestratorRuntimeResumeFactory {
       runtime = await runtimeFactory()
     } else {
-      runtime = await buildOrchestratorRuntime()
+      runtime = await buildOrchestratorRuntime(
+        suspendedResumeCapability: suspendedResumeCapability
+      )
     }
-    guard let runtime else { return nil }
+    guard let runtime else {
+      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
+      return nil
+    }
+    guard
+      !Task.isCancelled,
+      runtime.userDID == MLSStorageHelpers.normalizeDID(userDid),
+      MLSClient.isCurrentSuspendedResumeCapability(suspendedResumeCapability, for: userDid)
+    else {
+      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
+      if MLSClient.isCurrentSuspendedResumeCapability(suspendedResumeCapability, for: userDid) {
+        _ = try? MLSClient.withTrackedFFIAdmission(
+          suspendedResumeCapability: suspendedResumeCapability,
+          for: userDid
+        ) {
+          runtime.shutdown()
+        }
+      }
+      // This candidate was never installed. Without exact resume admission it must be discarded,
+      // not synchronously torn down underneath a newer suspension's quiescence boundary.
+      if let runtimeContextIdentity = runtime.mlsContextIdentity {
+        _ = await MLSCoreContext.shared.removeContext(
+          for: userDid,
+          matching: runtimeContextIdentity
+        )
+      }
+      return nil
+    }
 
     do {
-      try runtime.reattachAfterSuspend(reason: reason)
-      orchestratorRuntime = runtime
+      await orchestratorRuntimeBeforeReattachTestOverride?()
+      try Task.checkCancellation()
+      try await withTrackedRustRuntime(
+        runtime,
+        operation: "reattachOrchestratorRuntimeAfterSuspend",
+        suspendedResumeCapability: suspendedResumeCapability,
+        runtimeInstallationReservationToken: reservationToken
+      ) { runtime in
+        try runtime.reattachAfterSuspend(reason: reason)
+      }
       rustStartupReconcileCompleted = false
       return runtime
     } catch {
+      // Cancellation can arrive after the reservation was created but before tracked atomic
+      // installation begins. Release only this initializer's token before any async cleanup so
+      // waiters can reserve immediately and a newer reservation remains generation-safe.
+      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
+      // A failed or superseded candidate is intentionally never installed. Teardown bridge calls
+      // require their own exact admission; the authoritative context owner performs final close.
+      if let runtimeContextIdentity = runtime.mlsContextIdentity {
+        _ = await MLSCoreContext.shared.removeContext(
+          for: userDid,
+          matching: runtimeContextIdentity
+        )
+      }
       logger.error(
         "❌ [MLS-AUTHORITY] Failed to reattach Rust orchestrator runtime after suspend close: \(error.localizedDescription, privacy: .public)"
       )
@@ -239,13 +384,54 @@ extension MLSConversationManager {
 
   internal func withRustAuthoritativeRuntime<T>(
     operation: String,
+    suspendedResumeCapability: MLSClient.SuspendedResumeCapability? = nil,
     body: @escaping (MLSOrchestratorRuntime) throws -> T
   ) async throws -> T {
     guard protocolAuthorityMode.usesRustForDecisions else {
       throw MLSConversationError.operationFailed("Rust authority requested while mode is \(protocolAuthorityMode.rawValue)")
     }
+    guard rustRuntimeAdmissionIsAllowed(suspendedResumeCapability) else {
+      throw MLSConversationError.operationFailed(
+        "Rust authority blocked by lifecycle suspension for \(operation)"
+      )
+    }
     guard let runtime = await ensureOrchestratorRuntime() else {
       throw MLSConversationError.operationFailed("Rust orchestrator runtime unavailable for \(operation)")
+    }
+
+    return try await withTrackedRustRuntime(
+      runtime,
+      operation: operation,
+      suspendedResumeCapability: suspendedResumeCapability,
+      body: body
+    )
+  }
+
+  /// Executes a synchronous call against an already-resolved runtime while preserving
+  /// that exact runtime generation and participating in the suspension drain.
+  internal func withTrackedRustRuntime<T>(
+    _ runtime: MLSOrchestratorRuntime,
+    operation: String,
+    suspendedResumeCapability: MLSClient.SuspendedResumeCapability? = nil,
+    runtimeInstallationReservationToken: UUID? = nil,
+    body: @escaping (MLSOrchestratorRuntime) throws -> T
+  ) async throws -> T {
+    let runtimeStorage = orchestratorRuntimeStorage
+    guard protocolAuthorityMode != .swiftLegacy else {
+      if let runtimeInstallationReservationToken {
+        runtimeStorage.cancelInitialization(token: runtimeInstallationReservationToken)
+      }
+      throw MLSConversationError.operationFailed(
+        "Rust authority requested while mode is \(protocolAuthorityMode.rawValue)"
+      )
+    }
+    guard rustRuntimeAdmissionIsAllowed(suspendedResumeCapability) else {
+      if let runtimeInstallationReservationToken {
+        runtimeStorage.cancelInitialization(token: runtimeInstallationReservationToken)
+      }
+      throw MLSConversationError.operationFailed(
+        "Rust authority blocked by lifecycle suspension for \(operation)"
+      )
     }
 
     // Execute the synchronous bridge body OFF the caller's executor (main thread or
@@ -262,11 +448,52 @@ extension MLSConversationManager {
     // a genuinely escaping body, ARC owns its lifetime and there is no escape check to
     // race. The body still does not outlive this call — we await its completion before
     // returning.
-    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+    let result = try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<T, Error>) in
       Self.rustAuthorityExecutionQueue.async {
-        continuation.resume(with: Result { try body(runtime) })
+        let bridgeResult = Result {
+          if let runtimeInstallationReservationToken {
+            try MLSClient.withTrackedFFIAdmissionAndAtomicRuntimeInstall(
+              suspendedResumeCapability: suspendedResumeCapability,
+              for: runtime.userDID,
+              operation: { try body(runtime) },
+              runtime: runtime,
+              runtimeStorage: runtimeStorage,
+              reservationToken: runtimeInstallationReservationToken
+            )
+          } else {
+            try MLSClient.withTrackedFFIAdmission(
+              suspendedResumeCapability: suspendedResumeCapability,
+              for: runtime.userDID
+            ) {
+              try body(runtime)
+            }
+          }
+        }
+        trackedRustRuntimePostBodyTestOverride.withLock { $0 }?()
+        continuation.resume(with: bridgeResult)
       }
     }
+    // Admission and drain ownership are decided before and during the synchronous bridge call.
+    // Once `body` returns, a non-idempotent Rust mutation may already be committed. A suspension
+    // that begins before this awaiting task resumes must close future admissions, but must not
+    // rewrite the completed operation into a retryable failure or discard its exact result.
+    return result
+  }
+
+  private func rustRuntimeAdmissionIsAllowed(
+    _ suspendedResumeCapability: MLSClient.SuspendedResumeCapability?
+  ) -> Bool {
+    if let suspendedResumeCapability {
+      guard let userDid else { return false }
+      return MLSClient.isCurrentSuspendedResumeCapability(
+        suspendedResumeCapability,
+        for: userDid
+      )
+    }
+    return !isSuspending
+      && !MLSClient.isSuspensionInProgress
+      && !MLSCoreContext.isSuspensionInProgress
   }
 
   internal func joinOrRejoinWithRustAuthorityIfNeeded(
@@ -293,25 +520,39 @@ extension MLSConversationManager {
     swiftDecision: ConversationRecoveryState? = nil
   ) async {
     guard protocolAuthorityMode == .rustShadow else { return }
-    guard let runtime = await ensureOrchestratorRuntime() else { return }
 
-    let swiftState = await swiftRecoveryState(conversationId: conversationId, override: swiftDecision)
+    let swiftState = await swiftRecoveryState(
+      conversationId: conversationId,
+      override: swiftDecision
+    )
+    guard let runtime = await ensureOrchestratorRuntime() else { return }
     do {
-      let rustState = try runtime.conversationRecoveryState(conversationId: conversationId)
-      if rustState != swiftState {
-        runtime.recordShadowDecisionMismatch(
-          operation: operation,
-          conversationId: conversationId,
-          swiftDecision: swiftState.rawValue,
-          rustDecision: rustState.rawValue
-        )
+      try await withTrackedRustRuntime(
+        runtime,
+        operation: "mirrorRustRecoveryState.\(operation)"
+      ) { runtime in
+        do {
+          let rustState = try runtime.conversationRecoveryState(conversationId: conversationId)
+          if rustState != swiftState {
+            runtime.recordShadowDecisionMismatch(
+              operation: operation,
+              conversationId: conversationId,
+              swiftDecision: swiftState.rawValue,
+              rustDecision: rustState.rawValue
+            )
+          }
+        } catch {
+          runtime.recordShadowDecisionMismatch(
+            operation: operation,
+            conversationId: conversationId,
+            swiftDecision: swiftState.rawValue,
+            rustDecision: "error:\(String(describing: error))"
+          )
+        }
       }
     } catch {
-      runtime.recordShadowDecisionMismatch(
-        operation: operation,
-        conversationId: conversationId,
-        swiftDecision: swiftState.rawValue,
-        rustDecision: "error:\(String(describing: error))"
+      logger.error(
+        "❌ [MLS-SHADOW] Unable to admit Rust recovery mirror for \(operation, privacy: .public): \(error.localizedDescription, privacy: .public)"
       )
     }
   }

@@ -6,6 +6,14 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSFullRustRecoveryRoutingTests: XCTestCase {
+  override func tearDown() async throws {
+    // Startup-readiness coverage installs process-global device-auth authority. Revoke the exact
+    // test owner so later suspension suites do not correctly treat it as a resume obligation.
+    await MLSClient.shared.invalidateDeviceAuthBinding(for: "did:plc:testuser")
+    MLSClient.resetDeviceAuthSuspensionStateForTesting()
+    try await super.tearDown()
+  }
+
   func testRuntimeEnsureConversationReadyWrapsBridgeResult() throws {
     let bridge = RecordingStartupReconcileBridge()
     bridge.conversationReadyResult = FfiConversationReadyResult(
@@ -252,11 +260,17 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
       mode: .rustFull,
       bridge: bridge
     )
+    manager.deviceAuthBindingAPIOverride = SuccessfulDeviceAuthBindingAPI(
+      did: "did:plc:testuser",
+      deviceID: "did:mls:test-device"
+    )
+    manager.deviceAuthDeviceIDProviderOverride = { "did:mls:test-device" }
 
     let prepared = await manager.prepareRustFullStartupDeviceAndKeyPackages(
       userDid: "did:plc:testuser",
       operation: "unitStartupReadiness"
     )
+    await manager.keyPackageRefreshTask?.value
 
     XCTAssertTrue(prepared)
     XCTAssertEqual(bridge.startupReconcileCallCount, 1)
@@ -792,6 +806,10 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
     return "did:mls:test-device"
   }
 
+  override func signDeviceAuthChallenge(challenge: Data) throws -> Data {
+    Data(repeating: 0x42, count: 64)
+  }
+
   override func replenishKeyPackagesIfNeeded() throws {
     replenishKeyPackagesCallCount += 1
   }
@@ -816,6 +834,69 @@ private final class RecordingStartupReconcileBridge: OrchestratorBridge {
   }
 
   override func shutdown() {
+  }
+}
+
+private actor SuccessfulDeviceAuthBindingAPI: MLSDeviceAuthBindingAPI {
+  let did: String
+  let deviceID: String
+
+  init(did: String, deviceID: String) {
+    self.did = did
+    self.deviceID = deviceID
+  }
+
+  func snapshot() -> MLSDeviceAuthClientSnapshot {
+    MLSDeviceAuthClientSnapshot(
+      did: did,
+      authenticationMode: .gateway,
+      authenticationGeneration: 1
+    )
+  }
+
+  func commitIfSnapshotMatches(
+    _ expected: MLSDeviceAuthClientSnapshot,
+    operation: @Sendable () -> Bool
+  ) -> Bool {
+    guard snapshot() == expected else { return false }
+    return operation()
+  }
+
+  func begin(deviceID: String) throws -> MLSDeviceAuthBindingChallenge {
+    MLSDeviceAuthBindingChallenge(
+      challengeID: "unit-test-challenge",
+      challenge: Data([0x01, 0x02, 0x03]),
+      expiresAt: Date().addingTimeInterval(60),
+      bindingVersion: 1
+    )
+  }
+
+  func begin(
+    deviceID: String,
+    matching expected: MLSDeviceAuthClientSnapshot
+  ) throws -> MLSDeviceAuthBindingChallenge {
+    guard snapshot() == expected else { throw MLSDeviceAuthBindingError.sessionChanged }
+    return try begin(deviceID: deviceID)
+  }
+
+  func complete(
+    challengeID: String,
+    signature: Data
+  ) throws -> MLSDeviceAuthBindingCompletion? {
+    MLSDeviceAuthBindingCompletion(
+      deviceID: deviceID,
+      boundAt: Date(),
+      bindingVersion: 1
+    )
+  }
+
+  func complete(
+    challengeID: String,
+    signature: Data,
+    matching expected: MLSDeviceAuthClientSnapshot
+  ) throws -> MLSDeviceAuthBindingCompletion? {
+    guard snapshot() == expected else { throw MLSDeviceAuthBindingError.sessionChanged }
+    return try complete(challengeID: challengeID, signature: signature)
   }
 }
 

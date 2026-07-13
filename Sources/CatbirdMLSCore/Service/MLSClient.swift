@@ -17,6 +17,83 @@ public actor MLSClient {
 
   /// MLSClient delegates UniFFI `MlsContext` ownership to `MLSCoreContext`.
   /// Keep only suspension flags here so existing lifecycle callers still block sender-side FFI work.
+  private struct DeviceAuthEnrollmentHandle: @unchecked Sendable {
+    let token: UUID
+    let task: Task<MLSDeviceAuthBindingStatus, Error>
+  }
+
+  internal struct SuspendedResumeCapability: Sendable {
+    fileprivate let token: UUID
+    fileprivate let normalizedDID: String
+    fileprivate let suspensionGeneration: UInt64
+  }
+
+  internal struct SuspendedResumeDrainSnapshot: Sendable {
+    fileprivate let suspensionGeneration: UInt64
+    fileprivate let suspensionSignalSerial: UInt64
+  }
+
+  internal struct SuspensionAbandonmentCapability: Sendable {
+    fileprivate let normalizedDID: String
+    fileprivate let ownerToken: UUID
+    fileprivate let suspensionGeneration: UInt64
+    fileprivate let suspensionSignalSerial: UInt64
+  }
+
+  internal struct ShutdownQuiescenceLease: Sendable {
+    fileprivate let token: UUID
+    fileprivate let abandonmentCapability: SuspensionAbandonmentCapability?
+    fileprivate let noUserCapability: NoUserSuspendedResumeCapability?
+  }
+
+  internal struct NoUserSuspendedResumeCapability: Sendable {
+    fileprivate let ownerToken: UUID
+    fileprivate let suspensionGeneration: UInt64
+    fileprivate let suspensionSignalSerial: UInt64
+  }
+
+  private struct SuspendedResumeCapabilityHandle: Sendable {
+    let token: UUID
+    let normalizedDID: String
+    let suspensionGeneration: UInt64
+  }
+
+  private struct NoUserSuspensionOwner: Equatable, Sendable {
+    let token: UUID
+    let suspensionGeneration: UInt64
+    let suspensionSignalSerial: UInt64
+  }
+
+  private struct DeviceAuthBindingProviderIdentity: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+      case production
+      case override
+    }
+
+    let kind: Kind
+    let objectIdentifier: ObjectIdentifier
+    let mlsServiceDID: String?
+    let suspensionGeneration: UInt64
+  }
+
+  private struct CompletedDeviceAuthBindingReceipt: Equatable, @unchecked Sendable {
+    enum Evidence: Equatable, @unchecked Sendable {
+      case validated(
+        enrollmentToken: UUID,
+        bindingGeneration: UInt64,
+        providerIdentity: DeviceAuthBindingProviderIdentity,
+        status: MLSDeviceAuthBindingStatus,
+        clientSnapshot: MLSDeviceAuthClientSnapshot
+      )
+      case synthetic
+    }
+
+    let normalizedDID: String
+    let suspensionGeneration: UInt64
+    let suspendedResumeCapabilityToken: UUID?
+    let evidence: Evidence
+  }
+
   private struct EmergencyState: @unchecked Sendable {
     var cacheInvalidated = false
     var suspensionInProgress = false
@@ -27,9 +104,59 @@ public actor MLSClient {
     /// suspension flag is set no new operation can be admitted, so
     /// `drainInFlightFFIOperations` observing 0 means quiescence.
     var inFlightFFIOperations = 0
+    /// Exclusive synchronous lease held while Rust performs suspend preparation.
+    /// It is acquired only at quiescence and blocks every normal or scoped-resume admission.
+    var suspensionQuiescenceLeaseToken: UUID?
+    var deviceAuthSuspensionGeneration: UInt64 = 0
+    var deviceAuthEnrollmentTasks: [String: DeviceAuthEnrollmentHandle] = [:]
+    var activeDeviceAuthUsers: Set<String> = []
+    var pendingDeviceAuthRebindUsers: Set<String> = []
+    var completedDeviceAuthBindingReceipts: [String: CompletedDeviceAuthBindingReceipt] = [:]
+    var syntheticCompletedDeviceAuthRebinds: Set<String> = []
+    var deviceAuthUsersAtSuspensionTransition: Set<String> = []
+    var suspendedResumeCapability: SuspendedResumeCapabilityHandle?
+    var suspensionSignalSerial: UInt64 = 0
+    var suspensionAbandonmentOwner: (normalizedDID: String, token: UUID)?
+    var noUserSuspensionOwner: NoUserSuspensionOwner?
   }
 
   private static let emergencyState = Mutex(EmergencyState())
+  private static let legacyGateResumeAfterStateLockTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
+  private static let legacyClearAfterCoreClearTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
+  private static let deviceAuthAfterFinalValidationTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
+  private static let noUserResumeAfterCoreClearTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
+
+  internal nonisolated static func setLegacyGateResumeAfterStateLockTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    legacyGateResumeAfterStateLockTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setLegacyClearAfterCoreClearTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    legacyClearAfterCoreClearTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setDeviceAuthAfterFinalValidationTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    deviceAuthAfterFinalValidationTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setNoUserResumeAfterCoreClearTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    noUserResumeAfterCoreClearTestOverride.withLock { $0 = operation }
+  }
 
   internal nonisolated static func localKeyPackageHashesToEvict(
     localHashes: [String],
@@ -122,15 +249,151 @@ public actor MLSClient {
     emergencyState.withLock { $0.suspensionInProgress }
   }
 
+  /// Performs the single synchronous device-auth transition into suspension.
+  /// Repeated signals are idempotent unless an in-flight resume capability must be revoked as a
+  /// newer suspension generation. Callers must cancel the returned enrollment tasks immediately.
+  private nonisolated static func transitionDeviceAuthToSuspended(
+    invalidateCache: Bool,
+    abandonmentOwner: (normalizedDID: String, token: UUID)? = nil,
+    noUserOwnerToken: UUID? = nil,
+    preserveExistingTransition: Bool = false
+  ) -> [Task<MLSDeviceAuthBindingStatus, Error>] {
+    emergencyState.withLock { state in
+      if invalidateCache {
+        state.cacheInvalidated = true
+      }
+      if preserveExistingTransition, state.suspensionInProgress {
+        return []
+      }
+      state.suspensionSignalSerial &+= 1
+      guard !state.suspensionInProgress || state.suspendedResumeCapability != nil else {
+        if state.suspensionAbandonmentOwner == nil, let abandonmentOwner {
+          state.suspensionAbandonmentOwner = abandonmentOwner
+          state.noUserSuspensionOwner = nil
+        } else if state.suspensionAbandonmentOwner == nil, let noUserOwnerToken {
+          state.noUserSuspensionOwner = NoUserSuspensionOwner(
+            token: noUserOwnerToken,
+            suspensionGeneration: state.deviceAuthSuspensionGeneration,
+            suspensionSignalSerial: state.suspensionSignalSerial
+          )
+        } else if state.suspensionAbandonmentOwner == nil {
+          state.noUserSuspensionOwner = nil
+        }
+        return []
+      }
+
+      state.suspensionAbandonmentOwner = abandonmentOwner
+      state.suspensionInProgress = true
+      state.deviceAuthSuspensionGeneration &+= 1
+      state.noUserSuspensionOwner =
+        if abandonmentOwner == nil, let noUserOwnerToken {
+          NoUserSuspensionOwner(
+            token: noUserOwnerToken,
+            suspensionGeneration: state.deviceAuthSuspensionGeneration,
+            suspensionSignalSerial: state.suspensionSignalSerial
+          )
+        } else {
+          nil
+        }
+      state.deviceAuthUsersAtSuspensionTransition = state.activeDeviceAuthUsers
+        .union(state.pendingDeviceAuthRebindUsers)
+      state.suspendedResumeCapability = nil
+      let tasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
+      state.deviceAuthEnrollmentTasks.removeAll()
+      return tasks
+    }
+  }
+
   /// Set suspension flag (idempotent). Call synchronously when scenePhase becomes inactive/background.
   public nonisolated static func markSuspensionInProgress(reason: String = "unknown") {
-    emergencyState.withLock { $0.suspensionInProgress = true }
+    let enrollmentTasks = transitionDeviceAuthToSuspended(invalidateCache: false)
+    for task in enrollmentTasks {
+      task.cancel()
+    }
     MLSCoreContext.markSuspensionInProgress()
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
       details: "MLSClient markSuspensionInProgress: \(reason)",
       process: "app"
     )
+  }
+
+  internal nonisolated static func markSuspensionInProgress(
+    reason: String,
+    noUserOwnerToken: UUID
+  ) {
+    let enrollmentTasks = transitionDeviceAuthToSuspended(
+      invalidateCache: false,
+      noUserOwnerToken: noUserOwnerToken
+    )
+    for task in enrollmentTasks { task.cancel() }
+    MLSCoreContext.markSuspensionInProgress()
+    MLSSuspensionFlightRecorder.shared.record(
+      .suspensionPrepare,
+      details: "MLSClient no-user owner-bound markSuspensionInProgress: \(reason)",
+      process: "app"
+    )
+  }
+
+  /// Closes ordinary admission for shutdown without superseding an exact suspension transition
+  /// that the caller may already be authorized to abandon after teardown.
+  internal nonisolated static func markShutdownInProgress(
+    reason: String,
+    abandonmentOwnerDID: String?,
+    abandonmentOwnerToken: UUID
+  ) {
+    let normalizedDID = abandonmentOwnerDID?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let enrollmentTasks = transitionDeviceAuthToSuspended(
+      invalidateCache: false,
+      abandonmentOwner: normalizedDID.flatMap {
+        $0.isEmpty ? nil : ($0, abandonmentOwnerToken)
+      },
+      noUserOwnerToken: normalizedDID == nil || normalizedDID?.isEmpty == true
+        ? abandonmentOwnerToken : nil,
+      preserveExistingTransition: true
+    )
+    for task in enrollmentTasks { task.cancel() }
+    MLSCoreContext.markSuspensionInProgress()
+    MLSSuspensionFlightRecorder.shared.record(
+      .suspensionPrepare,
+      details: "MLSClient owner-preserving shutdown gate: \(reason)",
+      process: "app"
+    )
+  }
+
+  internal nonisolated static func markSuspensionInProgress(
+    reason: String,
+    abandonmentOwnerDID: String,
+    abandonmentOwnerToken: UUID
+  ) {
+    let normalizedDID = abandonmentOwnerDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedDID.isEmpty else {
+      markSuspensionInProgress(reason: reason)
+      return
+    }
+    let enrollmentTasks = transitionDeviceAuthToSuspended(
+      invalidateCache: false,
+      abandonmentOwner: (normalizedDID, abandonmentOwnerToken)
+    )
+    for task in enrollmentTasks { task.cancel() }
+    MLSCoreContext.markSuspensionInProgress()
+    MLSSuspensionFlightRecorder.shared.record(
+      .suspensionPrepare,
+      details: "MLSClient owner-bound markSuspensionInProgress: \(reason)",
+      process: "app"
+    )
+  }
+
+  /// Reads the immutable authority snapshot captured by the most recent false-to-true suspension
+  /// transition. Cleanup after that transition cannot erase the manager's obligation to rebind.
+  internal nonisolated static func deviceAuthBindingWasActiveAtSuspensionTransition(
+    for userDID: String
+  ) -> Bool {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock {
+      $0.deviceAuthUsersAtSuspensionTransition.contains(normalizedDID)
+    }
   }
 
   /// Fire sqlite3_interrupt() on all shared MLS contexts WITHOUT closing them.
@@ -143,22 +406,848 @@ public actor MLSClient {
 
   /// Clear suspension flag (idempotent). Call when the app returns to foreground, or when BGTasks
   /// need to run MLS work while the app is backgrounded.
-  public nonisolated static func clearSuspensionFlag(reason: String = "unknown") {
-    emergencyState.withLock { $0.suspensionInProgress = false }
-    MLSCoreContext.clearSuspensionFlag()
+  @discardableResult
+  public nonisolated static func clearSuspensionFlag(reason: String = "unknown") -> Bool {
+    let signalSerial = emergencyState.withLock { state -> UInt64? in
+      guard state.deviceAuthUsersAtSuspensionTransition.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.suspendedResumeCapability == nil,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner == nil
+      else {
+        return nil
+      }
+      return state.suspensionSignalSerial
+    }
+    let cleared: Bool
+    if let signalSerial {
+      MLSCoreContext.clearSuspensionFlag()
+      legacyClearAfterCoreClearTestOverride.withLock { $0 }?()
+      cleared = emergencyState.withLock { state in
+        guard state.suspensionSignalSerial == signalSerial,
+          state.deviceAuthUsersAtSuspensionTransition.isEmpty,
+          state.pendingDeviceAuthRebindUsers.isEmpty,
+          state.suspendedResumeCapability == nil,
+          state.suspensionQuiescenceLeaseToken == nil,
+          state.suspensionAbandonmentOwner == nil,
+          state.noUserSuspensionOwner == nil
+        else {
+          return false
+        }
+        state.suspensionInProgress = false
+        return true
+      }
+      if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    } else {
+      // Foreground callers historically clear Core before MLSClient. Restore the global Core gate
+      // synchronously while a security rebind is still owed or actively using its scoped permit.
+      MLSCoreContext.markSuspensionInProgress()
+      cleared = false
+    }
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
-      details: "MLSClient clearSuspensionFlag: \(reason)",
+      details: "MLSClient clearSuspensionFlag: \(reason), cleared=\(cleared)",
       process: "app"
     )
+    return cleared
+  }
+
+  /// Captures the exact closed transition owned by a suspended account manager. The capability
+  /// can only be consumed after that manager has completed a safe shutdown for the same DID.
+  internal nonisolated static func claimSuspensionAbandonmentOwnership(
+    for userDID: String,
+    ownerToken: UUID
+  ) -> SuspensionAbandonmentCapability? {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedDID.isEmpty else { return nil }
+    return emergencyState.withLock { state -> SuspensionAbandonmentCapability? in
+      guard state.suspensionInProgress,
+        state.suspensionAbandonmentOwner == nil
+          || (state.suspensionAbandonmentOwner?.normalizedDID == normalizedDID
+            && state.suspensionAbandonmentOwner?.token == ownerToken)
+      else {
+        return nil
+      }
+      state.suspensionAbandonmentOwner = (normalizedDID, ownerToken)
+      return SuspensionAbandonmentCapability(
+        normalizedDID: normalizedDID,
+        ownerToken: ownerToken,
+        suspensionGeneration: state.deviceAuthSuspensionGeneration,
+        suspensionSignalSerial: state.suspensionSignalSerial
+      )
+    }
+  }
+
+  internal nonisolated static func ownedSuspensionAbandonmentCapability(
+    for userDID: String,
+    ownerToken: UUID
+  ) -> SuspensionAbandonmentCapability? {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedDID.isEmpty else { return nil }
+    return emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionAbandonmentOwner?.normalizedDID == normalizedDID,
+        state.suspensionAbandonmentOwner?.token == ownerToken
+      else {
+        return nil
+      }
+      return SuspensionAbandonmentCapability(
+        normalizedDID: normalizedDID,
+        ownerToken: ownerToken,
+        suspensionGeneration: state.deviceAuthSuspensionGeneration,
+        suspensionSignalSerial: state.suspensionSignalSerial
+      )
+    }
+  }
+
+  internal nonisolated static func ownedNoUserSuspendedResumeCapability(
+    ownerToken: UUID,
+    matching drainSnapshot: SuspendedResumeDrainSnapshot? = nil
+  ) -> NoUserSuspendedResumeCapability? {
+    emergencyState.withLock { state in
+      let drainSnapshotMatches =
+        drainSnapshot.map {
+          $0.suspensionGeneration == state.deviceAuthSuspensionGeneration
+            && $0.suspensionSignalSerial == state.suspensionSignalSerial
+        } ?? true
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.inFlightFFIOperations == 0,
+        drainSnapshotMatches,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner?.token == ownerToken,
+        state.noUserSuspensionOwner?.suspensionGeneration
+          == state.deviceAuthSuspensionGeneration,
+        state.noUserSuspensionOwner?.suspensionSignalSerial == state.suspensionSignalSerial
+      else {
+        return nil
+      }
+      return NoUserSuspendedResumeCapability(
+        ownerToken: ownerToken,
+        suspensionGeneration: state.noUserSuspensionOwner!.suspensionGeneration,
+        suspensionSignalSerial: state.noUserSuspensionOwner!.suspensionSignalSerial
+      )
+    }
+  }
+
+  /// Releases only the exact context-free suspension transition owned by a manager that never
+  /// had an authenticated user. Any account-bound signal or remaining MLS authority keeps both
+  /// global gates closed.
+  internal static func finishNoUserSuspendedResumeCapability(
+    _ capability: NoUserSuspendedResumeCapability
+  ) async -> Bool {
+    let mayClearCore = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner
+          == NoUserSuspensionOwner(
+            token: capability.ownerToken,
+            suspensionGeneration: capability.suspensionGeneration,
+            suspensionSignalSerial: capability.suspensionSignalSerial
+          ),
+        state.suspendedResumeCapability == nil,
+        state.inFlightFFIOperations == 0,
+        state.deviceAuthEnrollmentTasks.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.completedDeviceAuthBindingReceipts.isEmpty,
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty
+      else {
+        return false
+      }
+      return true
+    }
+    guard mayClearCore,
+      await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts()
+    else {
+      MLSCoreContext.markSuspensionInProgress()
+      return false
+    }
+
+    noUserResumeAfterCoreClearTestOverride.withLock { $0 }?()
+
+    let cleared = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner
+          == NoUserSuspensionOwner(
+            token: capability.ownerToken,
+            suspensionGeneration: capability.suspensionGeneration,
+            suspensionSignalSerial: capability.suspensionSignalSerial
+          ),
+        state.suspendedResumeCapability == nil,
+        state.inFlightFFIOperations == 0,
+        state.deviceAuthEnrollmentTasks.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.completedDeviceAuthBindingReceipts.isEmpty,
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty
+      else {
+        return false
+      }
+      state.noUserSuspensionOwner = nil
+      state.suspensionInProgress = false
+      return true
+    }
+    if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    return cleared
+  }
+
+  /// Releases an ownerless suspension only for the exact transition captured by the manager that
+  /// has just shut down. Any newer signal or any remaining authority keeps both global gates shut.
+  internal static func abandonSuspensionAfterSafeShutdown(
+    _ shutdownLease: ShutdownQuiescenceLease
+  ) async -> Bool {
+    guard let capability = shutdownLease.abandonmentCapability else { return false }
+    let mayClearCore = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == shutdownLease.token,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner?.normalizedDID == capability.normalizedDID,
+        state.suspensionAbandonmentOwner?.token == capability.ownerToken,
+        state.suspendedResumeCapability == nil,
+        state.inFlightFFIOperations == 0,
+        state.deviceAuthEnrollmentTasks.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.completedDeviceAuthBindingReceipts.isEmpty,
+        state.deviceAuthUsersAtSuspensionTransition
+          .subtracting([capability.normalizedDID]).isEmpty
+      else {
+        return false
+      }
+      return true
+    }
+    guard mayClearCore,
+      await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts()
+    else {
+      MLSCoreContext.markSuspensionInProgress()
+      return false
+    }
+
+    let cleared = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == shutdownLease.token,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner?.normalizedDID == capability.normalizedDID,
+        state.suspensionAbandonmentOwner?.token == capability.ownerToken,
+        state.suspendedResumeCapability == nil,
+        state.inFlightFFIOperations == 0,
+        state.deviceAuthEnrollmentTasks.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.completedDeviceAuthBindingReceipts.isEmpty,
+        state.deviceAuthUsersAtSuspensionTransition
+          .subtracting([capability.normalizedDID]).isEmpty
+      else {
+        return false
+      }
+      state.deviceAuthUsersAtSuspensionTransition.remove(capability.normalizedDID)
+      state.suspensionAbandonmentOwner = nil
+      state.noUserSuspensionOwner = nil
+      state.suspensionQuiescenceLeaseToken = nil
+      state.suspensionInProgress = false
+      return true
+    }
+    if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    return cleared
+  }
+
+  /// Consumes only the exact context-free owner bound into a live shutdown lease. The lease keeps
+  /// every admission closed across teardown and Core clearing; both sides of that await revalidate
+  /// the owner token, generation, signal serial, and absence of all MLS authority.
+  internal static func abandonNoUserSuspensionAfterSafeShutdown(
+    _ shutdownLease: ShutdownQuiescenceLease
+  ) async -> Bool {
+    guard let capability = shutdownLease.noUserCapability else { return false }
+    let mayClearCore = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == shutdownLease.token,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner
+          == NoUserSuspensionOwner(
+            token: capability.ownerToken,
+            suspensionGeneration: capability.suspensionGeneration,
+            suspensionSignalSerial: capability.suspensionSignalSerial
+          ),
+        state.suspendedResumeCapability == nil,
+        state.inFlightFFIOperations == 0,
+        state.deviceAuthEnrollmentTasks.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.completedDeviceAuthBindingReceipts.isEmpty,
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty
+      else {
+        return false
+      }
+      return true
+    }
+    guard mayClearCore,
+      await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts()
+    else {
+      MLSCoreContext.markSuspensionInProgress()
+      return false
+    }
+
+    noUserResumeAfterCoreClearTestOverride.withLock { $0 }?()
+
+    let cleared = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == shutdownLease.token,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner
+          == NoUserSuspensionOwner(
+            token: capability.ownerToken,
+            suspensionGeneration: capability.suspensionGeneration,
+            suspensionSignalSerial: capability.suspensionSignalSerial
+          ),
+        state.suspendedResumeCapability == nil,
+        state.inFlightFFIOperations == 0,
+        state.deviceAuthEnrollmentTasks.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty,
+        state.completedDeviceAuthBindingReceipts.isEmpty,
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty
+      else {
+        return false
+      }
+      state.noUserSuspensionOwner = nil
+      state.suspensionQuiescenceLeaseToken = nil
+      state.suspensionInProgress = false
+      return true
+    }
+    if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    return cleared
+  }
+
+  internal nonisolated static func resetDeviceAuthSuspensionStateForTesting() {
+    emergencyState.withLock { state in
+      state.suspensionInProgress = false
+      state.suspendedResumeCapability = nil
+      state.suspensionQuiescenceLeaseToken = nil
+      state.deviceAuthUsersAtSuspensionTransition.removeAll()
+      state.pendingDeviceAuthRebindUsers.removeAll()
+      state.suspensionAbandonmentOwner = nil
+      state.noUserSuspensionOwner = nil
+    }
+    MLSCoreContext.clearSuspensionFlag()
+  }
+
+  /// Reproduces the pre-hardening legacy state where both global gates were opened while an exact
+  /// lifecycle owner remained recorded. Tests use this only to verify owner-preserving reclosure.
+  internal nonisolated static func simulateLegacyGateClearPreservingOwnerForTesting() {
+    emergencyState.withLock { $0.suspensionInProgress = false }
+    MLSCoreContext.clearSuspensionFlag()
+  }
+
+  private nonisolated static var deviceAuthSuspensionGeneration: UInt64 {
+    emergencyState.withLock { $0.deviceAuthSuspensionGeneration }
+  }
+
+  internal nonisolated static func captureSuspendedResumeDrainSnapshot()
+    -> SuspendedResumeDrainSnapshot?
+  {
+    emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.suspendedResumeCapability == nil
+      else {
+        return nil
+      }
+      return SuspendedResumeDrainSnapshot(
+        suspensionGeneration: state.deviceAuthSuspensionGeneration,
+        suspensionSignalSerial: state.suspensionSignalSerial
+      )
+    }
+  }
+
+  internal nonisolated static func beginSuspendedResumeCapability(
+    for userDID: String,
+    ownerToken: UUID? = nil,
+    matching drainSnapshot: SuspendedResumeDrainSnapshot? = nil
+  ) -> SuspendedResumeCapability? {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedDID.isEmpty else { return nil }
+    return emergencyState.withLock { state in
+      let drainSnapshotMatches =
+        drainSnapshot.map {
+          $0.suspensionGeneration == state.deviceAuthSuspensionGeneration
+            && $0.suspensionSignalSerial == state.suspensionSignalSerial
+        } ?? true
+      let exactLifecycleOwnerMatches =
+        ownerToken.map {
+          state.suspensionAbandonmentOwner?.normalizedDID == normalizedDID
+            && state.suspensionAbandonmentOwner?.token == $0
+        } ?? false
+      let resumeOwnerIsEligible: Bool
+      if state.noUserSuspensionOwner != nil {
+        resumeOwnerIsEligible = false
+      } else if state.suspensionAbandonmentOwner != nil {
+        resumeOwnerIsEligible = exactLifecycleOwnerMatches
+      } else {
+        resumeOwnerIsEligible =
+          state.deviceAuthUsersAtSuspensionTransition.isEmpty
+          || state.deviceAuthUsersAtSuspensionTransition.contains(normalizedDID)
+      }
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.inFlightFFIOperations == 0,
+        drainSnapshotMatches,
+        state.suspendedResumeCapability == nil,
+        resumeOwnerIsEligible
+      else {
+        return nil
+      }
+      let permit = SuspendedResumeCapability(
+        token: UUID(),
+        normalizedDID: normalizedDID,
+        suspensionGeneration: state.deviceAuthSuspensionGeneration
+      )
+      state.suspendedResumeCapability = SuspendedResumeCapabilityHandle(
+        token: permit.token,
+        normalizedDID: normalizedDID,
+        suspensionGeneration: permit.suspensionGeneration
+      )
+      return permit
+    }
+  }
+
+  /// Re-establishes the closed-gate resume transaction after a compatibility caller opened both
+  /// global gates without touching the manager's local suspension state. This path is available
+  /// only when no device-auth authority exists or remains owed from the prior transition.
+  internal nonisolated static func beginSuspendedResumeCapabilityAfterLegacyGateClear(
+    for userDID: String
+  ) -> SuspendedResumeCapability? {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedDID.isEmpty else { return nil }
+
+    // Re-close MLSClient admission and establish the exact resume authority in one lock. Core
+    // closes immediately afterward, and the authority is not returned until both gates are
+    // closed. A concurrent compatibility clear therefore cannot create an FFI admission window.
+    let transition = emergencyState.withLock {
+      state -> (
+        permit: SuspendedResumeCapability?,
+        enrollmentTasks: [Task<MLSDeviceAuthBindingStatus, Error>]
+      )? in
+      guard !state.suspensionInProgress else {
+        return nil
+      }
+      if let userOwner = state.suspensionAbandonmentOwner {
+        state.suspensionSignalSerial &+= 1
+        state.deviceAuthSuspensionGeneration &+= 1
+        state.suspensionInProgress = true
+        state.suspensionAbandonmentOwner = userOwner
+        state.noUserSuspensionOwner = nil
+        state.deviceAuthUsersAtSuspensionTransition = state.activeDeviceAuthUsers
+          .union(state.pendingDeviceAuthRebindUsers)
+        state.suspendedResumeCapability = nil
+        let enrollmentTasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
+        state.deviceAuthEnrollmentTasks.removeAll()
+        return (nil, enrollmentTasks)
+      }
+      if let noUserOwner = state.noUserSuspensionOwner {
+        state.suspensionSignalSerial &+= 1
+        state.deviceAuthSuspensionGeneration &+= 1
+        state.suspensionInProgress = true
+        state.suspensionAbandonmentOwner = nil
+        state.noUserSuspensionOwner = NoUserSuspensionOwner(
+          token: noUserOwner.token,
+          suspensionGeneration: state.deviceAuthSuspensionGeneration,
+          suspensionSignalSerial: state.suspensionSignalSerial
+        )
+        state.deviceAuthUsersAtSuspensionTransition = state.activeDeviceAuthUsers
+          .union(state.pendingDeviceAuthRebindUsers)
+        state.suspendedResumeCapability = nil
+        let enrollmentTasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
+        state.deviceAuthEnrollmentTasks.removeAll()
+        return (nil, enrollmentTasks)
+      }
+      guard state.suspensionQuiescenceLeaseToken == nil,
+        state.inFlightFFIOperations == 0,
+        state.suspendedResumeCapability == nil
+      else {
+        return nil
+      }
+
+      state.suspensionSignalSerial &+= 1
+      state.suspensionInProgress = true
+      state.deviceAuthSuspensionGeneration &+= 1
+      let enrollmentTasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
+      state.deviceAuthEnrollmentTasks.removeAll()
+      guard state.deviceAuthUsersAtSuspensionTransition.isEmpty,
+        state.activeDeviceAuthUsers.isEmpty,
+        state.pendingDeviceAuthRebindUsers.isEmpty
+      else {
+        state.deviceAuthUsersAtSuspensionTransition.formUnion(
+          state.activeDeviceAuthUsers.union(state.pendingDeviceAuthRebindUsers)
+        )
+        return (nil, enrollmentTasks)
+      }
+      let permit = SuspendedResumeCapability(
+        token: UUID(),
+        normalizedDID: normalizedDID,
+        suspensionGeneration: state.deviceAuthSuspensionGeneration
+      )
+      state.suspendedResumeCapability = SuspendedResumeCapabilityHandle(
+        token: permit.token,
+        normalizedDID: normalizedDID,
+        suspensionGeneration: permit.suspensionGeneration
+      )
+      return (permit, enrollmentTasks)
+    }
+    legacyGateResumeAfterStateLockTestOverride.withLock { $0 }?()
+    MLSCoreContext.markSuspensionInProgress()
+    guard let (permit, enrollmentTasks) = transition else { return nil }
+    for task in enrollmentTasks {
+      task.cancel()
+    }
+    guard let permit else { return nil }
+    MLSSuspensionFlightRecorder.shared.record(
+      .suspensionPrepare,
+      details: "MLSClient restored resume transaction after legacy gate clear",
+      process: "app"
+    )
+    return permit
+  }
+
+  internal nonisolated static func cancelSuspendedResumeCapability(
+    _ permit: SuspendedResumeCapability
+  ) {
+    emergencyState.withLock { state in
+      guard state.suspendedResumeCapability?.token == permit.token else { return }
+      state.suspendedResumeCapability = nil
+    }
+  }
+
+  /// Reads the transition authority for the exact still-current resume generation. A revoked or
+  /// superseded capability returns `nil` so callers cannot use a stale snapshot to release gates.
+  internal nonisolated static func deviceAuthBindingWasActiveAtSuspensionTransition(
+    for userDID: String,
+    capability: SuspendedResumeCapability
+  ) -> Bool? {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        capability.normalizedDID == normalizedDID,
+        state.suspendedResumeCapability?.token == capability.token
+      else {
+        return nil
+      }
+      return state.deviceAuthUsersAtSuspensionTransition.contains(normalizedDID)
+    }
+  }
+
+  private nonisolated static func consumeSuspendedResumeCapability(
+    _ permit: SuspendedResumeCapability,
+    expectedReceipt: CompletedDeviceAuthBindingReceipt?
+  ) -> Bool {
+    emergencyState.withLock { state in
+      let requiresReboundDeviceAuth =
+        state.deviceAuthUsersAtSuspensionTransition.contains(permit.normalizedDID)
+      let completedReceipt = state.completedDeviceAuthBindingReceipts[permit.normalizedDID]
+      let receiptMatchesPermit =
+        completedReceipt?.normalizedDID == permit.normalizedDID
+        && completedReceipt?.suspensionGeneration == permit.suspensionGeneration
+        && completedReceipt?.suspendedResumeCapabilityToken == permit.token
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.deviceAuthSuspensionGeneration == permit.suspensionGeneration,
+        state.suspendedResumeCapability?.token == permit.token,
+        completedReceipt == expectedReceipt,
+        state.deviceAuthUsersAtSuspensionTransition.subtracting([permit.normalizedDID]).isEmpty,
+        !requiresReboundDeviceAuth || receiptMatchesPermit
+      else {
+        return false
+      }
+      state.suspendedResumeCapability = nil
+      state.suspensionInProgress = false
+      state.suspensionAbandonmentOwner = nil
+      state.noUserSuspensionOwner = nil
+      state.deviceAuthUsersAtSuspensionTransition.remove(permit.normalizedDID)
+      state.completedDeviceAuthBindingReceipts.removeValue(forKey: permit.normalizedDID)
+      if state.syntheticCompletedDeviceAuthRebinds.remove(permit.normalizedDID) != nil {
+        state.activeDeviceAuthUsers.remove(permit.normalizedDID)
+      }
+      return true
+    }
+  }
+
+  /// Revalidates the exact installed provider continuity, then consumes the suspension receipt
+  /// inside the provider's serialized exact-snapshot callback. Authentication mutation either
+  /// wins before callback admission or waits until after the emergency-state CAS.
+  internal func finishSuspendedResumeCapability(
+    _ permit: SuspendedResumeCapability
+  ) async -> Bool {
+    let currentReceipt = Self.emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.deviceAuthSuspensionGeneration == permit.suspensionGeneration,
+        state.suspendedResumeCapability?.token == permit.token
+      else {
+        return nil as CompletedDeviceAuthBindingReceipt?
+      }
+      return state.completedDeviceAuthBindingReceipts[permit.normalizedDID]
+    }
+
+    guard let currentReceipt else {
+      return Self.consumeSuspendedResumeCapability(permit, expectedReceipt: nil)
+    }
+    switch currentReceipt.evidence {
+    case .synthetic:
+      return Self.consumeSuspendedResumeCapability(
+        permit,
+        expectedReceipt: currentReceipt
+      )
+
+    case .validated(
+      _,
+      let bindingGeneration,
+      let providerIdentity,
+      let expectedStatus,
+      let expectedSnapshot
+    ):
+      guard let installed = deviceAuthBindings[permit.normalizedDID],
+        installed.generation == bindingGeneration,
+        installed.providerIdentity == providerIdentity,
+        isInstalledDeviceAuthBinding(installed, for: permit.normalizedDID),
+        let validatedReceipt = await installed.service.validatedReceipt(),
+        validatedReceipt.status == expectedStatus,
+        validatedReceipt.clientSnapshot == expectedSnapshot,
+        isInstalledDeviceAuthBinding(installed, for: permit.normalizedDID)
+      else {
+        let staleService = detachDeviceAuthBinding(
+          for: permit.normalizedDID,
+          disposition: .preserveRebindObligation
+        )
+        await staleService?.invalidate()
+        return false
+      }
+      Self.deviceAuthAfterFinalValidationTestOverride.withLock { $0 }?()
+      return await installed.service.commitIfSnapshotMatches(expectedSnapshot) {
+        Self.consumeSuspendedResumeCapability(
+          permit,
+          expectedReceipt: currentReceipt
+        )
+      }
+    }
+  }
+
+  /// Test seam used only when the manager's injected rebind override stands in for a completed
+  /// binding service transaction. Production bindings install the same receipt on completion.
+  internal nonisolated static func recordCompletedDeviceAuthRebindForTesting(
+    for userDID: String,
+    capability: SuspendedResumeCapability
+  ) -> Bool {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspendedResumeCapability?.token == capability.token,
+        capability.normalizedDID == normalizedDID
+      else {
+        return false
+      }
+      state.activeDeviceAuthUsers.insert(normalizedDID)
+      state.completedDeviceAuthBindingReceipts[normalizedDID] =
+        CompletedDeviceAuthBindingReceipt(
+          normalizedDID: normalizedDID,
+          suspensionGeneration: capability.suspensionGeneration,
+          suspendedResumeCapabilityToken: capability.token,
+          evidence: .synthetic
+        )
+      state.syntheticCompletedDeviceAuthRebinds.insert(normalizedDID)
+      return true
+    }
+  }
+
+  internal nonisolated static func isCurrentSuspendedResumeCapability(
+    _ capability: SuspendedResumeCapability,
+    for userDID: String
+  ) -> Bool {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock { state in
+      state.suspensionInProgress
+        && state.deviceAuthSuspensionGeneration == capability.suspensionGeneration
+        && capability.normalizedDID == normalizedDID
+        && state.suspendedResumeCapability?.token == capability.token
+    }
+  }
+
+  /// Revoke suspended bindings that are not owned by the foreground account manager.
+  /// The transition entry is resolved only after its live binding has been detached and invalidated
+  /// under the exact still-current resume capability.
+  internal func invalidateOtherDeviceAuthBindingsForSuspendedResume(
+    activeUserDID: String,
+    capability: SuspendedResumeCapability,
+    afterInvalidation: (@Sendable (String) async throws -> Void)? = nil
+  ) async throws {
+    let normalizedActiveDID = normalizeUserDID(activeUserDID)
+    guard Self.isCurrentSuspendedResumeCapability(capability, for: normalizedActiveDID) else {
+      throw CancellationError()
+    }
+    let otherDIDs = Self.emergencyState.withLock { state -> [String]? in
+      guard state.suspensionInProgress,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspendedResumeCapability?.token == capability.token
+      else {
+        return nil
+      }
+      return state.deviceAuthUsersAtSuspensionTransition
+        .subtracting([normalizedActiveDID])
+        .sorted()
+    }
+    guard let otherDIDs else { throw CancellationError() }
+
+    for otherDID in otherDIDs {
+      try Task.checkCancellation()
+      guard Self.isCurrentSuspendedResumeCapability(capability, for: normalizedActiveDID) else {
+        throw CancellationError()
+      }
+
+      let binding = detachDeviceAuthBinding(
+        for: otherDID,
+        preservingSuspendedResumeCapability: capability
+      )
+      await binding?.invalidate()
+      try await afterInvalidation?(otherDID)
+      try Task.checkCancellation()
+
+      let resolved = Self.emergencyState.withLock { state in
+        guard state.suspensionInProgress,
+          state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+          state.suspendedResumeCapability?.token == capability.token,
+          !state.activeDeviceAuthUsers.contains(otherDID)
+        else {
+          return false
+        }
+        state.deviceAuthUsersAtSuspensionTransition.remove(otherDID)
+        return true
+      }
+      guard resolved else { throw CancellationError() }
+    }
+  }
+
+  private nonisolated static func registerDeviceAuthEnrollment(
+    for normalizedDID: String,
+    token: UUID,
+    task: Task<MLSDeviceAuthBindingStatus, Error>,
+    suspensionGeneration: UInt64,
+    suspendedResumePermit: SuspendedResumeCapability?
+  ) -> Bool {
+    emergencyState.withLock { state in
+      guard state.deviceAuthSuspensionGeneration == suspensionGeneration else { return false }
+      if state.suspensionInProgress {
+        guard let suspendedResumePermit,
+          suspendedResumePermit.normalizedDID == normalizedDID,
+          suspendedResumePermit.suspensionGeneration == suspensionGeneration,
+          state.suspendedResumeCapability?.token == suspendedResumePermit.token
+        else {
+          return false
+        }
+      } else if suspendedResumePermit != nil {
+        return false
+      }
+      state.activeDeviceAuthUsers.insert(normalizedDID)
+      state.deviceAuthEnrollmentTasks[normalizedDID] = DeviceAuthEnrollmentHandle(
+        token: token,
+        task: task
+      )
+      return true
+    }
+  }
+
+  private nonisolated static func unregisterDeviceAuthEnrollment(
+    for normalizedDID: String,
+    token: UUID
+  ) {
+    emergencyState.withLock { state in
+      guard state.deviceAuthEnrollmentTasks[normalizedDID]?.token == token else { return }
+      state.deviceAuthEnrollmentTasks.removeValue(forKey: normalizedDID)
+    }
+  }
+
+  private nonisolated static func completeDeviceAuthEnrollment(
+    for normalizedDID: String,
+    token: UUID,
+    bindingGeneration: UInt64,
+    providerIdentity: DeviceAuthBindingProviderIdentity,
+    validatedReceipt: MLSDeviceAuthBindingValidatedReceipt,
+    suspensionGeneration: UInt64,
+    suspendedResumePermit: SuspendedResumeCapability?
+  ) -> Bool {
+    emergencyState.withLock { state in
+      guard state.deviceAuthSuspensionGeneration == suspensionGeneration else {
+        return false
+      }
+      let completedReceipt = CompletedDeviceAuthBindingReceipt(
+        normalizedDID: normalizedDID,
+        suspensionGeneration: suspensionGeneration,
+        suspendedResumeCapabilityToken: suspendedResumePermit?.token,
+        evidence: .validated(
+          enrollmentToken: token,
+          bindingGeneration: bindingGeneration,
+          providerIdentity: providerIdentity,
+          status: validatedReceipt.status,
+          clientSnapshot: validatedReceipt.clientSnapshot
+        )
+      )
+      if let enrollment = state.deviceAuthEnrollmentTasks[normalizedDID] {
+        guard enrollment.token == token else { return false }
+      } else {
+        // Coalesced actor waiters all observe the same installed binding. The first waiter
+        // consumes the shared enrollment handle; later waiters may acknowledge that same
+        // completion only while its exact-generation receipt remains current.
+        guard state.completedDeviceAuthBindingReceipts[normalizedDID] == completedReceipt
+        else {
+          return false
+        }
+      }
+      if state.suspensionInProgress {
+        guard let suspendedResumePermit,
+          suspendedResumePermit.normalizedDID == normalizedDID,
+          suspendedResumePermit.suspensionGeneration == suspensionGeneration,
+          state.suspendedResumeCapability?.token == suspendedResumePermit.token
+        else {
+          return false
+        }
+      } else if suspendedResumePermit != nil {
+        return false
+      }
+      state.deviceAuthEnrollmentTasks.removeValue(forKey: normalizedDID)
+      state.completedDeviceAuthBindingReceipts[normalizedDID] = completedReceipt
+      state.pendingDeviceAuthRebindUsers.remove(normalizedDID)
+      return true
+    }
+  }
+
+  private nonisolated static func unregisterDeviceAuthBinding(for normalizedDID: String) {
+    emergencyState.withLock { state in
+      state.deviceAuthEnrollmentTasks.removeValue(forKey: normalizedDID)
+      state.activeDeviceAuthUsers.remove(normalizedDID)
+      state.completedDeviceAuthBindingReceipts.removeValue(forKey: normalizedDID)
+      state.syntheticCompletedDeviceAuthRebinds.remove(normalizedDID)
+    }
   }
 
   /// Emergency synchronous close of all Rust MLS contexts.
   /// Safe to call from any thread and without actor isolation.
   public nonisolated static func emergencyCloseAllContexts(reason: String = "unknown") {
-    emergencyState.withLock { state in
-      state.suspensionInProgress = true
-      state.cacheInvalidated = true
+    let enrollmentTasks = transitionDeviceAuthToSuspended(invalidateCache: true)
+    for task in enrollmentTasks {
+      task.cancel()
     }
 
     MLSSuspensionFlightRecorder.shared.record(
@@ -265,12 +1354,347 @@ public actor MLSClient {
     emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
   }
 
+  internal nonisolated static func _tryTrackedFFIAdmissionForTesting() -> Bool {
+    guard admitTrackedFFIOperation() else { return false }
+    _endTrackedFFIOperationForTesting()
+    return true
+  }
+
+  internal nonisolated static func _tryTrackedSuspendedResumeFFIAdmissionForTesting(
+    capability: SuspendedResumeCapability,
+    for userDID: String
+  ) -> Bool {
+    guard admitTrackedSuspendedResumeFFIOperation(capability: capability, for: userDID) else {
+      return false
+    }
+    _endTrackedFFIOperationForTesting()
+    return true
+  }
+
+  internal nonisolated static func _runTrackedSuspendedResumeFFIOperationForTesting(
+    capability: SuspendedResumeCapability,
+    for userDID: String,
+    operation: @Sendable @escaping () throws -> Void
+  ) async throws {
+    try await runTrackedSuspendedResumeFFIOperation(
+      capability: capability,
+      for: userDID,
+      operation: operation
+    )
+  }
+
+  private nonisolated static func admitTrackedFFIOperation() -> Bool {
+    emergencyState.withLock { state in
+      guard !state.suspensionInProgress, state.suspensionQuiescenceLeaseToken == nil else {
+        return false
+      }
+      state.inFlightFFIOperations += 1
+      return true
+    }
+  }
+
+  private nonisolated static func admitTrackedSuspendedResumeFFIOperation(
+    capability: SuspendedResumeCapability,
+    for userDID: String
+  ) -> Bool {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.suspensionQuiescenceLeaseToken == nil,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        capability.normalizedDID == normalizedDID,
+        state.suspendedResumeCapability?.token == capability.token,
+        state.suspendedResumeCapability?.normalizedDID == normalizedDID,
+        state.suspendedResumeCapability?.suspensionGeneration == capability.suspensionGeneration
+      else {
+        return false
+      }
+      state.inFlightFFIOperations += 1
+      return true
+    }
+  }
+
+  /// Atomically admits a synchronous bridge operation into the suspension drain.
+  /// The bridge body runs after the state mutex is released and remains counted
+  /// until its synchronous return.
+  internal nonisolated static func withTrackedFFIAdmission<T>(
+    suspendedResumeCapability: SuspendedResumeCapability?,
+    for userDID: String,
+    operation: () throws -> T
+  ) throws -> T {
+    let admitted =
+      if let suspendedResumeCapability {
+        admitTrackedSuspendedResumeFFIOperation(
+          capability: suspendedResumeCapability,
+          for: userDID
+        )
+      } else {
+        admitTrackedFFIOperation()
+      }
+    guard admitted else { throw CancellationError() }
+    defer { emergencyState.withLock { $0.inFlightFFIOperations -= 1 } }
+    return try operation()
+  }
+
+  /// Runs one synchronous bridge operation and installs its runtime before releasing tracked
+  /// admission. Installation is linearized under the emergency mutex and may only write the
+  /// dedicated runtime storage cell. The fixed lock order is emergency state then runtime storage;
+  /// no manager callback or arbitrary code runs under the emergency mutex.
+  internal nonisolated static func withTrackedFFIAdmissionAndAtomicRuntimeInstall<T>(
+    suspendedResumeCapability: SuspendedResumeCapability?,
+    for userDID: String,
+    operation: () throws -> T,
+    runtime: MLSOrchestratorRuntime,
+    runtimeStorage: MLSOrchestratorRuntimeStorage,
+    reservationToken: UUID
+  ) throws -> T {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    let admitted =
+      if let suspendedResumeCapability {
+        admitTrackedSuspendedResumeFFIOperation(
+          capability: suspendedResumeCapability,
+          for: normalizedDID
+        )
+      } else {
+        admitTrackedFFIOperation()
+      }
+    guard admitted else {
+      runtimeStorage.cancelInitialization(token: reservationToken)
+      throw CancellationError()
+    }
+
+    let value: T
+    do {
+      value = try operation()
+    } catch {
+      // Teardown remains part of the admitted operation. A suspension drain cannot pass while an
+      // initialized candidate is being discarded, and no Rust bridge call occurs under a mutex.
+      runtime.shutdown()
+      runtimeStorage.cancelInitialization(token: reservationToken)
+      emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
+      throw error
+    }
+
+    let installed = emergencyState.withLock { state in
+      let admissionRemainsCurrent =
+        if let suspendedResumeCapability {
+          state.suspensionInProgress
+            && state.suspensionQuiescenceLeaseToken == nil
+            && state.deviceAuthSuspensionGeneration
+              == suspendedResumeCapability.suspensionGeneration
+            && suspendedResumeCapability.normalizedDID == normalizedDID
+            && state.suspendedResumeCapability?.token == suspendedResumeCapability.token
+            && state.suspendedResumeCapability?.normalizedDID == normalizedDID
+            && state.suspendedResumeCapability?.suspensionGeneration
+              == suspendedResumeCapability.suspensionGeneration
+        } else {
+          !state.suspensionInProgress && state.suspensionQuiescenceLeaseToken == nil
+        }
+      guard admissionRemainsCurrent else { return false }
+      return runtimeStorage.installReserved(runtime, token: reservationToken)
+    }
+    guard installed else {
+      runtime.shutdown()
+      runtimeStorage.cancelInitialization(token: reservationToken)
+      emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
+      throw CancellationError()
+    }
+    emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
+    return value
+  }
+
+  /// Acquires the post-drain Rust suspension-preparation lease atomically with
+  /// the final quiescence and resume-capability checks. The synchronous body
+  /// runs outside the mutex while all FFI admission remains closed.
+  internal nonisolated static func withSuspensionPreparationLease<T>(
+    operation: () throws -> T
+  ) throws -> T {
+    let token = UUID()
+    let acquired = emergencyState.withLock { state in
+      guard state.suspensionInProgress,
+        state.inFlightFFIOperations == 0,
+        state.suspendedResumeCapability == nil,
+        state.suspensionQuiescenceLeaseToken == nil
+      else {
+        return false
+      }
+      state.suspensionQuiescenceLeaseToken = token
+      return true
+    }
+    guard acquired else { throw CancellationError() }
+    defer {
+      emergencyState.withLock { state in
+        if state.suspensionQuiescenceLeaseToken == token {
+          state.suspensionQuiescenceLeaseToken = nil
+        }
+      }
+    }
+    return try operation()
+  }
+
+  /// Acquires an exact lease after a successful drain and keeps every ordinary and scoped-resume
+  /// admission closed across asynchronous runtime/context destruction.
+  internal nonisolated static func beginShutdownQuiescenceLease(
+    abandonmentCapability: SuspensionAbandonmentCapability?,
+    noUserCapability: NoUserSuspendedResumeCapability? = nil,
+    excludingUserDID userDID: String?
+  )
+    -> ShutdownQuiescenceLease?
+  {
+    let token = UUID()
+    let normalizedDID = userDID?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock { state -> ShutdownQuiescenceLease? in
+      let resumeCapabilityConflicts =
+        state.suspendedResumeCapability.map { capability in
+          normalizedDID.map { !$0.isEmpty && capability.normalizedDID == $0 } ?? false
+        } ?? false
+      guard state.suspensionInProgress,
+        state.inFlightFFIOperations == 0,
+        !resumeCapabilityConflicts,
+        state.suspensionQuiescenceLeaseToken == nil
+      else {
+        return nil
+      }
+      let boundCapability: SuspensionAbandonmentCapability?
+      if let capability = abandonmentCapability,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner?.normalizedDID == capability.normalizedDID,
+        state.suspensionAbandonmentOwner?.token == capability.ownerToken
+      {
+        boundCapability = capability
+      } else {
+        boundCapability = nil
+      }
+      let boundNoUserCapability: NoUserSuspendedResumeCapability?
+      if let capability = noUserCapability,
+        state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+        state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner
+          == NoUserSuspensionOwner(
+            token: capability.ownerToken,
+            suspensionGeneration: capability.suspensionGeneration,
+            suspensionSignalSerial: capability.suspensionSignalSerial
+          )
+      {
+        boundNoUserCapability = capability
+      } else {
+        boundNoUserCapability = nil
+      }
+      let lease = ShutdownQuiescenceLease(
+        token: token,
+        abandonmentCapability: boundCapability,
+        noUserCapability: boundNoUserCapability
+      )
+      state.suspensionQuiescenceLeaseToken = token
+      return lease
+    }
+  }
+
+  /// Releases only the matching teardown reservation. Suspension itself remains closed.
+  internal nonisolated static func cancelShutdownQuiescenceLease(
+    _ lease: ShutdownQuiescenceLease
+  ) {
+    emergencyState.withLock { state in
+      guard state.suspensionQuiescenceLeaseToken == lease.token else { return }
+      state.suspensionQuiescenceLeaseToken = nil
+    }
+  }
+
+  private nonisolated static func runTrackedSuspendedResumeFFIOperation<T: Sendable>(
+    capability: SuspendedResumeCapability,
+    for userDID: String,
+    operation: @Sendable @escaping () throws -> T
+  ) async throws -> T {
+    try Task.checkCancellation()
+    let result = try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<T, Error>) in
+      DispatchQueue.global(qos: .userInitiated).async {
+        guard
+          admitTrackedSuspendedResumeFFIOperation(
+            capability: capability,
+            for: userDID
+          )
+        else {
+          continuation.resume(throwing: CancellationError())
+          return
+        }
+        defer { emergencyState.withLock { $0.inFlightFFIOperations -= 1 } }
+        do {
+          continuation.resume(returning: try operation())
+        } catch {
+          continuation.resume(throwing: error)
+        }
+      }
+    }
+    try Task.checkCancellation()
+    guard isCurrentSuspendedResumeCapability(capability, for: userDID) else {
+      throw CancellationError()
+    }
+    return result
+  }
+
   /// Per-user generation token.
   /// Bump this before account switches / storage resets so in-flight tasks fail fast.
   private var generations: [String: UInt64] = [:]
 
   /// Per-user API clients for server operations
   private var apiClients: [String: MLSAPIClient] = [:]
+
+  /// Volatile proof-of-possession status scoped to the exact configured API
+  /// client. Never persisted; cleared on client replacement and shutdown.
+  private var deviceAuthBindings: [String: InstalledDeviceAuthBinding] = [:]
+  private var deviceAuthBindingGenerations: [String: UInt64] = [:]
+  private var deviceAuthBindingBlockedUsers: Set<String> = []
+  private var deviceAuthBindingEnrollments: [String: DeviceAuthBindingEnrollment] = [:]
+  private var deviceAuthBeforeEnrollmentAdmissionOverride: (() -> Void)?
+  private var deviceAuthAfterReplacementDetachOverride: (() async -> Void)?
+
+  private struct InstalledDeviceAuthBinding {
+    let deviceID: String
+    let generation: UInt64
+    let providerIdentity: DeviceAuthBindingProviderIdentity
+    let service: MLSDeviceAuthBindingService
+  }
+
+  private struct DeviceAuthBindingEnrollment {
+    let token: UUID
+    let deviceID: String
+    let generation: UInt64
+    let providerIdentity: DeviceAuthBindingProviderIdentity
+    let suspendedResumePermit: SuspendedResumeCapability?
+    let service: MLSDeviceAuthBindingService
+    let task: Task<MLSDeviceAuthBindingStatus, Error>
+    var waiterTokens: Set<UUID>
+  }
+
+  private enum DeviceAuthBindingDetachDisposition {
+    case revoke
+    case replacement
+    case preserveRebindObligation
+  }
+
+  internal func setDeviceAuthBeforeEnrollmentAdmissionOverride(
+    _ operation: (() -> Void)?
+  ) {
+    deviceAuthBeforeEnrollmentAdmissionOverride = operation
+  }
+
+  internal func setDeviceAuthAfterReplacementDetachOverride(
+    _ operation: (() async -> Void)?
+  ) {
+    deviceAuthAfterReplacementDetachOverride = operation
+  }
+
+  internal nonisolated static func isDeviceAuthRebindObligationPendingForTesting(
+    _ userDID: String
+  ) -> Bool {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return emergencyState.withLock { state in
+      state.pendingDeviceAuthRebindUsers.contains(normalizedDID)
+    }
+  }
 
   /// Per-user device managers for multi-device support
   private var deviceManagers: [String: MLSDeviceManager] = [:]
@@ -344,8 +1768,12 @@ public actor MLSClient {
 
   /// Configure the MLS API client (Phase 3/4)
   /// Must be called before using Welcome validation or bundle monitoring
-  public func configure(for userDID: String, apiClient: MLSAPIClient, atProtoClient: ATProtoClient) {
+  public func configure(for userDID: String, apiClient: MLSAPIClient, atProtoClient: ATProtoClient) async {
     let normalizedDID = normalizeUserDID(userDID)
+    let staleBinding = detachDeviceAuthBinding(
+      for: normalizedDID,
+      disposition: .replacement
+    )
     self.apiClients[normalizedDID] = apiClient
 
     // Create managers for this specific user context
@@ -354,6 +1782,8 @@ public actor MLSClient {
 
     self.recoveryManagers[normalizedDID] = MLSRecoveryManager(
       mlsClient: self, mlsAPIClient: apiClient)
+
+    await staleBinding?.invalidate()
 
     logger.info(
       "✅ MLSClient configured for user \(normalizedDID.prefix(20))... with API client, device manager, and recovery manager"
@@ -364,9 +1794,11 @@ public actor MLSClient {
   /// This ensures subsequent MLS operations use the fresh client with new tokens
   public func invalidateCachedClient(for userDID: String) async {
     let normalizedDID = normalizeUserDID(userDID)
+    let staleBinding = detachDeviceAuthBinding(for: normalizedDID)
     apiClients.removeValue(forKey: normalizedDID)
     deviceManagers.removeValue(forKey: normalizedDID)
     recoveryManagers.removeValue(forKey: normalizedDID)
+    await staleBinding?.invalidate()
     await MLSCoreContext.shared.removeContext(for: normalizedDID)
     logger.info("[E2E] Invalidated cached MLS clients and context for \(normalizedDID.prefix(20))...")
   }
@@ -410,7 +1842,9 @@ public actor MLSClient {
         "❌ Device manager not configured for user \(normalizedDID) - call configure() first")
       throw MLSError.configurationError
     }
-    return try await deviceManager.ensureDeviceRegistered(userDid: userDid)
+    let mlsDID = try await deviceManager.ensureDeviceRegistered(userDid: userDid)
+    _ = try await bindLegacyDeviceAuthentication(for: normalizedDID)
+    return mlsDID
   }
 
   /// Get device info for key package uploads for a specific user
@@ -424,7 +1858,8 @@ public actor MLSClient {
   }
 
   /// Get the MLS client identity for a user on this device.
-  /// Returns `did#deviceUUID` format for proper multi-device MLS support.
+  /// Returns the bare DID used by the registered key-package credential.
+  /// Device scope is carried separately by the server-issued device id.
   ///
   /// - Parameter userDID: The user's DID
   /// - Returns: Client identity or nil if device not registered
@@ -451,7 +1886,590 @@ public actor MLSClient {
         "❌ Device manager not configured for user \(normalizedDID) - call configure() first")
       throw MLSError.configurationError
     }
-    return try await deviceManager.reregisterDevice(userDid: userDid)
+    await invalidateDeviceAuthBindingForReplacement(for: normalizedDID)
+    let mlsDID = try await deviceManager.reregisterDevice(userDid: userDid)
+    _ = try await bindLegacyDeviceAuthentication(for: normalizedDID)
+    return mlsDID
+  }
+
+  /// Returns the exact bare-DID signer identity used by a registered legacy
+  /// device. Enrollment must never fall back to a caller-provided identity.
+  internal nonisolated static func deviceAuthSignerIdentity(
+    expectedDID: String,
+    registeredIdentity: String?
+  ) throws -> String {
+    let normalizedDID = expectedDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedDID.isEmpty,
+          !normalizedDID.contains("#"),
+          registeredIdentity == normalizedDID
+    else {
+      throw MLSDeviceAuthBindingError.sessionChanged
+    }
+    return normalizedDID
+  }
+
+  internal func signLegacyDeviceAuthChallenge(
+    for userDID: String,
+    challenge: Data,
+    suspendedResumeCapability: SuspendedResumeCapability? = nil
+  ) async throws -> Data {
+    guard !challenge.isEmpty else {
+      throw MLSDeviceAuthBindingError.invalidChallenge
+    }
+    let normalizedDID = normalizeUserDID(userDID)
+    let registeredIdentity = await getClientIdentity(for: normalizedDID)
+    let signerIdentity = try Self.deviceAuthSignerIdentity(
+      expectedDID: normalizedDID,
+      registeredIdentity: registeredIdentity
+    )
+
+    do {
+      if let suspendedResumeCapability {
+        try Task.checkCancellation()
+        guard Self.isCurrentSuspendedResumeCapability(
+          suspendedResumeCapability,
+          for: normalizedDID
+        ) else {
+          throw CancellationError()
+        }
+        let context = try await MLSCoreContext.shared.contextForSuspendedResume(
+          for: normalizedDID,
+          capability: suspendedResumeCapability
+        )
+        try Task.checkCancellation()
+        let signature = try await Self.runTrackedSuspendedResumeFFIOperation(
+          capability: suspendedResumeCapability,
+          for: normalizedDID
+        ) {
+          try context.signWithIdentityKey(
+            identity: signerIdentity,
+            payload: challenge
+          )
+        }
+        try Task.checkCancellation()
+        guard Self.isCurrentSuspendedResumeCapability(
+          suspendedResumeCapability,
+          for: normalizedDID
+        ) else {
+          throw CancellationError()
+        }
+        return signature
+      }
+      return try await runFFIWithRecovery(for: normalizedDID) { context in
+        try context.signWithIdentityKey(identity: signerIdentity, payload: challenge)
+      }
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch {
+      throw MLSDeviceAuthBindingError.signingFailed
+    }
+  }
+
+  @discardableResult
+  internal func bindDeviceAuthentication(
+    for userDID: String,
+    deviceID: String,
+    apiOverride: (any MLSDeviceAuthBindingAPI)? = nil,
+    suspendedResumePermit: SuspendedResumeCapability? = nil,
+    signer: @escaping MLSDeviceAuthChallengeSigner
+  ) async throws -> MLSDeviceAuthBindingStatus {
+    let normalizedDID = normalizeUserDID(userDID)
+    guard !deviceAuthBindingBlockedUsers.contains(normalizedDID) else {
+      throw MLSDeviceAuthBindingError.sessionChanged
+    }
+    let bindingAPI: any MLSDeviceAuthBindingAPI
+    let productionClient: ATProtoClient?
+    let providerIdentity: DeviceAuthBindingProviderIdentity
+    if let apiOverride {
+      bindingAPI = apiOverride
+      productionClient = nil
+      providerIdentity = DeviceAuthBindingProviderIdentity(
+        kind: .override,
+        objectIdentifier: ObjectIdentifier(apiOverride),
+        mlsServiceDID: nil,
+        suspensionGeneration: Self.deviceAuthSuspensionGeneration
+      )
+    } else {
+      guard let apiClient = apiClients[normalizedDID] else {
+        throw MLSDeviceAuthBindingError.sessionChanged
+      }
+      bindingAPI = MLSDeviceAuthPetrelAPI(apiClient: apiClient)
+      productionClient = apiClient.client
+      providerIdentity = DeviceAuthBindingProviderIdentity(
+        kind: .production,
+        objectIdentifier: ObjectIdentifier(apiClient.client),
+        mlsServiceDID: apiClient.mlsServiceDID,
+        suspensionGeneration: Self.deviceAuthSuspensionGeneration
+      )
+    }
+    let entryGeneration = deviceAuthBindingGenerations[normalizedDID, default: 0]
+
+    if let enrollment = deviceAuthBindingEnrollments[normalizedDID],
+      enrollment.deviceID == deviceID,
+      enrollment.generation == entryGeneration,
+      enrollment.providerIdentity == providerIdentity,
+      isInstalledDeviceAuthBinding(enrollment, for: normalizedDID)
+    {
+      return try await awaitDeviceAuthEnrollment(
+        enrollment,
+        for: normalizedDID,
+        productionClient: productionClient,
+        productionServiceDID: providerIdentity.mlsServiceDID,
+        suspensionGeneration: providerIdentity.suspensionGeneration
+      )
+    }
+
+    if let existing = deviceAuthBindings[normalizedDID],
+      existing.deviceID == deviceID,
+      existing.generation == entryGeneration,
+      existing.providerIdentity == providerIdentity
+    {
+      let status = await existing.service.status()
+      guard isCurrentDeviceAuthBoundary(
+        for: normalizedDID,
+        generation: entryGeneration,
+        productionClient: productionClient,
+        productionServiceDID: providerIdentity.mlsServiceDID,
+        suspensionGeneration: providerIdentity.suspensionGeneration
+      ), isInstalledDeviceAuthBinding(existing, for: normalizedDID) else {
+        throw MLSDeviceAuthBindingError.sessionChanged
+      }
+      if let status {
+        return status
+      }
+    }
+
+    let staleBinding = detachDeviceAuthBinding(
+      for: normalizedDID,
+      preservingSuspendedResumeCapability: suspendedResumePermit,
+      disposition: .replacement
+    )
+    let enrollmentGeneration = deviceAuthBindingGenerations[normalizedDID, default: 0]
+    await deviceAuthAfterReplacementDetachOverride?()
+    await staleBinding?.invalidate()
+    guard isCurrentDeviceAuthBoundary(
+      for: normalizedDID,
+      generation: enrollmentGeneration,
+      productionClient: productionClient,
+      productionServiceDID: providerIdentity.mlsServiceDID,
+      suspensionGeneration: providerIdentity.suspensionGeneration
+    ) else {
+      throw MLSDeviceAuthBindingError.sessionChanged
+    }
+
+    let service = MLSDeviceAuthBindingService(
+      expectedDID: normalizedDID,
+      deviceID: deviceID,
+      api: bindingAPI,
+      signer: signer
+    )
+    deviceAuthBindings[normalizedDID] = InstalledDeviceAuthBinding(
+      deviceID: deviceID,
+      generation: enrollmentGeneration,
+      providerIdentity: providerIdentity,
+      service: service
+    )
+    let enrollmentToken = UUID()
+    let (startStream, startContinuation) = AsyncStream<Void>.makeStream()
+    let enrollmentTask = Task {
+      for await _ in startStream { break }
+      try Task.checkCancellation()
+      return try await service.bind()
+    }
+    let enrollment = DeviceAuthBindingEnrollment(
+      token: enrollmentToken,
+      deviceID: deviceID,
+      generation: enrollmentGeneration,
+      providerIdentity: providerIdentity,
+      suspendedResumePermit: suspendedResumePermit,
+      service: service,
+      task: enrollmentTask,
+      waiterTokens: []
+    )
+    deviceAuthBindingEnrollments[normalizedDID] = enrollment
+    deviceAuthBeforeEnrollmentAdmissionOverride?()
+    let admitted = Self.registerDeviceAuthEnrollment(
+      for: normalizedDID,
+      token: enrollmentToken,
+      task: enrollment.task,
+      suspensionGeneration: providerIdentity.suspensionGeneration,
+      suspendedResumePermit: suspendedResumePermit
+    )
+    guard admitted else {
+      deviceAuthBindingEnrollments.removeValue(forKey: normalizedDID)
+      deviceAuthBindings.removeValue(forKey: normalizedDID)
+      enrollment.task.cancel()
+      startContinuation.finish()
+      await service.invalidate()
+      throw MLSDeviceAuthBindingError.sessionChanged
+    }
+    startContinuation.yield()
+    startContinuation.finish()
+    return try await awaitDeviceAuthEnrollment(
+      enrollment,
+      for: normalizedDID,
+      productionClient: productionClient,
+      productionServiceDID: providerIdentity.mlsServiceDID,
+      suspensionGeneration: providerIdentity.suspensionGeneration
+    )
+  }
+
+  private func awaitDeviceAuthEnrollment(
+    _ enrollment: DeviceAuthBindingEnrollment,
+    for normalizedDID: String,
+    productionClient: ATProtoClient?,
+    productionServiceDID: String?,
+    suspensionGeneration: UInt64
+  ) async throws -> MLSDeviceAuthBindingStatus {
+    let waiterToken = UUID()
+    guard var installedEnrollment = deviceAuthBindingEnrollments[normalizedDID],
+      installedEnrollment.token == enrollment.token
+    else {
+      throw MLSDeviceAuthBindingError.sessionChanged
+    }
+    installedEnrollment.waiterTokens.insert(waiterToken)
+    deviceAuthBindingEnrollments[normalizedDID] = installedEnrollment
+
+    return try await withTaskCancellationHandler {
+      defer {
+        releaseDeviceAuthEnrollmentWaiter(
+          waiterToken,
+          enrollmentToken: enrollment.token,
+          for: normalizedDID
+        )
+      }
+
+      let result = await enrollment.task.result
+      try Task.checkCancellation()
+      switch result {
+      case .success(let status):
+        guard isCurrentDeviceAuthBoundary(
+          for: normalizedDID,
+          generation: enrollment.generation,
+          productionClient: productionClient,
+          productionServiceDID: productionServiceDID,
+          suspensionGeneration: suspensionGeneration
+        ), isInstalledDeviceAuthBinding(enrollment, for: normalizedDID) else {
+          let staleService = detachDeviceAuthBinding(
+            for: normalizedDID,
+            disposition: .preserveRebindObligation
+          )
+          await staleService?.invalidate()
+          throw MLSDeviceAuthBindingError.sessionChanged
+        }
+        guard let validatedReceipt = await enrollment.service.validatedReceipt(),
+          validatedReceipt.status == status,
+          isCurrentDeviceAuthBoundary(
+            for: normalizedDID,
+            generation: enrollment.generation,
+            productionClient: productionClient,
+            productionServiceDID: productionServiceDID,
+            suspensionGeneration: suspensionGeneration
+          ),
+          isInstalledDeviceAuthBinding(enrollment, for: normalizedDID)
+        else {
+          let staleService = detachDeviceAuthBinding(
+            for: normalizedDID,
+            disposition: .preserveRebindObligation
+          )
+          await staleService?.invalidate()
+          throw MLSDeviceAuthBindingError.sessionChanged
+        }
+        if deviceAuthBindingEnrollments[normalizedDID]?.token == enrollment.token {
+          deviceAuthBindingEnrollments.removeValue(forKey: normalizedDID)
+        }
+        guard Self.completeDeviceAuthEnrollment(
+          for: normalizedDID,
+          token: enrollment.token,
+          bindingGeneration: enrollment.generation,
+          providerIdentity: enrollment.providerIdentity,
+          validatedReceipt: validatedReceipt,
+          suspensionGeneration: suspensionGeneration,
+          suspendedResumePermit: enrollment.suspendedResumePermit
+        ) else {
+          if isInstalledDeviceAuthBinding(enrollment, for: normalizedDID) {
+            deviceAuthBindings.removeValue(forKey: normalizedDID)
+            Self.unregisterDeviceAuthBinding(for: normalizedDID)
+          }
+          await enrollment.service.invalidate()
+          throw MLSDeviceAuthBindingError.sessionChanged
+        }
+        return status
+
+      case .failure(let error):
+        if deviceAuthBindingEnrollments[normalizedDID]?.token == enrollment.token {
+          deviceAuthBindingEnrollments.removeValue(forKey: normalizedDID)
+        }
+        if isInstalledDeviceAuthBinding(enrollment, for: normalizedDID) {
+          deviceAuthBindings.removeValue(forKey: normalizedDID)
+          Self.unregisterDeviceAuthBinding(for: normalizedDID)
+        }
+        if error is CancellationError {
+          throw CancellationError()
+        }
+        guard isCurrentDeviceAuthBoundary(
+          for: normalizedDID,
+          generation: enrollment.generation,
+          productionClient: productionClient,
+          productionServiceDID: productionServiceDID,
+          suspensionGeneration: suspensionGeneration
+        ) else {
+          throw MLSDeviceAuthBindingError.sessionChanged
+        }
+        throw error
+      }
+    } onCancel: {
+      Task {
+        await self.cancelDeviceAuthEnrollmentWaiter(
+          waiterToken,
+          enrollmentToken: enrollment.token,
+          for: normalizedDID
+        )
+      }
+    }
+  }
+
+  private func releaseDeviceAuthEnrollmentWaiter(
+    _ waiterToken: UUID,
+    enrollmentToken: UUID,
+    for normalizedDID: String
+  ) {
+    guard var enrollment = deviceAuthBindingEnrollments[normalizedDID],
+      enrollment.token == enrollmentToken
+    else {
+      return
+    }
+    enrollment.waiterTokens.remove(waiterToken)
+    deviceAuthBindingEnrollments[normalizedDID] = enrollment
+  }
+
+  private func cancelDeviceAuthEnrollmentWaiter(
+    _ waiterToken: UUID,
+    enrollmentToken: UUID,
+    for normalizedDID: String
+  ) async {
+    guard var enrollment = deviceAuthBindingEnrollments[normalizedDID],
+      enrollment.token == enrollmentToken,
+      enrollment.waiterTokens.remove(waiterToken) != nil
+    else {
+      return
+    }
+    guard enrollment.waiterTokens.isEmpty else {
+      deviceAuthBindingEnrollments[normalizedDID] = enrollment
+      return
+    }
+
+    let service = detachDeviceAuthBinding(
+      for: normalizedDID,
+      disposition: .preserveRebindObligation
+    )
+    await service?.invalidate()
+  }
+
+  @discardableResult
+  internal func bindLegacyDeviceAuthentication(
+    for userDID: String,
+    suspendedResumePermit: SuspendedResumeCapability? = nil
+  ) async throws -> MLSDeviceAuthBindingStatus {
+    let normalizedDID = normalizeUserDID(userDID)
+    guard let deviceInfo = await deviceManagers[normalizedDID]?.getDeviceInfo(for: normalizedDID),
+          !deviceInfo.deviceId.isEmpty
+    else {
+      throw MLSDeviceAuthBindingError.malformedResponse
+    }
+
+    return try await bindDeviceAuthentication(
+      for: normalizedDID,
+      deviceID: deviceInfo.deviceId,
+      suspendedResumePermit: suspendedResumePermit
+    ) { [weak self] challenge in
+      guard let self else { throw CancellationError() }
+      return try await self.signLegacyDeviceAuthChallenge(
+        for: normalizedDID,
+        challenge: challenge,
+        suspendedResumeCapability: suspendedResumePermit
+      )
+    }
+  }
+
+  public func deviceAuthBindingStatus(
+    for userDID: String
+  ) async -> MLSDeviceAuthBindingStatus? {
+    let normalizedDID = normalizeUserDID(userDID)
+    guard let binding = deviceAuthBindings[normalizedDID],
+      isCurrentInstalledDeviceAuthBoundary(binding, for: normalizedDID)
+    else {
+      return nil
+    }
+    let status = await binding.service.status()
+    guard isCurrentInstalledDeviceAuthBoundary(binding, for: normalizedDID) else {
+      return nil
+    }
+    return status
+  }
+
+  @discardableResult
+  public func invalidateDeviceAuthBinding(for userDID: String) async -> Bool {
+    await invalidateDeviceAuthBinding(for: userDID, preservingSuspendedResumeCapability: nil)
+  }
+
+  @discardableResult
+  internal func invalidateDeviceAuthBinding(
+    for userDID: String,
+    preservingSuspendedResumeCapability capability: SuspendedResumeCapability?
+  ) async -> Bool {
+    await invalidateDeviceAuthBinding(
+      for: userDID,
+      preservingSuspendedResumeCapability: capability,
+      disposition: .revoke
+    )
+  }
+
+  /// Detaches volatile binding evidence while retaining a DID-scoped authentication obligation
+  /// until the replacement completes. The obligation is established before the first await so a
+  /// concurrent suspension cannot observe an empty device-auth boundary.
+  @discardableResult
+  internal func invalidateDeviceAuthBindingForReplacement(
+    for userDID: String,
+    preservingSuspendedResumeCapability capability: SuspendedResumeCapability? = nil
+  ) async -> Bool {
+    let normalizedDID = normalizeUserDID(userDID)
+    let service = detachDeviceAuthBinding(
+      for: normalizedDID,
+      preservingSuspendedResumeCapability: capability,
+      disposition: .replacement
+    )
+    await deviceAuthAfterReplacementDetachOverride?()
+    await service?.invalidate()
+    return service != nil
+  }
+
+  private func invalidateDeviceAuthBinding(
+    for userDID: String,
+    preservingSuspendedResumeCapability capability: SuspendedResumeCapability?,
+    disposition: DeviceAuthBindingDetachDisposition
+  ) async -> Bool {
+    let normalizedDID = normalizeUserDID(userDID)
+    let service = detachDeviceAuthBinding(
+      for: normalizedDID,
+      preservingSuspendedResumeCapability: capability,
+      disposition: disposition
+    )
+    await service?.invalidate()
+    return service != nil
+  }
+
+  private func detachDeviceAuthBinding(
+    for normalizedDID: String,
+    preservingSuspendedResumeCapability capability: SuspendedResumeCapability? = nil,
+    disposition: DeviceAuthBindingDetachDisposition = .revoke
+  ) -> MLSDeviceAuthBindingService? {
+    let enrollmentTasks: [Task<MLSDeviceAuthBindingStatus, Error>] =
+      Self.emergencyState.withLock { state in
+      switch disposition {
+      case .replacement:
+        if state.activeDeviceAuthUsers.contains(normalizedDID)
+          || state.pendingDeviceAuthRebindUsers.contains(normalizedDID)
+        {
+          state.pendingDeviceAuthRebindUsers.insert(normalizedDID)
+        }
+      case .revoke:
+        state.pendingDeviceAuthRebindUsers.remove(normalizedDID)
+      case .preserveRebindObligation:
+        break
+      }
+      guard let currentCapability = state.suspendedResumeCapability,
+        currentCapability.normalizedDID == normalizedDID
+      else {
+        return []
+      }
+      if let capability,
+        capability.token == currentCapability.token,
+        capability.suspensionGeneration == currentCapability.suspensionGeneration,
+        capability.normalizedDID == currentCapability.normalizedDID
+      {
+        return []
+      }
+
+      // Teardown/configuration cannot detach a binding underneath an exact resume transaction.
+      // Revoke that transaction before the actor-owned binding leaves its installed slot.
+      state.suspensionSignalSerial &+= 1
+      state.deviceAuthSuspensionGeneration &+= 1
+      state.deviceAuthUsersAtSuspensionTransition.formUnion(
+        state.activeDeviceAuthUsers.union(state.pendingDeviceAuthRebindUsers)
+      )
+      state.suspendedResumeCapability = nil
+      let tasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
+      state.deviceAuthEnrollmentTasks.removeAll()
+      return tasks
+      }
+    for task in enrollmentTasks { task.cancel() }
+    deviceAuthBindingGenerations[normalizedDID, default: 0] &+= 1
+    if let enrollment = deviceAuthBindingEnrollments.removeValue(forKey: normalizedDID) {
+      enrollment.task.cancel()
+    }
+    Self.unregisterDeviceAuthBinding(for: normalizedDID)
+    return deviceAuthBindings.removeValue(forKey: normalizedDID)?.service
+  }
+
+  private func isInstalledDeviceAuthBinding(
+    _ enrollment: DeviceAuthBindingEnrollment,
+    for normalizedDID: String
+  ) -> Bool {
+    guard let installed = deviceAuthBindings[normalizedDID] else { return false }
+    return installed.service === enrollment.service
+      && installed.deviceID == enrollment.deviceID
+      && installed.generation == enrollment.generation
+      && installed.providerIdentity == enrollment.providerIdentity
+  }
+
+  private func isInstalledDeviceAuthBinding(
+    _ binding: InstalledDeviceAuthBinding,
+    for normalizedDID: String
+  ) -> Bool {
+    guard let installed = deviceAuthBindings[normalizedDID] else { return false }
+    return installed.service === binding.service
+      && installed.deviceID == binding.deviceID
+      && installed.generation == binding.generation
+      && installed.providerIdentity == binding.providerIdentity
+  }
+
+  private func isCurrentInstalledDeviceAuthBoundary(
+    _ binding: InstalledDeviceAuthBinding,
+    for normalizedDID: String
+  ) -> Bool {
+    guard binding.generation == deviceAuthBindingGenerations[normalizedDID, default: 0],
+      binding.providerIdentity.suspensionGeneration == Self.deviceAuthSuspensionGeneration,
+      isInstalledDeviceAuthBinding(binding, for: normalizedDID)
+    else {
+      return false
+    }
+
+    switch binding.providerIdentity.kind {
+    case .override:
+      return true
+    case .production:
+      guard let apiClient = apiClients[normalizedDID] else { return false }
+      return ObjectIdentifier(apiClient.client) == binding.providerIdentity.objectIdentifier
+        && apiClient.mlsServiceDID == binding.providerIdentity.mlsServiceDID
+    }
+  }
+
+  private func isCurrentDeviceAuthBoundary(
+    for normalizedDID: String,
+    generation: UInt64,
+    productionClient: ATProtoClient?,
+    productionServiceDID: String?,
+    suspensionGeneration: UInt64
+  ) -> Bool {
+    guard generation == deviceAuthBindingGenerations[normalizedDID, default: 0] else {
+      return false
+    }
+    guard suspensionGeneration == Self.deviceAuthSuspensionGeneration else { return false }
+    guard let productionClient else { return true }
+    guard let apiClient = apiClients[normalizedDID] else { return false }
+    return apiClient.client === productionClient
+      && apiClient.mlsServiceDID == productionServiceDID
   }
 
   private func logRustFullSwiftProtocolMutationBlocked(_ operation: StaticString) {
@@ -508,11 +2526,7 @@ public actor MLSClient {
         // signaled between a separate flag check and the counter increment —
         // a drain observing inFlightFFIOperations == 0 after
         // markSuspensionInProgress() is therefore a true quiescence proof.
-        let admitted = Self.emergencyState.withLock { state -> Bool in
-          guard !state.suspensionInProgress else { return false }
-          state.inFlightFFIOperations += 1
-          return true
-        }
+        let admitted = Self.admitTrackedFFIOperation()
         guard admitted else {
           continuation.resume(
             throwing: MLSError.contextCreationBlocked(
@@ -3679,11 +5693,12 @@ public actor MLSClient {
   private func closeContextLocked(normalizedDID: String) async -> Bool {
     logger.info("🛑 [MLSClient] Closing context for user: \(normalizedDID.prefix(20))...")
 
-    let hadContext = await MLSCoreContext.shared.removeContext(for: normalizedDID)
-
+    let staleBinding = detachDeviceAuthBinding(for: normalizedDID)
     apiClients.removeValue(forKey: normalizedDID)
     deviceManagers.removeValue(forKey: normalizedDID)
     recoveryManagers.removeValue(forKey: normalizedDID)
+    await staleBinding?.invalidate()
+    let hadContext = await MLSCoreContext.shared.removeContext(for: normalizedDID)
 
     if hadContext {
       logger.info("   ✅ Context closed and removed from cache")
@@ -3710,12 +5725,20 @@ public actor MLSClient {
     let usersToForget = Set(apiClients.keys)
       .union(deviceManagers.keys)
       .union(recoveryManagers.keys)
+      .union(deviceAuthBindings.keys)
       .filter { $0 != normalizedKeepDID }
 
+    var staleBindings: [MLSDeviceAuthBindingService] = []
     for userDID in usersToForget {
+      if let service = detachDeviceAuthBinding(for: userDID) {
+        staleBindings.append(service)
+      }
       apiClients.removeValue(forKey: userDID)
       deviceManagers.removeValue(forKey: userDID)
       recoveryManagers.removeValue(forKey: userDID)
+    }
+    for service in staleBindings {
+      await service.invalidate()
     }
 
     let closedCount = await MLSCoreContext.shared.removeAllContextsExcept(keepUserDid: normalizedKeepDID)
@@ -3728,6 +5751,10 @@ public actor MLSClient {
   /// IMPORTANT: This is a manual, user-initiated operation. It quarantines files (does not delete).
   public func clearStorage(for userDID: String) async throws {
     let normalizedDID = normalizeUserDID(userDID)
+    deviceAuthBindingBlockedUsers.insert(normalizedDID)
+    defer { deviceAuthBindingBlockedUsers.remove(normalizedDID) }
+    let staleBinding = detachDeviceAuthBinding(for: normalizedDID)
+    await staleBinding?.invalidate()
     logger.info("🧰 [Diagnostics] Resetting MLS storage for user: \(normalizedDID)")
 
     // ═══════════════════════════════════════════════════════════════════════════

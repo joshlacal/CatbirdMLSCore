@@ -18,6 +18,7 @@ import PetrelCatbird
 public final class MLSOrchestratorRuntime: @unchecked Sendable {
   public let userDID: String
   public let mode: MLSProtocolAuthorityMode
+  internal let mlsContextIdentity: ObjectIdentifier?
 
   public let bridge: OrchestratorBridge
 
@@ -56,11 +57,15 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       sequencerReceipts: true,
       recoveryBackoff: true,
       pendingDeletion: true,
-      authorizedDeviceResolution: authorizedDeviceKeyResolver != nil
+      // The Swift credential adapter always implements the resolution callback. A nil
+      // resolver is represented losslessly as an unsupported (`nil`) lookup result,
+      // which Rust already handles and caches separately from an authorized empty set.
+      authorizedDeviceResolution: true
     )
 
     self.userDID = normalizedDID
     self.mode = mode
+    mlsContextIdentity = ObjectIdentifier(mlsContext)
     self.storageAdapter = storageAdapter
     self.apiClient = apiClient
     self.credentialAdapter = credentialAdapter
@@ -85,11 +90,13 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     userDID: String,
     mode: MLSProtocolAuthorityMode = MLSProtocolAuthorityMode.defaultMode,
     bridge: OrchestratorBridge,
+    mlsContextIdentity: ObjectIdentifier? = nil,
     eventCallback: OrchestratorEventCallback? = nil
   ) {
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
     self.userDID = normalizedDID
     self.mode = mode
+    self.mlsContextIdentity = mlsContextIdentity
     self.bridge = bridge
     self.storageAdapter = nil
     self.apiClient = nil
@@ -286,6 +293,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   @discardableResult
   public func ensureDeviceRegistered() throws -> String {
     try bridge.ensureDeviceRegistered()
+  }
+
+  public func signDeviceAuthChallenge(_ challenge: Data) throws -> Data {
+    try bridge.signDeviceAuthChallenge(challenge: challenge)
   }
 
   public func replenishKeyPackagesIfNeeded() throws {

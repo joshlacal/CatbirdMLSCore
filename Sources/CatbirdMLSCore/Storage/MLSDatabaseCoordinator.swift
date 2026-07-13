@@ -51,12 +51,16 @@ public final class MLSDatabaseCoordinator: @unchecked Sendable {
     logger.debug("prepareForSuspension is no-op - WAL handles suspension safely")
   }
 
-  /// Resume normal operation after returning from background.
-  /// Clears the MLS suspension flag so Rust FFI contexts can be re-created on demand.
+  /// Legacy foreground notification. Global MLS admission is intentionally not opened here;
+  /// `MLSConversationManager.resumeMLSOperations()` owns the authorized resume transaction.
+  @available(*, deprecated, message: "Use manager.resumeMLSOperations(); this method no longer clears MLS gates")
   public func resumeFromSuspension() {
-    MLSCoreContext.clearSuspensionFlag()
-    MLSClient.clearSuspensionFlag(reason: "MLSDatabaseCoordinator.resumeFromSuspension")
-    logger.debug("Resumed from suspension - cleared MLS suspension flags")
+    logger.debug("Foreground storage notification received; MLS admission remains gated")
+  }
+
+  /// Prepares coordinator-local foreground state without changing MLSClient or MLSCoreContext gates.
+  public func prepareStorageForForegroundResume() {
+    logger.debug("Prepared storage coordinator for foreground while MLS admission remains gated")
   }
 
   // MARK: - Public API
