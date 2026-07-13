@@ -4,53 +4,49 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: GitHub release tag to update
+        description: New immutable GitHub release tag
         required: true
-        default: ffi-v1
+        default: ffi-w1-690d567b
         type: string
       catbird_mls_ref:
-        description: catbird-mls ref to build
+        description: Exact catbird-mls commit SHA to build
         required: true
-        default: main
+        default: 690d567b6d892064ae315f8776c3537006d88f93
         type: string
       catbird_atproto_ref:
-        description: catbird-atproto ref to build
+        description: Exact catbird-atproto commit SHA to build
         required: true
-        default: main
+        default: 8b2f92e28097c0788492f2f82328f4ab5b032953
         type: string
       petrel_ref:
-        description: Petrel ref for Swift package verification
+        description: Exact Petrel commit SHA for Swift package verification
         required: true
-        default: main
+        default: 6ae52433268312c716ea96526762b4e38a5967ec
         type: string
       petrel_catbird_ref:
-        description: PetrelCatbird ref for Swift package verification
+        description: Exact PetrelCatbird commit SHA for Swift package verification
         required: true
-        default: main
+        default: 22781c730383dd5faa690afe1e002f97876e8ef0
         type: string
-      upload_release:
-        description: Upload zip and checksum to the release
-        required: true
-        default: true
-        type: boolean
-  push:
-    tags:
-      - "ffi-*"
-      - "v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: ffi-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
 env:
   ASSET_NAME: CatbirdMLSFFI.xcframework.zip
+  PROVENANCE_NAME: ffi-provenance.txt
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
   IPHONEOS_DEPLOYMENT_TARGET: "18.0"
   MACOSX_DEPLOYMENT_TARGET: "15.0"
-  RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
-  CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref || 'main' }}
-  CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref || 'main' }}
-  PETREL_REF: ${{ github.event.inputs.petrel_ref || 'main' }}
-  PETREL_CATBIRD_REF: ${{ github.event.inputs.petrel_catbird_ref || 'main' }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  CATBIRD_MLS_REF: ${{ inputs.catbird_mls_ref }}
+  CATBIRD_ATPROTO_REF: ${{ inputs.catbird_atproto_ref }}
+  PETREL_REF: ${{ inputs.petrel_ref }}
+  PETREL_CATBIRD_REF: ${{ inputs.petrel_catbird_ref }}
 
 jobs:
   build-xcframework:
@@ -59,37 +55,121 @@ jobs:
 
     steps:
       - name: Checkout CatbirdMLSCore
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           path: CatbirdMLSCore
+          persist-credentials: false
+
+      - name: Validate immutable release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "release_tag must contain only letters, digits, dot, underscore, or hyphen" >&2
+            exit 1
+          fi
+          for source_ref in \
+            "${CATBIRD_MLS_REF}" \
+            "${CATBIRD_ATPROTO_REF}" \
+            "${PETREL_REF}" \
+            "${PETREL_CATBIRD_REF}"; do
+            if [[ ! "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Every source ref must be an exact 40-character lowercase commit SHA" >&2
+              exit 1
+            fi
+          done
+
+      - name: Reject existing release tag or assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          require_absent() {
+            local resource="$1"
+            local endpoint="$2"
+            local response
+            local request_status
+            local http_status
+
+            set +e
+            response="$(gh api --include "$endpoint" 2>/dev/null)"
+            request_status=$?
+            set -e
+            http_status="$(printf '%s\n' "$response" | awk '/^HTTP\// { status = $2 } END { print status }')"
+
+            case "$http_status" in
+              404)
+                return 0
+                ;;
+              200)
+                echo "Refusing to replace existing ${resource}: ${RELEASE_TAG}" >&2
+                exit 1
+                ;;
+              *)
+                echo "Unable to prove ${resource} is absent (gh=${request_status}, http=${http_status:-unknown})" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          require_absent \
+            "Git tag" \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}"
+
+          if ! release_tags="$(gh api \
+            --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[].tag_name')"; then
+            echo "Unable to inventory existing releases and draft assets" >&2
+            exit 1
+          fi
+          if printf '%s\n' "$release_tags" | grep -Fqx -- "$RELEASE_TAG"; then
+            echo "Refusing to replace an existing release or draft assets: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
 
       - name: Checkout catbird-mls
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: joshlacal/catbird-mls
           ref: ${{ env.CATBIRD_MLS_REF }}
           path: catbird-mls
+          persist-credentials: false
 
       - name: Checkout catbird-atproto
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: joshlacal/catbird-atproto
           ref: ${{ env.CATBIRD_ATPROTO_REF }}
           path: catbird-atproto
+          persist-credentials: false
 
       - name: Checkout Petrel
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: joshlacal/Petrel
           ref: ${{ env.PETREL_REF }}
           path: Petrel
+          persist-credentials: false
 
       - name: Checkout PetrelCatbird
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: joshlacal/PetrelCatbird
           ref: ${{ env.PETREL_CATBIRD_REF }}
           path: PetrelCatbird
+          persist-credentials: false
+
+      - name: Verify checked-out source pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C catbird-mls rev-parse HEAD)" = "${CATBIRD_MLS_REF}"
+          test "$(git -C catbird-atproto rev-parse HEAD)" = "${CATBIRD_ATPROTO_REF}"
+          test "$(git -C Petrel rev-parse HEAD)" = "${PETREL_REF}"
+          test "$(git -C PetrelCatbird rev-parse HEAD)" = "${PETREL_CATBIRD_REF}"
 
       - name: Show toolchain
         run: |
@@ -110,7 +190,7 @@ jobs:
             x86_64-apple-darwin
 
       - name: Cache Cargo registry and build outputs
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -124,6 +204,33 @@ jobs:
         working-directory: CatbirdMLSCore
         run: ./Scripts/rebuild-ffi.sh
 
+      - name: Reject generated binding drift
+        working-directory: CatbirdMLSCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- Sources/CatbirdMLS/CatbirdMLS.swift
+
+      - name: Generate complete internal artifact manifest
+        working-directory: CatbirdMLSCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="Sources/CatbirdMLSFFI.xcframework/SHA256SUMS"
+          manifest_tmp="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ffi-manifest.XXXXXX")"
+          trap 'rm -f "$manifest_tmp"' EXIT
+          test -d Sources/CatbirdMLSFFI.xcframework
+          rm -f "$manifest"
+          {
+            shasum -a 256 Sources/CatbirdMLS/CatbirdMLS.swift
+            while IFS= read -r framework_file; do
+              shasum -a 256 "$framework_file"
+            done < <(find Sources/CatbirdMLSFFI.xcframework -type f \
+              ! -path "$manifest" | LC_ALL=C sort)
+          } > "$manifest_tmp"
+          mv "$manifest_tmp" "$manifest"
+          test -s "$manifest"
+
       - name: Verify Swift package consumes generated FFI
         working-directory: CatbirdMLSCore
         run: swift build
@@ -131,36 +238,110 @@ jobs:
       - name: Create release archive
         working-directory: CatbirdMLSCore
         run: |
+          set -euo pipefail
           test -d Sources/CatbirdMLSFFI.xcframework
+          test -s Sources/CatbirdMLSFFI.xcframework/SHA256SUMS
+          shasum -a 256 -c Sources/CatbirdMLSFFI.xcframework/SHA256SUMS
           rm -f "${ASSET_NAME}" "${ASSET_NAME}.sha256"
-          ditto -c -k --keepParent Sources/CatbirdMLSFFI.xcframework "${ASSET_NAME}"
+          COPYFILE_DISABLE=1 ditto -c -k --keepParent \
+            --norsrc --noextattr --noqtn --noacl \
+            Sources/CatbirdMLSFFI.xcframework "${ASSET_NAME}"
           shasum -a 256 "${ASSET_NAME}" > "${ASSET_NAME}.sha256"
           cat "${ASSET_NAME}.sha256"
 
+      - name: Verify archived artifact coverage
+        working-directory: CatbirdMLSCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          verification_root="$(mktemp -d "${RUNNER_TEMP}/ffi-archive.XXXXXX")"
+          trap 'rm -rf "$verification_root"' EXIT
+          mkdir -p "${verification_root}/Sources"
+          unzip -q "${ASSET_NAME}" -d "${verification_root}/Sources"
+
+          extracted_framework="${verification_root}/Sources/CatbirdMLSFFI.xcframework"
+          test -d "$extracted_framework"
+          test -z "$(find "${verification_root}/Sources" -mindepth 1 -maxdepth 1 \
+            ! -name CatbirdMLSFFI.xcframework -print -quit)"
+          test -z "$(find "$extracted_framework" ! -type d ! -type f -print -quit)"
+
+          find Sources/CatbirdMLSFFI.xcframework -type f \
+            | sed 's#^Sources/##' \
+            | LC_ALL=C sort > "${verification_root}/source-files.txt"
+          find "$extracted_framework" -type f \
+            | sed "s#^${verification_root}/Sources/##" \
+            | LC_ALL=C sort > "${verification_root}/archive-files.txt"
+          diff -u \
+            "${verification_root}/source-files.txt" \
+            "${verification_root}/archive-files.txt"
+
+          ln -s "${PWD}/Sources/CatbirdMLS" "${verification_root}/Sources/CatbirdMLS"
+          (
+            cd "$verification_root"
+            shasum -a 256 -c Sources/CatbirdMLSFFI.xcframework/SHA256SUMS
+          )
+
+      - name: Write source, toolchain, and checksum provenance
+        working-directory: CatbirdMLSCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_sha256="$(awk '{ print $1 }' "${ASSET_NAME}.sha256")"
+          checksum_sha256="$(shasum -a 256 "${ASSET_NAME}.sha256" | awk '{ print $1 }')"
+          internal_manifest_sha256="$(shasum -a 256 Sources/CatbirdMLSFFI.xcframework/SHA256SUMS | awk '{ print $1 }')"
+          {
+            echo "format_version=1"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "catbird_mls_commit=$(git -C ../catbird-mls rev-parse HEAD)"
+            echo "catbird_atproto_commit=$(git -C ../catbird-atproto rev-parse HEAD)"
+            echo "petrel_commit=$(git -C ../Petrel rev-parse HEAD)"
+            echo "petrel_catbird_commit=$(git -C ../PetrelCatbird rev-parse HEAD)"
+            echo "catbird_mls_core_commit=$(git rev-parse HEAD)"
+            echo "github_run_id=${GITHUB_RUN_ID}"
+            echo "github_run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "runner_image=${ImageOS:-unknown}"
+            echo "runner_image_version=${ImageVersion:-unknown}"
+            echo "xcode=$(xcodebuild -version | paste -sd ';' -)"
+            echo "swift=$(swift --version 2>&1 | paste -sd ';' -)"
+            echo "rustc=$(rustc --version)"
+            echo "cargo=$(cargo --version)"
+            echo "asset_name=${ASSET_NAME}"
+            echo "asset_sha256=${asset_sha256}"
+            echo "checksum_manifest_sha256=${checksum_sha256}"
+            echo "internal_manifest_sha256=${internal_manifest_sha256}"
+          } > "${PROVENANCE_NAME}"
+          cat "${PROVENANCE_NAME}"
+
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: catbird-mls-ffi
           path: |
             CatbirdMLSCore/${{ env.ASSET_NAME }}
             CatbirdMLSCore/${{ env.ASSET_NAME }}.sha256
+            CatbirdMLSCore/${{ env.PROVENANCE_NAME }}
           if-no-files-found: error
 
-      - name: Upload release assets
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upload_release == 'true' }}
+      - name: Create immutable tag and release
         working-directory: CatbirdMLSCore
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --latest
-          else
-            gh release create "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "CatbirdMLSFFI ${RELEASE_TAG}" \
-              --notes "Prebuilt CatbirdMLSFFI.xcframework from catbird-mls ${CATBIRD_MLS_REF}." \
-              --latest
-          fi
+          set -euo pipefail
+          core_commit="$(git rev-parse HEAD)"
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${RELEASE_TAG}" \
+            -f "sha=${core_commit}" \
+            --silent
+          gh release create \
+            "${RELEASE_TAG}" \
+            "${ASSET_NAME}" \
+            "${ASSET_NAME}.sha256" \
+            "${PROVENANCE_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --latest=false \
+            --title "CatbirdMLSFFI ${RELEASE_TAG}" \
+            --notes-file "${PROVENANCE_NAME}"

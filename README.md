@@ -32,7 +32,7 @@ CatbirdMLSCore/
 │   ├── Models/             # Data models
 │   └── Storage/            # SQLCipher persistence & GRDB
 ├── Sources/
-│   └── MLSFFICore.xcframework   # Binary Rust FFI framework
+│   └── CatbirdMLSFFI.xcframework # Binary Rust FFI framework
 ├── Package.swift           # Swift Package Manager manifest
 └── Scripts/
     └── rebuild-ffi.sh      # Rebuild Rust FFI and bindings
@@ -41,25 +41,26 @@ CatbirdMLSCore/
 ## Dependencies
 
 - **GRDB.swift** (7.0+) - SQLite database toolkit
-- **MLSFFICore** - Rust-based MLS protocol implementation (UniFFI)
+- **CatbirdMLSFFI** - Rust-based MLS protocol implementation (UniFFI)
 
 ## Getting Started
 
 ### 1. Download Pre-built XCFramework (Recommended)
 
-Download the latest pre-built `MLSFFICore.xcframework` from [GitHub Releases](https://github.com/joshlacal/CatbirdMLSCore/releases):
+Download the pinned pre-built `CatbirdMLSFFI.xcframework` from [GitHub Releases](https://github.com/joshlacal/CatbirdMLSCore/releases):
 
 ```bash
 # Easy way: use the download script
 ./Scripts/download-ffi.sh
 
-# Or manually:
-curl -LO https://github.com/joshlacal/CatbirdMLSCore/releases/latest/download/MLSFFICore.xcframework.zip
-curl -LO https://github.com/joshlacal/CatbirdMLSCore/releases/latest/download/MLSFFICore.xcframework.zip.sha256
-shasum -a 256 -c MLSFFICore.xcframework.zip.sha256
-unzip MLSFFICore.xcframework.zip -d Sources/
-rm MLSFFICore.xcframework.zip MLSFFICore.xcframework.zip.sha256
+# To consume another immutable release explicitly:
+FFI_RELEASE_TAG=ffi-w1-690d567b ./Scripts/download-ffi.sh
 ```
+
+The downloader verifies the release checksum and the artifact's complete
+internal manifest before replacing an installed framework. Do not extract a
+release archive directly into `Sources/`; a failed or malformed extraction must
+not destroy the last known-good framework.
 
 Now you can build the package:
 
@@ -69,7 +70,7 @@ swift build
 
 ### 2. Building the FFI Layer from Source (Alternative)
 
-If you need to build from source, the MLS FFI is built from Rust code in the [mls-ffi repository](https://github.com/joshlacal/mls-ffi).
+If you need to build from source, the MLS FFI is built from Rust code in the [catbird-mls repository](https://github.com/joshlacal/catbird-mls).
 
 #### Prerequisites
 
@@ -91,9 +92,9 @@ When you need to update the Rust FFI layer:
 ```
 
 This script will:
-1. Clone/use the mls-ffi repository
+1. Use the sibling `catbird-mls` repository
 2. Build the Rust FFI code for all iOS targets
-3. Create the MLSFFICore.xcframework
+3. Create `CatbirdMLSFFI.xcframework`
 4. Generate Swift bindings
 5. Copy everything to CatbirdMLSCore/Sources/
 
@@ -102,15 +103,11 @@ This script will:
 Alternatively, build manually:
 
 ```bash
-# Clone mls-ffi if you haven't already
-git clone https://github.com/joshlacal/mls-ffi.git ../MLSFFI/mls-ffi
+# Clone catbird-mls as a sibling if you haven't already
+git clone https://github.com/joshlacal/catbird-mls.git ../catbird-mls
 
-cd ../MLSFFI/mls-ffi
-./create-xcframework.sh
-
-# Copy outputs back to CatbirdMLSCore
-cp -R MLSFFICore.xcframework ../../CatbirdMLSCore/Sources/
-cp build/bindings/MLSFFI.swift ../../CatbirdMLSCore/Sources/MLSFFI/
+# From CatbirdMLSCore, build and copy the framework plus generated bindings
+./Scripts/rebuild-ffi.sh
 ```
 
 ## Building CatbirdMLSCore
@@ -173,10 +170,10 @@ This means the FFI bindings are out of sync. Rebuild:
 
 ### "Binary artifact does not contain a binary"
 
-The MLSFFICore.xcframework is missing. Download it from releases:
+The `CatbirdMLSFFI.xcframework` is missing. Download it from releases:
 
-1. Download from [GitHub Releases](https://github.com/joshlacal/CatbirdMLSCore/releases/latest)
-2. Extract to `Sources/MLSFFICore.xcframework`
+1. Run `./Scripts/download-ffi.sh` to fetch the repository's immutable default release
+2. Confirm it extracted to `Sources/CatbirdMLSFFI.xcframework`
 3. Or build from source: `./Scripts/rebuild-ffi.sh`
 
 ### Xcode indexing fails
@@ -188,7 +185,7 @@ The MLSFFICore.xcframework is missing. Download it from releases:
 
 ## Development Workflow
 
-1. **Make changes to Rust FFI** → Edit files in `MLSFFI/mls-ffi/src/`
+1. **Make changes to Rust FFI** → Edit files in `../catbird-mls/`
 2. **Rebuild FFI** → Run `./Scripts/rebuild-ffi.sh`
 3. **Update Swift code** → Edit CatbirdMLSCore sources
 4. **Build package** → `swift build`
