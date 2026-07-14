@@ -251,7 +251,9 @@ extension MLSConversationManager {
       if let orchestratorRuntimeFactory {
         await orchestratorRuntimeFactory()
       } else {
-        await buildOrchestratorRuntime()
+        await buildOrchestratorRuntime(
+          suspendedResumeCapability: suspendedResumeCapability
+        )
       }
     guard let runtime else {
       MLSClient.cancelTrackedRuntimeInitialization(
@@ -265,6 +267,7 @@ extension MLSConversationManager {
       try await withTrackedRustRuntime(
         runtime,
         operation: "initializeOrchestratorRuntime",
+        suspendedResumeCapability: suspendedResumeCapability,
         runtimeInitializationRight: initializationRight
       ) { runtime in
         try runtime.initialize()

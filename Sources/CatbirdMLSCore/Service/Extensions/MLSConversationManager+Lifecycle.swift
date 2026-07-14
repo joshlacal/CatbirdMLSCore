@@ -979,14 +979,18 @@ extension MLSConversationManager {
     // read userDid after isShuttingDown was set but before cleanup completed.
     let shutdownUserDid = userDid
     let normalizedShutdownDID = shutdownUserDid?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let expectedAbandonmentCapability: MLSClient.SuspensionAbandonmentCapability? =
-      if authorization?.managerIdentity == ObjectIdentifier(self),
-        authorization?.normalizedDID == normalizedShutdownDID
-      {
-        authorization?.capability
-      } else {
-        nil
+    if let authorization {
+      guard
+        authorization.managerIdentity == ObjectIdentifier(self),
+        authorization.normalizedDID == normalizedShutdownDID
+      else {
+        logger.error(
+          "❌ [SHUTDOWN-AUTHORITY] Rejected suspension authorization owned by another manager or account"
+        )
+        return false
       }
+    }
+    let expectedAbandonmentCapability = authorization?.capability
     shutdownBeforeTransitionTestOverride.withLock { $0 }?()
     isShuttingDown = true
     isSyncPaused = true

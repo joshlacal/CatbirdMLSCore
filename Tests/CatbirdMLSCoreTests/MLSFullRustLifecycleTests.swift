@@ -2058,6 +2058,33 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
   }
 
+  func testConsumedAuthorizationRetainedByAnotherManagerCannotPoisonFreshShutdown() async throws {
+    let firstManager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    _ = await MainActor.run { firstManager.suspendMLSOperations() }
+    let issuedAuthorization = await firstManager.authorizeSuspensionAbandonmentForAccountSwitch()
+    let retainedAuthorization = try XCTUnwrap(issuedAuthorization)
+    let firstShutdownWasSafe = await firstManager.shutdown(
+      accountSwitchSuspensionAuthorization: retainedAuthorization
+    )
+    XCTAssertTrue(firstShutdownWasSafe)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+
+    let secondManager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    let rejected = await secondManager.shutdown(
+      accountSwitchSuspensionAuthorization: retainedAuthorization
+    )
+
+    XCTAssertFalse(rejected)
+    XCTAssertEqual(secondManager.userDid, "did:plc:testuser")
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+    let secondShutdownWasSafe = await secondManager.shutdown()
+    XCTAssertTrue(secondShutdownWasSafe)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+  }
+
   func testAuthorizedAbandonmentPreservesUnrelatedCoreContext() async throws {
     try useTemporaryCoreStorageDirectory()
     let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
@@ -2880,6 +2907,38 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(hasContext)
     XCTAssertTrue(MLSClient.isSuspensionInProgress)
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+  }
+
+  func testColdRuntimeBuildUsesExactScopedSuspendedResumeCapability() async throws {
+    try useTemporaryCoreStorageDirectory()
+    let userDID = "did:plc:testuser"
+    let ownerToken = UUID()
+    let manager = try await makeManager(
+      protocolAuthorityMode: .rustFull,
+      migrateDatabase: true
+    )
+    MLSClient.markSuspensionInProgress(
+      reason: "cold scoped runtime build",
+      abandonmentOwnerDID: userDID,
+      abandonmentOwnerToken: ownerToken
+    )
+    let capability = try XCTUnwrap(
+      MLSClient.beginSuspendedResumeCapability(for: userDID, ownerToken: ownerToken)
+    )
+    defer { MLSClient.cancelSuspendedResumeCapability(capability) }
+
+    let runtime = await manager.ensureOrchestratorRuntime(
+      suspendedResumeCapability: capability
+    )
+    let contextIdentity = await MLSCoreContext.shared.contextIdentity(for: userDID)
+
+    XCTAssertNotNil(runtime)
+    XCTAssertNotNil(contextIdentity)
+    XCTAssertEqual(runtime?.mlsContextIdentity, contextIdentity)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    manager.resetOrchestratorRuntime(reason: "cold scoped runtime test cleanup")
+    _ = await MLSCoreContext.shared.removeContext(for: userDID)
   }
 
   func testRustFullRestoreRejectsMismatchedRuntimeDIDAndKeepsGatesClosed() async throws {
