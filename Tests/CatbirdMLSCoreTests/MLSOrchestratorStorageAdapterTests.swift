@@ -167,7 +167,13 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
 
     try adapter.clearSequencerReceipts(conversationId: "convo-security")
     try adapter.clearQuarantine(conversationId: "convo-security")
-    try adapter.clearResetPending(conversationId: "convo-security")
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: "convo-security",
+        expectedGeneration: 4,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
     XCTAssertTrue(
       try adapter.getSequencerReceipts(conversationId: "convo-security", sinceEpoch: nil).isEmpty
     )
@@ -182,7 +188,7 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertNil(finalState.quarantineReason)
   }
 
-  func testActiveTransitionClearsResetMarkerAndPayloadAcrossRestart() throws {
+  func testScalarActiveCannotBypassExactResetCompletionAcrossRestart() throws {
     let adapter = try makeAdapter()
     try adapter.ensureConversationExists(
       userDid: "did:plc:receiver",
@@ -196,13 +202,28 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       notifiedAtMs: 1_752_345_678_900
     )
 
-    try adapter.setConversationState(
-      conversationId: "convo-active-transition",
-      state: "active"
-    )
+    assertThrowsStorageError("pending reset requires exact completion") {
+      try adapter.setConversationState(
+        conversationId: "convo-active-transition",
+        state: "active"
+      )
+    }
 
     let restartedAdapter = try makeAdapter()
-    let state = try XCTUnwrap(
+    var state = try XCTUnwrap(
+      restartedAdapter.getConversationState(conversationId: "convo-active-transition")
+    )
+    XCTAssertEqual(state.state, "reset_pending")
+    XCTAssertEqual(state.newGroupId, "05060708")
+    XCTAssertEqual(state.resetGeneration, 5)
+    XCTAssertTrue(
+      try restartedAdapter.completeResetPending(
+        conversationId: "convo-active-transition",
+        expectedGeneration: 5,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
+    state = try XCTUnwrap(
       restartedAdapter.getConversationState(conversationId: "convo-active-transition")
     )
     XCTAssertEqual(state.state, "active")
@@ -491,7 +512,13 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       reasonTag: "multi_peer_bad_commits",
       sinceMs: 1_752_345_679_200
     )
-    try adapter.clearResetPending(conversationId: "convo-coexist")
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: "convo-coexist",
+        expectedGeneration: 12,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
     let quarantined = try XCTUnwrap(adapter.getConversationState(conversationId: "convo-coexist"))
     XCTAssertEqual(quarantined.state, "quarantined")
     XCTAssertEqual(quarantined.quarantineReason, "multi_peer_bad_commits")
@@ -541,6 +568,263 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(state.newGroupId, "05060708")
     XCTAssertEqual(state.resetGeneration, 4)
     XCTAssertEqual(state.notifiedAtMs, 100)
+  }
+
+  func testCompleteResetPendingRequiresExactGenerationAndTarget() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-clear-cas",
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-clear-cas",
+      newGroupIdHex: "05060708",
+      resetGeneration: 1,
+      notifiedAtMs: 100
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-clear-cas",
+      newGroupIdHex: "090a0b0c",
+      resetGeneration: 2,
+      notifiedAtMs: 200
+    )
+
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: "convo-reset-clear-cas",
+        expectedGeneration: 1,
+        expectedNewGroupIdHex: "090a0b0c"
+      )
+    )
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: "convo-reset-clear-cas",
+        expectedGeneration: 2,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
+    var state = try XCTUnwrap(
+      adapter.getConversationState(conversationId: "convo-reset-clear-cas")
+    )
+    XCTAssertEqual(state.state, "reset_pending")
+    XCTAssertEqual(state.newGroupId, "090a0b0c")
+    XCTAssertEqual(state.resetGeneration, 2)
+    XCTAssertEqual(state.notifiedAtMs, 200)
+
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: "convo-reset-clear-cas",
+        expectedGeneration: 2,
+        expectedNewGroupIdHex: "090a0b0c"
+      )
+    )
+    state = try XCTUnwrap(
+      adapter.getConversationState(conversationId: "convo-reset-clear-cas")
+    )
+    XCTAssertEqual(state.state, "active")
+    XCTAssertNil(state.newGroupId)
+    XCTAssertNil(state.resetGeneration)
+    XCTAssertNil(state.notifiedAtMs)
+    let groupID = try XCTUnwrap(dbPool.read { db in
+      try Data.fetchOne(
+        db,
+        sql: """
+          SELECT groupID FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: ["convo-reset-clear-cas", "did:plc:receiver"]
+      )
+    })
+    XCTAssertEqual(groupID.hexEncodedString(), "090a0b0c")
+  }
+
+  func testClearResetPendingForDeleteIsExactAndDoesNotProjectActiveOrTarget() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-delete-cas",
+      groupId: "01020304"
+    )
+    try adapter.deleteConversations(
+      userDid: "did:plc:receiver",
+      ids: ["convo-reset-delete-cas"]
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-delete-cas",
+      newGroupIdHex: "090a0b0c",
+      resetGeneration: 2,
+      notifiedAtMs: 200
+    )
+
+    XCTAssertFalse(
+      try adapter.clearResetPendingForDelete(
+        conversationId: "convo-reset-delete-cas",
+        expectedGeneration: 1
+      )
+    )
+    XCTAssertTrue(
+      try adapter.clearResetPendingForDelete(
+        conversationId: "convo-reset-delete-cas",
+        expectedGeneration: 2
+      )
+    )
+    let row = try XCTUnwrap(dbPool.read { db in
+      try Row.fetchOne(
+        db,
+        sql: """
+          SELECT isActive, needsReset, needsRejoin, groupID
+          FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: ["convo-reset-delete-cas", "did:plc:receiver"]
+      )
+    })
+    let isActive: Bool = row["isActive"]
+    let needsReset: Bool = row["needsReset"]
+    let needsRejoin: Bool = row["needsRejoin"]
+    let groupID: Data = row["groupID"]
+    XCTAssertFalse(isActive)
+    XCTAssertFalse(needsReset)
+    XCTAssertFalse(needsRejoin)
+    XCTAssertEqual(groupID.hexEncodedString(), "01020304")
+  }
+
+  func testResetCompletionRejectsInvalidInputs() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-clear-negative",
+      groupId: "01020304"
+    )
+
+    assertThrowsStorageError("expected reset generation must not be negative") {
+      _ = try adapter.completeResetPending(
+        conversationId: "convo-reset-clear-negative",
+        expectedGeneration: -1,
+        expectedNewGroupIdHex: "05060708"
+      )
+    }
+    assertThrowsStorageError("valid hexadecimal") {
+      _ = try adapter.completeResetPending(
+        conversationId: "convo-reset-clear-negative",
+        expectedGeneration: 1,
+        expectedNewGroupIdHex: "not-hex"
+      )
+    }
+    assertThrowsStorageError("expected reset generation must not be negative") {
+      _ = try adapter.clearResetPendingForDelete(
+        conversationId: "convo-reset-clear-negative",
+        expectedGeneration: -1
+      )
+    }
+  }
+
+  func testMarkResetPendingAtomicallyPublishesRejoinAndPreservesOldGroupMapping() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-publication",
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-publication",
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+    let row = try XCTUnwrap(dbPool.read { db in
+      try Row.fetchOne(
+        db,
+        sql: """
+          SELECT needsReset, needsRejoin, pendingNewGroupId,
+                 pendingResetGeneration, groupID
+          FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: ["convo-reset-publication", "did:plc:receiver"]
+      )
+    })
+    let needsReset: Bool = row["needsReset"]
+    let needsRejoin: Bool = row["needsRejoin"]
+    let target: String = row["pendingNewGroupId"]
+    let generation: Int64 = row["pendingResetGeneration"]
+    let groupID: Data = row["groupID"]
+    XCTAssertTrue(needsReset)
+    XCTAssertTrue(needsRejoin)
+    XCTAssertEqual(target, "05060708")
+    XCTAssertEqual(generation, 7)
+    XCTAssertEqual(groupID.hexEncodedString(), "01020304")
+  }
+
+  func testAppliedGenerationHighWaterRejectsStaleReplayAfterLaterCompletion() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-high-water",
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-high-water",
+      newGroupIdHex: "05060708",
+      resetGeneration: 1,
+      notifiedAtMs: 100
+    )
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: "convo-reset-high-water",
+        expectedGeneration: 1,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-reset-high-water",
+      newGroupIdHex: "090a0b0c",
+      resetGeneration: 2,
+      notifiedAtMs: 200
+    )
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: "convo-reset-high-water",
+        expectedGeneration: 2,
+        expectedNewGroupIdHex: "090a0b0c"
+      )
+    )
+
+    let restartedAdapter = try makeAdapter()
+    assertThrowsStorageError("already applied") {
+      try restartedAdapter.markResetPending(
+        conversationId: "convo-reset-high-water",
+        newGroupIdHex: "05060708",
+        resetGeneration: 1,
+        notifiedAtMs: 100
+      )
+    }
+
+    let state = try XCTUnwrap(
+      restartedAdapter.getConversationState(conversationId: "convo-reset-high-water")
+    )
+    XCTAssertEqual(state.state, "active")
+    XCTAssertNil(state.newGroupId)
+    XCTAssertNil(state.resetGeneration)
+    let row = try XCTUnwrap(dbPool.read { db in
+      try Row.fetchOne(
+        db,
+        sql: """
+          SELECT c.groupID, s.applied_reset_generation
+          FROM MLSConversationModel AS c
+          JOIN mls_orchestrator_security_state AS s
+            ON s.conversation_id = c.conversationID
+           AND s.user_did = c.currentUserDID
+          WHERE c.conversationID = ? AND c.currentUserDID = ?
+          """,
+        arguments: ["convo-reset-high-water", "did:plc:receiver"]
+      )
+    })
+    let groupID: Data = row["groupID"]
+    let appliedGeneration: Int64 = row["applied_reset_generation"]
+    XCTAssertEqual(groupID.hexEncodedString(), "090a0b0c")
+    XCTAssertEqual(appliedGeneration, 2)
   }
 
   func testEqualResetGenerationBackfillsNotificationForLegacyPayload() throws {
@@ -683,6 +967,32 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     }
 
     XCTAssertThrowsError(try makeAdapter(pool: pool))
+  }
+
+  func testConstructionMigratesLegacySecurityTableWithAppliedGenerationHighWater() throws {
+    let pool = try DatabasePool(
+      path: tempDir.appendingPathComponent("legacy-security-schema.sqlite").path
+    )
+    try MLSGRDBManager.makeMigrator().migrate(pool)
+    try pool.write { db in
+      try db.execute(sql: """
+        CREATE TABLE mls_orchestrator_security_state (
+          conversation_id TEXT NOT NULL,
+          user_did TEXT NOT NULL,
+          quarantine_reason TEXT,
+          quarantined_since_ms INTEGER,
+          reset_notified_at_ms INTEGER,
+          updated_at DATETIME NOT NULL,
+          PRIMARY KEY (conversation_id, user_did)
+        )
+        """)
+    }
+
+    _ = try makeAdapter(pool: pool)
+    let columns = try pool.read { db in
+      Set(try db.columns(in: "mls_orchestrator_security_state").map(\.name))
+    }
+    XCTAssertTrue(columns.contains("applied_reset_generation"))
   }
 
   private func makeAdapter(
