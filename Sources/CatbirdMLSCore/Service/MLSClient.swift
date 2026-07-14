@@ -614,7 +614,10 @@ public actor MLSClient {
         state.activeDeviceAuthUsers.isEmpty,
         state.pendingDeviceAuthRebindUsers.isEmpty,
         state.completedDeviceAuthBindingReceipts.isEmpty,
-        state.deviceAuthUsersAtSuspensionTransition.isEmpty
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty,
+        // Keep the established MLS-emergency -> Core-emergency lock order. Checking Core while
+        // this lock is held makes the two gate clears one indivisible far-side decision.
+        !MLSCoreContext.isSuspensionInProgress
       else {
         return false
       }

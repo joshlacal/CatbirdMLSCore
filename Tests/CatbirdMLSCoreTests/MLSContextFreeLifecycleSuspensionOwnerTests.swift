@@ -57,6 +57,50 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     assertBothGatesOpenAndOrdinaryAdmissionAllowed()
   }
 
+  func testShutdownPreservingSignalDuringReleaseKeepsBothGatesClosed() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let releaseReachedPostCoreClear = expectation(description: "release cleared Core")
+    let finishRelease = DispatchSemaphore(value: 0)
+    owner.markSuspensionInProgress(reason: "shutdown-preserving release race")
+    MLSClient.setNoUserResumeAfterCoreClearTestOverride {
+      releaseReachedPostCoreClear.fulfill()
+      finishRelease.wait()
+    }
+
+    let release = Task { await owner.resumeSuspensionIfOwnedAndContextFree() }
+    await fulfillment(of: [releaseReachedPostCoreClear], timeout: 2)
+    MLSClient.markShutdownInProgress(
+      reason: "shutdown signal while release is held",
+      abandonmentOwnerDID: nil,
+      abandonmentOwnerToken: UUID()
+    )
+    finishRelease.signal()
+    let released = await release.value
+
+    XCTAssertFalse(released)
+    assertBothGatesClosed()
+  }
+
+  func testLegacyClearDuringReleaseKeepsBothGatesClosed() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let releaseReachedPostCoreClear = expectation(description: "release cleared Core")
+    let finishRelease = DispatchSemaphore(value: 0)
+    owner.markSuspensionInProgress(reason: "legacy clear release race")
+    MLSClient.setNoUserResumeAfterCoreClearTestOverride {
+      releaseReachedPostCoreClear.fulfill()
+      finishRelease.wait()
+    }
+
+    let release = Task { await owner.resumeSuspensionIfOwnedAndContextFree() }
+    await fulfillment(of: [releaseReachedPostCoreClear], timeout: 2)
+    XCTAssertFalse(MLSClient.clearSuspensionFlag(reason: "legacy clear while release is held"))
+    finishRelease.signal()
+    let released = await release.value
+
+    XCTAssertFalse(released)
+    assertBothGatesClosed()
+  }
+
   func testWrongOwnerReleaseAfterSuccessfulReleaseDoesNotRecloseCoreGate() async {
     let owner = MLSContextFreeLifecycleSuspensionOwner()
     let wrongOwner = MLSContextFreeLifecycleSuspensionOwner()
