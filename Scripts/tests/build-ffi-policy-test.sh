@@ -22,6 +22,19 @@ assert_absent() {
     fi
 }
 
+assert_before() {
+    local first="$1"
+    local second="$2"
+    local first_line
+    local second_line
+    first_line="$(grep -nF -- "$first" "$WORKFLOW" | head -n 1 | cut -d: -f1)"
+    second_line="$(grep -nF -- "$second" "$WORKFLOW" | head -n 1 | cut -d: -f1)"
+    [[ -n "$first_line" ]] || fail "workflow is missing: $first"
+    [[ -n "$second_line" ]] || fail "workflow is missing: $second"
+    (( first_line < second_line )) \
+        || fail "workflow must place '$first' before '$second'"
+}
+
 assert_contains "default: ffi-w1-690d567b"
 assert_contains "default: 690d567b6d892064ae315f8776c3537006d88f93"
 assert_contains "default: 8b2f92e28097c0788492f2f82328f4ab5b032953"
@@ -42,7 +55,16 @@ assert_contains "name: Write source, toolchain, and checksum provenance"
 assert_contains "ffi-provenance.txt"
 assert_contains "internal_manifest_sha256="
 assert_contains "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1"
-assert_contains "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
+assert_contains "name: Restore Cargo registry and build outputs"
+assert_contains "id: restore-cargo-cache"
+assert_contains "actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
+assert_contains "name: Save Cargo registry and build outputs before cleanup"
+assert_contains "if: steps.restore-cargo-cache.outputs.cache-hit != 'true'"
+assert_contains "actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0"
+assert_contains "name: Release generated Rust build outputs before Swift validation"
+assert_contains "cargo clean --manifest-path ../catbird-mls/Cargo.toml"
+assert_contains "rm -rf ../catbird-mls/build"
+assert_contains "run: swift build --jobs 2"
 assert_contains "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2"
 assert_contains "group: ffi-release-\${{ inputs.release_tag }}"
 assert_contains "\"repos/\${GITHUB_REPOSITORY}/git/refs\""
@@ -53,6 +75,13 @@ assert_absent "--clobber"
 assert_absent "gh release upload"
 assert_absent "gh release edit"
 assert_absent "releases/latest/download"
+assert_absent "uses: actions/cache@"
+assert_before \
+    "name: Save Cargo registry and build outputs before cleanup" \
+    "name: Release generated Rust build outputs before Swift validation"
+assert_before \
+    "name: Release generated Rust build outputs before Swift validation" \
+    "name: Verify Swift package consumes generated FFI"
 
 extract_step_script() {
     local step_name="$1"
@@ -146,5 +175,50 @@ assert_manifest_generation() {
 }
 
 assert_manifest_generation
+
+assert_rust_cleanup_preserves_copied_ffi() {
+    local fixture_root
+    fixture_root="$(mktemp -d)"
+    local mock_bin="${fixture_root}/bin"
+    local step_script="${fixture_root}/cleanup.sh"
+    local core_root="${fixture_root}/CatbirdMLSCore"
+    local rust_root="${fixture_root}/catbird-mls"
+    mkdir -p \
+        "$mock_bin" \
+        "${core_root}/Sources/CatbirdMLS" \
+        "${core_root}/Sources/CatbirdMLSFFI.xcframework" \
+        "${rust_root}/target" \
+        "${rust_root}/build"
+    printf 'fixture binding\n' > "${core_root}/Sources/CatbirdMLS/CatbirdMLS.swift"
+    printf 'fixture framework\n' > "${core_root}/Sources/CatbirdMLSFFI.xcframework/Info.plist"
+    printf '[workspace]\n' > "${rust_root}/Cargo.toml"
+    extract_step_script "Release generated Rust build outputs before Swift validation" "$step_script"
+
+    cat > "${mock_bin}/cargo" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 3 ]]
+[[ "$1" == "clean" ]]
+[[ "$2" == "--manifest-path" ]]
+[[ "$3" == "../catbird-mls/Cargo.toml" ]]
+rm -rf ../catbird-mls/target
+MOCK
+    chmod +x "${mock_bin}/cargo"
+
+    (
+        cd "$core_root"
+        PATH="${mock_bin}:$PATH" bash "$step_script"
+    )
+
+    [[ ! -e "${rust_root}/target" ]] || fail "cleanup retained Rust target outputs"
+    [[ ! -e "${rust_root}/build" ]] || fail "cleanup retained generated Rust build outputs"
+    [[ -d "${core_root}/Sources/CatbirdMLSFFI.xcframework" ]] \
+        || fail "cleanup removed the copied XCFramework"
+    [[ -s "${core_root}/Sources/CatbirdMLS/CatbirdMLS.swift" ]] \
+        || fail "cleanup removed the copied Swift binding"
+    rm -rf "$fixture_root"
+}
+
+assert_rust_cleanup_preserves_copied_ffi
 
 echo "PASS: build-ffi workflow is pinned and append-only"
