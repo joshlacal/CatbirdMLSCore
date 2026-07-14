@@ -223,12 +223,14 @@ extension MLSConversationManager {
     }
   }
 
-  internal func ensureOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
+  internal func ensureOrchestratorRuntime(
+    suspendedResumeCapability: MLSClient.SuspendedResumeCapability? = nil
+  ) async -> MLSOrchestratorRuntime? {
     guard protocolAuthorityMode != .swiftLegacy, let userDid else { return nil }
     var initializationRight: MLSClient.RuntimeInitializationRight?
     while initializationRight == nil {
       switch MLSClient.beginTrackedRuntimeInitialization(
-        suspendedResumeCapability: nil,
+        suspendedResumeCapability: suspendedResumeCapability,
         for: userDid,
         runtimeStorage: orchestratorRuntimeStorage
       ) {
@@ -392,7 +394,11 @@ extension MLSConversationManager {
         "Rust authority blocked by lifecycle suspension for \(operation)"
       )
     }
-    guard let runtime = await ensureOrchestratorRuntime() else {
+    guard
+      let runtime = await ensureOrchestratorRuntime(
+        suspendedResumeCapability: suspendedResumeCapability
+      )
+    else {
       throw MLSConversationError.operationFailed("Rust orchestrator runtime unavailable for \(operation)")
     }
 

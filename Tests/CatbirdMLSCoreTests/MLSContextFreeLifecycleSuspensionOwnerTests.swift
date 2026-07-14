@@ -20,10 +20,18 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
   }
 
   func testPendingShutdownCloseDeniesOwnerReleaseUntilHandoffCompletes() async {
-    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let ownerToken = UUID()
     let closeIntentRecorded = expectation(description: "shutdown close intent recorded")
     let finishCoreClose = DispatchSemaphore(value: 0)
-    owner.markSuspensionInProgress(reason: "pending shutdown close")
+    MLSClient.markSuspensionInProgress(
+      reason: "pending shutdown close",
+      noUserOwnerToken: ownerToken
+    )
+    guard
+      let capability = MLSClient.ownedNoUserSuspendedResumeCapability(ownerToken: ownerToken)
+    else {
+      return XCTFail("Expected exact no-user shutdown authority")
+    }
     MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
       closeIntentRecorded.fulfill()
       finishCoreClose.wait()
@@ -33,21 +41,56 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
       MLSClient.markShutdownInProgress(
         reason: "pending shutdown close",
         abandonmentOwnerDID: nil,
-        abandonmentOwnerToken: UUID()
+        abandonmentOwnerToken: ownerToken,
+        allowImplicitFreshAuthority: false
       )
     }
     await fulfillment(of: [closeIntentRecorded], timeout: 2)
 
-    let releasedWhilePending = await owner.resumeSuspensionIfOwnedAndContextFree()
+    let releasedWhilePending = await MLSClient.finishNoUserSuspendedResumeCapability(capability)
     XCTAssertFalse(releasedWhilePending)
     assertBothGatesClosed()
 
     finishCoreClose.signal()
-    await shutdown.value
+    let shutdownAuthority = await shutdown.value
+    XCTAssertNotNil(shutdownAuthority.noUserCapability)
     assertBothGatesClosed()
-    let releasedAfterHandoff = await owner.resumeSuspensionIfOwnedAndContextFree()
+    let releasedAfterHandoff = await MLSClient.finishNoUserSuspendedResumeCapability(capability)
     XCTAssertFalse(releasedAfterHandoff)
     assertBothGatesClosed()
+  }
+
+  func testOwnerlessShutdownPhaseRejectsLegacyClearAndOrdinaryAdmission() {
+    let shutdownAuthority = MLSClient.markShutdownInProgress(
+      reason: "ownerless shutdown phase",
+      abandonmentOwnerDID: nil,
+      abandonmentOwnerToken: UUID()
+    )
+    XCTAssertNotNil(shutdownAuthority.noUserCapability)
+
+    let legacyCleared = MLSClient.clearSuspensionFlag(
+      reason: "legacy clear during ownerless shutdown"
+    )
+
+    XCTAssertFalse(legacyCleared)
+    assertBothGatesClosed()
+    let runtimeStorage = MLSOrchestratorRuntimeStorage()
+    switch MLSClient.beginTrackedRuntimeInitialization(
+      suspendedResumeCapability: nil,
+      for: "did:plc:shutdown-denial",
+      runtimeStorage: runtimeStorage
+    ) {
+    case .denied:
+      break
+    case .reserved(let right):
+      _ = MLSClient.cancelTrackedRuntimeInitialization(
+        right,
+        runtimeStorage: runtimeStorage
+      )
+      XCTFail("A fresh ordinary runtime initialization must remain denied during shutdown")
+    case .existing, .wait:
+      XCTFail("Shutdown admission unexpectedly observed runtime storage state")
+    }
   }
 
   func testPendingLegacyCloseDeniesOwnerReleaseUntilHandoffCompletes() async {
@@ -156,7 +199,7 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     let retryDuringHandoff = await owner.resumeSuspensionIfOwnedAndContextFree()
     XCTAssertFalse(retryDuringHandoff)
     finishShutdownCoreClose.signal()
-    await shutdown.value
+    _ = await shutdown.value
     assertBothGatesClosed()
   }
 
@@ -287,17 +330,31 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
   }
 
   func testShutdownLeaseDeniesReleaseAndKeepsBothGatesClosed() async throws {
-    let owner = MLSContextFreeLifecycleSuspensionOwner()
-    owner.markSuspensionInProgress(reason: "shutdown lease denial")
+    let ownerToken = UUID()
+    MLSClient.markSuspensionInProgress(
+      reason: "shutdown lease denial",
+      noUserOwnerToken: ownerToken
+    )
+    let capability = try XCTUnwrap(
+      MLSClient.ownedNoUserSuspendedResumeCapability(ownerToken: ownerToken)
+    )
+    let shutdownAuthority = MLSClient.markShutdownInProgress(
+      reason: "shutdown lease denial",
+      abandonmentOwnerDID: nil,
+      abandonmentOwnerToken: ownerToken,
+      allowImplicitFreshAuthority: false
+    )
+    let shutdownCapability = try XCTUnwrap(shutdownAuthority.noUserCapability)
     let lease = try XCTUnwrap(
       MLSClient.beginShutdownQuiescenceLease(
         abandonmentCapability: nil,
+        noUserCapability: shutdownCapability,
         excludingUserDID: nil
       )
     )
     defer { MLSClient.cancelShutdownQuiescenceLease(lease) }
 
-    let released = await owner.resumeSuspensionIfOwnedAndContextFree()
+    let released = await MLSClient.finishNoUserSuspendedResumeCapability(capability)
 
     XCTAssertFalse(released)
     assertBothGatesClosed()

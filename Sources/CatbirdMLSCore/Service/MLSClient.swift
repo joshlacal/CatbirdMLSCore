@@ -66,6 +66,17 @@ public actor MLSClient {
     fileprivate let noUserCapability: NoUserSuspendedResumeCapability?
   }
 
+  internal struct ShutdownTransitionAuthority: Sendable {
+    let abandonmentCapability: SuspensionAbandonmentCapability?
+    let noUserCapability: NoUserSuspendedResumeCapability?
+  }
+
+  private enum ShutdownAuthorityCandidate {
+    case user(SuspensionAbandonmentCapability)
+    case noUser(NoUserSuspendedResumeCapability)
+    case none
+  }
+
   internal struct NoUserSuspendedResumeCapability: Sendable {
     fileprivate let ownerToken: UUID
     fileprivate let suspensionGeneration: UInt64
@@ -131,6 +142,9 @@ public actor MLSClient {
     /// A preserve-existing shutdown has started. User-resume authority stays denied after its
     /// Core-close handoff completes; only exact teardown consumption clears this phase.
     var shutdownInProgress = false
+    /// Identifies the shutdown attempt whose Core-close handoff may still fail final authority
+    /// validation. A superseded attempt clears only its own phase, never a successor's.
+    var shutdownAttemptToken: UUID?
     /// WS-6.2 suspension handshake: number of FFI operations currently
     /// executing on background threads. Incremented atomically WITH the
     /// suspension check inside the `runFFI` dispatch block (admit-or-reject
@@ -351,6 +365,20 @@ public actor MLSClient {
       && state.coreGateCloseSignalSerial == serial
   }
 
+  private nonisolated static func ordinaryAdmissionIsOpen(
+    state: EmergencyState
+  ) -> Bool {
+    !state.suspensionInProgress
+      && !state.shutdownInProgress
+      && state.coreGateCloseInFlightTokens.isEmpty
+      && state.suspensionQuiescenceLeaseToken == nil
+      && !MLSCoreContext.isSuspensionInProgress
+  }
+
+  private nonisolated static func ordinaryAdmissionIsOpen() -> Bool {
+    emergencyState.withLock { ordinaryAdmissionIsOpen(state: $0) }
+  }
+
   private nonisolated static func suspendedResumeCapabilityMatches(
     _ capability: SuspendedResumeCapability,
     state: EmergencyState,
@@ -373,6 +401,71 @@ public actor MLSClient {
   /// Repeated signals are idempotent unless an in-flight resume capability must be revoked as a
   /// newer suspension generation. Callers must cancel the returned enrollment tasks immediately.
   private nonisolated static func transitionDeviceAuthToSuspended(
+    state: inout EmergencyState,
+    invalidateCache: Bool,
+    abandonmentOwner: (normalizedDID: String, token: UUID)? = nil,
+    noUserOwnerToken: UUID? = nil,
+    preserveExistingTransition: Bool = false,
+    beginShutdownPhase: Bool = false
+  ) -> SuspensionTransition {
+    let coreGateCloseHandoff = beginCoreGateCloseHandoff(state: &state)
+    if beginShutdownPhase {
+      state.shutdownInProgress = true
+    }
+    if invalidateCache {
+      state.cacheInvalidated = true
+    }
+    if preserveExistingTransition, state.suspensionInProgress {
+      return SuspensionTransition(
+        enrollmentTasks: [],
+        coreGateCloseHandoff: coreGateCloseHandoff
+      )
+    }
+    state.suspensionSignalSerial &+= 1
+    guard !state.suspensionInProgress || state.suspendedResumeCapability != nil else {
+      if state.suspensionAbandonmentOwner == nil, let abandonmentOwner {
+        state.suspensionAbandonmentOwner = abandonmentOwner
+        state.noUserSuspensionOwner = nil
+      } else if state.suspensionAbandonmentOwner == nil, let noUserOwnerToken {
+        state.noUserSuspensionOwner = NoUserSuspensionOwner(
+          token: noUserOwnerToken,
+          suspensionGeneration: state.deviceAuthSuspensionGeneration,
+          suspensionSignalSerial: state.suspensionSignalSerial
+        )
+      } else if state.suspensionAbandonmentOwner == nil {
+        state.noUserSuspensionOwner = nil
+      }
+      return SuspensionTransition(
+        enrollmentTasks: [],
+        coreGateCloseHandoff: coreGateCloseHandoff
+      )
+    }
+
+    state.suspensionAbandonmentOwner = abandonmentOwner
+    state.suspensionInProgress = true
+    state.deviceAuthSuspensionGeneration &+= 1
+    state.noUserSuspensionOwner =
+      if abandonmentOwner == nil, let noUserOwnerToken {
+        NoUserSuspensionOwner(
+          token: noUserOwnerToken,
+          suspensionGeneration: state.deviceAuthSuspensionGeneration,
+          suspensionSignalSerial: state.suspensionSignalSerial
+        )
+      } else {
+        nil
+      }
+    state.deviceAuthUsersAtSuspensionTransition = state.activeDeviceAuthUsers
+      .union(state.pendingDeviceAuthRebindUsers)
+    state.suspendedResumeCapability = nil
+    let tasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
+    state.deviceAuthEnrollmentTasks.removeAll()
+    return SuspensionTransition(
+      enrollmentTasks: tasks,
+      coreGateCloseHandoff: coreGateCloseHandoff
+    )
+  }
+
+  private nonisolated static func transitionDeviceAuthToSuspended(
     invalidateCache: Bool,
     abandonmentOwner: (normalizedDID: String, token: UUID)? = nil,
     noUserOwnerToken: UUID? = nil,
@@ -380,60 +473,13 @@ public actor MLSClient {
     beginShutdownPhase: Bool = false
   ) -> SuspensionTransition {
     emergencyState.withLock { state in
-      let coreGateCloseHandoff = beginCoreGateCloseHandoff(state: &state)
-      if beginShutdownPhase {
-        state.shutdownInProgress = true
-      }
-      if invalidateCache {
-        state.cacheInvalidated = true
-      }
-      if preserveExistingTransition, state.suspensionInProgress {
-        return SuspensionTransition(
-          enrollmentTasks: [],
-          coreGateCloseHandoff: coreGateCloseHandoff
-        )
-      }
-      state.suspensionSignalSerial &+= 1
-      guard !state.suspensionInProgress || state.suspendedResumeCapability != nil else {
-        if state.suspensionAbandonmentOwner == nil, let abandonmentOwner {
-          state.suspensionAbandonmentOwner = abandonmentOwner
-          state.noUserSuspensionOwner = nil
-        } else if state.suspensionAbandonmentOwner == nil, let noUserOwnerToken {
-          state.noUserSuspensionOwner = NoUserSuspensionOwner(
-            token: noUserOwnerToken,
-            suspensionGeneration: state.deviceAuthSuspensionGeneration,
-            suspensionSignalSerial: state.suspensionSignalSerial
-          )
-        } else if state.suspensionAbandonmentOwner == nil {
-          state.noUserSuspensionOwner = nil
-        }
-        return SuspensionTransition(
-          enrollmentTasks: [],
-          coreGateCloseHandoff: coreGateCloseHandoff
-        )
-      }
-
-      state.suspensionAbandonmentOwner = abandonmentOwner
-      state.suspensionInProgress = true
-      state.deviceAuthSuspensionGeneration &+= 1
-      state.noUserSuspensionOwner =
-        if abandonmentOwner == nil, let noUserOwnerToken {
-          NoUserSuspensionOwner(
-            token: noUserOwnerToken,
-            suspensionGeneration: state.deviceAuthSuspensionGeneration,
-            suspensionSignalSerial: state.suspensionSignalSerial
-          )
-        } else {
-          nil
-        }
-      state.deviceAuthUsersAtSuspensionTransition = state.activeDeviceAuthUsers
-        .union(state.pendingDeviceAuthRebindUsers)
-      state.suspendedResumeCapability = nil
-      let tasks = state.deviceAuthEnrollmentTasks.values.map(\.task)
-      state.deviceAuthEnrollmentTasks.removeAll()
-      return SuspensionTransition(
-        enrollmentTasks: tasks,
-        coreGateCloseHandoff: coreGateCloseHandoff
+      transitionDeviceAuthToSuspended(
+        state: &state,
+        invalidateCache: invalidateCache,
+        abandonmentOwner: abandonmentOwner,
+        noUserOwnerToken: noUserOwnerToken,
+        preserveExistingTransition: preserveExistingTransition,
+        beginShutdownPhase: beginShutdownPhase
       )
     }
   }
@@ -475,33 +521,165 @@ public actor MLSClient {
 
   /// Closes ordinary admission for shutdown without superseding an exact suspension transition
   /// that the caller may already be authorized to abandon after teardown.
+  @discardableResult
   internal nonisolated static func markShutdownInProgress(
     reason: String,
     abandonmentOwnerDID: String?,
-    abandonmentOwnerToken: UUID
-  ) {
+    abandonmentOwnerToken: UUID,
+    expectedAbandonmentCapability: SuspensionAbandonmentCapability? = nil,
+    allowImplicitFreshAuthority: Bool = true
+  ) -> ShutdownTransitionAuthority {
     let normalizedDID = abandonmentOwnerDID?
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    let transition = transitionDeviceAuthToSuspended(
-      invalidateCache: false,
-      abandonmentOwner: normalizedDID.flatMap {
-        $0.isEmpty ? nil : ($0, abandonmentOwnerToken)
-      },
-      noUserOwnerToken: normalizedDID == nil || normalizedDID?.isEmpty == true
-        ? abandonmentOwnerToken : nil,
-      preserveExistingTransition: true,
-      beginShutdownPhase: true
-    )
+    let hasUserDID = normalizedDID?.isEmpty == false
+    let initial = emergencyState.withLock {
+      state -> (
+        transition: SuspensionTransition,
+        candidate: ShutdownAuthorityCandidate,
+        shutdownAttemptToken: UUID?
+      ) in
+      let suspensionWasInProgress = state.suspensionInProgress
+      let explicitCapabilityMatches = expectedAbandonmentCapability.map { capability in
+        hasUserDID
+          && !state.shutdownInProgress
+          && state.suspensionInProgress
+          && coreGateCloseFenceMatches(capability.coreGateCloseSignalSerial, state: state)
+          && state.deviceAuthSuspensionGeneration == capability.suspensionGeneration
+          && state.suspensionSignalSerial == capability.suspensionSignalSerial
+          && capability.normalizedDID == normalizedDID
+          && capability.ownerToken == abandonmentOwnerToken
+          && state.suspensionAbandonmentOwner?.normalizedDID == normalizedDID
+          && state.suspensionAbandonmentOwner?.token == abandonmentOwnerToken
+          && MLSCoreContext.isSuspensionInProgress
+      } ?? false
+      let existingNoUserOwnerMatches =
+        !hasUserDID
+        && !state.shutdownInProgress
+        && state.suspensionInProgress
+        && state.coreGateCloseInFlightTokens.isEmpty
+        && state.suspensionAbandonmentOwner == nil
+        && state.noUserSuspensionOwner?.token == abandonmentOwnerToken
+        && state.noUserSuspensionOwner?.suspensionGeneration
+          == state.deviceAuthSuspensionGeneration
+        && state.noUserSuspensionOwner?.suspensionSignalSerial == state.suspensionSignalSerial
+        && MLSCoreContext.isSuspensionInProgress
+      let mayCaptureFreshAuthority =
+        allowImplicitFreshAuthority
+        && expectedAbandonmentCapability == nil
+        && !suspensionWasInProgress
+      let mayEnterShutdownPhase =
+        explicitCapabilityMatches || existingNoUserOwnerMatches || mayCaptureFreshAuthority
+      let transition = transitionDeviceAuthToSuspended(
+        state: &state,
+        invalidateCache: false,
+        abandonmentOwner: normalizedDID.flatMap {
+          $0.isEmpty ? nil : ($0, abandonmentOwnerToken)
+        },
+        noUserOwnerToken: hasUserDID ? nil : abandonmentOwnerToken,
+        preserveExistingTransition: true,
+        beginShutdownPhase: mayEnterShutdownPhase
+      )
+      let shutdownAttemptToken = mayEnterShutdownPhase ? UUID() : nil
+      if let shutdownAttemptToken {
+        state.shutdownAttemptToken = shutdownAttemptToken
+      }
+      let candidate: ShutdownAuthorityCandidate
+      if hasUserDID, explicitCapabilityMatches || mayCaptureFreshAuthority,
+        let normalizedDID
+      {
+        candidate = .user(
+          SuspensionAbandonmentCapability(
+            normalizedDID: normalizedDID,
+            ownerToken: abandonmentOwnerToken,
+            suspensionGeneration: state.deviceAuthSuspensionGeneration,
+            suspensionSignalSerial: state.suspensionSignalSerial,
+            coreGateCloseSignalSerial: state.coreGateCloseSignalSerial
+          )
+        )
+      } else if !hasUserDID, existingNoUserOwnerMatches || mayCaptureFreshAuthority {
+        candidate = .noUser(
+          NoUserSuspendedResumeCapability(
+            ownerToken: abandonmentOwnerToken,
+            suspensionGeneration: state.deviceAuthSuspensionGeneration,
+            suspensionSignalSerial: state.suspensionSignalSerial,
+            coreGateCloseSignalSerial: state.coreGateCloseSignalSerial
+          )
+        )
+      } else {
+        candidate = .none
+      }
+      return (transition, candidate, shutdownAttemptToken)
+    }
+    let transition = initial.transition
     for task in transition.enrollmentTasks { task.cancel() }
     performCoreGateCloseHandoff(transition.coreGateCloseHandoff) {
       shutdownCoreCloseAfterIntentTestOverride.withLock { $0 }?()
       MLSCoreContext.markSuspensionInProgress()
+    }
+    let authority = emergencyState.withLock { state -> ShutdownTransitionAuthority in
+      func rejectAuthority() -> ShutdownTransitionAuthority {
+        if let shutdownAttemptToken = initial.shutdownAttemptToken,
+          state.shutdownAttemptToken == shutdownAttemptToken
+        {
+          state.shutdownInProgress = false
+          state.shutdownAttemptToken = nil
+        }
+        return ShutdownTransitionAuthority(
+          abandonmentCapability: nil,
+          noUserCapability: nil
+        )
+      }
+      guard state.shutdownInProgress,
+        state.suspensionInProgress,
+        state.coreGateCloseInFlightTokens.isEmpty,
+        MLSCoreContext.isSuspensionInProgress
+      else {
+        return rejectAuthority()
+      }
+      switch initial.candidate {
+      case .user(let capability):
+        guard state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+          state.suspensionSignalSerial == capability.suspensionSignalSerial,
+          state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
+          state.suspensionAbandonmentOwner?.normalizedDID == capability.normalizedDID,
+          state.suspensionAbandonmentOwner?.token == capability.ownerToken
+        else {
+          return rejectAuthority()
+        }
+        state.shutdownAttemptToken = nil
+        return ShutdownTransitionAuthority(
+          abandonmentCapability: capability,
+          noUserCapability: nil
+        )
+      case .noUser(let capability):
+        guard state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
+          state.suspensionSignalSerial == capability.suspensionSignalSerial,
+          state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
+          state.suspensionAbandonmentOwner == nil,
+          state.noUserSuspensionOwner
+            == NoUserSuspensionOwner(
+              token: capability.ownerToken,
+              suspensionGeneration: capability.suspensionGeneration,
+              suspensionSignalSerial: capability.suspensionSignalSerial
+            )
+        else {
+          return rejectAuthority()
+        }
+        state.shutdownAttemptToken = nil
+        return ShutdownTransitionAuthority(
+          abandonmentCapability: nil,
+          noUserCapability: capability
+        )
+      case .none:
+        return rejectAuthority()
+      }
     }
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
       details: "MLSClient owner-preserving shutdown gate: \(reason)",
       process: "app"
     )
+    return authority
   }
 
   internal nonisolated static func markSuspensionInProgress(
@@ -576,7 +754,8 @@ public actor MLSClient {
         snapshot: (suspension: UInt64, coreClose: UInt64)?,
         deniedClose: CoreGateCloseHandoff?
       ) in
-      guard state.deviceAuthUsersAtSuspensionTransition.isEmpty,
+      guard !state.shutdownInProgress,
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty,
         state.pendingDeviceAuthRebindUsers.isEmpty,
         state.suspendedResumeCapability == nil,
         state.suspensionQuiescenceLeaseToken == nil,
@@ -597,7 +776,8 @@ public actor MLSClient {
       legacyClearAfterCoreClearTestOverride.withLock { $0 }?()
       let finalDecision = emergencyState.withLock {
         state -> (cleared: Bool, closeHandoff: CoreGateCloseHandoff?) in
-        guard state.suspensionSignalSerial == snapshot.suspension,
+        guard !state.shutdownInProgress,
+          state.suspensionSignalSerial == snapshot.suspension,
           coreGateCloseFenceMatches(snapshot.coreClose, state: state),
           state.deviceAuthUsersAtSuspensionTransition.isEmpty,
           state.pendingDeviceAuthRebindUsers.isEmpty,
@@ -667,35 +847,6 @@ public actor MLSClient {
     }
   }
 
-  /// Captures the no-user owner only for the teardown path that established the persistent
-  /// shutdown phase. Normal context-free resume acquisition remains denied during shutdown.
-  internal nonisolated static func ownedNoUserShutdownSuspensionCapability(
-    ownerToken: UUID
-  ) -> NoUserSuspendedResumeCapability? {
-    emergencyState.withLock { state in
-      guard state.suspensionInProgress,
-        state.shutdownInProgress,
-        state.coreGateCloseInFlightTokens.isEmpty,
-        state.suspensionQuiescenceLeaseToken == nil,
-        state.inFlightFFIOperations == 0,
-        state.suspensionAbandonmentOwner == nil,
-        state.noUserSuspensionOwner?.token == ownerToken,
-        state.noUserSuspensionOwner?.suspensionGeneration
-          == state.deviceAuthSuspensionGeneration,
-        state.noUserSuspensionOwner?.suspensionSignalSerial == state.suspensionSignalSerial,
-        MLSCoreContext.isSuspensionInProgress
-      else {
-        return nil
-      }
-      return NoUserSuspendedResumeCapability(
-        ownerToken: ownerToken,
-        suspensionGeneration: state.noUserSuspensionOwner!.suspensionGeneration,
-        suspensionSignalSerial: state.noUserSuspensionOwner!.suspensionSignalSerial,
-        coreGateCloseSignalSerial: state.coreGateCloseSignalSerial
-      )
-    }
-  }
-
   internal nonisolated static func ownedSuspensionAbandonmentCapability(
     for userDID: String,
     ownerToken: UUID
@@ -718,26 +869,6 @@ public actor MLSClient {
         suspensionSignalSerial: state.suspensionSignalSerial,
         coreGateCloseSignalSerial: state.coreGateCloseSignalSerial
       )
-    }
-  }
-
-  internal nonisolated static func isCurrentSuspensionAbandonmentCapability(
-    _ capability: SuspensionAbandonmentCapability,
-    for userDID: String,
-    ownerToken: UUID
-  ) -> Bool {
-    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
-    return emergencyState.withLock { state in
-      state.suspensionInProgress
-        && state.coreGateCloseInFlightTokens.isEmpty
-        && state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial
-        && state.deviceAuthSuspensionGeneration == capability.suspensionGeneration
-        && state.suspensionSignalSerial == capability.suspensionSignalSerial
-        && capability.normalizedDID == normalizedDID
-        && capability.ownerToken == ownerToken
-        && state.suspensionAbandonmentOwner?.normalizedDID == normalizedDID
-        && state.suspensionAbandonmentOwner?.token == ownerToken
-        && MLSCoreContext.isSuspensionInProgress
     }
   }
 
@@ -858,6 +989,7 @@ public actor MLSClient {
       state.suspensionQuiescenceLeaseToken = nil
       state.suspensionInProgress = false
       state.shutdownInProgress = false
+      state.shutdownAttemptToken = nil
       return true
     }
     if !cleared {
@@ -934,6 +1066,7 @@ public actor MLSClient {
       state.suspensionQuiescenceLeaseToken = nil
       state.suspensionInProgress = false
       state.shutdownInProgress = false
+      state.shutdownAttemptToken = nil
       return true
     }
     if !cleared { restoreCoreSuspensionGateIfClientSuspended() }
@@ -1014,6 +1147,7 @@ public actor MLSClient {
       state.suspensionQuiescenceLeaseToken = nil
       state.suspensionInProgress = false
       state.shutdownInProgress = false
+      state.shutdownAttemptToken = nil
       return true
     }
     if !cleared { restoreCoreSuspensionGateIfClientSuspended() }
@@ -1028,6 +1162,7 @@ public actor MLSClient {
       )
       state.suspensionInProgress = false
       state.shutdownInProgress = false
+      state.shutdownAttemptToken = nil
       state.suspendedResumeCapability = nil
       state.suspensionQuiescenceLeaseToken = nil
       state.deviceAuthUsersAtSuspensionTransition.removeAll()
@@ -1503,8 +1638,10 @@ public actor MLSClient {
         else {
           return false
         }
-      } else if suspendedResumePermit != nil {
-        return false
+      } else {
+        guard suspendedResumePermit == nil, ordinaryAdmissionIsOpen(state: state) else {
+          return false
+        }
       }
       state.activeDeviceAuthUsers.insert(normalizedDID)
       state.deviceAuthEnrollmentTasks[normalizedDID] = DeviceAuthEnrollmentHandle(
@@ -1569,8 +1706,10 @@ public actor MLSClient {
         else {
           return false
         }
-      } else if suspendedResumePermit != nil {
-        return false
+      } else {
+        guard suspendedResumePermit == nil, ordinaryAdmissionIsOpen(state: state) else {
+          return false
+        }
       }
       state.deviceAuthEnrollmentTasks.removeValue(forKey: normalizedDID)
       state.completedDeviceAuthBindingReceipts[normalizedDID] = completedReceipt
@@ -1733,9 +1872,7 @@ public actor MLSClient {
 
   private nonisolated static func admitTrackedFFIOperation() -> Bool {
     emergencyState.withLock { state in
-      guard !state.suspensionInProgress, state.suspensionQuiescenceLeaseToken == nil else {
-        return false
-      }
+      guard ordinaryAdmissionIsOpen(state: state) else { return false }
       state.inFlightFFIOperations += 1
       return true
     }
@@ -1798,27 +1935,17 @@ public actor MLSClient {
       guard !state.runtimeInitializationRightDIDs.values.contains(normalizedDID) else {
         return .wait
       }
-      let storageDisposition = runtimeStorage.beginInitialization()
-      if case .existing(let runtime) = storageDisposition {
-        // Looking up an already-installed runtime does not create new lifecycle work. Preserve the
-        // existing-runtime path so a scoped suspended resume can resolve it and perform its bridge
-        // call under the exact capability supplied by the caller.
-        return .existing(runtime)
-      }
       let admissionIsValid =
         if let suspendedResumeCapability {
           state.suspensionQuiescenceLeaseToken == nil
             && suspendedResumeCapability.normalizedDID == normalizedDID
             && suspendedResumeCapabilityMatches(suspendedResumeCapability, state: state)
         } else {
-          !state.suspensionInProgress && state.suspensionQuiescenceLeaseToken == nil
+          ordinaryAdmissionIsOpen(state: state)
         }
-      guard admissionIsValid else {
-        if case .reserved(let reservationToken) = storageDisposition {
-          runtimeStorage.cancelInitialization(token: reservationToken)
-        }
-        return .denied
-      }
+      guard admissionIsValid else { return .denied }
+
+      let storageDisposition = runtimeStorage.beginInitialization()
 
       switch storageDisposition {
       case .existing(let runtime):
@@ -1854,7 +1981,7 @@ public actor MLSClient {
       return suspendedResumeCapabilityMatches(capability, state: state)
         && capability.normalizedDID == right.normalizedDID
     }
-    return !state.suspensionInProgress
+    return ordinaryAdmissionIsOpen(state: state)
       && state.deviceAuthSuspensionGeneration == right.suspensionGeneration
       && state.suspensionSignalSerial == right.suspensionSignalSerial
   }
@@ -2006,6 +2133,11 @@ public actor MLSClient {
         boundNoUserCapability = capability
       } else {
         boundNoUserCapability = nil
+      }
+      guard state.shutdownInProgress,
+        boundCapability != nil || boundNoUserCapability != nil
+      else {
+        return nil
       }
       let lease = ShutdownQuiescenceLease(
         token: token,
@@ -2942,7 +3074,7 @@ public actor MLSClient {
     // Pre-dispatch check: fail fast before queuing work that may execute during suspension.
     // This prevents the race where suspension is signaled after the dispatch is queued
     // but before the block starts executing on the background thread.
-    guard !Self.isSuspensionInProgress else {
+    guard Self.ordinaryAdmissionIsOpen() else {
       throw MLSError.contextCreationBlocked(
         reason: "App is transitioning to background - MLS operations suspended (pre-dispatch)")
     }
@@ -3075,7 +3207,7 @@ public actor MLSClient {
     let normalizedDID = normalizeUserDID(userDID)
 
     // Block creation/use while app is suspending to avoid 0xdead10cc termination.
-    if Self.isSuspensionInProgress {
+    if !Self.ordinaryAdmissionIsOpen() {
       logger.warning("🚫 [0xdead10cc-FIX] MLSClient.getContext BLOCKED - suspension in progress")
       throw MLSError.contextCreationBlocked(
         reason: "App is transitioning to background - MLS operations suspended"

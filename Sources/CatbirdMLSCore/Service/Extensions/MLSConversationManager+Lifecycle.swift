@@ -26,6 +26,7 @@ private let suspendedResumeOtherBindingInvalidationOverride = Mutex<
   (@Sendable (String) async throws -> Void)?
 >(nil)
 private let shutdownAfterSuspensionCapabilityTestOverride = Mutex<(@Sendable () -> Void)?>(nil)
+private let shutdownBeforeTransitionTestOverride = Mutex<(@Sendable () -> Void)?>(nil)
 
 extension MLSConversationManager {
 
@@ -33,6 +34,12 @@ extension MLSConversationManager {
     _ operation: (@Sendable () -> Void)?
   ) {
     shutdownAfterSuspensionCapabilityTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setShutdownBeforeTransitionTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    shutdownBeforeTransitionTestOverride.withLock { $0 = operation }
   }
 
   // MARK: - App Suspension (0xdead10cc Prevention)
@@ -972,68 +979,27 @@ extension MLSConversationManager {
     // read userDid after isShuttingDown was set but before cleanup completed.
     let shutdownUserDid = userDid
     let normalizedShutdownDID = shutdownUserDid?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let explicitAuthorizationMatches =
-      authorization?.managerIdentity == ObjectIdentifier(self)
-      && authorization?.normalizedDID == normalizedShutdownDID
-      && authorization.map {
-        MLSClient.isCurrentSuspensionAbandonmentCapability(
-          $0.capability,
-          for: $0.normalizedDID,
-          ownerToken: suspensionAbandonmentOwnerToken
-        )
-      } == true
-    let suspensionAlreadyInProgress = MLSClient.isSuspensionInProgress
+    let expectedAbandonmentCapability: MLSClient.SuspensionAbandonmentCapability? =
+      if authorization?.managerIdentity == ObjectIdentifier(self),
+        authorization?.normalizedDID == normalizedShutdownDID
+      {
+        authorization?.capability
+      } else {
+        nil
+      }
+    shutdownBeforeTransitionTestOverride.withLock { $0 }?()
     isShuttingDown = true
     isSyncPaused = true
     isSuspending = true
-    MLSClient.markShutdownInProgress(
+    let shutdownAuthority = MLSClient.markShutdownInProgress(
       reason: "MLSConversationManager.shutdown",
       abandonmentOwnerDID: shutdownUserDid,
-      abandonmentOwnerToken: suspensionAbandonmentOwnerToken
+      abandonmentOwnerToken: suspensionAbandonmentOwnerToken,
+      expectedAbandonmentCapability: expectedAbandonmentCapability,
+      allowImplicitFreshAuthority: authorization == nil
     )
-    // markShutdown records and completes a fresh Core-close handoff. Refresh an otherwise valid
-    // pre-shutdown authorization onto that exact close serial; the stale wrapped capability must
-    // never be carried across the new handoff.
-    let refreshedAuthorizedSuspensionCapability: MLSClient.SuspensionAbandonmentCapability? =
-      if explicitAuthorizationMatches,
-        let normalizedShutdownDID,
-        !normalizedShutdownDID.isEmpty
-      {
-        MLSClient.ownedSuspensionAbandonmentCapability(
-          for: normalizedShutdownDID,
-          ownerToken: suspensionAbandonmentOwnerToken
-        )
-      } else {
-        nil
-      }
-    // A foreground account switch can enter shutdown directly, without first asking the
-    // lifecycle coordinator for an authorization. In that case this manager owns the exact
-    // suspension tuple that markShutdownInProgress just created and may carry that authority
-    // through safe teardown. Never acquire authority implicitly for a pre-existing transition:
-    // background suspension still requires its explicit authorization, and a racing/superseding
-    // owner will fail this exact owner-token lookup.
-    let implicitShutdownSuspensionCapability: MLSClient.SuspensionAbandonmentCapability? =
-      if !suspensionAlreadyInProgress,
-        let normalizedShutdownDID,
-        !normalizedShutdownDID.isEmpty
-      {
-        MLSClient.ownedSuspensionAbandonmentCapability(
-          for: normalizedShutdownDID,
-          ownerToken: suspensionAbandonmentOwnerToken
-        )
-      } else {
-        nil
-      }
-    let shutdownSuspensionCapability =
-      refreshedAuthorizedSuspensionCapability ?? implicitShutdownSuspensionCapability
-    let noUserShutdownSuspensionCapability: MLSClient.NoUserSuspendedResumeCapability? =
-      if normalizedShutdownDID == nil || normalizedShutdownDID?.isEmpty == true {
-        MLSClient.ownedNoUserShutdownSuspensionCapability(
-          ownerToken: suspensionAbandonmentOwnerToken
-        )
-      } else {
-        nil
-      }
+    let shutdownSuspensionCapability = shutdownAuthority.abandonmentCapability
+    let noUserShutdownSuspensionCapability = shutdownAuthority.noUserCapability
     shutdownAfterSuspensionCapabilityTestOverride.withLock { $0 }?()
     userDid = nil  // Immediately invalidate to fail-fast any new operations
 

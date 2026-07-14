@@ -14,6 +14,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     MLSConversationManager.setSuspendedResumeFinalReleaseOverride(nil)
     MLSConversationManager.setSuspendedResumeOtherBindingInvalidationOverride(nil)
     MLSConversationManager.setShutdownAfterSuspensionCapabilityTestOverride(nil)
+    MLSConversationManager.setShutdownBeforeTransitionTestOverride(nil)
     MLSConversationManager.setTrackedRustRuntimePostBodyTestOverride(nil)
     MLSCoreContext.setSuspendedResumeReloadTestOverride { _ in }
     MLSCoreContext.setSuspendedResumeContextAdmissionTestOverride(nil)
@@ -32,6 +33,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     MLSConversationManager.setSuspendedResumeFinalReleaseOverride(nil)
     MLSConversationManager.setSuspendedResumeOtherBindingInvalidationOverride(nil)
     MLSConversationManager.setShutdownAfterSuspensionCapabilityTestOverride(nil)
+    MLSConversationManager.setShutdownBeforeTransitionTestOverride(nil)
     MLSConversationManager.setTrackedRustRuntimePostBodyTestOverride(nil)
     MLSCoreContext.setSuspendedResumeReloadTestOverride(nil)
     MLSCoreContext.setSuspendedResumeContextAdmissionTestOverride(nil)
@@ -225,6 +227,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       abandonmentOwnerDID: userDID,
       abandonmentOwnerToken: ownerToken
     )
+    let abandonmentCapability = try XCTUnwrap(
+      MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
+    )
     let staleCapability = try XCTUnwrap(
       MLSClient.beginSuspendedResumeCapability(for: userDID, ownerToken: ownerToken)
     )
@@ -237,7 +242,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       MLSClient.markShutdownInProgress(
         reason: "pending user resume close",
         abandonmentOwnerDID: userDID,
-        abandonmentOwnerToken: ownerToken
+        abandonmentOwnerToken: ownerToken,
+        expectedAbandonmentCapability: abandonmentCapability,
+        allowImplicitFreshAuthority: false
       )
     }
     await fulfillment(of: [closeIntentRecorded], timeout: 2)
@@ -248,7 +255,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertTrue(MLSClient.isSuspensionInProgress)
 
     finishCoreClose.signal()
-    await shutdown.value
+    _ = await shutdown.value
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
     MLSClient.cancelSuspendedResumeCapability(staleCapability)
     XCTAssertNil(
@@ -272,12 +279,6 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let staleCapability = try XCTUnwrap(
       MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
     )
-    let staleLease = try XCTUnwrap(
-      MLSClient.beginShutdownQuiescenceLease(
-        abandonmentCapability: staleCapability,
-        excludingUserDID: userDID
-      )
-    )
     MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
       closeIntentRecorded.fulfill()
       finishCoreClose.wait()
@@ -287,21 +288,26 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       MLSClient.markShutdownInProgress(
         reason: "pending user abandonment close",
         abandonmentOwnerDID: userDID,
-        abandonmentOwnerToken: ownerToken
+        abandonmentOwnerToken: ownerToken,
+        expectedAbandonmentCapability: staleCapability,
+        allowImplicitFreshAuthority: false
       )
     }
     await fulfillment(of: [closeIntentRecorded], timeout: 2)
 
-    let staleAbandoned = await MLSClient.abandonSuspensionAfterSafeShutdown(staleLease)
-    XCTAssertFalse(staleAbandoned)
+    XCTAssertNil(
+      MLSClient.beginShutdownQuiescenceLease(
+        abandonmentCapability: staleCapability,
+        excludingUserDID: userDID
+      )
+    )
     XCTAssertTrue(MLSClient.isSuspensionInProgress)
 
     finishCoreClose.signal()
-    await shutdown.value
+    let shutdownAuthority = await shutdown.value
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
-    MLSClient.cancelShutdownQuiescenceLease(staleLease)
     let renewedCapability = try XCTUnwrap(
-      MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
+      shutdownAuthority.abandonmentCapability
     )
     let renewedLease = try XCTUnwrap(
       MLSClient.beginShutdownQuiescenceLease(
@@ -311,6 +317,56 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     )
     let renewedAbandoned = await MLSClient.abandonSuspensionAfterSafeShutdown(renewedLease)
     XCTAssertTrue(renewedAbandoned)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+  }
+
+  func testSupersededShutdownHandoffRollsBackOnlyItsShutdownPhase() async throws {
+    let userDID = "did:plc:superseded-shutdown"
+    let ownerToken = UUID()
+    MLSClient.markSuspensionInProgress(
+      reason: "superseded shutdown setup",
+      abandonmentOwnerDID: userDID,
+      abandonmentOwnerToken: ownerToken
+    )
+    let staleCapability = try XCTUnwrap(
+      MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
+    )
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
+      MLSClient.markSuspensionInProgress(reason: "newer signal during shutdown handoff")
+    }
+
+    let staleAuthority = MLSClient.markShutdownInProgress(
+      reason: "superseded shutdown handoff",
+      abandonmentOwnerDID: userDID,
+      abandonmentOwnerToken: ownerToken,
+      expectedAbandonmentCapability: staleCapability,
+      allowImplicitFreshAuthority: false
+    )
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride(nil)
+
+    XCTAssertNil(staleAuthority.abandonmentCapability)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    let currentCapability = try XCTUnwrap(
+      MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
+    )
+    let currentAuthority = MLSClient.markShutdownInProgress(
+      reason: "recover after superseded shutdown handoff",
+      abandonmentOwnerDID: userDID,
+      abandonmentOwnerToken: ownerToken,
+      expectedAbandonmentCapability: currentCapability,
+      allowImplicitFreshAuthority: false
+    )
+    let renewedCapability = try XCTUnwrap(currentAuthority.abandonmentCapability)
+    let lease = try XCTUnwrap(
+      MLSClient.beginShutdownQuiescenceLease(
+        abandonmentCapability: renewedCapability,
+        excludingUserDID: userDID
+      )
+    )
+    let recovered = await MLSClient.abandonSuspensionAfterSafeShutdown(lease)
+    XCTAssertTrue(recovered)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
   }
@@ -1959,6 +2015,26 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertTrue(manager.isSyncPaused)
   }
 
+  func testSameOwnerSignalAtShutdownBoundaryCannotRefreshOlderAuthorization() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    _ = await MainActor.run { manager.suspendMLSOperations() }
+    let authorization = await manager.authorizeSuspensionAbandonmentForAccountSwitch()
+    XCTAssertNotNil(authorization)
+    MLSConversationManager.setShutdownBeforeTransitionTestOverride {
+      MLSClient.markSuspensionInProgress(reason: "same-owner shutdown boundary supersession")
+    }
+
+    let shutdownWasSafe = await manager.shutdown(
+      accountSwitchSuspensionAuthorization: authorization
+    )
+
+    XCTAssertFalse(shutdownWasSafe)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(manager.isSuspending)
+    XCTAssertTrue(manager.isSyncPaused)
+  }
+
   func testStaleManagerCannotAuthorizeAnotherManagersSuspensionAbandonment() async throws {
     let owner = try await makeManager(protocolAuthorityMode: .swiftLegacy)
     let stale = try await makeManager(protocolAuthorityMode: .swiftLegacy)
@@ -2133,9 +2209,17 @@ final class MLSFullRustLifecycleTests: XCTestCase {
         ownerToken: manager.suspensionAbandonmentOwnerToken
       )
     )
+    let shutdownAuthority = MLSClient.markShutdownInProgress(
+      reason: "no-user shutdown lease regression",
+      abandonmentOwnerDID: nil,
+      abandonmentOwnerToken: manager.suspensionAbandonmentOwnerToken,
+      allowImplicitFreshAuthority: false
+    )
+    let shutdownCapability = try XCTUnwrap(shutdownAuthority.noUserCapability)
     let lease = try XCTUnwrap(
       MLSClient.beginShutdownQuiescenceLease(
         abandonmentCapability: nil,
+        noUserCapability: shutdownCapability,
         excludingUserDID: nil
       )
     )
@@ -2151,14 +2235,16 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
 
     MLSClient.cancelShutdownQuiescenceLease(lease)
-    XCTAssertNotNil(
+    XCTAssertNil(
       MLSClient.ownedNoUserSuspendedResumeCapability(
         ownerToken: manager.suspensionAbandonmentOwnerToken
       )
     )
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
   }
 
-  func testStaleAbandonmentCapabilityCreatesUnboundShutdownLease() async throws {
+  func testStaleAbandonmentCapabilityCannotAcquireShutdownLease() async throws {
     let userDID = "did:plc:testuser"
     let ownerToken = UUID()
     MLSClient.markSuspensionInProgress(
@@ -2173,18 +2259,15 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       )
     )
     MLSClient.markSuspensionInProgress(reason: "supersede shutdown capability")
-    let lease = try XCTUnwrap(
+    XCTAssertNil(
       MLSClient.beginShutdownQuiescenceLease(
         abandonmentCapability: capability,
         excludingUserDID: userDID
-      )
+      ),
+      "A stale capability must not authorize globally destructive shutdown teardown"
     )
-
-    let abandoned = await MLSClient.abandonSuspensionAfterSafeShutdown(lease)
-    XCTAssertFalse(abandoned)
     XCTAssertTrue(MLSClient.isSuspensionInProgress)
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
-    MLSClient.cancelShutdownQuiescenceLease(lease)
   }
 
   func testRapidForegroundResumeWaitsForTrackedFFIBeforeRuntimeRefreshAndRebind() async throws {
