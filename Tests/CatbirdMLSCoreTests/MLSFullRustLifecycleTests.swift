@@ -2426,9 +2426,8 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       protocolAuthorityMode: .rustFull,
       migrateDatabase: true
     )
-    let contextIdentity = try await MLSCoreContext.shared.ensureContextIdentity(
-      for: "did:plc:testuser"
-    )
+    let originalContext = try await MLSCoreContext.shared.getContext(for: "did:plc:testuser")
+    let contextIdentity = ObjectIdentifier(originalContext)
     let runtime = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
       mode: .rustFull,
@@ -2447,7 +2446,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertTrue((runtime.bridge as? RecordingLifecycleBridge)?.reattachCalls.isEmpty == true)
     XCTAssertTrue((runtime.bridge as? RecordingLifecycleBridge)?.shutdownCalled == true)
     XCTAssertEqual(runtime.mlsContextIdentity, contextIdentity)
-    XCTAssertNotEqual(installedIdentity, contextIdentity)
+    XCTAssertNotEqual(installedIdentity, ObjectIdentifier(originalContext))
     XCTAssertEqual(resumedRuntime?.mlsContextIdentity, installedIdentity)
     XCTAssertFalse(resumedRuntime === runtime)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
