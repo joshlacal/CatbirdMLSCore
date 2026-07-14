@@ -14,8 +14,18 @@ public enum MLSResumeResult: Sendable, Equatable {
 /// suspension owned by this manager after shutdown proves every MLS boundary is closed.
 public struct MLSAccountSwitchSuspensionAuthorization: @unchecked Sendable {
   fileprivate let managerIdentity: ObjectIdentifier
+  fileprivate let suspensionOwnerToken: UUID
   fileprivate let normalizedDID: String
   fileprivate let capability: MLSClient.SuspensionAbandonmentCapability
+
+  internal func replacingSuspensionOwnerTokenForTesting(_ token: UUID) -> Self {
+    Self(
+      managerIdentity: managerIdentity,
+      suspensionOwnerToken: token,
+      normalizedDID: normalizedDID,
+      capability: capability
+    )
+  }
 }
 
 private let suspendedResumeStateRefreshOverride = Mutex<
@@ -95,6 +105,7 @@ extension MLSConversationManager {
     }
     return MLSAccountSwitchSuspensionAuthorization(
       managerIdentity: ObjectIdentifier(self),
+      suspensionOwnerToken: suspensionAbandonmentOwnerToken,
       normalizedDID: userDid.trimmingCharacters(in: .whitespacesAndNewlines),
       capability: capability
     )
@@ -982,10 +993,11 @@ extension MLSConversationManager {
     if let authorization {
       guard
         authorization.managerIdentity == ObjectIdentifier(self),
+        authorization.suspensionOwnerToken == suspensionAbandonmentOwnerToken,
         authorization.normalizedDID == normalizedShutdownDID
       else {
         logger.error(
-          "❌ [SHUTDOWN-AUTHORITY] Rejected suspension authorization owned by another manager or account"
+          "❌ [SHUTDOWN-AUTHORITY] Rejected suspension authorization owned by another manager generation or account"
         )
         return false
       }

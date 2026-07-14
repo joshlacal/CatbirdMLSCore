@@ -2085,6 +2085,33 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
   }
 
+  func testAuthorizationWithMismatchedStableOwnerTokenCannotMutateShutdownState() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    _ = await MainActor.run { manager.suspendMLSOperations() }
+    let issuedAuthorization = await manager.authorizeSuspensionAbandonmentForAccountSwitch()
+    let liveAuthorization = try XCTUnwrap(issuedAuthorization)
+    let mismatchedAuthorization = liveAuthorization.replacingSuspensionOwnerTokenForTesting(UUID())
+
+    let rejected = await manager.shutdown(
+      accountSwitchSuspensionAuthorization: mismatchedAuthorization
+    )
+
+    XCTAssertFalse(rejected)
+    XCTAssertEqual(manager.userDid, "did:plc:testuser")
+    XCTAssertFalse(manager.isShuttingDown)
+    XCTAssertTrue(manager.isSuspending)
+    XCTAssertTrue(manager.isSyncPaused)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+
+    let validShutdownWasSafe = await manager.shutdown(
+      accountSwitchSuspensionAuthorization: liveAuthorization
+    )
+    XCTAssertTrue(validShutdownWasSafe)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+  }
+
   func testAuthorizedAbandonmentPreservesUnrelatedCoreContext() async throws {
     try useTemporaryCoreStorageDirectory()
     let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
