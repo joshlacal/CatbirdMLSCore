@@ -23,6 +23,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     MLSClient.setLegacyGateResumeAfterStateLockTestOverride(nil)
     MLSClient.setLegacyClearAfterCoreClearTestOverride(nil)
     MLSClient.setNoUserResumeAfterCoreClearTestOverride(nil)
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride(nil)
     try super.setUpWithError()
   }
 
@@ -40,6 +41,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     MLSClient.setLegacyGateResumeAfterStateLockTestOverride(nil)
     MLSClient.setLegacyClearAfterCoreClearTestOverride(nil)
     MLSClient.setNoUserResumeAfterCoreClearTestOverride(nil)
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride(nil)
     MLSStoragePaths.setBaseDirectoryOverride(nil)
     if let temporaryCoreStorageDirectory {
       try? FileManager.default.removeItem(at: temporaryCoreStorageDirectory)
@@ -211,6 +213,106 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     )
     XCTAssertTrue(userOwnerFinishedAfterRebind)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
+  }
+
+  func testPendingShutdownCloseRevokesUserResumeUntilRenewedAfterHandoff() async throws {
+    let userDID = "did:plc:pending-close-resume"
+    let ownerToken = UUID()
+    let closeIntentRecorded = expectation(description: "shutdown close intent recorded")
+    let finishCoreClose = DispatchSemaphore(value: 0)
+    MLSClient.markSuspensionInProgress(
+      reason: "pending user resume close",
+      abandonmentOwnerDID: userDID,
+      abandonmentOwnerToken: ownerToken
+    )
+    let staleCapability = try XCTUnwrap(
+      MLSClient.beginSuspendedResumeCapability(for: userDID, ownerToken: ownerToken)
+    )
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
+      closeIntentRecorded.fulfill()
+      finishCoreClose.wait()
+    }
+
+    let shutdown = Task {
+      MLSClient.markShutdownInProgress(
+        reason: "pending user resume close",
+        abandonmentOwnerDID: userDID,
+        abandonmentOwnerToken: ownerToken
+      )
+    }
+    await fulfillment(of: [closeIntentRecorded], timeout: 2)
+    MLSCoreContext.clearSuspensionFlag()
+
+    let staleFinished = await MLSClient.shared.finishSuspendedResumeCapability(staleCapability)
+    XCTAssertFalse(staleFinished)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    finishCoreClose.signal()
+    await shutdown.value
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    MLSClient.cancelSuspendedResumeCapability(staleCapability)
+    XCTAssertNil(
+      MLSClient.beginSuspendedResumeCapability(for: userDID, ownerToken: ownerToken),
+      "shutdown phase must deny fresh user-resume authority after the close handoff"
+    )
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+  }
+
+  func testPendingShutdownCloseRevokesUserAbandonmentUntilRenewedLease() async throws {
+    let userDID = "did:plc:pending-close-abandon"
+    let ownerToken = UUID()
+    let closeIntentRecorded = expectation(description: "shutdown close intent recorded")
+    let finishCoreClose = DispatchSemaphore(value: 0)
+    MLSClient.markSuspensionInProgress(
+      reason: "pending user abandonment close",
+      abandonmentOwnerDID: userDID,
+      abandonmentOwnerToken: ownerToken
+    )
+    let staleCapability = try XCTUnwrap(
+      MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
+    )
+    let staleLease = try XCTUnwrap(
+      MLSClient.beginShutdownQuiescenceLease(
+        abandonmentCapability: staleCapability,
+        excludingUserDID: userDID
+      )
+    )
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
+      closeIntentRecorded.fulfill()
+      finishCoreClose.wait()
+    }
+
+    let shutdown = Task {
+      MLSClient.markShutdownInProgress(
+        reason: "pending user abandonment close",
+        abandonmentOwnerDID: userDID,
+        abandonmentOwnerToken: ownerToken
+      )
+    }
+    await fulfillment(of: [closeIntentRecorded], timeout: 2)
+
+    let staleAbandoned = await MLSClient.abandonSuspensionAfterSafeShutdown(staleLease)
+    XCTAssertFalse(staleAbandoned)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    finishCoreClose.signal()
+    await shutdown.value
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    MLSClient.cancelShutdownQuiescenceLease(staleLease)
+    let renewedCapability = try XCTUnwrap(
+      MLSClient.ownedSuspensionAbandonmentCapability(for: userDID, ownerToken: ownerToken)
+    )
+    let renewedLease = try XCTUnwrap(
+      MLSClient.beginShutdownQuiescenceLease(
+        abandonmentCapability: renewedCapability,
+        excludingUserDID: userDID
+      )
+    )
+    let renewedAbandoned = await MLSClient.abandonSuspensionAfterSafeShutdown(renewedLease)
+    XCTAssertTrue(renewedAbandoned)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
   }
 
   func testLegacyClearRejectsNoUserOwnerAndLegacyDIDReclosePreservesExactOwner() async throws {
@@ -1011,8 +1113,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
     let restoredRuntime = await restore.value
     XCTAssertNil(restoredRuntime)
-    guard case .reserved(let replacementToken) =
-      manager.orchestratorRuntimeStorage.beginInitialization()
+    guard
+      case .reserved(let replacementToken) =
+        manager.orchestratorRuntimeStorage.beginInitialization()
     else {
       return XCTFail("Cancellation must release the exact reattach reservation")
     }
@@ -1059,8 +1162,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
   func testRuntimeResetCancelsPendingInitializationAndFencesStaleInstall() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
-    guard case .reserved(let staleToken) =
-      manager.orchestratorRuntimeStorage.beginInitialization()
+    guard
+      case .reserved(let staleToken) =
+        manager.orchestratorRuntimeStorage.beginInitialization()
     else {
       return XCTFail("Expected reset test reservation")
     }
@@ -1072,8 +1176,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
     manager.resetOrchestratorRuntime(reason: "pending initialization reset test")
 
-    guard case .reserved(let replacementToken) =
-      manager.orchestratorRuntimeStorage.beginInitialization()
+    guard
+      case .reserved(let replacementToken) =
+        manager.orchestratorRuntimeStorage.beginInitialization()
     else {
       return XCTFail("Reset must release the pending initialization reservation")
     }
@@ -1099,8 +1204,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
   func testRuntimeInvalidationCancelsPendingInitializationAndFencesStaleInstall() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
-    guard case .reserved(let staleToken) =
-      manager.orchestratorRuntimeStorage.beginInitialization()
+    guard
+      case .reserved(let staleToken) =
+        manager.orchestratorRuntimeStorage.beginInitialization()
     else {
       return XCTFail("Expected invalidation test reservation")
     }
@@ -1112,8 +1218,9 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
     manager.invalidateOrchestratorRuntime(reason: "pending initialization invalidation test")
 
-    guard case .reserved(let replacementToken) =
-      manager.orchestratorRuntimeStorage.beginInitialization()
+    guard
+      case .reserved(let replacementToken) =
+        manager.orchestratorRuntimeStorage.beginInitialization()
     else {
       return XCTFail("Invalidation must release the pending initialization reservation")
     }
@@ -1716,7 +1823,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     await MLSClient.shared.invalidateDeviceAuthBinding(for: ownerDID)
   }
 
-  func testNoUserAbandonmentPreservesUnrelatedExactCapability() async throws {
+  func testNoUserShutdownRevokesEarlierUserResumeCapability() async throws {
     let ownerDID = "did:plc:owner"
     let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
     MLSClient.markSuspensionInProgress(reason: "no-user capability preservation test")
@@ -1726,7 +1833,8 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let shutdownWasSafe = await authorizedAccountSwitchShutdown(manager)
 
     XCTAssertFalse(shutdownWasSafe)
-    XCTAssertTrue(MLSClient.isCurrentSuspendedResumeCapability(capability, for: ownerDID))
+    XCTAssertFalse(MLSClient.isCurrentSuspendedResumeCapability(capability, for: ownerDID))
+    XCTAssertNil(MLSClient.beginSuspendedResumeCapability(for: ownerDID))
     XCTAssertTrue(MLSClient.isSuspensionInProgress)
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
     MLSClient.cancelSuspendedResumeCapability(capability)
@@ -2770,15 +2878,6 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     await MainActor.run {
       manager.markRustRuntimeClosedForSuspend(reason: "unit-test force close")
     }
-    for _ in 0..<2 {
-      MLSCoreContext.clearSuspensionFlag()
-      let cleared = MLSClient.clearSuspensionFlag(
-        reason: "consumer foreground pre-manager clear"
-      )
-      XCTAssertFalse(cleared)
-      XCTAssertTrue(MLSClient.isSuspensionInProgress)
-      XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
-    }
     await bindingAPI.holdNextBegin()
     let resume = Task { await manager.resumeMLSOperations() }
     await bindingAPI.waitUntilBeginHeld()
@@ -2788,17 +2887,10 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertTrue(manager.isSuspending)
     XCTAssertTrue(manager.isSyncPaused)
 
-    MLSCoreContext.clearSuspensionFlag()
-    let clearedDuringRebind = MLSClient.clearSuspensionFlag(
-      reason: "consumer clear during held resume rebind"
-    )
-    XCTAssertFalse(clearedDuringRebind)
-    XCTAssertTrue(MLSClient.isSuspensionInProgress)
-    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
-
     await bindingAPI.releaseBegin()
-    await resume.value
+    let result = await resume.value
 
+    XCTAssertEqual(result, .resumed)
     let resumedBeginCount = await bindingAPI.beginCount()
     XCTAssertEqual(resumedBeginCount, 2)
     XCTAssertEqual(staleBridge.deviceAuthChallenges.count, 1)
@@ -2812,6 +2904,60 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       ["runtimeRestore", "coreReload", "authoritativeRefresh", "deviceAuthRebind"]
     )
     await MLSClient.shared.invalidateDeviceAuthBinding(for: "did:plc:testuser")
+  }
+
+  func testLegacyClearDuringHeldRuntimeRestoreRebindRevokesResumeAndFailsClosed() async throws {
+    let userDID = "did:plc:testuser"
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let staleBridge = RecordingLifecycleBridge()
+    let rebuiltBridge = RecordingLifecycleBridge()
+    let bindingAPI = LifecycleDeviceAuthBindingAPI()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: userDID,
+      mode: .rustFull,
+      bridge: staleBridge
+    )
+    manager.orchestratorRuntimeResumeFactory = {
+      MLSOrchestratorRuntime(
+        userDID: userDID,
+        mode: .rustFull,
+        bridge: rebuiltBridge
+      )
+    }
+    manager.deviceAuthBindingAPIOverride = bindingAPI
+    manager.deviceAuthDeviceIDProviderOverride = { "device-1" }
+
+    _ = try await manager.bindRustDeviceAuthentication(userDid: userDID)
+    let rustPrepared = await MainActor.run { manager.suspendMLSOperations() }
+    XCTAssertTrue(rustPrepared)
+    await MainActor.run {
+      manager.markRustRuntimeClosedForSuspend(reason: "legacy-clear rebind race")
+    }
+    await bindingAPI.holdNextBegin()
+    let resume = Task { await manager.resumeMLSOperations() }
+    await bindingAPI.waitUntilBeginHeld()
+
+    MLSCoreContext.clearSuspensionFlag()
+    XCTAssertFalse(
+      MLSClient.clearSuspensionFlag(reason: "legacy clear during held resume rebind")
+    )
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+
+    await bindingAPI.releaseBegin()
+    let result = await resume.value
+    let resumedBeginCount = await bindingAPI.beginCount()
+    let reboundStatus = await MLSClient.shared.deviceAuthBindingStatus(for: userDID)
+
+    XCTAssertEqual(result, .failedStillSuspended)
+    XCTAssertEqual(resumedBeginCount, 2)
+    XCTAssertEqual(staleBridge.deviceAuthChallenges.count, 1)
+    XCTAssertEqual(rebuiltBridge.deviceAuthChallenges.count, 0)
+    XCTAssertNil(reboundStatus)
+    XCTAssertTrue(manager.isSuspending)
+    XCTAssertTrue(manager.isSyncPaused)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
   }
 
   func testRustResumeBindingFailureNeverReleasesGlobalSuspensionGate() async throws {

@@ -19,6 +19,66 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     super.tearDown()
   }
 
+  func testPendingShutdownCloseDeniesOwnerReleaseUntilHandoffCompletes() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let closeIntentRecorded = expectation(description: "shutdown close intent recorded")
+    let finishCoreClose = DispatchSemaphore(value: 0)
+    owner.markSuspensionInProgress(reason: "pending shutdown close")
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
+      closeIntentRecorded.fulfill()
+      finishCoreClose.wait()
+    }
+
+    let shutdown = Task {
+      MLSClient.markShutdownInProgress(
+        reason: "pending shutdown close",
+        abandonmentOwnerDID: nil,
+        abandonmentOwnerToken: UUID()
+      )
+    }
+    await fulfillment(of: [closeIntentRecorded], timeout: 2)
+
+    let releasedWhilePending = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(releasedWhilePending)
+    assertBothGatesClosed()
+
+    finishCoreClose.signal()
+    await shutdown.value
+    assertBothGatesClosed()
+    let releasedAfterHandoff = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(releasedAfterHandoff)
+    assertBothGatesClosed()
+  }
+
+  func testPendingLegacyCloseDeniesOwnerReleaseUntilHandoffCompletes() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let closeIntentRecorded = expectation(description: "legacy close intent recorded")
+    let finishCoreClose = DispatchSemaphore(value: 0)
+    owner.markSuspensionInProgress(reason: "pending legacy close")
+    MLSClient.setLegacyClearCoreCloseAfterIntentTestOverride {
+      closeIntentRecorded.fulfill()
+      finishCoreClose.wait()
+    }
+
+    let legacyClear = Task {
+      MLSClient.clearSuspensionFlag(reason: "pending legacy denial")
+    }
+    await fulfillment(of: [closeIntentRecorded], timeout: 2)
+
+    let releasedWhilePending = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(releasedWhilePending)
+    assertBothGatesClosed()
+
+    finishCoreClose.signal()
+    let legacyCleared = await legacyClear.value
+    XCTAssertFalse(legacyCleared)
+    assertBothGatesClosed()
+    let releasedAfterHandoff = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(releasedAfterHandoff)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+  }
+
   func testExactOwnerMarksAndReleasesContextFreeSuspension() async {
     let owner = MLSContextFreeLifecycleSuspensionOwner()
 

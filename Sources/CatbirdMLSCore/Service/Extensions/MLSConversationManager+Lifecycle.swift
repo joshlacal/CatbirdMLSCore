@@ -283,6 +283,10 @@ extension MLSConversationManager {
   internal func resumeMLSOperations(
     trackedFFIDrainTimeout: TimeInterval
   ) async -> MLSResumeResult {
+    guard !isShuttingDown else {
+      logger.debug("🔄 [RESUME] Shutdown owns the suspension; resume remains denied")
+      return .failedStillSuspended
+    }
     guard isSuspending else {
       logger.debug("🔄 [RESUME] MLS not suspended - nothing to resume")
       return .resumed
@@ -559,7 +563,6 @@ extension MLSConversationManager {
     deviceAuthBindingRequiresResumeRebind = false
     isSuspending = false
     isSyncPaused = false
-    MLSCoreContext.clearSuspensionFlag()
     if let finalReleaseOverride = suspendedResumeFinalReleaseOverride.withLock({ $0 }) {
       await finalReleaseOverride()
     }
@@ -969,15 +972,16 @@ extension MLSConversationManager {
     // read userDid after isShuttingDown was set but before cleanup completed.
     let shutdownUserDid = userDid
     let normalizedShutdownDID = shutdownUserDid?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let authorizedSuspensionCapability: MLSClient.SuspensionAbandonmentCapability? =
-      if let authorization,
-        authorization.managerIdentity == ObjectIdentifier(self),
-        authorization.normalizedDID == normalizedShutdownDID
-      {
-        authorization.capability
-      } else {
-        nil
-      }
+    let explicitAuthorizationMatches =
+      authorization?.managerIdentity == ObjectIdentifier(self)
+      && authorization?.normalizedDID == normalizedShutdownDID
+      && authorization.map {
+        MLSClient.isCurrentSuspensionAbandonmentCapability(
+          $0.capability,
+          for: $0.normalizedDID,
+          ownerToken: suspensionAbandonmentOwnerToken
+        )
+      } == true
     let suspensionAlreadyInProgress = MLSClient.isSuspensionInProgress
     isShuttingDown = true
     isSyncPaused = true
@@ -987,6 +991,21 @@ extension MLSConversationManager {
       abandonmentOwnerDID: shutdownUserDid,
       abandonmentOwnerToken: suspensionAbandonmentOwnerToken
     )
+    // markShutdown records and completes a fresh Core-close handoff. Refresh an otherwise valid
+    // pre-shutdown authorization onto that exact close serial; the stale wrapped capability must
+    // never be carried across the new handoff.
+    let refreshedAuthorizedSuspensionCapability: MLSClient.SuspensionAbandonmentCapability? =
+      if explicitAuthorizationMatches,
+        let normalizedShutdownDID,
+        !normalizedShutdownDID.isEmpty
+      {
+        MLSClient.ownedSuspensionAbandonmentCapability(
+          for: normalizedShutdownDID,
+          ownerToken: suspensionAbandonmentOwnerToken
+        )
+      } else {
+        nil
+      }
     // A foreground account switch can enter shutdown directly, without first asking the
     // lifecycle coordinator for an authorization. In that case this manager owns the exact
     // suspension tuple that markShutdownInProgress just created and may carry that authority
@@ -1006,10 +1025,10 @@ extension MLSConversationManager {
         nil
       }
     let shutdownSuspensionCapability =
-      authorizedSuspensionCapability ?? implicitShutdownSuspensionCapability
+      refreshedAuthorizedSuspensionCapability ?? implicitShutdownSuspensionCapability
     let noUserShutdownSuspensionCapability: MLSClient.NoUserSuspendedResumeCapability? =
       if normalizedShutdownDID == nil || normalizedShutdownDID?.isEmpty == true {
-        MLSClient.ownedNoUserSuspendedResumeCapability(
+        MLSClient.ownedNoUserShutdownSuspensionCapability(
           ownerToken: suspensionAbandonmentOwnerToken
         )
       } else {

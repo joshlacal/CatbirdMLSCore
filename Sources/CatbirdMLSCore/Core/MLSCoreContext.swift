@@ -118,7 +118,7 @@ public actor MLSCoreContext {
   }
 
   /// Set suspension flag - call this BEFORE emergency close
-  public nonisolated static func markSuspensionInProgress() {
+  internal nonisolated static func markSuspensionInProgress() {
     emergencyState.withLock {
       $0.suspensionGeneration &+= 1
       $0.suspensionInProgress = true
@@ -137,7 +137,7 @@ public actor MLSCoreContext {
   }
 
   /// Clear suspension flag - call this when returning to foreground
-  public nonisolated static func clearSuspensionFlag() {
+  internal nonisolated static func clearSuspensionFlag() {
     emergencyState.withLock {
       $0.suspensionGeneration &+= 1
       $0.suspensionInProgress = false
@@ -171,7 +171,7 @@ public actor MLSCoreContext {
   /// Emergency synchronous close of all Rust MLS contexts for 0xdead10cc prevention.
   /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
   /// This is safe to call from any thread and does not require actor isolation.
-  public nonisolated static func emergencyCloseAllContexts() {
+  internal nonisolated static func emergencyCloseAllContexts() {
     let process = Bundle.main.bundlePath.hasSuffix(".appex") ? "nse" : "app"
     // Extract contexts and set flags atomically, then close outside the lock
     // to avoid holding the lock during potentially slow FFI calls.
