@@ -10,6 +10,7 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     MLSClient.setNoUserResumeAfterCoreClearTestOverride(nil)
     MLSClient.setShutdownCoreCloseAfterIntentTestOverride(nil)
     MLSClient.setLegacyClearCoreCloseAfterIntentTestOverride(nil)
+    MLSClient.setOwnerAwareEmergencyCloseAfterIntentTestOverride(nil)
     MLSCoreContext.emergencyCloseAllContexts()
     MLSStoragePaths.setBaseDirectoryOverride(nil)
     if let temporaryCoreStorageDirectory {
@@ -133,6 +134,69 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     XCTAssertTrue(released)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+  }
+
+  func testExactOwnerEmergencyClosePreservesContextFreeResumeAuthority() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    owner.markSuspensionInProgress(reason: "owner-aware emergency close")
+
+    let closed = owner.emergencyCloseAllContextsIfOwned(reason: "expiration")
+
+    XCTAssertTrue(closed)
+    assertBothGatesClosed()
+    let resumed = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(resumed)
+    assertBothGatesOpenAndOrdinaryAdmissionAllowed()
+  }
+
+  func testStaleOwnerEmergencyCloseCannotReplaceRotatedSuccessor() async {
+    let staleOwner = MLSContextFreeLifecycleSuspensionOwner()
+    let successor = MLSContextFreeLifecycleSuspensionOwner()
+    staleOwner.markSuspensionInProgress(reason: "initial no-user owner")
+    successor.markSuspensionInProgress(reason: "rotated no-user owner")
+
+    let staleClosed = staleOwner.emergencyCloseAllContextsIfOwned(reason: "stale expiration")
+
+    XCTAssertFalse(staleClosed)
+    assertBothGatesClosed()
+    let staleResumed = await staleOwner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(staleResumed)
+    let successorResumed = await successor.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(successorResumed)
+    assertBothGatesOpenAndOrdinaryAdmissionAllowed()
+  }
+
+  func testOwnerRotationDuringEmergencyClosePreservesSuccessorAndClosedGates() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let successor = MLSContextFreeLifecycleSuspensionOwner()
+    let closeIntentRecorded = expectation(description: "owner-aware close intent recorded")
+    let finishCoreClose = DispatchSemaphore(value: 0)
+    owner.markSuspensionInProgress(reason: "overlapping owner-aware close")
+    MLSClient.setOwnerAwareEmergencyCloseAfterIntentTestOverride {
+      closeIntentRecorded.fulfill()
+      finishCoreClose.wait()
+    }
+
+    let close = Task {
+      owner.emergencyCloseAllContextsIfOwned(reason: "held expiration")
+    }
+    await fulfillment(of: [closeIntentRecorded], timeout: 2)
+
+    assertBothGatesClosed()
+    let releasedDuringClose = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(releasedDuringClose)
+    successor.markSuspensionInProgress(reason: "successor during held close")
+    assertBothGatesClosed()
+    finishCoreClose.signal()
+    let closed = await close.value
+
+    XCTAssertTrue(closed)
+    assertBothGatesClosed()
+    let staleResumed = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(staleResumed)
+    let successorResumed = await successor.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(successorResumed)
+    assertBothGatesOpenAndOrdinaryAdmissionAllowed()
   }
 
   func testConcurrentSameOwnerReleaseIsSingleFlightAndKeepsGatesOpenAfterWinner() async {

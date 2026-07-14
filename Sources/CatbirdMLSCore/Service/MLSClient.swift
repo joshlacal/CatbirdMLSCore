@@ -197,6 +197,9 @@ public actor MLSClient {
   private static let legacyClearCoreCloseAfterIntentTestOverride = Mutex<
     (@Sendable () -> Void)?
   >(nil)
+  private static let ownerAwareEmergencyCloseAfterIntentTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
 
   internal nonisolated static func setLegacyGateResumeAfterStateLockTestOverride(
     _ operation: (@Sendable () -> Void)?
@@ -232,6 +235,12 @@ public actor MLSClient {
     _ operation: (@Sendable () -> Void)?
   ) {
     legacyClearCoreCloseAfterIntentTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setOwnerAwareEmergencyCloseAfterIntentTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    ownerAwareEmergencyCloseAfterIntentTestOverride.withLock { $0 = operation }
   }
 
   internal nonisolated static func localKeyPackageHashesToEvict(
@@ -1750,6 +1759,57 @@ public actor MLSClient {
       details: "MLSClient emergencyCloseAllContexts: delegated close complete",
       process: "app"
     )
+  }
+
+  /// Emergency-closes Core contexts only while the caller still owns the exact context-free
+  /// suspension generation. Validation and the replacement close intent are one locked decision,
+  /// so a stale caller cannot overwrite a rotated owner.
+  @discardableResult
+  internal nonisolated static func emergencyCloseAllContextsIfOwned(
+    noUserOwnerToken: UUID,
+    reason: String
+  ) -> Bool {
+    let transition = emergencyState.withLock { state -> SuspensionTransition? in
+      guard state.suspensionInProgress,
+        !state.shutdownInProgress,
+        state.coreGateCloseInFlightTokens.isEmpty,
+        state.suspensionAbandonmentOwner == nil,
+        state.noUserSuspensionOwner
+          == NoUserSuspensionOwner(
+            token: noUserOwnerToken,
+            suspensionGeneration: state.deviceAuthSuspensionGeneration,
+            suspensionSignalSerial: state.suspensionSignalSerial
+          ),
+        MLSCoreContext.isSuspensionInProgress
+      else {
+        return nil
+      }
+      return transitionDeviceAuthToSuspended(
+        state: &state,
+        invalidateCache: true,
+        noUserOwnerToken: noUserOwnerToken
+      )
+    }
+    guard let transition else { return false }
+    for task in transition.enrollmentTasks {
+      task.cancel()
+    }
+
+    MLSSuspensionFlightRecorder.shared.record(
+      .flushStarted,
+      details: "Owner-aware emergency close (\(reason)): delegating to Core",
+      process: "app"
+    )
+    ownerAwareEmergencyCloseAfterIntentTestOverride.withLock { $0 }?()
+    performCoreGateCloseHandoff(transition.coreGateCloseHandoff) {
+      MLSCoreContext.emergencyCloseAllContexts()
+    }
+    MLSSuspensionFlightRecorder.shared.record(
+      .flushCompleted,
+      details: "MLSClient owner-aware emergencyCloseAllContexts: delegated close complete",
+      process: "app"
+    )
+    return true
   }
 
   // MARK: - Suspension Handshake (WS-6.2)
