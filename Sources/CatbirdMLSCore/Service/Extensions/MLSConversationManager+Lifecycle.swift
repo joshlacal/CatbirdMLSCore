@@ -293,7 +293,7 @@ extension MLSConversationManager {
     func restoreClosedResumeGates(_ reason: String) {
       if MLSClient.isSuspensionInProgress {
         // Preserve another exact resume capability; only repair a split Core gate.
-        MLSCoreContext.markSuspensionInProgress()
+        MLSClient.restoreCoreSuspensionGateIfClientSuspended()
       } else {
         MLSClient.markSuspensionInProgress(reason: reason)
       }
@@ -388,7 +388,7 @@ extension MLSConversationManager {
 
     func failStillSuspended(_ message: String) async -> MLSResumeResult {
       MLSClient.cancelSuspendedResumeCapability(suspendedResumeCapability)
-      MLSCoreContext.markSuspensionInProgress()
+      MLSClient.markSuspensionInProgress(reason: "resume failure: \(message)")
       if suspendedResumeRuntimeAttemptID == resumeAttemptID,
         let ownedContextIdentity = suspendedResumeRuntimeContextIdentity
       {
@@ -569,8 +569,6 @@ extension MLSConversationManager {
         || MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: userDid)
       isSuspending = true
       isSyncPaused = true
-      MLSCoreContext.markSuspensionInProgress()
-      MLSClient.markSuspensionInProgress(reason: "resume final release rollback")
       return await failStillSuspended("resume capability was revoked before final gate release")
     }
     guard !MLSClient.isSuspensionInProgress, !MLSCoreContext.isSuspensionInProgress else {
@@ -579,8 +577,6 @@ extension MLSConversationManager {
         || MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: userDid)
       isSuspending = true
       isSyncPaused = true
-      MLSCoreContext.markSuspensionInProgress()
-      MLSClient.markSuspensionInProgress(reason: "resume final release postcondition rollback")
       return await failStillSuspended("resume final release postcondition failed")
     }
     if suspendedResumeRuntimeAttemptID == resumeAttemptID {

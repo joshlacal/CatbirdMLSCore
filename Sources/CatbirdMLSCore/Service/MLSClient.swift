@@ -66,6 +66,7 @@ public actor MLSClient {
     fileprivate let ownerToken: UUID
     fileprivate let suspensionGeneration: UInt64
     fileprivate let suspensionSignalSerial: UInt64
+    fileprivate let coreGateCloseSignalSerial: UInt64
   }
 
   private struct SuspendedResumeCapabilityHandle: Sendable {
@@ -136,6 +137,9 @@ public actor MLSClient {
     var deviceAuthUsersAtSuspensionTransition: Set<String> = []
     var suspendedResumeCapability: SuspendedResumeCapabilityHandle?
     var suspensionSignalSerial: UInt64 = 0
+    /// Monotonic intent fence for every MLS-state decision that will close the Core gate.
+    /// It advances under this mutex before the corresponding Core handoff.
+    var coreGateCloseSignalSerial: UInt64 = 0
     var suspensionAbandonmentOwner: (normalizedDID: String, token: UUID)?
     var noUserSuspensionOwner: NoUserSuspensionOwner?
   }
@@ -151,6 +155,12 @@ public actor MLSClient {
     (@Sendable () -> Void)?
   >(nil)
   private static let noUserResumeAfterCoreClearTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
+  private static let shutdownCoreCloseAfterIntentTestOverride = Mutex<
+    (@Sendable () -> Void)?
+  >(nil)
+  private static let legacyClearCoreCloseAfterIntentTestOverride = Mutex<
     (@Sendable () -> Void)?
   >(nil)
 
@@ -176,6 +186,18 @@ public actor MLSClient {
     _ operation: (@Sendable () -> Void)?
   ) {
     noUserResumeAfterCoreClearTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setShutdownCoreCloseAfterIntentTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    shutdownCoreCloseAfterIntentTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setLegacyClearCoreCloseAfterIntentTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    legacyClearCoreCloseAfterIntentTestOverride.withLock { $0 = operation }
   }
 
   internal nonisolated static func localKeyPackageHashesToEvict(
@@ -279,6 +301,7 @@ public actor MLSClient {
     preserveExistingTransition: Bool = false
   ) -> [Task<MLSDeviceAuthBindingStatus, Error>] {
     emergencyState.withLock { state in
+      state.coreGateCloseSignalSerial &+= 1
       if invalidateCache {
         state.cacheInvalidated = true
       }
@@ -374,6 +397,7 @@ public actor MLSClient {
       preserveExistingTransition: true
     )
     for task in enrollmentTasks { task.cancel() }
+    shutdownCoreCloseAfterIntentTestOverride.withLock { $0 }?()
     MLSCoreContext.markSuspensionInProgress()
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
@@ -403,6 +427,20 @@ public actor MLSClient {
       details: "MLSClient owner-bound markSuspensionInProgress: \(reason)",
       process: "app"
     )
+  }
+
+  /// Repairs only a still-closed MLS transition. The intent fence is recorded before handing off
+  /// to Core, so an exact release either observes the intent or wins before this locked decision.
+  @discardableResult
+  internal nonisolated static func restoreCoreSuspensionGateIfClientSuspended() -> Bool {
+    let shouldCloseCore = emergencyState.withLock { state in
+      guard state.suspensionInProgress else { return false }
+      state.coreGateCloseSignalSerial &+= 1
+      return true
+    }
+    guard shouldCloseCore else { return false }
+    MLSCoreContext.markSuspensionInProgress()
+    return true
   }
 
   /// Reads the immutable authority snapshot captured by the most recent false-to-true suspension
@@ -436,6 +474,7 @@ public actor MLSClient {
         state.suspensionAbandonmentOwner == nil,
         state.noUserSuspensionOwner == nil
       else {
+        state.coreGateCloseSignalSerial &+= 1
         return nil
       }
       return state.suspensionSignalSerial
@@ -453,15 +492,20 @@ public actor MLSClient {
           state.suspensionAbandonmentOwner == nil,
           state.noUserSuspensionOwner == nil
         else {
+          state.coreGateCloseSignalSerial &+= 1
           return false
         }
         state.suspensionInProgress = false
         return true
       }
-      if !cleared { MLSCoreContext.markSuspensionInProgress() }
+      if !cleared {
+        legacyClearCoreCloseAfterIntentTestOverride.withLock { $0 }?()
+        MLSCoreContext.markSuspensionInProgress()
+      }
     } else {
       // Foreground callers historically clear Core before MLSClient. Restore the global Core gate
       // synchronously while a security rebind is still owed or actively using its scoped permit.
+      legacyClearCoreCloseAfterIntentTestOverride.withLock { $0 }?()
       MLSCoreContext.markSuspensionInProgress()
       cleared = false
     }
@@ -539,14 +583,17 @@ public actor MLSClient {
         state.noUserSuspensionOwner?.token == ownerToken,
         state.noUserSuspensionOwner?.suspensionGeneration
           == state.deviceAuthSuspensionGeneration,
-        state.noUserSuspensionOwner?.suspensionSignalSerial == state.suspensionSignalSerial
+        state.noUserSuspensionOwner?.suspensionSignalSerial == state.suspensionSignalSerial,
+        // A recorded close intent is not releasable until its Core handoff has completed.
+        MLSCoreContext.isSuspensionInProgress
       else {
         return nil
       }
       return NoUserSuspendedResumeCapability(
         ownerToken: ownerToken,
         suspensionGeneration: state.noUserSuspensionOwner!.suspensionGeneration,
-        suspensionSignalSerial: state.noUserSuspensionOwner!.suspensionSignalSerial
+        suspensionSignalSerial: state.noUserSuspensionOwner!.suspensionSignalSerial,
+        coreGateCloseSignalSerial: state.coreGateCloseSignalSerial
       )
     }
   }
@@ -565,6 +612,7 @@ public actor MLSClient {
         state.suspensionQuiescenceLeaseToken == nil,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
         state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
         state.suspensionAbandonmentOwner == nil,
         state.noUserSuspensionOwner
           == NoUserSuspensionOwner(
@@ -578,7 +626,8 @@ public actor MLSClient {
         state.activeDeviceAuthUsers.isEmpty,
         state.pendingDeviceAuthRebindUsers.isEmpty,
         state.completedDeviceAuthBindingReceipts.isEmpty,
-        state.deviceAuthUsersAtSuspensionTransition.isEmpty
+        state.deviceAuthUsersAtSuspensionTransition.isEmpty,
+        MLSCoreContext.isSuspensionInProgress
       else {
         return false
       }
@@ -601,6 +650,7 @@ public actor MLSClient {
         state.suspensionQuiescenceLeaseToken == releaseClaimToken,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
         state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
         state.suspensionAbandonmentOwner == nil,
         state.noUserSuspensionOwner
           == NoUserSuspensionOwner(
@@ -664,7 +714,7 @@ public actor MLSClient {
     guard mayClearCore,
       await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts()
     else {
-      MLSCoreContext.markSuspensionInProgress()
+      restoreCoreSuspensionGateIfClientSuspended()
       return false
     }
 
@@ -693,7 +743,7 @@ public actor MLSClient {
       state.suspensionInProgress = false
       return true
     }
-    if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    if !cleared { restoreCoreSuspensionGateIfClientSuspended() }
     return cleared
   }
 
@@ -709,6 +759,7 @@ public actor MLSClient {
         state.suspensionQuiescenceLeaseToken == shutdownLease.token,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
         state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
         state.suspensionAbandonmentOwner == nil,
         state.noUserSuspensionOwner
           == NoUserSuspensionOwner(
@@ -731,7 +782,7 @@ public actor MLSClient {
     guard mayClearCore,
       await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts()
     else {
-      MLSCoreContext.markSuspensionInProgress()
+      restoreCoreSuspensionGateIfClientSuspended()
       return false
     }
 
@@ -742,6 +793,7 @@ public actor MLSClient {
         state.suspensionQuiescenceLeaseToken == shutdownLease.token,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
         state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
         state.suspensionAbandonmentOwner == nil,
         state.noUserSuspensionOwner
           == NoUserSuspensionOwner(
@@ -764,7 +816,7 @@ public actor MLSClient {
       state.suspensionInProgress = false
       return true
     }
-    if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    if !cleared { restoreCoreSuspensionGateIfClientSuspended() }
     return cleared
   }
 
@@ -877,6 +929,7 @@ public actor MLSClient {
         permit: SuspendedResumeCapability?,
         enrollmentTasks: [Task<MLSDeviceAuthBindingStatus, Error>]
       )? in
+      state.coreGateCloseSignalSerial &+= 1
       guard !state.suspensionInProgress else {
         return nil
       }
@@ -1690,6 +1743,7 @@ public actor MLSClient {
       if let capability = noUserCapability,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
         state.suspensionSignalSerial == capability.suspensionSignalSerial,
+        state.coreGateCloseSignalSerial == capability.coreGateCloseSignalSerial,
         state.suspensionAbandonmentOwner == nil,
         state.noUserSuspensionOwner
           == NoUserSuspensionOwner(

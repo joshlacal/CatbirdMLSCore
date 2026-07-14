@@ -8,6 +8,8 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
 
   override func tearDown() {
     MLSClient.setNoUserResumeAfterCoreClearTestOverride(nil)
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride(nil)
+    MLSClient.setLegacyClearCoreCloseAfterIntentTestOverride(nil)
     MLSCoreContext.emergencyCloseAllContexts()
     MLSStoragePaths.setBaseDirectoryOverride(nil)
     if let temporaryCoreStorageDirectory {
@@ -61,23 +63,40 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     let owner = MLSContextFreeLifecycleSuspensionOwner()
     let releaseReachedPostCoreClear = expectation(description: "release cleared Core")
     let finishRelease = DispatchSemaphore(value: 0)
+    let shutdownRecordedCloseIntent = expectation(description: "shutdown recorded close intent")
+    let finishShutdownCoreClose = DispatchSemaphore(value: 0)
     owner.markSuspensionInProgress(reason: "shutdown-preserving release race")
     MLSClient.setNoUserResumeAfterCoreClearTestOverride {
       releaseReachedPostCoreClear.fulfill()
       finishRelease.wait()
     }
+    MLSClient.setShutdownCoreCloseAfterIntentTestOverride {
+      shutdownRecordedCloseIntent.fulfill()
+      finishShutdownCoreClose.wait()
+    }
 
     let release = Task { await owner.resumeSuspensionIfOwnedAndContextFree() }
     await fulfillment(of: [releaseReachedPostCoreClear], timeout: 2)
-    MLSClient.markShutdownInProgress(
-      reason: "shutdown signal while release is held",
-      abandonmentOwnerDID: nil,
-      abandonmentOwnerToken: UUID()
-    )
+    let shutdown = Task {
+      MLSClient.markShutdownInProgress(
+        reason: "shutdown signal while release is held",
+        abandonmentOwnerDID: nil,
+        abandonmentOwnerToken: UUID()
+      )
+    }
+    await fulfillment(of: [shutdownRecordedCloseIntent], timeout: 2)
     finishRelease.signal()
     let released = await release.value
 
     XCTAssertFalse(released)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertFalse(MLSClient._tryTrackedFFIAdmissionForTesting())
+    MLSClient.setNoUserResumeAfterCoreClearTestOverride(nil)
+    let retryDuringHandoff = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(retryDuringHandoff)
+    finishShutdownCoreClose.signal()
+    await shutdown.value
     assertBothGatesClosed()
   }
 
@@ -85,19 +104,39 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     let owner = MLSContextFreeLifecycleSuspensionOwner()
     let releaseReachedPostCoreClear = expectation(description: "release cleared Core")
     let finishRelease = DispatchSemaphore(value: 0)
+    let legacyClearRecordedCloseIntent = expectation(
+      description: "legacy clear recorded close intent"
+    )
+    let finishLegacyCoreClose = DispatchSemaphore(value: 0)
     owner.markSuspensionInProgress(reason: "legacy clear release race")
     MLSClient.setNoUserResumeAfterCoreClearTestOverride {
       releaseReachedPostCoreClear.fulfill()
       finishRelease.wait()
     }
+    MLSClient.setLegacyClearCoreCloseAfterIntentTestOverride {
+      legacyClearRecordedCloseIntent.fulfill()
+      finishLegacyCoreClose.wait()
+    }
 
     let release = Task { await owner.resumeSuspensionIfOwnedAndContextFree() }
     await fulfillment(of: [releaseReachedPostCoreClear], timeout: 2)
-    XCTAssertFalse(MLSClient.clearSuspensionFlag(reason: "legacy clear while release is held"))
+    let legacyClear = Task {
+      MLSClient.clearSuspensionFlag(reason: "legacy clear while release is held")
+    }
+    await fulfillment(of: [legacyClearRecordedCloseIntent], timeout: 2)
     finishRelease.signal()
     let released = await release.value
 
     XCTAssertFalse(released)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertFalse(MLSClient._tryTrackedFFIAdmissionForTesting())
+    MLSClient.setNoUserResumeAfterCoreClearTestOverride(nil)
+    let retryDuringHandoff = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertFalse(retryDuringHandoff)
+    finishLegacyCoreClose.signal()
+    let legacyCleared = await legacyClear.value
+    XCTAssertFalse(legacyCleared)
     assertBothGatesClosed()
   }
 
