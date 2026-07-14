@@ -189,8 +189,9 @@ jobs:
             aarch64-apple-darwin \
             x86_64-apple-darwin
 
-      - name: Cache Cargo registry and build outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - name: Restore Cargo registry and build outputs
+        id: restore-cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -231,9 +232,32 @@ jobs:
           mv "$manifest_tmp" "$manifest"
           test -s "$manifest"
 
+      - name: Save Cargo registry and build outputs before cleanup
+        if: steps.restore-cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            catbird-mls/target
+          key: ${{ runner.os }}-catbird-mls-${{ hashFiles('catbird-mls/Cargo.lock') }}
+
+      - name: Release generated Rust build outputs before Swift validation
+        working-directory: CatbirdMLSCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f ../catbird-mls/Cargo.toml
+          test -d Sources/CatbirdMLSFFI.xcframework
+          test -s Sources/CatbirdMLS/CatbirdMLS.swift
+          cargo clean --manifest-path ../catbird-mls/Cargo.toml
+          rm -rf ../catbird-mls/build
+          test -d Sources/CatbirdMLSFFI.xcframework
+          test -s Sources/CatbirdMLS/CatbirdMLS.swift
+
       - name: Verify Swift package consumes generated FFI
         working-directory: CatbirdMLSCore
-        run: swift build
+        run: swift build --jobs 2
 
       - name: Create release archive
         working-directory: CatbirdMLSCore
