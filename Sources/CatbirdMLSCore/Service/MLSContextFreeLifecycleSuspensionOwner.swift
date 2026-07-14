@@ -19,6 +19,18 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
     )
   }
 
+  /// Emergency-closes Core contexts while preserving this exact context-free suspension owner.
+  /// Returns false without changing lifecycle state if a newer owner has replaced this instance.
+  @discardableResult
+  public nonisolated func emergencyCloseAllContextsIfOwned(
+    reason: String = "context-free lifecycle expiration"
+  ) -> Bool {
+    MLSClient.emergencyCloseAllContextsIfOwned(
+      noUserOwnerToken: ownerToken,
+      reason: reason
+    )
+  }
+
   @discardableResult
   public func resumeSuspensionIfOwnedAndContextFree() async -> Bool {
     guard
