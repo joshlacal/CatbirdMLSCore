@@ -28,6 +28,22 @@ public actor MLSClient {
     fileprivate let suspensionGeneration: UInt64
   }
 
+  internal struct RuntimeInitializationRight: Sendable {
+    fileprivate let token: UUID
+    fileprivate let reservationToken: UUID
+    fileprivate let normalizedDID: String
+    fileprivate let suspensionGeneration: UInt64
+    fileprivate let suspensionSignalSerial: UInt64
+    fileprivate let suspendedResumeCapability: SuspendedResumeCapability?
+  }
+
+  internal enum RuntimeInitializationDisposition {
+    case existing(MLSOrchestratorRuntime)
+    case reserved(RuntimeInitializationRight)
+    case wait
+    case denied
+  }
+
   internal struct SuspendedResumeDrainSnapshot: Sendable {
     fileprivate let suspensionGeneration: UInt64
     fileprivate let suspensionSignalSerial: UInt64
@@ -104,6 +120,10 @@ public actor MLSClient {
     /// suspension flag is set no new operation can be admitted, so
     /// `drainInFlightFFIOperations` observing 0 means quiescence.
     var inFlightFFIOperations = 0
+    /// Tokenized rights held across asynchronous runtime construction and disposal. Each right is
+    /// included in `inFlightFFIOperations` from reservation acquisition through exact install or
+    /// cancellation, so suspension preparation cannot overlap an uninstalled candidate teardown.
+    var runtimeInitializationRightDIDs: [UUID: String] = [:]
     /// Exclusive synchronous lease held while Rust performs suspend preparation.
     /// It is acquired only at quiescence and blocks every normal or scoped-resume admission.
     var suspensionQuiescenceLeaseToken: UUID?
@@ -1436,47 +1456,31 @@ public actor MLSClient {
     return try operation()
   }
 
-  /// Runs one synchronous bridge operation and installs its runtime before releasing tracked
-  /// admission. Installation is linearized under the emergency mutex and may only write the
-  /// dedicated runtime storage cell. The fixed lock order is emergency state then runtime storage;
-  /// no manager callback or arbitrary code runs under the emergency mutex.
-  internal nonisolated static func withTrackedFFIAdmissionAndAtomicRuntimeInstall<T>(
+  /// Acquires a runtime-storage reservation and its drain-visible lifecycle right atomically.
+  /// The fixed lock order is emergency state then runtime storage. A reserved right remains in the
+  /// shared in-flight count across every async factory/build await until exact install or cancel.
+  internal nonisolated static func beginTrackedRuntimeInitialization(
     suspendedResumeCapability: SuspendedResumeCapability?,
     for userDID: String,
-    operation: () throws -> T,
-    runtime: MLSOrchestratorRuntime,
-    runtimeStorage: MLSOrchestratorRuntimeStorage,
-    reservationToken: UUID
-  ) throws -> T {
+    runtimeStorage: MLSOrchestratorRuntimeStorage
+  ) -> RuntimeInitializationDisposition {
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines)
-    let admitted =
-      if let suspendedResumeCapability {
-        admitTrackedSuspendedResumeFFIOperation(
-          capability: suspendedResumeCapability,
-          for: normalizedDID
-        )
-      } else {
-        admitTrackedFFIOperation()
+    guard !normalizedDID.isEmpty else { return .denied }
+    return emergencyState.withLock { state in
+      // A reset may revoke the storage reservation while its asynchronous builder still owns Core
+      // context state. Do not let a successor for the same DID enter its factory until the stale
+      // right has completed candidate teardown and identity-matched context removal.
+      guard !state.runtimeInitializationRightDIDs.values.contains(normalizedDID) else {
+        return .wait
       }
-    guard admitted else {
-      runtimeStorage.cancelInitialization(token: reservationToken)
-      throw CancellationError()
-    }
-
-    let value: T
-    do {
-      value = try operation()
-    } catch {
-      // Teardown remains part of the admitted operation. A suspension drain cannot pass while an
-      // initialized candidate is being discarded, and no Rust bridge call occurs under a mutex.
-      runtime.shutdown()
-      runtimeStorage.cancelInitialization(token: reservationToken)
-      emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
-      throw error
-    }
-
-    let installed = emergencyState.withLock { state in
-      let admissionRemainsCurrent =
+      let storageDisposition = runtimeStorage.beginInitialization()
+      if case .existing(let runtime) = storageDisposition {
+        // Looking up an already-installed runtime does not create new lifecycle work. Preserve the
+        // existing-runtime path so a scoped suspended resume can resolve it and perform its bridge
+        // call under the exact capability supplied by the caller.
+        return .existing(runtime)
+      }
+      let admissionIsValid =
         if let suspendedResumeCapability {
           state.suspensionInProgress
             && state.suspensionQuiescenceLeaseToken == nil
@@ -1490,16 +1494,117 @@ public actor MLSClient {
         } else {
           !state.suspensionInProgress && state.suspensionQuiescenceLeaseToken == nil
         }
-      guard admissionRemainsCurrent else { return false }
-      return runtimeStorage.installReserved(runtime, token: reservationToken)
+      guard admissionIsValid else {
+        if case .reserved(let reservationToken) = storageDisposition {
+          runtimeStorage.cancelInitialization(token: reservationToken)
+        }
+        return .denied
+      }
+
+      switch storageDisposition {
+      case .existing(let runtime):
+        return .existing(runtime)
+      case .wait:
+        return .wait
+      case .reserved(let reservationToken):
+        let right = RuntimeInitializationRight(
+          token: UUID(),
+          reservationToken: reservationToken,
+          normalizedDID: normalizedDID,
+          suspensionGeneration: state.deviceAuthSuspensionGeneration,
+          suspensionSignalSerial: state.suspensionSignalSerial,
+          suspendedResumeCapability: suspendedResumeCapability
+        )
+        state.runtimeInitializationRightDIDs[right.token] = normalizedDID
+        state.inFlightFFIOperations += 1
+        return .reserved(right)
+      }
     }
-    guard installed else {
-      runtime.shutdown()
-      runtimeStorage.cancelInitialization(token: reservationToken)
-      emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
+  }
+
+  private nonisolated static func runtimeInitializationAdmissionIsCurrent(
+    _ right: RuntimeInitializationRight,
+    state: EmergencyState
+  ) -> Bool {
+    guard state.runtimeInitializationRightDIDs[right.token] == right.normalizedDID,
+      state.suspensionQuiescenceLeaseToken == nil
+    else {
+      return false
+    }
+    if let capability = right.suspendedResumeCapability {
+      return state.suspensionInProgress
+        && state.deviceAuthSuspensionGeneration == capability.suspensionGeneration
+        && capability.normalizedDID == right.normalizedDID
+        && state.suspendedResumeCapability?.token == capability.token
+        && state.suspendedResumeCapability?.normalizedDID == right.normalizedDID
+        && state.suspendedResumeCapability?.suspensionGeneration
+          == capability.suspensionGeneration
+    }
+    return !state.suspensionInProgress
+      && state.deviceAuthSuspensionGeneration == right.suspensionGeneration
+      && state.suspensionSignalSerial == right.suspensionSignalSerial
+  }
+
+  internal nonisolated static func runtimeInitializationRightIsActive(
+    _ right: RuntimeInitializationRight
+  ) -> Bool {
+    emergencyState.withLock {
+      $0.runtimeInitializationRightDIDs[right.token] == right.normalizedDID
+    }
+  }
+
+  /// Cancels only this right and its exact storage reservation. Call after every candidate bridge
+  /// shutdown and identity-matched Core-context removal has completed.
+  @discardableResult
+  internal nonisolated static func cancelTrackedRuntimeInitialization(
+    _ right: RuntimeInitializationRight,
+    runtimeStorage: MLSOrchestratorRuntimeStorage
+  ) -> Bool {
+    emergencyState.withLock { state in
+      guard state.runtimeInitializationRightDIDs.removeValue(forKey: right.token) != nil else {
+        return false
+      }
+      runtimeStorage.cancelInitialization(token: right.reservationToken)
+      state.inFlightFFIOperations -= 1
+      return true
+    }
+  }
+
+  /// Runs one synchronous candidate bridge operation under an already-held initialization right,
+  /// then atomically installs the exact reserved generation. Rejection leaves the right active so
+  /// the caller can keep teardown and async context removal drain-visible before exact cancellation.
+  internal nonisolated static func withTrackedFFIAdmissionAndAtomicRuntimeInstall<T>(
+    initializationRight: RuntimeInitializationRight,
+    operation: () throws -> T,
+    runtime: MLSOrchestratorRuntime,
+    runtimeStorage: MLSOrchestratorRuntimeStorage
+  ) throws -> T {
+    guard
+      emergencyState.withLock({
+        runtimeInitializationAdmissionIsCurrent(initializationRight, state: $0)
+          && runtimeStorage.hasInitializationReservation(
+            token: initializationRight.reservationToken
+          )
+      })
+    else {
       throw CancellationError()
     }
-    emergencyState.withLock { $0.inFlightFFIOperations -= 1 }
+
+    let value = try operation()
+    let installed = emergencyState.withLock { state in
+      guard runtimeInitializationAdmissionIsCurrent(initializationRight, state: state),
+        runtimeStorage.installReserved(
+          runtime,
+          token: initializationRight.reservationToken
+        ),
+        state.runtimeInitializationRightDIDs.removeValue(forKey: initializationRight.token) != nil
+      else {
+        return false
+      }
+      state.inFlightFFIOperations -= 1
+      return true
+    }
+    guard installed else { throw CancellationError() }
     return value
   }
 

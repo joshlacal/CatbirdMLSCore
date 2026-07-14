@@ -67,6 +67,14 @@ internal final class MLSOrchestratorRuntimeStorage: Sendable {
     }
   }
 
+  /// Returns whether `token` still owns the empty runtime cell. This is a lock-only generation
+  /// check; callers may safely invoke it while holding the MLSClient emergency-state lock.
+  func hasInitializationReservation(token: UUID) -> Bool {
+    state.withLock { current in
+      current.runtime == nil && current.initializationReservationToken == token
+    }
+  }
+
   func cancelInitialization(token: UUID) {
     state.withLock { current in
       guard current.initializationReservationToken == token else { return }

@@ -224,21 +224,27 @@ extension MLSConversationManager {
   }
 
   internal func ensureOrchestratorRuntime() async -> MLSOrchestratorRuntime? {
-    guard protocolAuthorityMode != .swiftLegacy else { return nil }
-    var reservationToken: UUID?
-    while reservationToken == nil {
-      switch orchestratorRuntimeStorage.beginInitialization() {
+    guard protocolAuthorityMode != .swiftLegacy, let userDid else { return nil }
+    var initializationRight: MLSClient.RuntimeInitializationRight?
+    while initializationRight == nil {
+      switch MLSClient.beginTrackedRuntimeInitialization(
+        suspendedResumeCapability: nil,
+        for: userDid,
+        runtimeStorage: orchestratorRuntimeStorage
+      ) {
       case .existing(let runtime):
         return runtime
-      case .reserved(let token):
-        reservationToken = token
+      case .reserved(let right):
+        initializationRight = right
       case .wait:
-        guard !Task.isCancelled, rustRuntimeAdmissionIsAllowed(nil) else { return nil }
+        guard !Task.isCancelled else { return nil }
         try? await Task.sleep(nanoseconds: 5_000_000)
         continue
+      case .denied:
+        return nil
       }
     }
-    guard let reservationToken else { return nil }
+    guard let initializationRight else { return nil }
     let runtime =
       if let orchestratorRuntimeFactory {
         await orchestratorRuntimeFactory()
@@ -246,7 +252,10 @@ extension MLSConversationManager {
         await buildOrchestratorRuntime()
       }
     guard let runtime else {
-      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
+      MLSClient.cancelTrackedRuntimeInitialization(
+        initializationRight,
+        runtimeStorage: orchestratorRuntimeStorage
+      )
       return nil
     }
 
@@ -254,7 +263,7 @@ extension MLSConversationManager {
       try await withTrackedRustRuntime(
         runtime,
         operation: "initializeOrchestratorRuntime",
-        runtimeInstallationReservationToken: reservationToken
+        runtimeInitializationRight: initializationRight
       ) { runtime in
         try runtime.initialize()
       }
@@ -291,9 +300,15 @@ extension MLSConversationManager {
     else {
       return nil
     }
-    guard case .reserved(let reservationToken) =
-      orchestratorRuntimeStorage.beginInitialization()
-    else {
+    let initializationRight: MLSClient.RuntimeInitializationRight
+    switch MLSClient.beginTrackedRuntimeInitialization(
+      suspendedResumeCapability: suspendedResumeCapability,
+      for: userDid,
+      runtimeStorage: orchestratorRuntimeStorage
+    ) {
+    case .reserved(let right):
+      initializationRight = right
+    case .existing, .wait, .denied:
       return nil
     }
     let runtime: MLSOrchestratorRuntime?
@@ -305,7 +320,10 @@ extension MLSConversationManager {
       )
     }
     guard let runtime else {
-      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
+      MLSClient.cancelTrackedRuntimeInitialization(
+        initializationRight,
+        runtimeStorage: orchestratorRuntimeStorage
+      )
       return nil
     }
     guard
@@ -313,23 +331,10 @@ extension MLSConversationManager {
       runtime.userDID == MLSStorageHelpers.normalizeDID(userDid),
       MLSClient.isCurrentSuspendedResumeCapability(suspendedResumeCapability, for: userDid)
     else {
-      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
-      if MLSClient.isCurrentSuspendedResumeCapability(suspendedResumeCapability, for: userDid) {
-        _ = try? MLSClient.withTrackedFFIAdmission(
-          suspendedResumeCapability: suspendedResumeCapability,
-          for: userDid
-        ) {
-          runtime.shutdown()
-        }
-      }
-      // This candidate was never installed. Without exact resume admission it must be discarded,
-      // not synchronously torn down underneath a newer suspension's quiescence boundary.
-      if let runtimeContextIdentity = runtime.mlsContextIdentity {
-        _ = await MLSCoreContext.shared.removeContext(
-          for: userDid,
-          matching: runtimeContextIdentity
-        )
-      }
+      await discardUninstalledRustRuntimeCandidate(
+        runtime,
+        initializationRight: initializationRight
+      )
       return nil
     }
 
@@ -340,25 +345,17 @@ extension MLSConversationManager {
         runtime,
         operation: "reattachOrchestratorRuntimeAfterSuspend",
         suspendedResumeCapability: suspendedResumeCapability,
-        runtimeInstallationReservationToken: reservationToken
+        runtimeInitializationRight: initializationRight
       ) { runtime in
         try runtime.reattachAfterSuspend(reason: reason)
       }
       rustStartupReconcileCompleted = false
       return runtime
     } catch {
-      // Cancellation can arrive after the reservation was created but before tracked atomic
-      // installation begins. Release only this initializer's token before any async cleanup so
-      // waiters can reserve immediately and a newer reservation remains generation-safe.
-      orchestratorRuntimeStorage.cancelInitialization(token: reservationToken)
-      // A failed or superseded candidate is intentionally never installed. Teardown bridge calls
-      // require their own exact admission; the authoritative context owner performs final close.
-      if let runtimeContextIdentity = runtime.mlsContextIdentity {
-        _ = await MLSCoreContext.shared.removeContext(
-          for: userDid,
-          matching: runtimeContextIdentity
-        )
-      }
+      await discardUninstalledRustRuntimeCandidate(
+        runtime,
+        initializationRight: initializationRight
+      )
       logger.error(
         "❌ [MLS-AUTHORITY] Failed to reattach Rust orchestrator runtime after suspend close: \(error.localizedDescription, privacy: .public)"
       )
@@ -413,21 +410,27 @@ extension MLSConversationManager {
     _ runtime: MLSOrchestratorRuntime,
     operation: String,
     suspendedResumeCapability: MLSClient.SuspendedResumeCapability? = nil,
-    runtimeInstallationReservationToken: UUID? = nil,
+    runtimeInitializationRight: MLSClient.RuntimeInitializationRight? = nil,
     body: @escaping (MLSOrchestratorRuntime) throws -> T
   ) async throws -> T {
     let runtimeStorage = orchestratorRuntimeStorage
     guard protocolAuthorityMode != .swiftLegacy else {
-      if let runtimeInstallationReservationToken {
-        runtimeStorage.cancelInitialization(token: runtimeInstallationReservationToken)
+      if let runtimeInitializationRight {
+        await discardUninstalledRustRuntimeCandidate(
+          runtime,
+          initializationRight: runtimeInitializationRight
+        )
       }
       throw MLSConversationError.operationFailed(
         "Rust authority requested while mode is \(protocolAuthorityMode.rawValue)"
       )
     }
     guard rustRuntimeAdmissionIsAllowed(suspendedResumeCapability) else {
-      if let runtimeInstallationReservationToken {
-        runtimeStorage.cancelInitialization(token: runtimeInstallationReservationToken)
+      if let runtimeInitializationRight {
+        await discardUninstalledRustRuntimeCandidate(
+          runtime,
+          initializationRight: runtimeInitializationRight
+        )
       }
       throw MLSConversationError.operationFailed(
         "Rust authority blocked by lifecycle suspension for \(operation)"
@@ -448,37 +451,68 @@ extension MLSConversationManager {
     // a genuinely escaping body, ARC owns its lifetime and there is no escape check to
     // race. The body still does not outlive this call — we await its completion before
     // returning.
-    let result = try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<T, Error>) in
-      Self.rustAuthorityExecutionQueue.async {
-        let bridgeResult = Result {
-          if let runtimeInstallationReservationToken {
-            try MLSClient.withTrackedFFIAdmissionAndAtomicRuntimeInstall(
-              suspendedResumeCapability: suspendedResumeCapability,
-              for: runtime.userDID,
-              operation: { try body(runtime) },
-              runtime: runtime,
-              runtimeStorage: runtimeStorage,
-              reservationToken: runtimeInstallationReservationToken
-            )
-          } else {
-            try MLSClient.withTrackedFFIAdmission(
-              suspendedResumeCapability: suspendedResumeCapability,
-              for: runtime.userDID
-            ) {
-              try body(runtime)
+    let result: T
+    do {
+      result = try await withCheckedThrowingContinuation {
+        (continuation: CheckedContinuation<T, Error>) in
+        Self.rustAuthorityExecutionQueue.async {
+          let bridgeResult = Result {
+            if let runtimeInitializationRight {
+              try MLSClient.withTrackedFFIAdmissionAndAtomicRuntimeInstall(
+                initializationRight: runtimeInitializationRight,
+                operation: { try body(runtime) },
+                runtime: runtime,
+                runtimeStorage: runtimeStorage
+              )
+            } else {
+              try MLSClient.withTrackedFFIAdmission(
+                suspendedResumeCapability: suspendedResumeCapability,
+                for: runtime.userDID
+              ) {
+                try body(runtime)
+              }
             }
           }
+          trackedRustRuntimePostBodyTestOverride.withLock { $0 }?()
+          continuation.resume(with: bridgeResult)
         }
-        trackedRustRuntimePostBodyTestOverride.withLock { $0 }?()
-        continuation.resume(with: bridgeResult)
       }
+    } catch {
+      if let runtimeInitializationRight {
+        await discardUninstalledRustRuntimeCandidate(
+          runtime,
+          initializationRight: runtimeInitializationRight
+        )
+      }
+      throw error
     }
     // Admission and drain ownership are decided before and during the synchronous bridge call.
     // Once `body` returns, a non-idempotent Rust mutation may already be committed. A suspension
     // that begins before this awaiting task resumes must close future admissions, but must not
     // rewrite the completed operation into a retryable failure or discard its exact result.
     return result
+  }
+
+  /// Discards a runtime that was built under an initialization reservation but never admitted.
+  /// Keep the exact reservation until teardown completes so a waiter cannot reuse the doomed
+  /// Core context while identity-matched removal is suspended on the context actor. No bridge
+  /// call runs under either the runtime-storage mutex or the Core-context actor.
+  private func discardUninstalledRustRuntimeCandidate(
+    _ runtime: MLSOrchestratorRuntime,
+    initializationRight: MLSClient.RuntimeInitializationRight
+  ) async {
+    guard MLSClient.runtimeInitializationRightIsActive(initializationRight) else { return }
+    runtime.shutdown()
+    if let runtimeContextIdentity = runtime.mlsContextIdentity {
+      _ = await MLSCoreContext.shared.removeContext(
+        for: runtime.userDID,
+        matching: runtimeContextIdentity
+      )
+    }
+    MLSClient.cancelTrackedRuntimeInitialization(
+      initializationRight,
+      runtimeStorage: orchestratorRuntimeStorage
+    )
   }
 
   private func rustRuntimeAdmissionIsAllowed(

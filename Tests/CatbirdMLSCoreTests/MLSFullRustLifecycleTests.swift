@@ -1,4 +1,4 @@
-import CatbirdMLS
+@preconcurrency import CatbirdMLS
 import GRDB
 import Petrel
 import Synchronization
@@ -701,6 +701,222 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
   }
 
+  func testColdRuntimeCandidateRejectedBeforeAdmissionIsDiscardedWithoutDisturbingSuccessor()
+    async throws
+  {
+    try useTemporaryCoreStorageDirectory()
+    let manager = try await makeManager(
+      protocolAuthorityMode: .rustFull,
+      migrateDatabase: true
+    )
+    let candidateContextIdentity = try await MLSCoreContext.shared.ensureContextIdentity(
+      for: "did:plc:testuser"
+    )
+    let candidateBridge = RecordingLifecycleBridge()
+    let candidateBuilt = AsyncStream<Void>.makeStream()
+    let releaseCandidate = AsyncStream<Void>.makeStream()
+    let shutdownStarted = DispatchSemaphore(value: 0)
+    let releaseShutdown = DispatchSemaphore(value: 0)
+    candidateBridge.onShutdown = {
+      shutdownStarted.signal()
+      releaseShutdown.wait()
+    }
+    manager.orchestratorRuntimeFactory = {
+      let candidate = MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: candidateBridge,
+        mlsContextIdentity: candidateContextIdentity
+      )
+      candidateBuilt.continuation.yield()
+      for await _ in releaseCandidate.stream { break }
+      return candidate
+    }
+
+    let coldOperation = Task {
+      try await manager.withRustAuthoritativeRuntime(
+        operation: "candidateBuiltBeforeSuspensionAdmission"
+      ) { _ in () }
+    }
+    for await _ in candidateBuilt.stream { break }
+
+    _ = await MainActor.run { manager.suspendMLSOperations() }
+    releaseCandidate.continuation.yield()
+    XCTAssertEqual(shutdownStarted.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+    XCTAssertThrowsError(
+      try MLSClient.withSuspensionPreparationLease {}
+    )
+    releaseShutdown.signal()
+    do {
+      _ = try await coldOperation.value
+      XCTFail("Expected the candidate to be rejected after suspension closed admission")
+    } catch {}
+
+    let candidateContextSurvived = await MLSCoreContext.shared.hasContext(
+      for: "did:plc:testuser"
+    )
+    XCTAssertNil(manager.orchestratorRuntime)
+    XCTAssertEqual(candidateBridge.shutdownCallCount, 1)
+    XCTAssertFalse(candidateContextSurvived)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(manager.isSuspending)
+    XCTAssertTrue(manager.isSyncPaused)
+
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSClient.resetDeviceAuthSuspensionStateForTesting()
+    let successorContextIdentity = try await MLSCoreContext.shared.ensureContextIdentity(
+      for: "did:plc:testuser"
+    )
+    let successorBridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntimeFactory = {
+      MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: successorBridge,
+        mlsContextIdentity: successorContextIdentity
+      )
+    }
+
+    let successor = await manager.ensureOrchestratorRuntime()
+
+    XCTAssertNotNil(successor)
+    XCTAssertTrue(manager.orchestratorRuntime === successor)
+    XCTAssertEqual(successor?.mlsContextIdentity, successorContextIdentity)
+    XCTAssertEqual(successorBridge.initializeCalls.count, 1)
+    XCTAssertEqual(successorBridge.shutdownCallCount, 0)
+    XCTAssertEqual(candidateBridge.shutdownCallCount, 1)
+    let installedSuccessorContextIdentity = await MLSCoreContext.shared.contextIdentity(
+      for: "did:plc:testuser"
+    )
+    XCTAssertEqual(installedSuccessorContextIdentity, successorContextIdentity)
+    _ = await MLSCoreContext.shared.removeContext(for: "did:plc:testuser")
+  }
+
+  func testSwiftLegacyGuardDiscardsReservedCandidateUnderDrainVisibleRight() async throws {
+    try useTemporaryCoreStorageDirectory()
+    let manager = try await makeManager(
+      protocolAuthorityMode: .swiftLegacy,
+      migrateDatabase: true
+    )
+    let contextIdentity = try await MLSCoreContext.shared.ensureContextIdentity(
+      for: "did:plc:testuser"
+    )
+    let bridge = RecordingLifecycleBridge()
+    let shutdownStarted = DispatchSemaphore(value: 0)
+    let releaseShutdown = DispatchSemaphore(value: 0)
+    bridge.onShutdown = {
+      shutdownStarted.signal()
+      releaseShutdown.wait()
+    }
+    let runtime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge,
+      mlsContextIdentity: contextIdentity
+    )
+    guard
+      case .reserved(let initializationRight) = MLSClient.beginTrackedRuntimeInitialization(
+        suspendedResumeCapability: nil,
+        for: "did:plc:testuser",
+        runtimeStorage: manager.orchestratorRuntimeStorage
+      )
+    else {
+      return XCTFail("Expected a legacy-guard candidate reservation")
+    }
+    MLSClient.markSuspensionInProgress(reason: "legacy candidate rejection")
+
+    let rejected = Task {
+      try await manager.withTrackedRustRuntime(
+        runtime,
+        operation: "legacyCandidateRejection",
+        runtimeInitializationRight: initializationRight
+      ) { _ in () }
+    }
+    XCTAssertEqual(shutdownStarted.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+    XCTAssertThrowsError(try MLSClient.withSuspensionPreparationLease {})
+    releaseShutdown.signal()
+    do {
+      _ = try await rejected.value
+      XCTFail("Expected the Swift legacy guard to reject the Rust candidate")
+    } catch {}
+
+    XCTAssertEqual(bridge.shutdownCallCount, 1)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
+    let contextSurvived = await MLSCoreContext.shared.hasContext(for: "did:plc:testuser")
+    XCTAssertFalse(contextSurvived)
+  }
+
+  func testResetDuringHeldFactoryAllowsSuccessorWithoutStaleFinalizationABA() async throws {
+    try useTemporaryCoreStorageDirectory()
+    let manager = try await makeManager(
+      protocolAuthorityMode: .rustFull,
+      migrateDatabase: true
+    )
+    // A production runtime retains its MlsContext through its bridge and storage adapter. Keep the
+    // fake candidate's context alive too, so ObjectIdentifier cannot be allocator-reused by the
+    // replacement while the stale candidate is still in flight.
+    let staleContext = try await MLSCoreContext.shared.getContext(for: "did:plc:testuser")
+    let staleContextIdentity = ObjectIdentifier(staleContext)
+    let staleBridge = RecordingLifecycleBridge()
+    let successorBridge = RecordingLifecycleBridge()
+    let staleBuilt = AsyncStream<Void>.makeStream()
+    let releaseStale = AsyncStream<Void>.makeStream()
+    let factoryCalls = LifecycleLockedBox(0)
+    manager.orchestratorRuntimeFactory = {
+      factoryCalls.withValue { $0 += 1 }
+      let call = factoryCalls.value
+      if call == 1 {
+        let stale = MLSOrchestratorRuntime(
+          userDID: "did:plc:testuser",
+          mode: .rustFull,
+          bridge: staleBridge,
+          mlsContextIdentity: staleContextIdentity
+        )
+        staleBuilt.continuation.yield()
+        for await _ in releaseStale.stream { break }
+        return stale
+      }
+      let identity = try? await MLSCoreContext.shared.ensureContextIdentity(
+        for: "did:plc:testuser"
+      )
+      guard let identity else { return nil }
+      return MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: successorBridge,
+        mlsContextIdentity: identity
+      )
+    }
+
+    let staleInitialization = Task { await manager.ensureOrchestratorRuntime() }
+    for await _ in staleBuilt.stream { break }
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+
+    manager.resetOrchestratorRuntime(reason: "reset held stale initializer")
+    let successorInitialization = Task { await manager.ensureOrchestratorRuntime() }
+    try await Task.sleep(nanoseconds: 100_000_000)
+    XCTAssertEqual(factoryCalls.value, 1)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+
+    releaseStale.continuation.yield()
+    let staleResult = await staleInitialization.value
+    XCTAssertNil(staleResult)
+    let successor = await successorInitialization.value
+    XCTAssertNotNil(successor)
+    XCTAssertTrue(manager.orchestratorRuntime === successor)
+    XCTAssertTrue(staleBridge.initializeCalls.isEmpty)
+    XCTAssertEqual(staleBridge.shutdownCallCount, 1)
+    XCTAssertEqual(successorBridge.shutdownCallCount, 0)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
+    let survivingIdentity = await MLSCoreContext.shared.contextIdentity(for: "did:plc:testuser")
+    XCTAssertEqual(survivingIdentity, successor?.mlsContextIdentity)
+    withExtendedLifetime(staleContext) {}
+    _ = await MLSCoreContext.shared.removeContext(for: "did:plc:testuser")
+  }
+
   func testConcurrentColdRuntimeCallersShareOneInitializationAndInstalledRuntime() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingLifecycleBridge()
@@ -789,6 +1005,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       )
     }
     await reattachGate.waitUntilHeld()
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
     restore.cancel()
     await reattachGate.release()
 
@@ -800,6 +1017,44 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       return XCTFail("Cancellation must release the exact reattach reservation")
     }
     manager.orchestratorRuntimeStorage.cancelInitialization(token: replacementToken)
+  }
+
+  func testRevokedResumeReservationCannotEnterReattachBody() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntimeResumeFactory = {
+      MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: bridge
+      )
+    }
+    MLSClient.markSuspensionInProgress(reason: "revoked resume reservation")
+    let capability = try XCTUnwrap(
+      MLSClient.beginSuspendedResumeCapability(for: "did:plc:testuser")
+    )
+    let reattachGate = LifecycleInitializationGate()
+    manager.orchestratorRuntimeBeforeReattachTestOverride = {
+      await reattachGate.hold()
+    }
+
+    let restore = Task {
+      await manager.restoreOrchestratorRuntimeAfterSuspendClose(
+        reason: "revoked resume reservation",
+        suspendedResumeCapability: capability
+      )
+    }
+    await reattachGate.waitUntilHeld()
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+    manager.resetOrchestratorRuntime(reason: "revoke held resume reservation")
+    await reattachGate.release()
+
+    let restoredRuntime = await restore.value
+    XCTAssertNil(restoredRuntime)
+    XCTAssertTrue(bridge.reattachCalls.isEmpty)
+    XCTAssertEqual(bridge.shutdownCallCount, 1)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
+    MLSClient.cancelSuspendedResumeCapability(capability)
   }
 
   func testRuntimeResetCancelsPendingInitializationAndFencesStaleInstall() async throws {
@@ -884,31 +1139,60 @@ final class MLSFullRustLifecycleTests: XCTestCase {
 
   func testRejectedAtomicRuntimeAdmissionReleasesOnlyItsOwnReservation() throws {
     let storage = MLSOrchestratorRuntimeStorage()
-    guard case .reserved(let rejectedToken) = storage.beginInitialization() else {
+    guard
+      case .reserved(let initializationRight) = MLSClient.beginTrackedRuntimeInitialization(
+        suspendedResumeCapability: nil,
+        for: "did:plc:testuser",
+        runtimeStorage: storage
+      )
+    else {
       return XCTFail("Expected rejected operation reservation")
     }
+    let bridge = RecordingLifecycleBridge()
     let runtime = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
       mode: .rustFull,
-      bridge: RecordingLifecycleBridge()
+      bridge: bridge
     )
+    var operationRan = false
     MLSClient.markSuspensionInProgress(reason: "reject atomic runtime install admission")
 
     XCTAssertThrowsError(
       try MLSClient.withTrackedFFIAdmissionAndAtomicRuntimeInstall(
-        suspendedResumeCapability: nil,
-        for: "did:plc:testuser",
-        operation: {},
+        initializationRight: initializationRight,
+        operation: { operationRan = true },
         runtime: runtime,
-        runtimeStorage: storage,
-        reservationToken: rejectedToken
+        runtimeStorage: storage
       )
     )
+    XCTAssertFalse(operationRan)
+    XCTAssertTrue(MLSClient.runtimeInitializationRightIsActive(initializationRight))
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+    guard case .wait = storage.beginInitialization() else {
+      return XCTFail("Rejected admission must retain its reservation through candidate teardown")
+    }
+    XCTAssertThrowsError(try MLSClient.withSuspensionPreparationLease {})
+
+    runtime.shutdown()
+    XCTAssertTrue(
+      MLSClient.cancelTrackedRuntimeInitialization(
+        initializationRight,
+        runtimeStorage: storage
+      )
+    )
+    XCTAssertEqual(bridge.shutdownCallCount, 1)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
     guard case .reserved(let waiterToken) = storage.beginInitialization() else {
-      return XCTFail("Rejected admission must release its exact reservation")
+      return XCTFail("Completed teardown must release its exact reservation")
     }
 
-    storage.cancelInitialization(token: rejectedToken)
+    XCTAssertFalse(
+      MLSClient.cancelTrackedRuntimeInitialization(
+        initializationRight,
+        runtimeStorage: storage
+      ),
+      "A stale right must not revoke its successor's reservation"
+    )
 
     let replacement = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
@@ -917,6 +1201,34 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     )
     XCTAssertTrue(storage.installReserved(replacement, token: waiterToken))
     XCTAssertTrue(storage.load() === replacement)
+  }
+
+  func testRuntimeInitializationRightsPermitDifferentDIDsConcurrently() throws {
+    let firstStorage = MLSOrchestratorRuntimeStorage()
+    let secondStorage = MLSOrchestratorRuntimeStorage()
+    guard
+      case .reserved(let firstRight) = MLSClient.beginTrackedRuntimeInitialization(
+        suspendedResumeCapability: nil,
+        for: "did:plc:first",
+        runtimeStorage: firstStorage
+      ),
+      case .reserved(let secondRight) = MLSClient.beginTrackedRuntimeInitialization(
+        suspendedResumeCapability: nil,
+        for: "did:plc:second",
+        runtimeStorage: secondStorage
+      )
+    else {
+      return XCTFail("Different DIDs must retain independent initialization lanes")
+    }
+
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 2)
+    XCTAssertTrue(
+      MLSClient.cancelTrackedRuntimeInitialization(firstRight, runtimeStorage: firstStorage)
+    )
+    XCTAssertTrue(
+      MLSClient.cancelTrackedRuntimeInitialization(secondRight, runtimeStorage: secondStorage)
+    )
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
   }
 
   func testHeldResumeReattachParticipatesInNewerSuspensionDrainAndCannotInstall() async throws {
