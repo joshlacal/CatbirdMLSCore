@@ -26,7 +26,6 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
         ownerToken: ownerToken
       )
     else {
-      MLSCoreContext.markSuspensionInProgress()
       return false
     }
     return await MLSClient.finishNoUserSuspendedResumeCapability(capability)

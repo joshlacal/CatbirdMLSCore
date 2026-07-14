@@ -557,7 +557,10 @@ public actor MLSClient {
   internal static func finishNoUserSuspendedResumeCapability(
     _ capability: NoUserSuspendedResumeCapability
   ) async -> Bool {
-    let mayClearCore = emergencyState.withLock { state in
+    // Reserve the shared quiescence slot before crossing actor isolation. Duplicate releases then
+    // fail without touching Core, while the exact claimant revalidates the transition afterward.
+    let releaseClaimToken = UUID()
+    let claimedRelease = emergencyState.withLock { state in
       guard state.suspensionInProgress,
         state.suspensionQuiescenceLeaseToken == nil,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
@@ -579,12 +582,15 @@ public actor MLSClient {
       else {
         return false
       }
+      state.suspensionQuiescenceLeaseToken = releaseClaimToken
       return true
     }
-    guard mayClearCore,
-      await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts()
-    else {
-      MLSCoreContext.markSuspensionInProgress()
+    guard claimedRelease else { return false }
+    guard await MLSCoreContext.shared.clearSuspensionFlagAfterSafeShutdownIfNoContexts() else {
+      emergencyState.withLock { state in
+        guard state.suspensionQuiescenceLeaseToken == releaseClaimToken else { return }
+        state.suspensionQuiescenceLeaseToken = nil
+      }
       return false
     }
 
@@ -592,7 +598,7 @@ public actor MLSClient {
 
     let cleared = emergencyState.withLock { state in
       guard state.suspensionInProgress,
-        state.suspensionQuiescenceLeaseToken == nil,
+        state.suspensionQuiescenceLeaseToken == releaseClaimToken,
         state.deviceAuthSuspensionGeneration == capability.suspensionGeneration,
         state.suspensionSignalSerial == capability.suspensionSignalSerial,
         state.suspensionAbandonmentOwner == nil,
@@ -613,10 +619,16 @@ public actor MLSClient {
         return false
       }
       state.noUserSuspensionOwner = nil
+      state.suspensionQuiescenceLeaseToken = nil
       state.suspensionInProgress = false
       return true
     }
-    if !cleared { MLSCoreContext.markSuspensionInProgress() }
+    if !cleared {
+      emergencyState.withLock { state in
+        guard state.suspensionQuiescenceLeaseToken == releaseClaimToken else { return }
+        state.suspensionQuiescenceLeaseToken = nil
+      }
+    }
     return cleared
   }
 

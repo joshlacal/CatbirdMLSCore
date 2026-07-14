@@ -1,3 +1,4 @@
+import Synchronization
 import XCTest
 
 @testable import CatbirdMLSCore
@@ -27,6 +28,58 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     XCTAssertTrue(released)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+  }
+
+  func testConcurrentSameOwnerReleaseIsSingleFlightAndKeepsGatesOpenAfterWinner() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let firstReachedPostCoreClear = expectation(description: "first release cleared Core")
+    let releaseFirst = DispatchSemaphore(value: 0)
+    let invocationCount = Mutex(0)
+    owner.markSuspensionInProgress(reason: "concurrent release")
+    MLSClient.setNoUserResumeAfterCoreClearTestOverride {
+      let isFirst = invocationCount.withLock { count in
+        count += 1
+        return count == 1
+      }
+      if isFirst {
+        firstReachedPostCoreClear.fulfill()
+        releaseFirst.wait()
+      }
+    }
+
+    let firstRelease = Task { await owner.resumeSuspensionIfOwnedAndContextFree() }
+    await fulfillment(of: [firstReachedPostCoreClear], timeout: 2)
+    let duplicateReleased = await owner.resumeSuspensionIfOwnedAndContextFree()
+    releaseFirst.signal()
+    let firstReleased = await firstRelease.value
+
+    XCTAssertEqual([firstReleased, duplicateReleased].filter { $0 }.count, 1)
+    assertBothGatesOpenAndOrdinaryAdmissionAllowed()
+  }
+
+  func testWrongOwnerReleaseAfterSuccessfulReleaseDoesNotRecloseCoreGate() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let wrongOwner = MLSContextFreeLifecycleSuspensionOwner()
+    owner.markSuspensionInProgress(reason: "wrong owner after success")
+    let initiallyReleased = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(initiallyReleased)
+
+    let wrongOwnerReleased = await wrongOwner.resumeSuspensionIfOwnedAndContextFree()
+
+    XCTAssertFalse(wrongOwnerReleased)
+    assertBothGatesOpenAndOrdinaryAdmissionAllowed()
+  }
+
+  func testDuplicateOwnerReleaseAfterSuccessfulReleaseDoesNotRecloseCoreGate() async {
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    owner.markSuspensionInProgress(reason: "duplicate owner after success")
+    let initiallyReleased = await owner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(initiallyReleased)
+
+    let duplicateReleased = await owner.resumeSuspensionIfOwnedAndContextFree()
+
+    XCTAssertFalse(duplicateReleased)
+    assertBothGatesOpenAndOrdinaryAdmissionAllowed()
   }
 
   func testWrongOwnerCannotReleaseContextFreeSuspension() async {
@@ -191,6 +244,20 @@ final class MLSContextFreeLifecycleSuspensionOwnerTests: XCTestCase {
     XCTAssertFalse(
       MLSClient._tryTrackedFFIAdmissionForTesting(),
       "A fresh ordinary MLS admission must remain denied",
+      file: file,
+      line: line
+    )
+  }
+
+  private func assertBothGatesOpenAndOrdinaryAdmissionAllowed(
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    XCTAssertFalse(MLSClient.isSuspensionInProgress, file: file, line: line)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress, file: file, line: line)
+    XCTAssertTrue(
+      MLSClient._tryTrackedFFIAdmissionForTesting(),
+      "A fresh ordinary MLS admission must remain allowed",
       file: file,
       line: line
     )
