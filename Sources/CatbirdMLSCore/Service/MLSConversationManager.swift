@@ -21,6 +21,80 @@ import Synchronization
 
 // MARK: - Conversation Manager
 
+internal final class MLSOrchestratorRuntimeStorage: Sendable {
+  enum InitializationDisposition {
+    case existing(MLSOrchestratorRuntime)
+    case reserved(UUID)
+    case wait
+  }
+
+  private struct State {
+    var runtime: MLSOrchestratorRuntime?
+    var initializationReservationToken: UUID?
+  }
+
+  private let state = Mutex(State())
+
+  func load() -> MLSOrchestratorRuntime? {
+    state.withLock { $0.runtime }
+  }
+
+  func store(_ runtime: MLSOrchestratorRuntime?) {
+    state.withLock {
+      $0.runtime = runtime
+      $0.initializationReservationToken = nil
+    }
+  }
+
+  func beginInitialization() -> InitializationDisposition {
+    state.withLock { current in
+      if let runtime = current.runtime { return .existing(runtime) }
+      guard current.initializationReservationToken == nil else { return .wait }
+      let token = UUID()
+      current.initializationReservationToken = token
+      return .reserved(token)
+    }
+  }
+
+  func installReserved(_ runtime: MLSOrchestratorRuntime, token: UUID) -> Bool {
+    state.withLock { current in
+      guard current.runtime == nil, current.initializationReservationToken == token else {
+        return false
+      }
+      current.runtime = runtime
+      current.initializationReservationToken = nil
+      return true
+    }
+  }
+
+  /// Returns whether `token` still owns the empty runtime cell. This is a lock-only generation
+  /// check; callers may safely invoke it while holding the MLSClient emergency-state lock.
+  func hasInitializationReservation(token: UUID) -> Bool {
+    state.withLock { current in
+      current.runtime == nil && current.initializationReservationToken == token
+    }
+  }
+
+  func cancelInitialization(token: UUID) {
+    state.withLock { current in
+      guard current.initializationReservationToken == token else { return }
+      current.initializationReservationToken = nil
+    }
+  }
+
+  func take() -> MLSOrchestratorRuntime? {
+    state.withLock { current in
+      let runtime = current.runtime
+      current.runtime = nil
+      // A reset/invalidation is a generation fence for both an installed runtime and any
+      // initializer that has not reached atomic installation yet. Clearing the token makes the
+      // stale initializer's later install fail without allowing it to cancel a newer reservation.
+      current.initializationReservationToken = nil
+      return runtime
+    }
+  }
+}
+
 /// Tracks conversation initialization state to prevent race conditions
 public enum ConversationInitState: Sendable {
     case initializing
@@ -44,11 +118,32 @@ public final class MLSConversationManager {
     @ObservationIgnored public var database: MLSDatabase
     public let configuration: MLSConfiguration
     public let protocolAuthorityMode: MLSProtocolAuthorityMode
-    @ObservationIgnored public internal(set) var orchestratorRuntime: MLSOrchestratorRuntime?
-    @ObservationIgnored internal var orchestratorRuntimeResumeFactory: (() async -> MLSOrchestratorRuntime?)?
+  @ObservationIgnored internal let orchestratorRuntimeStorage = MLSOrchestratorRuntimeStorage()
+  @ObservationIgnored public internal(set) var orchestratorRuntime: MLSOrchestratorRuntime? {
+    get { orchestratorRuntimeStorage.load() }
+    set { orchestratorRuntimeStorage.store(newValue) }
+  }
+  @ObservationIgnored internal var orchestratorRuntimeFactory:
+    (() async -> MLSOrchestratorRuntime?)?
+  @ObservationIgnored internal var orchestratorRuntimeResumeFactory:
+    (() async -> MLSOrchestratorRuntime?)?
+  @ObservationIgnored internal var orchestratorRuntimeBeforeReattachTestOverride:
+    (() async -> Void)?
+    /// Test-only seams for deterministic device-auth lifecycle coverage.
+    /// Production leaves these nil and uses the configured Petrel client and Rust credential store.
+    @ObservationIgnored internal var deviceAuthBindingAPIOverride: (any MLSDeviceAuthBindingAPI)?
+    @ObservationIgnored internal var deviceAuthDeviceIDProviderOverride: (() async throws -> String?)?
+    @ObservationIgnored internal var deviceAuthBindingRequiresResumeRebind = false
+    @ObservationIgnored internal var deviceAuthResumeRebindOverride: (() async throws -> Void)?
     @ObservationIgnored internal var rustRuntimeRequiresForegroundRestore = false
     @ObservationIgnored internal var rustStartupReconcileCompleted = false
+    @ObservationIgnored internal var rustSuspensionPreparationGeneration: UInt64 = 0
+  @ObservationIgnored internal var rustPreparedSuspensionGeneration: UInt64?
+  @ObservationIgnored internal var rustShadowSuspensionTeardownTask: Task<Void, Never>?
     @ObservationIgnored internal var postReloadSyncPending = false
+    @ObservationIgnored internal var suspendedResumeRuntimeAttemptID: UUID?
+    @ObservationIgnored internal var suspendedResumeRuntimeContextIdentity: ObjectIdentifier?
+    @ObservationIgnored internal let suspensionAbandonmentOwnerToken = UUID()
 
     /// Called when the database pool is refreshed after recovery.
     /// Allows the app layer to update its own cached pool references.
@@ -600,13 +695,14 @@ public final class MLSConversationManager {
         return try? await deviceRecordService.fetchChatPolicy(for: did)
     }
 
-    public func removeCurrentDeviceRecord() async throws {
+  public func removeCurrentDeviceRecord() async throws {
         try throwIfShuttingDown("removeCurrentDeviceRecord")
         guard let activeDid = userDid else {
             throw MLSConversationError.noAuthentication
         }
-        try await deviceRecordService.removeCurrentDeviceRecord(userDid: activeDid)
-    }
+    try await deviceRecordService.removeCurrentDeviceRecord(userDid: activeDid)
+    await MLSClient.shared.invalidateDeviceAuthBinding(for: activeDid)
+  }
 
     public func ensureDeviceRecordPublished() async throws {
         try throwIfShuttingDown("ensureDeviceRecordPublished")

@@ -51,6 +51,52 @@ public actor MLSCoreContext {
 
   public static let shared = MLSCoreContext()
 
+  private static let suspendedResumeReloadTestOverride = Mutex<
+    (@Sendable (String) async throws -> Void)?
+  >(nil)
+  private static let suspendedResumeContextAdmissionTestOverride = Mutex<
+    (@Sendable (String) async -> Void)?
+  >(nil)
+  private static let contextPreInstallTestOverride = Mutex<
+    (@Sendable (String) async -> Void)?
+  >(nil)
+  private static let contextPostInstallTestOverride = Mutex<
+    (@Sendable (String) async -> Void)?
+  >(nil)
+  private static let contextCloseAttemptTestObserver = Mutex<
+    (@Sendable (String, ObjectIdentifier) -> Void)?
+  >(nil)
+
+  internal nonisolated static func setSuspendedResumeReloadTestOverride(
+    _ operation: (@Sendable (String) async throws -> Void)?
+  ) {
+    suspendedResumeReloadTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setSuspendedResumeContextAdmissionTestOverride(
+    _ operation: (@Sendable (String) async -> Void)?
+  ) {
+    suspendedResumeContextAdmissionTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setContextPreInstallTestOverride(
+    _ operation: (@Sendable (String) async -> Void)?
+  ) {
+    contextPreInstallTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setContextPostInstallTestOverride(
+    _ operation: (@Sendable (String) async -> Void)?
+  ) {
+    contextPostInstallTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setContextCloseAttemptTestObserver(
+    _ operation: (@Sendable (String, ObjectIdentifier) -> Void)?
+  ) {
+    contextCloseAttemptTestObserver.withLock { $0 = operation }
+  }
+
   // MARK: - Emergency Suspension Close (0xdead10cc Prevention)
 
   /// Thread-safe state for emergency suspension close, protected by Mutex.
@@ -60,6 +106,7 @@ public actor MLSCoreContext {
     var contexts: [String: MlsContext] = [:]
     var cacheInvalidated = false
     var suspensionInProgress = false
+    var suspensionGeneration: UInt64 = 0
   }
 
   private static let emergencyState = Mutex(EmergencyState())
@@ -71,8 +118,11 @@ public actor MLSCoreContext {
   }
 
   /// Set suspension flag - call this BEFORE emergency close
-  public nonisolated static func markSuspensionInProgress() {
-    emergencyState.withLock { $0.suspensionInProgress = true }
+  internal nonisolated static func markSuspensionInProgress() {
+    emergencyState.withLock {
+      $0.suspensionGeneration &+= 1
+      $0.suspensionInProgress = true
+    }
     staticLogger.warning("🚨 [0xdead10cc-FIX] Suspension flag SET - blocking all MLS operations")
   }
 
@@ -87,19 +137,46 @@ public actor MLSCoreContext {
   }
 
   /// Clear suspension flag - call this when returning to foreground
-  public nonisolated static func clearSuspensionFlag() {
-    emergencyState.withLock { $0.suspensionInProgress = false }
+  internal nonisolated static func clearSuspensionFlag() {
+    emergencyState.withLock {
+      $0.suspensionGeneration &+= 1
+      $0.suspensionInProgress = false
+    }
     staticLogger.debug("✅ [0xdead10cc-FIX] Suspension flag CLEARED - MLS operations allowed")
+  }
+
+  /// Clears the Core suspension gate only after the actor has unregistered every Rust context.
+  /// MLSClient remains closed while this check runs, so ordinary context creation cannot race
+  /// between this proof and the caller's final suspension-state CAS.
+  private nonisolated static func clearSuspensionFlagIfNoRegisteredContexts() -> Bool {
+    emergencyState.withLock { state in
+      guard state.contexts.isEmpty else { return false }
+      state.suspensionGeneration &+= 1
+      state.suspensionInProgress = false
+      return true
+    }
+  }
+
+  /// Actor-serialized proof that neither the Swift cache nor emergency registry owns a context.
+  /// Context construction and registration cannot advance while this method holds actor isolation.
+  internal func clearSuspensionFlagAfterSafeShutdownIfNoContexts() -> Bool {
+    guard contexts.isEmpty, Self.clearSuspensionFlagIfNoRegisteredContexts() else {
+      return false
+    }
+    Self.staticLogger.debug(
+      "✅ [0xdead10cc-FIX] Suspension flag CLEARED after context-free shutdown")
+    return true
   }
 
   /// Emergency synchronous close of all Rust MLS contexts for 0xdead10cc prevention.
   /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
   /// This is safe to call from any thread and does not require actor isolation.
-  public nonisolated static func emergencyCloseAllContexts() {
+  internal nonisolated static func emergencyCloseAllContexts() {
     let process = Bundle.main.bundlePath.hasSuffix(".appex") ? "nse" : "app"
     // Extract contexts and set flags atomically, then close outside the lock
     // to avoid holding the lock during potentially slow FFI calls.
     let contextsToClose: [String: MlsContext] = emergencyState.withLock { state in
+      state.suspensionGeneration &+= 1
       state.suspensionInProgress = true
       let snapshot = state.contexts
       state.contexts.removeAll()
@@ -125,8 +202,7 @@ public actor MLSCoreContext {
 
     for (userDID, context) in contextsToClose {
       do {
-        context.clearContentRootKey()
-        try context.flushAndPrepareClose()
+        try closeOwnedContext(context, for: userDID)
         staticLogger.debug("✅ [0xdead10cc-FIX] Rust context closed for \(userDID.prefix(20), privacy: .private)...")
       } catch {
         staticLogger.warning("⚠️ [0xdead10cc-FIX] Rust context close failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
@@ -146,16 +222,55 @@ public actor MLSCoreContext {
     )
   }
 
-  /// Register a context for emergency close.
-  /// Called internally when a context is created or retrieved.
-  private nonisolated static func registerForEmergencyClose(_ context: MlsContext, for userDID: String) {
-    emergencyState.withLock { $0.contexts[userDID] = context }
+  private nonisolated static func registerForEmergencyClose(
+    _ context: MlsContext,
+    for userDID: String,
+    admissionGeneration: UInt64,
+    expectedSuspended: Bool
+  ) -> Bool {
+    emergencyState.withLock { state in
+      guard state.suspensionGeneration == admissionGeneration,
+        state.suspensionInProgress == expectedSuspended
+      else {
+        return false
+      }
+      state.contexts[userDID] = context
+      return true
+    }
   }
 
-  /// Unregister a context from emergency close.
-  /// Called internally when a context is explicitly closed.
-  private nonisolated static func unregisterFromEmergencyClose(for userDID: String) {
-    emergencyState.withLock { $0.contexts.removeValue(forKey: userDID) }
+  private nonisolated static func isRegisteredForEmergencyClose(
+    _ context: MlsContext,
+    for userDID: String,
+    admissionGeneration: UInt64
+  ) -> Bool {
+    emergencyState.withLock { state in
+      state.suspensionGeneration == admissionGeneration
+        && state.contexts[userDID] === context
+    }
+  }
+
+  /// Atomically transfers close ownership for one exact registered context.
+  /// The emergency closer wins by extracting the registry first; actor cleanup wins only when
+  /// this identity compare-and-swap succeeds. The loser must never touch the Rust object.
+  private nonisolated static func takeRegisteredContext(
+    _ context: MlsContext,
+    for userDID: String
+  ) -> Bool {
+    emergencyState.withLock { state in
+      guard state.contexts[userDID] === context else { return false }
+      state.contexts.removeValue(forKey: userDID)
+      return true
+    }
+  }
+
+  private nonisolated static func closeOwnedContext(
+    _ context: MlsContext,
+    for userDID: String
+  ) throws {
+    contextCloseAttemptTestObserver.withLock { $0 }?(userDID, ObjectIdentifier(context))
+    context.clearContentRootKey()
+    try context.flushAndPrepareClose()
   }
 
   // MARK: - Properties
@@ -418,9 +533,16 @@ public actor MLSCoreContext {
   /// - Returns: MLS context for the user
   /// - Throws: MLSError if context creation fails
   public func getContext(for userDid: String) async throws -> MlsContext {
+    try await getContext(for: userDid, suspendedResumeAuthorization: nil)
+  }
+
+  private func getContext(
+    for userDid: String,
+    suspendedResumeAuthorization: (@Sendable () -> Bool)?
+  ) async throws -> MlsContext {
     // CRITICAL: Check suspension flag FIRST - abort immediately if app is going to background
     // This prevents the race condition where we start creating a context right before suspension
-    if Self.isSuspensionInProgress {
+    guard contextAdmissionIsAllowed(suspendedResumeAuthorization) else {
       logger.warning("🚫 [0xdead10cc-FIX] getContext BLOCKED - suspension in progress")
       throw MLSError.contextCreationBlocked(reason: "App is transitioning to background - MLS operations suspended")
     }
@@ -456,12 +578,11 @@ public actor MLSCoreContext {
         logger.warning("🔄 [CONTEXT] Stale context detected for \(userDid.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
         logger.info("   NSE advanced the ratchet - reloading context from disk")
 
-        // Close the stale context
-        existingContext.clearContentRootKey()
-        try? existingContext.flushAndPrepareClose()
         contexts.removeValue(forKey: userDid)
         contextVersions.removeValue(forKey: userDid)
-        Self.unregisterFromEmergencyClose(for: userDid)
+        if Self.takeRegisteredContext(existingContext, for: userDid) {
+          try? Self.closeOwnedContext(existingContext, for: userDid)
+        }
 
         // Fall through to create fresh context below
       } else {
@@ -473,6 +594,9 @@ public actor MLSCoreContext {
     // This fixes a race condition where context creation could happen
     // before the async configureKeychainAccess() completes
     await ensureKeychainConfigured()
+    guard contextAdmissionIsAllowed(suspendedResumeAuthorization) else {
+      throw CancellationError()
+    }
 
     logger.info("Creating new MLS context for user: \(userDid, privacy: .private)")
 
@@ -481,6 +605,9 @@ public actor MLSCoreContext {
 
     // Get or create encryption key
     let encryptionKey = try await getEncryptionKey(for: userDid)
+    guard contextAdmissionIsAllowed(suspendedResumeAuthorization) else {
+      throw CancellationError()
+    }
 
     // Create keychain access bridge
     let keychainBridge = MLSKeychainAccessBridge()
@@ -517,12 +644,51 @@ public actor MLSCoreContext {
     logger.info("✅ Installed per-DID content root key on MLS context")
 
     // Track the current disk version at context creation time
+    guard contextAdmissionIsAllowed(suspendedResumeAuthorization) else {
+      newContext.clearContentRootKey()
+      try? newContext.flushAndPrepareClose()
+      throw CancellationError()
+    }
+    let admissionState = Self.emergencyState.withLock {
+      (generation: $0.suspensionGeneration, suspended: $0.suspensionInProgress)
+    }
+    if let operation = Self.contextPreInstallTestOverride.withLock({ $0 }) {
+      await operation(userDid)
+    }
+    guard contextAdmissionIsAllowed(suspendedResumeAuthorization),
+      Self.registerForEmergencyClose(
+        newContext,
+        for: userDid,
+        admissionGeneration: admissionState.generation,
+        expectedSuspended: admissionState.suspended
+      )
+    else {
+      newContext.clearContentRootKey()
+      try? newContext.flushAndPrepareClose()
+      throw CancellationError()
+    }
     let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
     contexts[userDid] = newContext
     contextVersions[userDid] = currentDiskVersion
-
-    // Register for emergency close (0xdead10cc prevention)
-    Self.registerForEmergencyClose(newContext, for: userDid)
+    if let operation = Self.contextPostInstallTestOverride.withLock({ $0 }) {
+      await operation(userDid)
+    }
+    guard contextAdmissionIsAllowed(suspendedResumeAuthorization),
+      Self.isRegisteredForEmergencyClose(
+        newContext,
+        for: userDid,
+        admissionGeneration: admissionState.generation
+      )
+    else {
+      if contexts[userDid] === newContext {
+        contexts.removeValue(forKey: userDid)
+        contextVersions.removeValue(forKey: userDid)
+      }
+      if Self.takeRegisteredContext(newContext, for: userDid) {
+        try? Self.closeOwnedContext(newContext, for: userDid)
+      }
+      throw CancellationError()
+    }
 
     // Sync the version manager's cache
     MLSStateVersionManager.shared.syncLastKnownVersion(for: userDid)
@@ -530,6 +696,15 @@ public actor MLSCoreContext {
     logger.info("Created MLS context for user: \(userDid, privacy: .private) at version \(currentDiskVersion)")
 
     return newContext
+  }
+
+  private nonisolated func contextAdmissionIsAllowed(
+    _ suspendedResumeAuthorization: (@Sendable () -> Bool)?
+  ) -> Bool {
+    if Self.isSuspensionInProgress {
+      return suspendedResumeAuthorization?() == true
+    }
+    return suspendedResumeAuthorization == nil && !MLSClient.isSuspensionInProgress
   }
 
   /// Force reload MLS context from disk.
@@ -544,14 +719,90 @@ public actor MLSCoreContext {
 
     // Close existing context if any
     if let existingContext = contexts.removeValue(forKey: userDid) {
-      existingContext.clearContentRootKey()
-      try? existingContext.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: userDid)
+      if Self.takeRegisteredContext(existingContext, for: userDid) {
+        try? Self.closeOwnedContext(existingContext, for: userDid)
+      }
     }
     contextVersions.removeValue(forKey: userDid)
 
     // Create fresh context (this will update version tracking)
     _ = try await getContext(for: userDid)
+  }
+
+  /// Reloads one exact user's context while the global suspension gate remains closed.
+  /// The caller-supplied authorization is rechecked across every suspension-sensitive await.
+  internal func reloadContextForSuspendedResume(
+    for userDid: String,
+    capability: MLSClient.SuspendedResumeCapability
+  ) async throws -> ObjectIdentifier? {
+    let authorization: @Sendable () -> Bool = {
+      MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid)
+    }
+    try Task.checkCancellation()
+    guard Self.isSuspensionInProgress, authorization() else { throw CancellationError() }
+    if let operation = Self.suspendedResumeReloadTestOverride.withLock({ $0 }) {
+      try await operation(userDid)
+      try Task.checkCancellation()
+      guard Self.isSuspensionInProgress, authorization() else { throw CancellationError() }
+      return nil
+    }
+    logger.info("🔄 [CONTEXT] Authorized suspended-resume reload for \(userDid.prefix(20))...")
+
+    if let existingContext = contexts.removeValue(forKey: userDid) {
+      if Self.takeRegisteredContext(existingContext, for: userDid) {
+        try? Self.closeOwnedContext(existingContext, for: userDid)
+      }
+    }
+    contextVersions.removeValue(forKey: userDid)
+
+    var installedContextIdentity: ObjectIdentifier?
+    do {
+      try Task.checkCancellation()
+      let context = try await getContext(
+        for: userDid,
+        suspendedResumeAuthorization: authorization
+      )
+      installedContextIdentity = ObjectIdentifier(context)
+      try Task.checkCancellation()
+      guard Self.isSuspensionInProgress, authorization() else {
+        throw CancellationError()
+      }
+      return installedContextIdentity
+    } catch {
+      if let installedContextIdentity {
+        _ = removeContext(for: userDid, matching: installedContextIdentity)
+      }
+      throw error
+    }
+  }
+
+  internal func contextForSuspendedResume(
+    for userDid: String,
+    capability: MLSClient.SuspendedResumeCapability
+  ) async throws -> MlsContext {
+    let authorization: @Sendable () -> Bool = {
+      MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid)
+    }
+    try Task.checkCancellation()
+    guard Self.isSuspensionInProgress, authorization() else { throw CancellationError() }
+    let context = try await getContext(
+      for: userDid,
+      suspendedResumeAuthorization: authorization
+    )
+    do {
+      try Task.checkCancellation()
+      if let operation = Self.suspendedResumeContextAdmissionTestOverride.withLock({ $0 }) {
+        await operation(userDid)
+      }
+      try Task.checkCancellation()
+      guard Self.isSuspensionInProgress, authorization() else {
+        throw CancellationError()
+      }
+      return context
+    } catch {
+      _ = removeContext(for: userDid, matching: ObjectIdentifier(context))
+      throw error
+    }
   }
 
   // MARK: - Helper Methods
@@ -597,9 +848,9 @@ public actor MLSCoreContext {
   @discardableResult
   public func removeContext(for userDid: String) -> Bool {
     if let context = contexts.removeValue(forKey: userDid) {
-      context.clearContentRootKey()
-      try? context.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: userDid)
+      if Self.takeRegisteredContext(context, for: userDid) {
+        try? Self.closeOwnedContext(context, for: userDid)
+      }
       contextVersions.removeValue(forKey: userDid)
       logger.info("Removed MLS context for user: \(userDid, privacy: .private)")
       return true
@@ -607,6 +858,17 @@ public actor MLSCoreContext {
     contextVersions.removeValue(forKey: userDid)
     logger.debug("No MLS context cached for user: \(userDid, privacy: .private)")
     return false
+  }
+
+  @discardableResult
+  internal func removeContext(
+    for userDid: String,
+    matching expectedIdentity: ObjectIdentifier
+  ) -> Bool {
+    guard contexts[userDid].map(ObjectIdentifier.init) == expectedIdentity else {
+      return false
+    }
+    return removeContext(for: userDid)
   }
 
   /// Clear all contexts except the active user.
@@ -621,9 +883,9 @@ public actor MLSCoreContext {
 
     for userDid in usersToRemove {
       if let context = contexts.removeValue(forKey: userDid) {
-        context.clearContentRootKey()
-        try? context.flushAndPrepareClose()
-        Self.unregisterFromEmergencyClose(for: userDid)
+        if Self.takeRegisteredContext(context, for: userDid) {
+          try? Self.closeOwnedContext(context, for: userDid)
+        }
       }
       contextVersions.removeValue(forKey: userDid)
     }
@@ -636,13 +898,12 @@ public actor MLSCoreContext {
 
   /// Clear all contexts
   public func clearAllContexts() {
-    for (userDid, context) in contexts {
-      context.clearContentRootKey()
-      try? context.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: userDid)
-    }
+    let cachedContexts = contexts
     contexts.removeAll()
     contextVersions.removeAll()
+    for (userDid, context) in cachedContexts where Self.takeRegisteredContext(context, for: userDid) {
+      try? Self.closeOwnedContext(context, for: userDid)
+    }
     logger.info("Cleared all MLS contexts")
   }
 
@@ -673,9 +934,9 @@ public actor MLSCoreContext {
     if !staleContextUsers.isEmpty {
       for staleUser in staleContextUsers {
         if let context = contexts.removeValue(forKey: staleUser) {
-          context.clearContentRootKey()
-          try? context.flushAndPrepareClose()
-          Self.unregisterFromEmergencyClose(for: staleUser)
+          if Self.takeRegisteredContext(context, for: staleUser) {
+            try? Self.closeOwnedContext(context, for: staleUser)
+          }
         }
         contextVersions.removeValue(forKey: staleUser)
         logger.warning(
@@ -719,6 +980,14 @@ public actor MLSCoreContext {
   public func hasContext(for userDid: String) -> Bool {
     let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     return contexts.keys.contains { $0.lowercased() == normalizedUserDid }
+  }
+
+  internal func contextIdentity(for userDid: String) -> ObjectIdentifier? {
+    contexts[userDid].map(ObjectIdentifier.init)
+  }
+
+  internal func ensureContextIdentity(for userDid: String) async throws -> ObjectIdentifier {
+    ObjectIdentifier(try await getContext(for: userDid))
   }
 
   // MARK: - Cross-Process Decryption Coordination
@@ -1542,9 +1811,11 @@ public actor MLSCoreContext {
       // If NSE processed messages, our cached context may be stale. Always reload
       // from disk to ensure we have the latest ratchet state.
       // ═══════════════════════════════════════════════════════════════════════════
-      if contexts[userDid] != nil {
-        contexts.removeValue(forKey: userDid)
-        Self.unregisterFromEmergencyClose(for: userDid)
+      if let context = contexts.removeValue(forKey: userDid) {
+        contextVersions.removeValue(forKey: userDid)
+        if Self.takeRegisteredContext(context, for: userDid) {
+          try? Self.closeOwnedContext(context, for: userDid)
+        }
         logger.info("🔄 [DECRYPT] Invalidated cached context for fresh disk read")
       }
 
@@ -1921,9 +2192,11 @@ public actor MLSCoreContext {
     // The main app may have processed messages. Always reload from disk to ensure
     // we have the latest ratchet state.
     // ═══════════════════════════════════════════════════════════════════════════
-    if contexts[userDid] != nil {
-      contexts.removeValue(forKey: userDid)
-      Self.unregisterFromEmergencyClose(for: userDid)
+    if let context = contexts.removeValue(forKey: userDid) {
+      contextVersions.removeValue(forKey: userDid)
+      if Self.takeRegisteredContext(context, for: userDid) {
+        try? Self.closeOwnedContext(context, for: userDid)
+      }
       logger.info("🔄 [DECRYPT-NOTIF] Invalidated cached context for fresh disk read")
     }
 

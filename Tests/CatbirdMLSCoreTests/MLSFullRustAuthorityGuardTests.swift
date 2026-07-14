@@ -270,14 +270,19 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
       contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/Extensions/MLSConversationManager+Lifecycle.swift"),
       encoding: .utf8
     )
-    let resumeBody = try XCTUnwrap(
-      extractFunctionBody(signature: "public func resumeMLSOperations() async", from: source)
+    let resumeSignature = try XCTUnwrap(
+      source.range(of: "public func resumeMLSOperations() async")
     )
+    // This function contains braces in interpolated log strings, so the intentionally lightweight
+    // brace extractor cannot delimit it reliably. Anchor both security markers after the exact
+    // function signature instead; the end marker is part of this function's stable task-restart
+    // block and keeps the authority assertion narrowly scoped.
+    let resumeSource = String(source[resumeSignature.lowerBound...])
     let deviceRecordSection = try XCTUnwrap(
       extractSection(
         startMarker: "if userDid != nil, !configuration.skipDeviceRecordPublishing",
         endMarker: "// Note: missingConversationsTask",
-        from: resumeBody
+        from: resumeSource
       )
     )
 

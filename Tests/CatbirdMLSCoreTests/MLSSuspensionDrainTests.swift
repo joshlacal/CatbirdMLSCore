@@ -1,3 +1,4 @@
+import Synchronization
 import XCTest
 
 @testable import CatbirdMLSCore
@@ -73,5 +74,88 @@ final class MLSSuspensionDrainTests: XCTestCase {
 
     MLSClient.clearSuspensionFlag(reason: "MLSSuspensionDrainTests")
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
+  }
+
+  func testSuspendedResumeTrackedSigningBlocksNewDrainUntilRelease() async throws {
+    let userDID = "did:plc:testuser"
+    MLSClient.markSuspensionInProgress(reason: "tracked suspended-resume sign setup")
+    let capability = try XCTUnwrap(
+      MLSClient.beginSuspendedResumeCapability(for: userDID)
+    )
+    let signStarted = DispatchSemaphore(value: 0)
+    let releaseSign = DispatchSemaphore(value: 0)
+    let drainFinished = Mutex(false)
+    let closeReached = Mutex(false)
+
+    let sign = Task {
+      try await MLSClient._runTrackedSuspendedResumeFFIOperationForTesting(
+        capability: capability,
+        for: userDID
+      ) {
+        signStarted.signal()
+        releaseSign.wait()
+      }
+    }
+    XCTAssertEqual(signStarted.wait(timeout: .now() + 2), .success)
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+
+    let suspension = Task {
+      let drained = await MLSClient.suspendAndDrain(
+        reason: "new suspension during suspended-resume sign",
+        timeout: 2
+      )
+      drainFinished.withLock { $0 = true }
+      if drained {
+        closeReached.withLock { $0 = true }
+      }
+      return drained
+    }
+    try await Task.sleep(nanoseconds: 100_000_000)
+
+    XCTAssertFalse(drainFinished.withLock { $0 })
+    XCTAssertFalse(closeReached.withLock { $0 })
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 1)
+
+    releaseSign.signal()
+    do {
+      try await sign.value
+      XCTFail("The superseded resume signing capability must be revoked")
+    } catch is CancellationError {
+      // Expected: the new suspension revokes the exact resume generation.
+    }
+    let drained = await suspension.value
+    XCTAssertTrue(drained)
+    XCTAssertTrue(drainFinished.withLock { $0 })
+    XCTAssertTrue(closeReached.withLock { $0 })
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+  }
+
+  func testStaleOrMismatchedResumeCapabilityCannotEnterTrackedFFI() throws {
+    let userDID = "did:plc:testuser"
+    MLSClient.markSuspensionInProgress(reason: "tracked capability admission setup")
+    let capability = try XCTUnwrap(
+      MLSClient.beginSuspendedResumeCapability(for: userDID)
+    )
+
+    XCTAssertFalse(
+      MLSClient._tryTrackedSuspendedResumeFFIAdmissionForTesting(
+        capability: capability,
+        for: "did:plc:attacker"
+      )
+    )
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
+
+    MLSClient.markSuspensionInProgress(reason: "supersede tracked capability")
+
+    XCTAssertFalse(
+      MLSClient._tryTrackedSuspendedResumeFFIAdmissionForTesting(
+        capability: capability,
+        for: userDID
+      )
+    )
+    XCTAssertEqual(MLSClient.inFlightFFIOperationCount, 0)
+    XCTAssertFalse(MLSClient._tryTrackedFFIAdmissionForTesting())
   }
 }

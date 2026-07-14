@@ -5,7 +5,52 @@ import Petrel
 import PetrelCatbird
 import Synchronization
 
+public enum MLSResumeResult: Sendable, Equatable {
+  case resumed
+  case failedStillSuspended
+}
+
+/// Opaque, one-shot authority for a foreground account-switch transaction to release the exact
+/// suspension owned by this manager after shutdown proves every MLS boundary is closed.
+public struct MLSAccountSwitchSuspensionAuthorization: @unchecked Sendable {
+  fileprivate let managerIdentity: ObjectIdentifier
+  fileprivate let suspensionOwnerToken: UUID
+  fileprivate let normalizedDID: String
+  fileprivate let capability: MLSClient.SuspensionAbandonmentCapability
+
+  internal func replacingSuspensionOwnerTokenForTesting(_ token: UUID) -> Self {
+    Self(
+      managerIdentity: managerIdentity,
+      suspensionOwnerToken: token,
+      normalizedDID: normalizedDID,
+      capability: capability
+    )
+  }
+}
+
+private let suspendedResumeStateRefreshOverride = Mutex<
+  (@Sendable (String, MLSClient.SuspendedResumeCapability) async throws -> Void)?
+>(nil)
+private let suspendedResumeFinalReleaseOverride = Mutex<(@Sendable () async -> Void)?>(nil)
+private let suspendedResumeOtherBindingInvalidationOverride = Mutex<
+  (@Sendable (String) async throws -> Void)?
+>(nil)
+private let shutdownAfterSuspensionCapabilityTestOverride = Mutex<(@Sendable () -> Void)?>(nil)
+private let shutdownBeforeTransitionTestOverride = Mutex<(@Sendable () -> Void)?>(nil)
+
 extension MLSConversationManager {
+
+  internal nonisolated static func setShutdownAfterSuspensionCapabilityTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    shutdownAfterSuspensionCapabilityTestOverride.withLock { $0 = operation }
+  }
+
+  internal nonisolated static func setShutdownBeforeTransitionTestOverride(
+    _ operation: (@Sendable () -> Void)?
+  ) {
+    shutdownBeforeTransitionTestOverride.withLock { $0 = operation }
+  }
 
   // MARK: - App Suspension (0xdead10cc Prevention)
 
@@ -24,6 +69,48 @@ extension MLSConversationManager {
     _isSuspending.withLock { $0 = false }
   }
 
+  /// Synchronous scene-phase boundary. The currently active manager owns the exact suspension
+  /// transition before the lifecycle coordinator performs any await or starts background cleanup.
+  @MainActor
+  public func markSuspensionInProgressForLifecycleTransition(
+    reason: String = "scene lifecycle transition"
+  ) {
+    isSuspending = true
+    isSyncPaused = true
+    guard let userDid else {
+      MLSClient.markSuspensionInProgress(
+        reason: reason,
+        noUserOwnerToken: suspensionAbandonmentOwnerToken
+      )
+      return
+    }
+    MLSClient.markSuspensionInProgress(
+      reason: reason,
+      abandonmentOwnerDID: userDid,
+      abandonmentOwnerToken: suspensionAbandonmentOwnerToken
+    )
+  }
+
+  @MainActor
+  public func authorizeSuspensionAbandonmentForAccountSwitch()
+    -> MLSAccountSwitchSuspensionAuthorization?
+  {
+    guard !isShuttingDown, let userDid,
+      let capability = MLSClient.ownedSuspensionAbandonmentCapability(
+        for: userDid,
+        ownerToken: suspensionAbandonmentOwnerToken
+      )
+    else {
+      return nil
+    }
+    return MLSAccountSwitchSuspensionAuthorization(
+      managerIdentity: ObjectIdentifier(self),
+      suspensionOwnerToken: suspensionAbandonmentOwnerToken,
+      normalizedDID: userDid.trimmingCharacters(in: .whitespacesAndNewlines),
+      capability: capability
+    )
+  }
+
   /// Suspend all MLS operations when app enters background
   /// This prevents 0xdead10cc crashes by ensuring no database operations
   /// continue running when iOS suspends the app
@@ -31,11 +118,8 @@ extension MLSConversationManager {
   /// Call this BEFORE GRDBSuspensionCoordinator.setLifecycleSuspended() to ensure
   /// MLS tasks are cancelled before GRDB starts rejecting operations
   ///
-  /// - Returns: `true` only when `.rustFull` successfully prepared the Rust lifecycle
-  ///   suspend path. Callers should use legacy synchronous interrupt fallback whenever this
-  ///   returns `false`.
-  /// - Note: In `.rustFull`, Rust currently performs an internal engine shutdown while
-  ///   preserving lifecycle state for resume. Other modes keep the legacy Swift shutdown path.
+  /// - Returns: `true` when a `.rustFull` runtime is available for the post-drain
+  ///   preparation step. A true result does not mean the runtime is prepared yet.
   @MainActor
   @discardableResult
   public func suspendMLSOperations() -> Bool {
@@ -47,31 +131,45 @@ extension MLSConversationManager {
     )
 
     // Set flag to reject new operations
-    isSuspending = true
-    isSyncPaused = true
-    MLSCoreContext.markSuspensionInProgress()
-    MLSClient.markSuspensionInProgress(reason: "MLSConversationManager.suspendMLSOperations")
-    let rustPrepareSucceeded: Bool
-    if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
-      do {
-        _ = try runtime.prepareForSuspend(
-          reason: "MLSConversationManager.suspendMLSOperations"
-        )
-        rustRuntimeRequiresForegroundRestore = false
-        rustStartupReconcileCompleted = false
-        rustPrepareSucceeded = true
-      } catch {
-        rustPrepareSucceeded = false
-        logger.error(
-          "❌ [MLS-FULL-RUST] prepareForSuspend failed: \(error.localizedDescription, privacy: .public)"
-        )
+    markSuspensionInProgressForLifecycleTransition(
+      reason: "MLSConversationManager.suspendMLSOperations"
+    )
+    deviceAuthBindingRequiresResumeRebind =
+      userDid.map {
+        MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: $0)
+      } ?? false
+    rustSuspensionPreparationGeneration &+= 1
+    rustPreparedSuspensionGeneration = nil
+    let rustPreparationAvailable = protocolAuthorityMode == .rustFull && orchestratorRuntime != nil
+    if protocolAuthorityMode == .rustFull, !rustPreparationAvailable {
+      logger.warning("⚠️ [MLS-FULL-RUST] Missing runtime during suspend; legacy fallback required")
+    } else if protocolAuthorityMode != .rustFull && protocolAuthorityMode != .swiftLegacy {
+      rustShadowSuspensionTeardownTask?.cancel()
+      let teardownGeneration = rustSuspensionPreparationGeneration
+      rustShadowSuspensionTeardownTask = Task { [weak self] in
+        guard await MLSClient.drainInFlightFFIOperations(timeout: 5), !Task.isCancelled,
+          let self, self.isSuspending,
+          self.rustSuspensionPreparationGeneration == teardownGeneration
+        else {
+          return
+        }
+        do {
+          try MLSClient.withSuspensionPreparationLease {
+            guard !Task.isCancelled, self.isSuspending,
+              self.rustSuspensionPreparationGeneration == teardownGeneration
+            else {
+              throw CancellationError()
+            }
+            // This shutdown is a teardown operation under the exclusive post-drain lease. The
+            // lease blocks ordinary, resume, and initialization admission until reset completes.
+            self.resetOrchestratorRuntime(reason: "rustShadow suspension after tracked drain")
+          }
+        } catch {
+          self.logger.error(
+            "❌ [MLS-SHADOW] Could not acquire post-drain runtime teardown lease"
+          )
+        }
       }
-    } else {
-      rustPrepareSucceeded = false
-      if protocolAuthorityMode == .rustFull {
-        logger.warning("⚠️ [MLS-FULL-RUST] Missing runtime during suspend; legacy fallback required")
-      }
-      resetOrchestratorRuntime(reason: "MLS suspension")
     }
     // Reset circuit breaker during lifecycle suspension so transient suspended errors
     // cannot strand foreground sync for the full backoff window.
@@ -127,7 +225,57 @@ extension MLSConversationManager {
     cancelAllTrackedTasks()
 
     logger.info("✅ [SUSPEND] MLS operations suspended - safe for app suspension")
-    return rustPrepareSucceeded
+    return rustPreparationAvailable
+  }
+
+  /// Waits for every admitted synchronous bridge call, then prepares the Rust runtime.
+  /// Production callers must await this before normal context/runtime close. On timeout,
+  /// the method interrupts stragglers and leaves every suspension gate closed.
+  @MainActor
+  @discardableResult
+  public func prepareRustRuntimeForSuspensionAfterDrain(
+    timeout: TimeInterval = 5.0
+  ) async -> Bool {
+    guard protocolAuthorityMode == .rustFull, isSuspending else { return false }
+    let generation = rustSuspensionPreparationGeneration
+    if rustPreparedSuspensionGeneration == generation { return true }
+
+    let drained = await MLSClient.drainInFlightFFIOperations(timeout: timeout)
+    guard drained else {
+      MLSClient.interruptAllContexts()
+      MLSCoreContext.interruptAllContexts()
+      logger.error("❌ [MLS-FULL-RUST] Timed out draining Rust work before suspend prepare")
+      return false
+    }
+    guard isSuspending,
+      generation == rustSuspensionPreparationGeneration,
+      let runtime = orchestratorRuntime
+    else {
+      return false
+    }
+
+    do {
+      try MLSClient.withSuspensionPreparationLease {
+        _ = try runtime.prepareForSuspend(
+          reason: "MLSConversationManager.suspendMLSOperations"
+        )
+      }
+      rustRuntimeRequiresForegroundRestore = false
+      rustStartupReconcileCompleted = false
+      rustPreparedSuspensionGeneration = generation
+      return true
+    } catch {
+      MLSClient.interruptAllContexts()
+      MLSCoreContext.interruptAllContexts()
+      logger.error(
+        "❌ [MLS-FULL-RUST] prepareForSuspend failed: \(error.localizedDescription, privacy: .public)"
+      )
+      return false
+    }
+  }
+
+  internal func waitForRustShadowSuspensionTeardownForTesting() async {
+    await rustShadowSuspensionTeardownTask?.value
   }
 
   /// Marks the rustFull runtime as unusable after an app-level force close
@@ -143,10 +291,143 @@ extension MLSConversationManager {
   /// Resume MLS operations when app returns to foreground
   /// This restarts background tasks that were cancelled during suspension
   @MainActor
-  public func resumeMLSOperations() async {
+  @discardableResult
+  public func resumeMLSOperations() async -> MLSResumeResult {
+    await resumeMLSOperations(trackedFFIDrainTimeout: 5.0)
+  }
+
+  @MainActor
+  @discardableResult
+  internal func resumeMLSOperations(
+    trackedFFIDrainTimeout: TimeInterval
+  ) async -> MLSResumeResult {
+    guard !isShuttingDown else {
+      logger.debug("🔄 [RESUME] Shutdown owns the suspension; resume remains denied")
+      return .failedStillSuspended
+    }
     guard isSuspending else {
       logger.debug("🔄 [RESUME] MLS not suspended - nothing to resume")
-      return
+      return .resumed
+    }
+    rustShadowSuspensionTeardownTask?.cancel()
+    rustShadowSuspensionTeardownTask = nil
+
+    func restoreClosedResumeGates(_ reason: String) {
+      if MLSClient.isSuspensionInProgress {
+        // Preserve another exact resume capability; only repair a split Core gate.
+        MLSClient.restoreCoreSuspensionGateIfClientSuspended()
+      } else {
+        MLSClient.markSuspensionInProgress(reason: reason)
+      }
+    }
+
+    let resumeGateWasSplit =
+      MLSClient.isSuspensionInProgress != MLSCoreContext.isSuspensionInProgress
+    restoreClosedResumeGates("resume pre-drain admission closure")
+    let resumeSuspensionPreparationGeneration = rustSuspensionPreparationGeneration
+    guard let resumeDrainSnapshot = MLSClient.captureSuspendedResumeDrainSnapshot() else {
+      restoreClosedResumeGates("resume could not capture exact pre-drain suspension")
+      logger.error("❌ [RESUME] Failed to capture exact pre-drain suspension authority")
+      return .failedStillSuspended
+    }
+    let drained = await MLSClient.drainInFlightFFIOperations(
+      timeout: trackedFFIDrainTimeout
+    )
+    guard drained, !Task.isCancelled else {
+      MLSClient.interruptAllContexts()
+      MLSCoreContext.interruptAllContexts()
+      restoreClosedResumeGates("resume tracked FFI drain failed")
+      logger.error("❌ [RESUME] Timed out or cancelled while draining tracked FFI work")
+      return .failedStillSuspended
+    }
+    guard !resumeGateWasSplit,
+      resumeSuspensionPreparationGeneration == rustSuspensionPreparationGeneration
+    else {
+      restoreClosedResumeGates("resume pre-drain authority was superseded or split")
+      logger.error("❌ [RESUME] Pre-drain suspension authority changed while waiting")
+      return .failedStillSuspended
+    }
+
+    guard let userDid else {
+      guard !isShuttingDown,
+        let capability = MLSClient.ownedNoUserSuspendedResumeCapability(
+          ownerToken: suspensionAbandonmentOwnerToken,
+          matching: resumeDrainSnapshot
+        ),
+        await MLSClient.finishNoUserSuspendedResumeCapability(capability)
+      else {
+        if !isShuttingDown {
+          restoreClosedResumeGates("resume failed without exact no-user suspension authority")
+        }
+        logger.error("❌ [MLS] Failed to release exact no-user suspension authority")
+        return .failedStillSuspended
+      }
+      deviceAuthBindingRequiresResumeRebind = false
+      isSuspending = false
+      isSyncPaused = false
+      logger.info("✅ [RESUME] Released exact context-free no-user suspension")
+      return .resumed
+    }
+    var suspendedResumeCapability = MLSClient.beginSuspendedResumeCapability(
+      for: userDid,
+      ownerToken: suspensionAbandonmentOwnerToken,
+      matching: resumeDrainSnapshot
+    )
+    if suspendedResumeCapability == nil,
+      !deviceAuthBindingRequiresResumeRebind,
+      !MLSClient.isSuspensionInProgress,
+      !MLSCoreContext.isSuspensionInProgress
+    {
+      suspendedResumeCapability =
+        MLSClient.beginSuspendedResumeCapabilityAfterLegacyGateClear(for: userDid)
+    }
+    guard let suspendedResumeCapability else {
+      restoreClosedResumeGates("resume capability acquisition failed")
+      deviceAuthBindingRequiresResumeRebind =
+        deviceAuthBindingRequiresResumeRebind
+        || MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: userDid)
+      logger.error("❌ [MLS] Failed to acquire the suspended resume capability")
+      return .failedStillSuspended
+    }
+    guard
+      let snapshotRequiresDeviceAuthRebind =
+        MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(
+          for: userDid,
+          capability: suspendedResumeCapability
+        )
+    else {
+      MLSClient.cancelSuspendedResumeCapability(suspendedResumeCapability)
+      restoreClosedResumeGates("resume capability was revoked before snapshot validation")
+      deviceAuthBindingRequiresResumeRebind =
+        deviceAuthBindingRequiresResumeRebind
+        || MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: userDid)
+      logger.error("❌ [MLS] Resume capability was revoked before snapshot validation")
+      return .failedStillSuspended
+    }
+    let resumeRequiresDeviceAuthRebind =
+      deviceAuthBindingRequiresResumeRebind || snapshotRequiresDeviceAuthRebind
+    let resumeAttemptID = UUID()
+
+    func failStillSuspended(_ message: String) async -> MLSResumeResult {
+      MLSClient.cancelSuspendedResumeCapability(suspendedResumeCapability)
+      MLSClient.markSuspensionInProgress(reason: "resume failure: \(message)")
+      if suspendedResumeRuntimeAttemptID == resumeAttemptID,
+        let ownedContextIdentity = suspendedResumeRuntimeContextIdentity
+      {
+        if orchestratorRuntime?.mlsContextIdentity == ownedContextIdentity {
+          resetOrchestratorRuntime(reason: "suspended resume failed")
+        }
+        _ = await MLSCoreContext.shared.removeContext(
+          for: userDid,
+          matching: ownedContextIdentity
+        )
+        if suspendedResumeRuntimeAttemptID == resumeAttemptID {
+          suspendedResumeRuntimeAttemptID = nil
+          suspendedResumeRuntimeContextIdentity = nil
+        }
+      }
+      logger.error("❌ [RESUME] \(message, privacy: .public)")
+      return .failedStillSuspended
     }
 
     logger.info("▶️ [RESUME] Resuming MLS operations after app foreground")
@@ -156,51 +437,179 @@ extension MLSConversationManager {
       process: "app"
     )
 
+    var rebuildCoreOwnedRustRuntimeAfterReload = false
     if protocolAuthorityMode == .rustFull {
       let resumeReason = "MLSConversationManager.resumeMLSOperations"
       if rustRuntimeRequiresForegroundRestore || orchestratorRuntime == nil {
-        logger.info(
-          "🔄 [MLS-FULL-RUST] Restoring runtime before foreground resume"
-        )
-        guard await restoreOrchestratorRuntimeAfterSuspendClose(reason: resumeReason) != nil else {
-          logger.error(
-            "❌ [MLS-FULL-RUST] Failed to rebuild runtime after suspension close; keeping MLS work suspended"
+        if orchestratorRuntimeResumeFactory == nil {
+          rebuildCoreOwnedRustRuntimeAfterReload = true
+        } else {
+          logger.info(
+            "🔄 [MLS-FULL-RUST] Restoring test runtime before foreground resume"
           )
-          return
-        }
-        rustRuntimeRequiresForegroundRestore = false
-      } else if let runtime = orchestratorRuntime {
-        do {
-          try runtime.resumeFromSuspend(reason: resumeReason)
-        } catch {
-          logger.error(
-            "❌ [MLS-FULL-RUST] resumeFromSuspend failed: \(error.localizedDescription, privacy: .public)"
-          )
-          rustRuntimeRequiresForegroundRestore = true
-          invalidateOrchestratorRuntime(reason: "resumeFromSuspend failed")
-          guard await restoreOrchestratorRuntimeAfterSuspendClose(reason: resumeReason) != nil else {
+          guard
+            await restoreOrchestratorRuntimeAfterSuspendClose(
+              reason: resumeReason,
+              suspendedResumeCapability: suspendedResumeCapability
+            ) != nil
+          else {
             logger.error(
-              "❌ [MLS-FULL-RUST] Failed to rebuild runtime after resume failure; keeping MLS work suspended"
+              "❌ [MLS-FULL-RUST] Failed to rebuild runtime after suspension close; keeping MLS work suspended"
             )
-            return
+            return await failStillSuspended("runtime restore failed")
           }
           rustRuntimeRequiresForegroundRestore = false
+        }
+      } else if let runtime = orchestratorRuntime {
+        let runtimeOwnsCoreContext = runtime.mlsContextIdentity != nil
+        if runtimeOwnsCoreContext {
+          // Rust resume only re-opens the existing engine lifecycle. It does not refresh
+          // MLSContext from disk, so a Core-owning runtime must remain quiesced until it
+          // is discarded and rebuilt on the authoritative suspended-resume reload below.
+          rebuildCoreOwnedRustRuntimeAfterReload = runtimeOwnsCoreContext
+        } else {
+          do {
+            try await withTrackedRustRuntime(
+              runtime,
+              operation: "rustFullResumeFromSuspend",
+              suspendedResumeCapability: suspendedResumeCapability
+            ) { runtime in
+              try runtime.resumeFromSuspend(reason: resumeReason)
+            }
+          } catch {
+            logger.error(
+              "❌ [MLS-FULL-RUST] resumeFromSuspend failed: \(error.localizedDescription, privacy: .public)"
+            )
+            rustRuntimeRequiresForegroundRestore = true
+            resetOrchestratorRuntime(reason: "resumeFromSuspend failed")
+            guard
+              await restoreOrchestratorRuntimeAfterSuspendClose(
+                reason: resumeReason,
+                suspendedResumeCapability: suspendedResumeCapability
+              ) != nil
+            else {
+              logger.error(
+                "❌ [MLS-FULL-RUST] Failed to rebuild runtime after resume failure; keeping MLS work suspended"
+              )
+              return await failStillSuspended("runtime rebuild after resume failure failed")
+            }
+            rustRuntimeRequiresForegroundRestore = false
+          }
         }
       }
     }
 
-    // Clear suspension flags only after the rustFull runtime is resumable again.
+    guard
+      MLSClient.isCurrentSuspendedResumeCapability(
+        suspendedResumeCapability,
+        for: userDid
+      )
+    else {
+      return await failStillSuspended("resume capability was revoked during runtime restore")
+    }
+    do {
+      try Task.checkCancellation()
+    } catch {
+      return await failStillSuspended("resume task was cancelled during runtime restore")
+    }
+
+    do {
+      try await refreshAuthoritativeStateForSuspendedResume(
+        userDid: userDid,
+        capability: suspendedResumeCapability,
+        rebuildCoreOwnedRustRuntime: rebuildCoreOwnedRustRuntimeAfterReload,
+        resumeAttemptID: resumeAttemptID
+      )
+    } catch {
+      return await failStillSuspended(
+        "authoritative state refresh failed: \(error.localizedDescription)"
+      )
+    }
+
+    // Keep every ordinary MLS admission gate closed until device authentication has been
+    // re-established against the exact resumed runtime and transport boundary.
+    if resumeRequiresDeviceAuthRebind {
+      do {
+        if let deviceAuthResumeRebindOverride {
+          try await deviceAuthResumeRebindOverride()
+          guard MLSClient.recordCompletedDeviceAuthRebindForTesting(
+            for: userDid,
+            capability: suspendedResumeCapability
+          ) else {
+            throw CancellationError()
+          }
+        } else if protocolAuthorityMode == .rustFull {
+          _ = try await bindRustDeviceAuthentication(
+            userDid: userDid,
+            force: true,
+            suspendedResumePermit: suspendedResumeCapability
+          )
+        } else {
+          _ = try await MLSClient.shared.bindLegacyDeviceAuthentication(
+            for: userDid,
+            suspendedResumePermit: suspendedResumeCapability
+          )
+        }
+      } catch {
+        return await failStillSuspended(
+          "device authentication rebind failed: \(error.localizedDescription)"
+        )
+      }
+    }
+
+    do {
+      try await MLSClient.shared.invalidateOtherDeviceAuthBindingsForSuspendedResume(
+        activeUserDID: userDid,
+        capability: suspendedResumeCapability,
+        afterInvalidation: suspendedResumeOtherBindingInvalidationOverride.withLock { $0 }
+      )
+    } catch {
+      return await failStillSuspended(
+        "inactive account device authentication invalidation failed: \(error.localizedDescription)"
+      )
+    }
+
+    do {
+      try Task.checkCancellation()
+    } catch {
+      return await failStillSuspended("resume task was cancelled before gate release")
+    }
+
+    // Stage the manager and Core gates while MLSClient still rejects every ordinary operation.
+    // Finishing the opaque capability is the final release/linearization point; no manager state
+    // is written after it, so a newer suspension cannot be overwritten by this resume attempt.
+    deviceAuthBindingRequiresResumeRebind = false
     isSuspending = false
     isSyncPaused = false
-    MLSCoreContext.clearSuspensionFlag()
-    MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
-    await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
+    if let finalReleaseOverride = suspendedResumeFinalReleaseOverride.withLock({ $0 }) {
+      await finalReleaseOverride()
+    }
+    guard await MLSClient.shared.finishSuspendedResumeCapability(suspendedResumeCapability) else {
+      deviceAuthBindingRequiresResumeRebind =
+        resumeRequiresDeviceAuthRebind
+        || MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: userDid)
+      isSuspending = true
+      isSyncPaused = true
+      return await failStillSuspended("resume capability was revoked before final gate release")
+    }
+    guard !MLSClient.isSuspensionInProgress, !MLSCoreContext.isSuspensionInProgress else {
+      deviceAuthBindingRequiresResumeRebind =
+        resumeRequiresDeviceAuthRebind
+        || MLSClient.deviceAuthBindingWasActiveAtSuspensionTransition(for: userDid)
+      isSuspending = true
+      isSyncPaused = true
+      return await failStillSuspended("resume final release postcondition failed")
+    }
+    if suspendedResumeRuntimeAttemptID == resumeAttemptID {
+      suspendedResumeRuntimeAttemptID = nil
+      suspendedResumeRuntimeContextIdentity = nil
+    }
     schedulePostReloadSyncIfNeeded()
 
     // Restart background tasks (only if we're initialized)
     guard isInitialized else {
       logger.debug("   Skipping task restart - not initialized")
-      return
+      return .resumed
     }
 
     // Restart periodic tasks
@@ -226,7 +635,8 @@ extension MLSConversationManager {
         do {
           try await self.ensureDeviceRecordPublished()
         } catch {
-          self.logger.error("Failed to publish device record on resume: \(error.localizedDescription)")
+          self.logger.error(
+            "Failed to publish device record on resume: \(error.localizedDescription)")
         }
       }
     }
@@ -235,6 +645,127 @@ extension MLSConversationManager {
     // If needed, it will be triggered by syncWithServer or explicit rejoin requests
 
     logger.info("✅ [RESUME] MLS operations resumed")
+    return .resumed
+  }
+
+  @MainActor
+  private func refreshAuthoritativeStateForSuspendedResume(
+    userDid: String,
+    capability: MLSClient.SuspendedResumeCapability,
+    rebuildCoreOwnedRustRuntime: Bool,
+    resumeAttemptID: UUID
+  ) async throws {
+    guard MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid) else {
+      throw CancellationError()
+    }
+    try Task.checkCancellation()
+    if let operation = suspendedResumeStateRefreshOverride.withLock({ $0 }) {
+      try await operation(userDid, capability)
+      try Task.checkCancellation()
+      guard MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid) else {
+        throw CancellationError()
+      }
+      return
+    }
+
+    isStateReloadInProgress = true
+    defer {
+      isStateReloadInProgress = false
+      let waiters = stateReloadWaiters
+      stateReloadWaiters.removeAll()
+      waiters.forEach { $0.resume() }
+    }
+
+    groupStates.removeAll()
+    conversationStates.removeAll()
+    pendingMessagesLock.withLock { pendingMessages.removeAll() }
+    ownCommitsLock.withLock { ownCommits.removeAll() }
+    recentlySentMessages.removeAll()
+    await CatbirdMLSCore.MLSEpochCheckpoint.shared.reloadCacheFromDisk()
+
+    try Task.checkCancellation()
+    guard MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid) else {
+      throw CancellationError()
+    }
+    if rebuildCoreOwnedRustRuntime {
+      resetOrchestratorRuntime(reason: "authoritative suspended-resume Core reload")
+    }
+    let reloadedContextIdentity = try await MLSCoreContext.shared.reloadContextForSuspendedResume(
+      for: userDid,
+      capability: capability
+    )
+    if rebuildCoreOwnedRustRuntime {
+      guard let reloadedContextIdentity else {
+        throw MLSConversationError.operationFailed(
+          "Authoritative suspended-resume Core reload did not install a context"
+        )
+      }
+      suspendedResumeRuntimeAttemptID = resumeAttemptID
+      suspendedResumeRuntimeContextIdentity = reloadedContextIdentity
+    }
+    try Task.checkCancellation()
+    guard MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid) else {
+      throw CancellationError()
+    }
+
+    if rebuildCoreOwnedRustRuntime {
+      guard
+        let rebuiltRuntime = await restoreOrchestratorRuntimeAfterSuspendClose(
+          reason: "MLSConversationManager.resumeMLSOperations.authoritativeCoreReload",
+          suspendedResumeCapability: capability
+        )
+      else {
+        throw MLSConversationError.operationFailed(
+          "Failed to rebuild rustFull runtime on the authoritative reloaded Core context"
+        )
+      }
+      guard rebuiltRuntime.mlsContextIdentity == reloadedContextIdentity else {
+        rebuiltRuntime.shutdown()
+        if orchestratorRuntime === rebuiltRuntime {
+          orchestratorRuntime = nil
+          rustStartupReconcileCompleted = false
+        }
+        throw MLSConversationError.operationFailed(
+          "Rebuilt rustFull runtime was not bound to the authoritative reloaded Core context"
+        )
+      }
+      rustRuntimeRequiresForegroundRestore = false
+    }
+    try Task.checkCancellation()
+    guard MLSClient.isCurrentSuspendedResumeCapability(capability, for: userDid) else {
+      throw CancellationError()
+    }
+
+    if protocolAuthorityMode == .rustFull {
+      _ = try await withRustAuthoritativeRuntime(
+        operation: "resumeAuthoritativeStateRefresh",
+        suspendedResumeCapability: capability
+      ) { runtime in
+        try runtime.startupReconcile()
+      }
+      rustStartupReconcileCompleted = true
+    }
+    try Task.checkCancellation()
+    lastForegroundTime = Date()
+    postReloadSyncPending = true
+  }
+
+  internal static func setSuspendedResumeStateRefreshOverride(
+    _ operation: (@Sendable (String, MLSClient.SuspendedResumeCapability) async throws -> Void)?
+  ) {
+    suspendedResumeStateRefreshOverride.withLock { $0 = operation }
+  }
+
+  internal static func setSuspendedResumeFinalReleaseOverride(
+    _ operation: (@Sendable () async -> Void)?
+  ) {
+    suspendedResumeFinalReleaseOverride.withLock { $0 = operation }
+  }
+
+  internal static func setSuspendedResumeOtherBindingInvalidationOverride(
+    _ operation: (@Sendable (String) async throws -> Void)?
+  ) {
+    suspendedResumeOtherBindingInvalidationOverride.withLock { $0 = operation }
   }
 
   @MainActor
@@ -303,6 +834,10 @@ extension MLSConversationManager {
     // CRITICAL: Capture userDid before clearing state
     let resetUserDid = userDid
     userDid = nil  // Fail-fast any new operations
+
+    if let resetUserDid {
+      await MLSClient.shared.invalidateDeviceAuthBinding(for: resetUserDid)
+    }
 
     isShuttingDown = true
 
@@ -416,7 +951,23 @@ extension MLSConversationManager {
   /// Note: This method has a 5-second timeout to prevent hanging during account switch.
   @MainActor
   @discardableResult
-  public func shutdown() async -> Bool {
+  public func shutdown(
+    accountSwitchSuspensionAuthorization authorization:
+      MLSAccountSwitchSuspensionAuthorization? = nil
+  ) async -> Bool {
+    await shutdown(
+      accountSwitchSuspensionAuthorization: authorization,
+      trackedFFIDrainTimeout: 5.0
+    )
+  }
+
+  @MainActor
+  @discardableResult
+  internal func shutdown(
+    accountSwitchSuspensionAuthorization authorization:
+      MLSAccountSwitchSuspensionAuthorization?,
+    trackedFFIDrainTimeout: TimeInterval = 5.0
+  ) async -> Bool {
     guard !isShuttingDown else {
       logger.debug("MLSConversationManager already shutting down")
       return false
@@ -438,12 +989,41 @@ extension MLSConversationManager {
     // proceeding with stale user context. Previously, stale sync operations could
     // read userDid after isShuttingDown was set but before cleanup completed.
     let shutdownUserDid = userDid
+    let normalizedShutdownDID = shutdownUserDid?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let authorization {
+      guard
+        authorization.managerIdentity == ObjectIdentifier(self),
+        authorization.suspensionOwnerToken == suspensionAbandonmentOwnerToken,
+        authorization.normalizedDID == normalizedShutdownDID
+      else {
+        logger.error(
+          "❌ [SHUTDOWN-AUTHORITY] Rejected suspension authorization owned by another manager generation or account"
+        )
+        return false
+      }
+    }
+    let expectedAbandonmentCapability = authorization?.capability
+    shutdownBeforeTransitionTestOverride.withLock { $0 }?()
+    isShuttingDown = true
+    isSyncPaused = true
+    isSuspending = true
+    let shutdownAuthority = MLSClient.markShutdownInProgress(
+      reason: "MLSConversationManager.shutdown",
+      abandonmentOwnerDID: shutdownUserDid,
+      abandonmentOwnerToken: suspensionAbandonmentOwnerToken,
+      expectedAbandonmentCapability: expectedAbandonmentCapability,
+      allowImplicitFreshAuthority: authorization == nil
+    )
+    let shutdownSuspensionCapability = shutdownAuthority.abandonmentCapability
+    let noUserShutdownSuspensionCapability = shutdownAuthority.noUserCapability
+    shutdownAfterSuspensionCapabilityTestOverride.withLock { $0 }?()
     userDid = nil  // Immediately invalidate to fail-fast any new operations
 
-    isShuttingDown = true
-    isSyncPaused = true  // CRITICAL: Reject any new sync attempts immediately
+    if let shutdownUserDid {
+      await MLSClient.shared.invalidateDeviceAuthBinding(for: shutdownUserDid)
+    }
+
     rustStartupReconcileCompleted = false
-    resetOrchestratorRuntime(reason: "manager shutdown")
     var shutdownWasSafe = true
 
     logger.info(
@@ -579,6 +1159,46 @@ extension MLSConversationManager {
     isInitialized = false
     isSyncing = false
 
+    let drained = await MLSClient.drainInFlightFFIOperations(
+      timeout: trackedFFIDrainTimeout
+    )
+    guard drained else {
+      MLSClient.interruptAllContexts()
+      MLSCoreContext.interruptAllContexts()
+      logger.critical(
+        "🚨 [MLSConversationManager.shutdown] Timed out draining tracked Rust/FFI work"
+      )
+      return false
+    }
+    guard
+      let shutdownLease = MLSClient.beginShutdownQuiescenceLease(
+        abandonmentCapability: shutdownSuspensionCapability,
+        noUserCapability: noUserShutdownSuspensionCapability,
+        excludingUserDID: shutdownUserDid
+      )
+    else {
+      MLSClient.interruptAllContexts()
+      MLSCoreContext.interruptAllContexts()
+      logger.critical(
+        "🚨 [MLSConversationManager.shutdown] Could not acquire post-drain shutdown lease"
+      )
+      return false
+    }
+    defer { MLSClient.cancelShutdownQuiescenceLease(shutdownLease) }
+    if let runtime = orchestratorRuntime {
+      do {
+        _ = try runtime.prepareForSuspend(reason: "MLSConversationManager.shutdown")
+      } catch {
+        MLSClient.interruptAllContexts()
+        MLSCoreContext.interruptAllContexts()
+        logger.critical(
+          "🚨 [MLSConversationManager.shutdown] Rust quiescence failed: \(error.localizedDescription, privacy: .public)"
+        )
+        return false
+      }
+      resetOrchestratorRuntime(reason: "manager shutdown after tracked drain")
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // CRITICAL: Use MLSShutdownCoordinator for proper shutdown sequence
     // ═══════════════════════════════════════════════════════════════════════════
@@ -625,6 +1245,28 @@ extension MLSConversationManager {
       }
     }
 
+    if shutdownWasSafe {
+      let releasedSuspension: Bool
+      if shutdownSuspensionCapability != nil {
+        releasedSuspension = await MLSClient.abandonSuspensionAfterSafeShutdown(shutdownLease)
+      } else if noUserShutdownSuspensionCapability != nil {
+        releasedSuspension = await MLSClient.abandonNoUserSuspensionAfterSafeShutdown(
+          shutdownLease
+        )
+      } else {
+        releasedSuspension = false
+      }
+      if releasedSuspension {
+        isSuspending = false
+        isSyncPaused = false
+        deviceAuthBindingRequiresResumeRebind = false
+      } else {
+        shutdownWasSafe = false
+        logger.critical(
+          "🚨 [MLSConversationManager.shutdown] Safe teardown could not consume exact suspension abandonment authority"
+        )
+      }
+    }
     if shutdownWasSafe {
       logger.info("✅ [MLSConversationManager.shutdown] Shutdown complete - safe to switch accounts")
     } else {
@@ -767,7 +1409,8 @@ extension MLSConversationManager {
         await recoveryManager.setPersistence(recoveryStore)
         await recoveryManager.hydrateFromDatabase()
 
-        await recoveryManager.setDeferredRejoinHandler { [weak self] handlerUserDid, conversationIds in
+        await recoveryManager.setDeferredRejoinHandler {
+          [weak self] handlerUserDid, conversationIds in
           guard let self, self.userDid == handlerUserDid else { return }
           await self.persistDeferredRejoinRequests(
             conversationIds,
@@ -801,7 +1444,9 @@ extension MLSConversationManager {
       logger.info("✅ Initialized smart key package monitoring")
 
       if protocolAuthorityMode == .rustFull {
-        logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device sync manager; Rust owns device membership changes")
+        logger.info(
+          "⏭️ [MLS-FULL-RUST] Skipping Swift device sync manager; Rust owns device membership changes"
+        )
       } else if let deviceSyncManager = deviceSyncManager {
         let deviceInfo = await mlsClient.getDeviceInfo(for: userDid)
         let deviceUUID = deviceInfo?.deviceUUID
@@ -826,7 +1471,8 @@ extension MLSConversationManager {
     }
 
     if protocolAuthorityMode == .rustFull {
-      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift initial key package refresh; Rust owns replenishment")
+      logger.info(
+        "⏭️ [MLS-FULL-RUST] Skipping Swift initial key package refresh; Rust owns replenishment")
     } else {
       keyPackageRefreshTask = Task(priority: .utility) { [weak self] in
         guard let self else { return }
@@ -851,7 +1497,8 @@ extension MLSConversationManager {
     await validateGroupStates()
 
     if protocolAuthorityMode == .rustFull {
-      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift missing-conversation sweep after Rust startup reconcile")
+      logger.info(
+        "⏭️ [MLS-FULL-RUST] Skipping Swift missing-conversation sweep after Rust startup reconcile")
     } else {
       // Run detectAndRejoinMissingConversations in background to avoid blocking startup
       // CRITICAL FIX: Store task reference so it can be properly cancelled during shutdown
@@ -891,12 +1538,15 @@ extension MLSConversationManager {
     let reconciled = await runRustStartupReconcileIfNeeded(operation: operation)
 
     do {
-      let mlsDid = try await withRustAuthoritativeRuntime(operation: "rustFullEnsureDeviceRegistered") { runtime in
+      let mlsDid = try await withRustAuthoritativeRuntime(
+        operation: "rustFullEnsureDeviceRegistered"
+      ) { runtime in
         try runtime.ensureDeviceRegistered()
       }
       logger.info(
         "✅ [MLS-FULL-RUST] Device registered via Rust for \(userDid.prefix(20), privacy: .private) mlsDid=\(mlsDid.prefix(20), privacy: .private)"
       )
+      _ = try await bindRustDeviceAuthentication(userDid: userDid, force: true)
     } catch {
       logger.error(
         "❌ [MLS-FULL-RUST] Failed to register device via Rust: \(error.localizedDescription, privacy: .public)"
@@ -921,10 +1571,13 @@ extension MLSConversationManager {
       do {
         try await Task.sleep(nanoseconds: 5_000_000_000)
         try Task.checkCancellation()
-        try await self.withRustAuthoritativeRuntime(operation: "rustFullReplenishKeyPackagesIfNeeded") { runtime in
+        try await self.withRustAuthoritativeRuntime(
+          operation: "rustFullReplenishKeyPackagesIfNeeded"
+        ) { runtime in
           try runtime.replenishKeyPackagesIfNeeded()
         }
-        self.logger.info("✅ [MLS-FULL-RUST] Key package replenishment checked via Rust (background)")
+        self.logger.info(
+          "✅ [MLS-FULL-RUST] Key package replenishment checked via Rust (background)")
       } catch is CancellationError {
         self.logger.info(
           "⚠️ [MLS-FULL-RUST] Background key package replenishment cancelled (expected during shutdown)"
@@ -939,12 +1592,88 @@ extension MLSConversationManager {
     if configuration.skipDeviceRecordPublishing {
       logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
     } else {
-      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device record publish; Rust owns MLS device readiness")
+      logger.info(
+        "⏭️ [MLS-FULL-RUST] Skipping Swift device record publish; Rust owns MLS device readiness")
     }
 
     logger.info("Loading persisted MLS storage for user: \(userDid)")
     logger.info("✅ MLS storage loaded successfully")
     return reconciled
+  }
+
+  @discardableResult
+  internal func bindRustDeviceAuthentication(
+    userDid: String,
+    force: Bool = false,
+    suspendedResumePermit: MLSClient.SuspendedResumeCapability? = nil
+  ) async throws -> MLSDeviceAuthBindingStatus {
+    if force {
+      await MLSClient.shared.invalidateDeviceAuthBindingForReplacement(
+        for: userDid,
+        preservingSuspendedResumeCapability: suspendedResumePermit
+      )
+    }
+    let deviceIDProviderOverride = deviceAuthDeviceIDProviderOverride
+    let (runtime, runtimeDeviceID) = try await withRustAuthoritativeRuntime(
+      operation: "rustFullDeviceAuthCurrentDevice",
+      suspendedResumeCapability: suspendedResumePermit
+    ) { runtime in
+      (runtime, try deviceIDProviderOverride == nil ? runtime.currentDeviceInfo()?.deviceId : nil)
+    }
+    let deviceID =
+      if let deviceIDProviderOverride {
+        try await deviceIDProviderOverride()
+      } else {
+        runtimeDeviceID
+      }
+    guard let deviceID, !deviceID.isEmpty else {
+      throw MLSDeviceAuthBindingError.malformedResponse
+    }
+
+    return try await MLSClient.shared.bindDeviceAuthentication(
+      for: userDid,
+      deviceID: deviceID,
+      apiOverride: deviceAuthBindingAPIOverride,
+      suspendedResumePermit: suspendedResumePermit
+    ) { challenge in
+      // Keep device resolution and proof signing on one runtime generation.
+      // Runtime shutdown is the fail-closed boundary: the Rust bridge refuses
+      // device-auth signing after shutdown, while binding invalidation prevents
+      // an in-flight result from restoring local authority after replacement.
+      try await self.withTrackedRustRuntime(
+        runtime,
+        operation: "rustFullDeviceAuthSignChallenge",
+        suspendedResumeCapability: suspendedResumePermit
+      ) { runtime in
+        try runtime.signDeviceAuthChallenge(challenge)
+      }
+    }
+  }
+
+  /// Explicit hook for restored sessions, device re-registration, signer
+  /// rotation, and transport rebinds. Existing volatile status is discarded
+  /// before a fresh server challenge is requested.
+  @discardableResult
+  public func rebindCurrentDeviceAuthentication() async throws -> MLSDeviceAuthBindingStatus {
+    guard let userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+    await MLSClient.shared.invalidateDeviceAuthBindingForReplacement(for: userDid)
+
+    if protocolAuthorityMode == .rustFull {
+      _ = try await withRustAuthoritativeRuntime(
+        operation: "rustFullRebindEnsureDeviceRegistered"
+      ) { runtime in
+        try runtime.ensureDeviceRegistered()
+      }
+      return try await bindRustDeviceAuthentication(userDid: userDid, force: true)
+    }
+
+    _ = try await MLSClient.shared.ensureDeviceRegistered(userDid: userDid)
+    guard let status = await MLSClient.shared.deviceAuthBindingStatus(for: userDid) else {
+      throw MLSDeviceAuthBindingError.bindingMismatch
+    }
+    return status
   }
 
   private func prepareSwiftLegacyStartupDeviceAndKeyPackages(userDid: String) async {
@@ -1007,12 +1736,14 @@ extension MLSConversationManager {
           // This can happen after app reinstall or device re-registration when old packages
           // belong to a different device_id. Without this fix, invites fail with NoMatchingKeyPackage.
           if syncResult.remainingAvailable == 0 {
-            self.logger.warning("🚨 [MLS Init] Server has 0 key packages for this device - uploading batch now")
+            self.logger.warning(
+              "🚨 [MLS Init] Server has 0 key packages for this device - uploading batch now")
             do {
               try await self.keyPackageManager.uploadKeyPackageBatchSmart(for: userDid, count: 25)
               self.logger.info("✅ [MLS Init] Emergency key package upload complete")
             } catch {
-              self.logger.error("❌ [MLS Init] Emergency key package upload failed: \(error.localizedDescription)")
+              self.logger.error(
+                "❌ [MLS Init] Emergency key package upload failed: \(error.localizedDescription)")
             }
           }
         } catch {
@@ -1060,18 +1791,18 @@ extension MLSConversationManager {
       return
     }
 
-#if MLS_SWIFT_LEGACY_PROTOCOL
-    await validateGroupStatesLegacy()
-#else
-    do {
-      try assertSwiftProtocolMutationAllowed("validateGroupStates legacy protocol implementation")
+    #if MLS_SWIFT_LEGACY_PROTOCOL
       await validateGroupStatesLegacy()
-    } catch {
-      logger.info(
-        "⏭️ [MLS-FULL-RUST] Skipping validateGroupStates in \(self.protocolAuthorityMode.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
-      )
-    }
-#endif
+    #else
+      do {
+        try assertSwiftProtocolMutationAllowed("validateGroupStates legacy protocol implementation")
+        await validateGroupStatesLegacy()
+      } catch {
+        logger.info(
+          "⏭️ [MLS-FULL-RUST] Skipping validateGroupStates in \(self.protocolAuthorityMode.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+        )
+      }
+    #endif
   }
 
   private func validateGroupStatesLegacy() async {
@@ -1140,7 +1871,8 @@ extension MLSConversationManager {
 
           // Only treat genuine MLS errors as corruption
           logger.error(
-            "❌ [STARTUP] Suspect corrupted group state detected for conversation \(convoIdPrefix)...")
+            "❌ [STARTUP] Suspect corrupted group state detected for conversation \(convoIdPrefix)..."
+          )
           logger.error("   Error: \(error.localizedDescription)")
           corruptedConversations.append(conversation)
         }
@@ -1201,7 +1933,9 @@ extension MLSConversationManager {
 
   public func detectAndRejoinMissingConversations() async throws {
     if protocolAuthorityMode == .rustFull {
-      let report = try await withRustAuthoritativeRuntime(operation: "detectAndRejoinMissingConversations") { runtime in
+      let report = try await withRustAuthoritativeRuntime(
+        operation: "detectAndRejoinMissingConversations"
+      ) { runtime in
         try runtime.startupReconcile()
       }
       logger.info(
@@ -1210,14 +1944,14 @@ extension MLSConversationManager {
       return
     }
 
-#if MLS_SWIFT_LEGACY_PROTOCOL
-    try await detectAndRejoinMissingConversationsLegacy()
-#else
-    try assertSwiftProtocolMutationAllowed(
-      "detectAndRejoinMissingConversations legacy protocol implementation"
-    )
-    try await detectAndRejoinMissingConversationsLegacy()
-#endif
+    #if MLS_SWIFT_LEGACY_PROTOCOL
+      try await detectAndRejoinMissingConversationsLegacy()
+    #else
+      try assertSwiftProtocolMutationAllowed(
+        "detectAndRejoinMissingConversations legacy protocol implementation"
+      )
+      try await detectAndRejoinMissingConversationsLegacy()
+    #endif
   }
 
   private func detectAndRejoinMissingConversationsLegacy() async throws {
@@ -1263,10 +1997,14 @@ extension MLSConversationManager {
         logger.info(
           "🔄 Found \(corruptedConvos.count) locally corrupted conversation(s) needing rejoin")
 
-        let mode: MLSRecoveryManager.RecoveryMode = corruptedConvos.count >= MLSRecoveryManager.batchRecoveryThreshold ? .batchRecovery : .normal
+        let mode: MLSRecoveryManager.RecoveryMode =
+          corruptedConvos.count >= MLSRecoveryManager.batchRecoveryThreshold
+          ? .batchRecovery : .normal
 
         if mode == .batchRecovery {
-          logger.info("⚡ [REJOIN] Entering BATCH recovery mode for \(corruptedConvos.count) corrupted conversations")
+          logger.info(
+            "⚡ [REJOIN] Entering BATCH recovery mode for \(corruptedConvos.count) corrupted conversations"
+          )
           let chunks = corruptedConvos.chunked(into: MLSRecoveryManager.maxConcurrentRejoins)
           for chunk in chunks {
             if isShuttingDown || Task.isCancelled { break }
@@ -1277,30 +2015,41 @@ extension MLSConversationManager {
                   guard let self = self, let userDid = self.userDid else { return }
 
                   if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
-                    let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationID, mode: .batchRecovery)
+                    let shouldSkip = await recoveryManager.shouldSkipRejoin(
+                      convoId: convo.conversationID, mode: .batchRecovery)
                     if shouldSkip {
-                      self.logger.info("⏭️ [REJOIN] Skipping \(convo.conversationID.prefix(16))... - MLSRecoveryManager backoff active")
+                      self.logger.info(
+                        "⏭️ [REJOIN] Skipping \(convo.conversationID.prefix(16))... - MLSRecoveryManager backoff active"
+                      )
                       return
                     }
                   }
 
-                  guard self.beginRejoinAttempt(conversationID: convo.conversationID, source: "deferred-epoch-recovery") else {
+                  guard
+                    self.beginRejoinAttempt(
+                      conversationID: convo.conversationID, source: "deferred-epoch-recovery")
+                  else {
                     return
                   }
 
                   let groupIdData = convo.groupID
-                  let preDeleteAuthHex: String? = await self.mlsClient.groupExists(for: userDid, groupId: groupIdData)
+                  let preDeleteAuthHex: String? =
+                    await self.mlsClient.groupExists(for: userDid, groupId: groupIdData)
                     ? await self.mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
                     : nil
 
                   if await self.mlsClient.groupExists(for: userDid, groupId: groupIdData) {
-                    self.logger.info("🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))...")
+                    self.logger.info(
+                      "🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))..."
+                    )
                     do {
                       try await self.mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
                     } catch {
-                      self.logger.warning("⚠️ [REJOIN] Failed to delete stale group: \(error.localizedDescription)")
+                      self.logger.warning(
+                        "⚠️ [REJOIN] Failed to delete stale group: \(error.localizedDescription)")
                     }
-                    self.removeCachedGroupState(conversationID: convo.conversationID, groupID: groupIdData)
+                    self.removeCachedGroupState(
+                      conversationID: convo.conversationID, groupID: groupIdData)
                   }
 
                   let rejoinResult = await self.attemptRejoinWithWelcomeFallback(
@@ -1327,7 +2076,8 @@ extension MLSConversationManager {
             }
 
             if chunks.last != chunk {
-              logger.info("⚡ [REJOIN] Pausing \(MLSRecoveryManager.batchPauseSec)s between batch chunks...")
+              logger.info(
+                "⚡ [REJOIN] Pausing \(MLSRecoveryManager.batchPauseSec)s between batch chunks...")
               try? await Task.sleep(for: .seconds(MLSRecoveryManager.batchPauseSec))
             }
           }
@@ -1343,10 +2093,12 @@ extension MLSConversationManager {
             // instead of the weaker 60s beginRejoinAttempt cooldown. This prevents sync-triggered
             // epoch inflation from repeatedly External-Committing every minute.
             if let recoveryManager = await mlsClient.recovery(for: userDid) {
-              let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationID, mode: .normal)
+              let shouldSkip = await recoveryManager.shouldSkipRejoin(
+                convoId: convo.conversationID, mode: .normal)
               if shouldSkip {
                 logger.info(
-                  "⏭️ [REJOIN] Skipping \(convo.conversationID.prefix(16))... - MLSRecoveryManager backoff active")
+                  "⏭️ [REJOIN] Skipping \(convo.conversationID.prefix(16))... - MLSRecoveryManager backoff active"
+                )
                 continue
               }
             }
@@ -1373,7 +2125,8 @@ extension MLSConversationManager {
               : nil
             if await mlsClient.groupExists(for: userDid, groupId: groupIdData) {
               logger.info(
-                "🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))...")
+                "🗑️ [REJOIN] Deleting stale local group state for \(convo.conversationID.prefix(16))..."
+              )
               do {
                 try await mlsClient.deleteGroup(for: userDid, groupId: groupIdData)
               } catch {
@@ -1413,7 +2166,8 @@ extension MLSConversationManager {
         return
       }
 
-      guard await ensureActiveAccount(for: userDid, operation: "detectAndRejoinMissingConversations")
+      guard
+        await ensureActiveAccount(for: userDid, operation: "detectAndRejoinMissingConversations")
       else {
         return
       }
@@ -1454,10 +2208,14 @@ extension MLSConversationManager {
         convosNeedingRejoin.append(convo)
       }
 
-      let mode: MLSRecoveryManager.RecoveryMode = convosNeedingRejoin.count >= MLSRecoveryManager.batchRecoveryThreshold ? .batchRecovery : .normal
+      let mode: MLSRecoveryManager.RecoveryMode =
+        convosNeedingRejoin.count >= MLSRecoveryManager.batchRecoveryThreshold
+        ? .batchRecovery : .normal
 
       if mode == .batchRecovery {
-        logger.info("⚡ [REJOIN] Entering BATCH recovery mode for \(convosNeedingRejoin.count) missing conversations")
+        logger.info(
+          "⚡ [REJOIN] Entering BATCH recovery mode for \(convosNeedingRejoin.count) missing conversations"
+        )
         let chunks = convosNeedingRejoin.chunked(into: MLSRecoveryManager.maxConcurrentRejoins)
         for chunk in chunks {
           if isShuttingDown || Task.isCancelled { break }
@@ -1468,25 +2226,34 @@ extension MLSConversationManager {
                 guard let self = self, let userDid = self.userDid else { return }
 
                 guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-                  self.logger.warning("⚠️ Invalid groupId format for \(convo.conversationId) - skipping")
+                  self.logger.warning(
+                    "⚠️ Invalid groupId format for \(convo.conversationId) - skipping")
                   return
                 }
 
-                let groupExists = await self.mlsClient.groupExists(for: userDid, groupId: groupIdData)
+                let groupExists = await self.mlsClient.groupExists(
+                  for: userDid, groupId: groupIdData)
 
                 if let recoveryManager = await self.mlsClient.recovery(for: userDid) {
-                  let shouldSkip = await recoveryManager.shouldSkipRejoin(convoId: convo.conversationId, mode: .batchRecovery)
+                  let shouldSkip = await recoveryManager.shouldSkipRejoin(
+                    convoId: convo.conversationId, mode: .batchRecovery)
                   if shouldSkip {
-                    self.logger.warning("⏭️ [REJOIN] Skipping \(convo.conversationId.prefix(16))... - recovery tracking says skip")
+                    self.logger.warning(
+                      "⏭️ [REJOIN] Skipping \(convo.conversationId.prefix(16))... - recovery tracking says skip"
+                    )
                     return
                   }
                 }
 
-                guard self.beginRejoinAttempt(conversationID: convo.conversationId, source: "missing-convo") else {
+                guard
+                  self.beginRejoinAttempt(
+                    conversationID: convo.conversationId, source: "missing-convo")
+                else {
                   return
                 }
 
-                let preDeleteAuthHex: String? = groupExists
+                let preDeleteAuthHex: String? =
+                  groupExists
                   ? await self.mlsClient.epochAuthenticatorHex(for: userDid, groupId: groupIdData)
                   : nil
 
@@ -1516,7 +2283,8 @@ extension MLSConversationManager {
           }
 
           if chunks.last != chunk {
-            logger.info("⚡ [REJOIN] Pausing \(MLSRecoveryManager.batchPauseSec)s between batch chunks...")
+            logger.info(
+              "⚡ [REJOIN] Pausing \(MLSRecoveryManager.batchPauseSec)s between batch chunks...")
             try? await Task.sleep(for: .seconds(MLSRecoveryManager.batchPauseSec))
           }
         }
@@ -1527,7 +2295,9 @@ extension MLSConversationManager {
             break
           }
 
-          guard await ensureActiveAccount(for: userDid, operation: "detectAndRejoinMissingConversations")
+          guard
+            await ensureActiveAccount(
+              for: userDid, operation: "detectAndRejoinMissingConversations")
           else {
             logger.info("⏸️ [REJOIN] Stopping missing-conversation loop for inactive account")
             break
@@ -1625,18 +2395,20 @@ extension MLSConversationManager {
     }
 
     do {
-      if let _ = try await joinOrRejoinWithRustAuthorityIfNeeded(
+      if (try await joinOrRejoinWithRustAuthorityIfNeeded(
         conversationId: convoId,
         operation: "attemptRejoinWithWelcomeFallback"
-      ) {
+      )) != nil {
         await clearConversationRejoinFlag(convoId)
         return .joined
       }
     } catch is CancellationError {
-      logger.info("📭 [attemptRejoin] Rust joinOrRejoin cancelled for \(label) (expected during shutdown)")
+      logger.info(
+        "📭 [attemptRejoin] Rust joinOrRejoin cancelled for \(label) (expected during shutdown)")
       return .skippedNoAttempt
     } catch {
-      logger.error("❌ [attemptRejoin] Rust joinOrRejoin failed for \(label): \(error.localizedDescription)")
+      logger.error(
+        "❌ [attemptRejoin] Rust joinOrRejoin failed for \(label): \(error.localizedDescription)")
       return .failed
     }
 
@@ -1662,7 +2434,7 @@ extension MLSConversationManager {
         "🔄 [attemptRejoin] \(fallbackReason) for \(label), attempting External Commit...")
 
       if let recoveryManager = await mlsClient.recovery(for: userDid),
-         let remaining = await recoveryManager.successCooldownRemaining(convoId: convoId)
+        let remaining = await recoveryManager.successCooldownRemaining(convoId: convoId)
       {
         logger.info(
           "⏭️ [attemptRejoin] Skipping External Commit for \(label): successful-rejoin cooldown active (\(Int(remaining))s remaining)"
@@ -1691,13 +2463,15 @@ extension MLSConversationManager {
         await clearConversationRejoinFlag(convoId)
         return .joined
       } catch is CancellationError {
-        logger.info("📭 [attemptRejoin] External Commit cancelled for \(label) (expected during shutdown)")
+        logger.info(
+          "📭 [attemptRejoin] External Commit cancelled for \(label) (expected during shutdown)")
         return .skippedNoAttempt
       } catch let error as RejoinSkippedNoAttemptError {
         logger.info("⏸️ [attemptRejoin] \(error.localizedDescription) for \(label)")
         return .skippedNoAttempt
       } catch {
-        logger.error("❌ Failed to rejoin \(label) via External Commit: \(error.localizedDescription)")
+        logger.error(
+          "❌ Failed to rejoin \(label) via External Commit: \(error.localizedDescription)")
 
         // B11: First-responder bootstrap fallback for the needsRejoin path.
         // Mirrors `runDeferredEpochRecoveryRecipient`'s bootstrap fallback
@@ -1714,9 +2488,11 @@ extension MLSConversationManager {
         // and fall through to the winner's GroupInfo on the next loop.
         let groupInfoMissing = await isGroupInfoMissing(convoId: convoId)
         if groupInfoMissing {
-          guard let localConvo = await loadLocalConvoForBootstrap(
-            convoId: convoId, userDid: userDid
-          ) else {
+          guard
+            let localConvo = await loadLocalConvoForBootstrap(
+              convoId: convoId, userDid: userDid
+            )
+          else {
             logger.warning(
               "⚠️ [attemptRejoin] GroupInfo absent for \(label) but local convo not loadable — skipping bootstrap fallback"
             )
@@ -1819,7 +2595,8 @@ extension MLSConversationManager {
         logger.info(
           "📭 No Welcome available for \(label) (missing welcome in 200 response) - will try External Commit"
         )
-        return .fallbackToExternalCommit(reason: "Welcome unavailable (missing welcome in 200 response)")
+        return .fallbackToExternalCommit(
+          reason: "Welcome unavailable (missing welcome in 200 response)")
       }
 
       if case .httpError(let code, _) = apiError {
@@ -1964,7 +2741,9 @@ extension MLSConversationManager {
     throw lastError ?? MLSConversationError.welcomeFetchFailed
   }
 
-  internal func fetchConversationForRejoin(convoId: String) async -> BlueCatbirdMlsChatDefs.ConvoView? {
+  internal func fetchConversationForRejoin(convoId: String) async -> BlueCatbirdMlsChatDefs
+    .ConvoView?
+  {
     // 1. Try in-memory first (fastest)
     if let convo = conversations[convoId] {
       return convo
