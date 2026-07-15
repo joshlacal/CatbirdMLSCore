@@ -53,6 +53,21 @@ for library in \
     CatbirdMLSFFI.xcframework/macos-arm64_x86_64/libCatbirdMLSFFI.a; do
     printf 'verified native slice\n' > "$library"
 done
+printf 'xcframework metadata\n' > CatbirdMLSFFI.xcframework/Info.plist
+for slice in \
+    ios-arm64 \
+    ios-arm64_x86_64-simulator \
+    ios-arm64_x86_64-maccatalyst \
+    macos-arm64_x86_64; do
+    mkdir -p "CatbirdMLSFFI.xcframework/${slice}/Headers"
+    printf 'generated header\n' \
+        > "CatbirdMLSFFI.xcframework/${slice}/Headers/CatbirdMLSFFI.h"
+    printf 'generated module map\n' \
+        > "CatbirdMLSFFI.xcframework/${slice}/Headers/module.modulemap"
+done
+if [[ "${MOCK_OMIT_COMPONENT:-0}" == 1 ]]; then
+    rm -f CatbirdMLSFFI.xcframework/ios-arm64/Headers/module.modulemap
+fi
 printf 'generated Swift binding\n' > build/bindings/CatbirdMLS.swift
 printf 'redundant staging library\n' > build/libs/ios-arm64/libCatbirdMLSFFI.a
 printf 'redundant framework staging\n' > build/frameworks/staging.marker
@@ -71,6 +86,9 @@ chmod +x \
     PATH="${mock_bin}:$PATH" \
         MOCK_RUST_ROOT="$rust_root" \
         ./Scripts/rebuild-ffi.sh >/dev/null
+    PATH="${mock_bin}:$PATH" \
+        MOCK_RUST_ROOT="$rust_root" \
+        ./Scripts/rebuild-ffi.sh >/dev/null
 )
 
 for library in \
@@ -83,6 +101,8 @@ for library in \
 done
 [[ -s "${core_root}/Sources/CatbirdMLS/CatbirdMLS.swift" ]] \
     || fail "generated Swift binding was not installed"
+[[ ! -e "${rust_root}/CatbirdMLSFFI.xcframework" ]] \
+    || fail "completed XCFramework was duplicated instead of transferred"
 [[ ! -e "${rust_root}/build/libs" ]] \
     || fail "redundant staging libraries were retained"
 [[ ! -e "${rust_root}/build/frameworks" ]] \
@@ -94,4 +114,40 @@ done
 [[ -s "${rust_root}/build/bindings/CatbirdMLS.swift" ]] \
     || fail "generated binding provenance was removed"
 
-echo "PASS: rebuild-ffi releases only verified redundant staging before package copy"
+grep -Fq 'source_stat.st_dev != parent_stat.st_dev' "$SCRIPT_UNDER_TEST" \
+    || fail "same-filesystem transfer is not enforced"
+grep -Fq 'os.replace(source, destination)' "$SCRIPT_UNDER_TEST" \
+    || fail "XCFramework transfer is not a no-copy rename"
+if grep -Eq 'cp[[:space:]]+-R[[:space:]]+CatbirdMLSFFI\.xcframework' "$SCRIPT_UNDER_TEST"; then
+    fail "XCFramework transfer retains a copy fallback"
+fi
+
+printf 'preserve known-good destination\n' \
+    > "${core_root}/Sources/CatbirdMLSFFI.xcframework/known-good.marker"
+if (
+    cd "$core_root"
+    PATH="${mock_bin}:$PATH" \
+        MOCK_RUST_ROOT="$rust_root" \
+        MOCK_OMIT_COMPONENT=1 \
+        ./Scripts/rebuild-ffi.sh >/dev/null 2>&1
+); then
+    fail "incomplete XCFramework was accepted"
+fi
+[[ -s "${core_root}/Sources/CatbirdMLSFFI.xcframework/known-good.marker" ]] \
+    || fail "incomplete output replaced the known-good destination"
+
+real_core_root="${fixture_root}/CatbirdMLSCore-real"
+mv "$core_root" "$real_core_root"
+ln -s "$real_core_root" "$core_root"
+if (
+    cd "$real_core_root"
+    PATH="${mock_bin}:$PATH" \
+        MOCK_RUST_ROOT="$rust_root" \
+        ./Scripts/rebuild-ffi.sh >/dev/null 2>&1
+); then
+    fail "symlinked Core checkout was accepted"
+fi
+[[ -s "${real_core_root}/Sources/CatbirdMLSFFI.xcframework/known-good.marker" ]] \
+    || fail "symlinked destination path modified the known-good artifact"
+
+echo "PASS: rebuild-ffi transfers verified output without duplicating the XCFramework"
