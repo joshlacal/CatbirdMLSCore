@@ -690,6 +690,56 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(state.notifiedAtMs, 700)
   }
 
+  func testAdoptResetPendingTargetMigratesLegacyPendingRowAcrossRestart() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-adopt-legacy"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel SET needsRejoin = 0
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+    let legacy = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertTrue(legacy.needsReset)
+    XCTAssertFalse(legacy.needsRejoin)
+    XCTAssertEqual(legacy.pendingNewGroupID, "05060708")
+    XCTAssertEqual(legacy.pendingResetGeneration, 7)
+    XCTAssertEqual(legacy.resetNotifiedAt, 700)
+
+    let restartedAdapter = try makeAdapter()
+    XCTAssertTrue(
+      try restartedAdapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    let adopted = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertEqual(adopted.groupID, legacy.groupID)
+    XCTAssertEqual(adopted.isActive, legacy.isActive)
+    XCTAssertEqual(adopted.needsReset, legacy.needsReset)
+    XCTAssertEqual(adopted.needsRejoin, legacy.needsRejoin)
+    XCTAssertEqual(adopted.pendingNewGroupID, "090a0b0c")
+    XCTAssertEqual(adopted.pendingResetGeneration, legacy.pendingResetGeneration)
+    XCTAssertEqual(adopted.resetNotifiedAt, legacy.resetNotifiedAt)
+    XCTAssertEqual(adopted.appliedResetGeneration, legacy.appliedResetGeneration)
+  }
+
   func testAdoptResetPendingTargetRejectsStaleOrIncompleteAuthorityWithoutMutation() throws {
     let adapter = try makeAdapter()
     let conversationID = "convo-reset-adopt-reject"
@@ -744,37 +794,6 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     )
     XCTAssertEqual(try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)), incomplete)
 
-    try dbPool.write { db in
-      try db.execute(
-        sql: """
-          UPDATE MLSConversationModel SET needsRejoin = 0
-          WHERE conversationID = ? AND currentUserDID = ?
-          """,
-        arguments: [conversationID, "did:plc:receiver"]
-      )
-      try db.execute(
-        sql: """
-          UPDATE mls_orchestrator_security_state SET reset_notified_at_ms = 700
-          WHERE conversation_id = ? AND user_did = ?
-          """,
-        arguments: [conversationID, "did:plc:receiver"]
-      )
-    }
-    let missingRejoinAuthority = try XCTUnwrap(
-      resetAuthoritySnapshot(conversationID: conversationID)
-    )
-    XCTAssertFalse(
-      try adapter.adoptResetPendingTarget(
-        conversationId: conversationID,
-        expectedGeneration: 7,
-        expectedOldTarget: "05060708",
-        authoritativeNewTarget: "090a0b0c"
-      )
-    )
-    XCTAssertEqual(
-      try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)),
-      missingRejoinAuthority
-    )
   }
 
   func testAdoptResetPendingTargetRejectsNonCanonicalInputs() throws {

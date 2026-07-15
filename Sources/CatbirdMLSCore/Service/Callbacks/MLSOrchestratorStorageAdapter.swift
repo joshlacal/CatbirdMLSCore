@@ -797,7 +797,6 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           SET pendingNewGroupId = ?
           WHERE conversationID = ? AND currentUserDID = ?
             AND needsReset = 1
-            AND needsRejoin = 1
             AND pendingResetGeneration = ?
             AND pendingNewGroupId = ?
             AND EXISTS (
