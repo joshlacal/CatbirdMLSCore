@@ -6,12 +6,12 @@ on:
       release_tag:
         description: New immutable GitHub release tag
         required: true
-        default: ffi-w1-690d567b
+        default: ffi-w2-bd2fe34d
         type: string
       catbird_mls_ref:
         description: Exact catbird-mls commit SHA to build
         required: true
-        default: 690d567b6d892064ae315f8776c3537006d88f93
+        default: bd2fe34d9a87f7466b673043f76a03aeadc8e111
         type: string
       catbird_atproto_ref:
         description: Exact catbird-atproto commit SHA to build
@@ -21,7 +21,7 @@ on:
       petrel_ref:
         description: Exact Petrel commit SHA for Swift package verification
         required: true
-        default: 6ae52433268312c716ea96526762b4e38a5967ec
+        default: 6cf0bbdc41ed57c8b8e9b55430a18ae143283f18
         type: string
       petrel_catbird_ref:
         description: Exact PetrelCatbird commit SHA for Swift package verification

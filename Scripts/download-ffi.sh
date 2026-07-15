@@ -8,11 +8,11 @@ set -euo pipefail
 #
 # Env:
 #   FFI_RELEASE_TAG  immutable release tag to download
-#                    (default: ffi-w1-690d567b)
+#                    (default: ffi-w2-bd2fe34d)
 
 ASSET="CatbirdMLSFFI.xcframework.zip"
 REPO="joshlacal/CatbirdMLSCore"
-FFI_RELEASE_TAG="${FFI_RELEASE_TAG:-ffi-w1-690d567b}"
+FFI_RELEASE_TAG="${FFI_RELEASE_TAG:-ffi-w2-bd2fe34d}"
 
 BASE_URL="https://github.com/${REPO}/releases/download/${FFI_RELEASE_TAG}"
 

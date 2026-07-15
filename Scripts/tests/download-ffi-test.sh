@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_UNDER_TEST="$(cd "$(dirname "$0")/../.." && pwd)/Scripts/download-ffi.sh"
 readonly SCRIPT_UNDER_TEST
-readonly EXPECTED_DEFAULT_TAG="ffi-w1-690d567b"
+readonly EXPECTED_DEFAULT_TAG="ffi-w2-bd2fe34d"
 readonly ASSET="CatbirdMLSFFI.xcframework.zip"
 
 fail() {

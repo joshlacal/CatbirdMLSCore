@@ -3265,8 +3265,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * This method no longer performs an inline `join_or_rejoin`: the
      * orchestrator transitions the conversation to `RESET_PENDING`, persists
      * the payload via `mark_reset_pending`, deletes the old local MLS group,
-     * clears per-conversation recovery trackers, rebinds the group id, and
-     * flags `needs_rejoin`. The deferred-recovery loop driven by
+     * atomically arms `needs_rejoin`, clears per-conversation recovery
+     * trackers, and rebinds the group id. The deferred-recovery loop driven by
      * `sync_with_server` performs the actual rejoin on the next cycle —
      * inline External Commits from event paths are the production
      * epoch-inflation pattern (spec §8.5).
@@ -3854,8 +3854,8 @@ open class OrchestratorBridge:
      * This method no longer performs an inline `join_or_rejoin`: the
      * orchestrator transitions the conversation to `RESET_PENDING`, persists
      * the payload via `mark_reset_pending`, deletes the old local MLS group,
-     * clears per-conversation recovery trackers, rebinds the group id, and
-     * flags `needs_rejoin`. The deferred-recovery loop driven by
+     * atomically arms `needs_rejoin`, clears per-conversation recovery
+     * trackers, and rebinds the group id. The deferred-recovery loop driven by
      * `sync_with_server` performs the actual rejoin on the next cycle —
      * inline External Commits from event paths are the production
      * epoch-inflation pattern (spec §8.5).
@@ -14420,17 +14420,32 @@ public protocol OrchestratorStorageCallback: AnyObject {
      * - `reset_generation`: monotonic reset counter from the DS.
      * - `notified_at_ms`: Unix millis when the notification was observed.
      *
-     * The Rust trait (`MLSStorageBackend::mark_reset_pending`) provides a
-     * no-op default; platforms that haven't adopted the payload may keep the
-     * generated callback stub empty and the behavior is unchanged.
+     * This callback is mandatory. It is the sole authority-publication commit
+     * point and must atomically persist the state tag, complete tuple, and
+     * `needs_rejoin = true`, rejecting stale generations while preserving the
+     * old durable group mapping for restart-safe predecessor cleanup. Missing
+     * support fails closed.
      */
     func markResetPending(conversationId: String, newGroupIdHex: String, resetGeneration: Int32, notifiedAtMs: Int64) throws
 
     /**
-     * Clear any persisted `RESET_PENDING` payload after the conversation has
-     * successfully adopted the new group.
+     * Atomically adopt the server-verified winner of a reset race while
+     * preserving the exact committed ResetPending generation and payload.
      */
-    func clearResetPending(conversationId: String) throws
+    func adoptResetPendingTarget(conversationId: String, expectedGeneration: Int32, expectedOldTarget: String, authoritativeNewTarget: String) throws -> Bool
+
+    /**
+     * Atomically complete an exact reset generation and target: project the
+     * durable group mapping to that target, clear its payload, project durable
+     * Active, and clear the durable rejoin flag.
+     */
+    func completeResetPending(conversationId: String, expectedGeneration: Int32, expectedNewGroupIdHex: String, landedEpoch: UInt64) throws -> Bool
+
+    /**
+     * Clear an exact reset generation for local deletion without projecting
+     * Active.
+     */
+    func clearResetPendingForDelete(conversationId: String, expectedGeneration: Int32) throws -> Bool
 
     func markQuarantined(conversationId: String, reasonTag: String, sinceMs: Int64) throws
 
@@ -14730,23 +14745,85 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
                 lowerError: FfiConverterTypeOrchestratorBridgeError.lower
             )
         },
-        clearResetPending: { (
+        adoptResetPendingTarget: { (
             uniffiHandle: UInt64,
             conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
+            expectedGeneration: Int32,
+            expectedOldTarget: RustBuffer,
+            authoritativeNewTarget: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
             let makeCall = {
-                () throws in
+                () throws -> Bool in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.clearResetPending(
-                    conversationId: FfiConverterString.lift(conversationId)
+                return try uniffiObj.adoptResetPendingTarget(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    expectedGeneration: FfiConverterInt32.lift(expectedGeneration),
+                    expectedOldTarget: FfiConverterString.lift(expectedOldTarget),
+                    authoritativeNewTarget: FfiConverterString.lift(authoritativeNewTarget)
                 )
             }
 
-            let writeReturn = { () }
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        completeResetPending: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            expectedGeneration: Int32,
+            expectedNewGroupIdHex: RustBuffer,
+            landedEpoch: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.completeResetPending(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    expectedGeneration: FfiConverterInt32.lift(expectedGeneration),
+                    expectedNewGroupIdHex: FfiConverterString.lift(expectedNewGroupIdHex),
+                    landedEpoch: FfiConverterUInt64.lift(landedEpoch)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        clearResetPendingForDelete: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            expectedGeneration: Int32,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.clearResetPendingForDelete(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    expectedGeneration: FfiConverterInt32.lift(expectedGeneration)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -17375,7 +17452,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_handle_group_reset() != 65273 {
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_handle_group_reset() != 52429 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_initialize() != 22546 {
@@ -17696,85 +17773,91 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 39371 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 54157 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 60873 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending() != 23175 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 908 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 14855 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 37086 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 22788 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 22873 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 47045 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 26128 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 19120 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 24499 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 9569 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 56726 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 62279 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 22702 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 21771 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 10890 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 20850 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 769 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 40387 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 21213 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 43671 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 63956 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 40131 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 64461 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 32336 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 46670 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 62544 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 26611 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 15814 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 2671 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 53919 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 8217 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 60477 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 2908 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 51718 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 19423 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 23759 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 20369 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 48900 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 7206 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 28930 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 35633 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 241 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 56098 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 64743 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 14492 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 56447 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 39110 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 10000 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 16053 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 58449 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 13497 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 62447 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 53096 {
         return InitializationResult.apiChecksumMismatch
     }
 

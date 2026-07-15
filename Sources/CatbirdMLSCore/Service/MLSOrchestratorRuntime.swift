@@ -50,7 +50,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       authorizedDeviceKeyResolver: authorizedDeviceKeyResolver
     )
     let capabilities = SecurityStorageCapabilities(
-      version: 1,
+      version: 2,
       resetState: true,
       quarantine: true,
       pendingMessageProtection: true,

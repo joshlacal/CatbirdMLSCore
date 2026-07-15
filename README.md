@@ -53,8 +53,8 @@ Download the pinned pre-built `CatbirdMLSFFI.xcframework` from [GitHub Releases]
 # Easy way: use the download script
 ./Scripts/download-ffi.sh
 
-# To consume another immutable release explicitly:
-FFI_RELEASE_TAG=ffi-w1-690d567b ./Scripts/download-ffi.sh
+# To pin the current immutable release explicitly:
+FFI_RELEASE_TAG=ffi-w2-bd2fe34d ./Scripts/download-ffi.sh
 ```
 
 The downloader verifies the release checksum and the artifact's complete

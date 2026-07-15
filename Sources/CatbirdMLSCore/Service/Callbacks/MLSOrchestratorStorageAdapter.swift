@@ -100,10 +100,21 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             quarantine_reason TEXT,
             quarantined_since_ms INTEGER,
             reset_notified_at_ms INTEGER,
+            applied_reset_generation INTEGER CHECK (applied_reset_generation >= 0),
             updated_at DATETIME NOT NULL,
             PRIMARY KEY (conversation_id, user_did)
           )
           """)
+        let securityColumns = Set(
+          try db.columns(in: "mls_orchestrator_security_state").map(\.name)
+        )
+        if !securityColumns.contains("applied_reset_generation") {
+          try db.execute(sql: """
+            ALTER TABLE mls_orchestrator_security_state
+            ADD COLUMN applied_reset_generation INTEGER
+              CHECK (applied_reset_generation >= 0)
+            """)
+        }
         try db.execute(sql: """
           CREATE TABLE IF NOT EXISTS mls_orchestrator_pending_messages (
             message_id TEXT NOT NULL,
@@ -142,7 +153,8 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             "mls_orchestrator_security_state",
             [
               "conversation_id", "user_did", "quarantine_reason",
-              "quarantined_since_ms", "reset_notified_at_ms", "updated_at",
+              "quarantined_since_ms", "reset_notified_at_ms",
+              "applied_reset_generation", "updated_at",
             ]
           ),
           (
@@ -252,6 +264,16 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  private func requireCanonicalGroupID(_ value: String, field: String) throws {
+    try requireNonEmptyIdentifier(value, field: field)
+    guard let decoded = Data(hexEncoded: value),
+          !decoded.isEmpty,
+          decoded.hexEncodedString() == value
+    else {
+      throw storageFailure("\(field) must be non-empty canonical hexadecimal")
+    }
+  }
+
   private func requireValidDID(_ value: String, field: String) throws {
     let components = value.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
     guard components.count == 3,
@@ -280,18 +302,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
-  private func clearResetState(conversationId: String, in db: Database) throws {
-    try db.execute(
-      sql: """
-        UPDATE MLSConversationModel
-        SET needsReset = 0,
-            pendingNewGroupId = NULL,
-            pendingResetGeneration = NULL,
-            updatedAt = ?
-        WHERE conversationID = ? AND currentUserDID = ?
-        """,
-      arguments: [Date(), conversationId, userDID]
-    )
+  private func clearResetNotification(conversationId: String, in db: Database) throws {
     try db.execute(
       sql: """
         UPDATE mls_orchestrator_security_state
@@ -307,8 +318,32 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           AND quarantine_reason IS NULL
           AND quarantined_since_ms IS NULL
           AND reset_notified_at_ms IS NULL
+          AND applied_reset_generation IS NULL
         """,
       arguments: [conversationId, userDID]
+    )
+  }
+
+  private func recordAppliedResetGeneration(
+    conversationId: String,
+    generation: Int64,
+    in db: Database
+  ) throws {
+    try db.execute(
+      sql: """
+        INSERT INTO mls_orchestrator_security_state
+          (conversation_id, user_did, applied_reset_generation, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(conversation_id, user_did) DO UPDATE SET
+          applied_reset_generation = CASE
+            WHEN applied_reset_generation IS NULL
+              OR applied_reset_generation < excluded.applied_reset_generation
+            THEN excluded.applied_reset_generation
+            ELSE applied_reset_generation
+          END,
+          updated_at = excluded.updated_at
+        """,
+      arguments: [conversationId, userDID, generation, Date()]
     )
   }
 
@@ -529,7 +564,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       case "left", "inactive":
         try conversation.withActiveStatus(false).update(db)
       case "active":
-        try clearResetState(conversationId: conversationId, in: db)
+        guard !conversation.needsReset else {
+          throw storageFailure("pending reset requires exact completion")
+        }
         try db.execute(
           sql: """
             UPDATE MLSConversationModel
@@ -546,7 +583,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           .withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
           .update(db)
       case "failed":
-        try clearResetState(conversationId: conversationId, in: db)
+        guard !conversation.needsReset else {
+          throw storageFailure("pending reset requires exact completion")
+        }
         try db.execute(
           sql: """
             UPDATE MLSConversationModel
@@ -624,7 +663,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       return FfiConversationState(
         state: state,
         newGroupId: newGroupId,
-        resetGeneration: generation,
+        // A completed generation remains durable as the legacy replay fence,
+        // but it is no longer part of the public ResetPending payload.
+        resetGeneration: needsReset ? generation : nil,
         notifiedAtMs: notifiedAt,
         quarantineReason: reason,
         quarantinedSinceMs: since
@@ -660,12 +701,27 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       let stored = try Row.fetchOne(
         db,
         sql: """
-          SELECT pendingResetGeneration, pendingNewGroupId
-          FROM MLSConversationModel
-          WHERE conversationID = ? AND currentUserDID = ?
+          SELECT c.pendingResetGeneration, c.pendingNewGroupId,
+                 s.applied_reset_generation
+          FROM MLSConversationModel AS c
+          LEFT JOIN mls_orchestrator_security_state AS s
+            ON s.conversation_id = c.conversationID
+           AND s.user_did = c.currentUserDID
+          WHERE c.conversationID = ? AND c.currentUserDID = ?
           """,
         arguments: [conversationId, userDID]
       )
+      let appliedGeneration: Int64? = try stored?.decode(
+        forColumn: "applied_reset_generation"
+      )
+      if let appliedGeneration {
+        guard appliedGeneration >= 0 else {
+          throw storageFailure("stored applied reset generation is invalid")
+        }
+        if incomingGen <= appliedGeneration {
+          throw storageFailure("pending reset generation was already applied")
+        }
+      }
       let storedGeneration: Int64? = try stored?.decode(forColumn: "pendingResetGeneration")
       if let storedGeneration {
         guard storedGeneration <= incomingGen else {
@@ -694,7 +750,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         sql: """
           UPDATE MLSConversationModel
           SET needsReset = 1,
-              needsRejoin = 0,
+              needsRejoin = 1,
               isUnrecoverable = 0,
               pendingNewGroupId = ?,
               pendingResetGeneration = ?,
@@ -717,12 +773,154 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
-  /// Clear the reset marker and its full payload after the conversation has
-  /// adopted the new group. An independent quarantine overlay is preserved.
-  public func clearResetPending(conversationId: String) throws {
-    try dbPool.write { db in
+  /// Atomically replace the losing reset candidate with the server-authoritative
+  /// winner without completing the reset or changing any generation fence.
+  ///
+  /// This CAS is intentionally narrower than `markResetPending`: same-generation
+  /// replacement is allowed only when the caller supplies the exact durable old
+  /// target, and only for a complete ResetPending tuple with a notification.
+  public func adoptResetPendingTarget(
+    conversationId: String,
+    expectedGeneration: Int32,
+    expectedOldTarget: String,
+    authoritativeNewTarget: String
+  ) throws -> Bool {
+    guard expectedGeneration >= 0 else {
+      throw storageFailure("expected reset generation must not be negative")
+    }
+    try requireCanonicalGroupID(expectedOldTarget, field: "expected old reset target")
+    try requireCanonicalGroupID(authoritativeNewTarget, field: "authoritative reset target")
+
+    return try dbPool.write { db in
       try requireOwnedConversation(conversationId, in: db)
-      try clearResetState(conversationId: conversationId, in: db)
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET pendingNewGroupId = ?
+          WHERE conversationID = ? AND currentUserDID = ?
+            AND needsReset = 1
+            AND pendingResetGeneration = ?
+            AND pendingNewGroupId = ?
+            AND EXISTS (
+              SELECT 1
+              FROM mls_orchestrator_security_state AS security
+              WHERE security.conversation_id = MLSConversationModel.conversationID
+                AND security.user_did = MLSConversationModel.currentUserDID
+                AND security.reset_notified_at_ms IS NOT NULL
+                AND security.reset_notified_at_ms >= 0
+            )
+          """,
+        arguments: [
+          authoritativeNewTarget,
+          conversationId,
+          userDID,
+          Int64(expectedGeneration),
+          expectedOldTarget,
+        ]
+      )
+      return db.changesCount == 1
+    }
+  }
+
+  /// Complete exactly one durable reset tuple. This is a single CAS over the
+  /// generation and target, so a stale worker cannot project Active or replace
+  /// the durable conversation-to-group mapping after a newer reset arrives.
+  public func completeResetPending(
+    conversationId: String,
+    expectedGeneration: Int32,
+    expectedNewGroupIdHex: String,
+    landedEpoch: UInt64
+  ) throws -> Bool {
+    guard expectedGeneration >= 0 else {
+      throw storageFailure("expected reset generation must not be negative")
+    }
+    guard let durableEpoch = Int64(exactly: landedEpoch) else {
+      throw storageFailure("landed epoch exceeds durable storage range")
+    }
+    try requireNonEmptyIdentifier(conversationId, field: "conversation id")
+    try requireNonEmptyIdentifier(expectedNewGroupIdHex, field: "expected reset group id")
+    guard let expectedGroupID = Data(hexEncoded: expectedNewGroupIdHex) else {
+      throw storageFailure("expected reset group id must be valid hexadecimal")
+    }
+    return try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET groupID = ?,
+              epoch = ?,
+              joinEpoch = ?,
+              isActive = 1,
+              needsReset = 0,
+              needsRejoin = 0,
+              rejoinRequestedAt = NULL,
+              isUnrecoverable = 0,
+              pendingNewGroupId = NULL,
+              pendingResetGeneration = ?,
+              updatedAt = ?
+          WHERE conversationID = ? AND currentUserDID = ?
+            AND isActive = 1
+            AND needsReset = 1
+            AND pendingResetGeneration = ?
+            AND pendingNewGroupId = ?
+            AND EXISTS (
+              SELECT 1
+              FROM mls_orchestrator_security_state AS security
+              WHERE security.conversation_id = MLSConversationModel.conversationID
+                AND security.user_did = MLSConversationModel.currentUserDID
+                AND security.reset_notified_at_ms IS NOT NULL
+                AND security.reset_notified_at_ms >= 0
+            )
+          """,
+        arguments: [
+          expectedGroupID, durableEpoch, durableEpoch, Int64(expectedGeneration), Date(),
+          conversationId, userDID,
+          Int64(expectedGeneration), expectedNewGroupIdHex,
+        ]
+      )
+      guard db.changesCount == 1 else { return false }
+      try recordAppliedResetGeneration(
+        conversationId: conversationId,
+        generation: Int64(expectedGeneration),
+        in: db
+      )
+      try clearResetNotification(conversationId: conversationId, in: db)
+      return true
+    }
+  }
+
+  /// Clear exactly one durable reset generation for local deletion. Unlike
+  /// completion, this does not project Active or change the durable group map.
+  public func clearResetPendingForDelete(
+    conversationId: String,
+    expectedGeneration: Int32
+  ) throws -> Bool {
+    guard expectedGeneration >= 0 else {
+      throw storageFailure("expected reset generation must not be negative")
+    }
+    return try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsReset = 0,
+              needsRejoin = 0,
+              pendingNewGroupId = NULL,
+              pendingResetGeneration = NULL,
+              updatedAt = ?
+          WHERE conversationID = ? AND currentUserDID = ?
+            AND needsReset = 1
+            AND pendingResetGeneration = ?
+          """,
+        arguments: [Date(), conversationId, userDID, Int64(expectedGeneration)]
+      )
+      guard db.changesCount == 1 else { return false }
+      try recordAppliedResetGeneration(
+        conversationId: conversationId,
+        generation: Int64(expectedGeneration),
+        in: db
+      )
+      try clearResetNotification(conversationId: conversationId, in: db)
+      return true
     }
   }
 
@@ -770,6 +968,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             AND quarantine_reason IS NULL
             AND quarantined_since_ms IS NULL
             AND reset_notified_at_ms IS NULL
+            AND applied_reset_generation IS NULL
           """,
         arguments: [conversationId, userDID]
       )
@@ -801,14 +1000,17 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func clearRejoinFlag(conversationId: String) throws {
     try dbPool.write { db in
-      if let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
-        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
-        .fetchOne(db)
-      {
-        let updated = conversation.withRejoinState(needsRejoin: false, rejoinRequestedAt: nil)
-        try updated.update(db)
-      }
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsRejoin = 0,
+              rejoinRequestedAt = NULL,
+              updatedAt = ?
+          WHERE conversationID = ? AND currentUserDID = ?
+            AND needsReset = 0
+          """,
+        arguments: [Date(), conversationId, userDID]
+      )
     }
   }
 

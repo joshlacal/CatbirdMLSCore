@@ -35,10 +35,10 @@ assert_before() {
         || fail "workflow must place '$first' before '$second'"
 }
 
-assert_contains "default: ffi-w1-690d567b"
-assert_contains "default: 690d567b6d892064ae315f8776c3537006d88f93"
+assert_contains "default: ffi-w2-bd2fe34d"
+assert_contains "default: bd2fe34d9a87f7466b673043f76a03aeadc8e111"
 assert_contains "default: 8b2f92e28097c0788492f2f82328f4ab5b032953"
-assert_contains "default: 6ae52433268312c716ea96526762b4e38a5967ec"
+assert_contains "default: 6cf0bbdc41ed57c8b8e9b55430a18ae143283f18"
 assert_contains "default: 22781c730383dd5faa690afe1e002f97876e8ef0"
 assert_contains "name: Reject existing release tag or assets"
 assert_contains "\"repos/\${GITHUB_REPOSITORY}/releases?per_page=100\""
@@ -127,7 +127,7 @@ MOCK
     set +e
     PATH="${mock_bin}:$PATH" \
         GITHUB_REPOSITORY="joshlacal/CatbirdMLSCore" \
-        RELEASE_TAG="ffi-w1-690d567b" \
+        RELEASE_TAG="ffi-w2-bd2fe34d" \
         MOCK_RELEASE_TAGS="$release_tags" \
         bash "$step_script" >/dev/null 2>&1
     result_code=$?
@@ -147,7 +147,7 @@ MOCK
 }
 
 assert_preflight_result success ""
-assert_preflight_result failure $'ffi-w1-690d567b\n'
+assert_preflight_result failure $'ffi-w2-bd2fe34d\n'
 
 assert_manifest_generation() {
     local fixture_root
