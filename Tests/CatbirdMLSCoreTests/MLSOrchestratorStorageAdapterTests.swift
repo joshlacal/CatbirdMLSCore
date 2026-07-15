@@ -1010,6 +1010,53 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(completed.appliedResetGeneration, 3)
   }
 
+  func testCompleteResetPendingDoesNotResurrectConversationDeletedDuringRecovery() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-deleted-in-flight"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markNeedsRejoin(conversationId: conversationID)
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 3,
+      notifiedAtMs: 300
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET epoch = 741, joinEpoch = 742
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+
+    try adapter.deleteConversations(
+      userDid: "did:plc:receiver",
+      ids: [conversationID]
+    )
+    let deleted = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertFalse(deleted.isActive)
+    XCTAssertTrue(deleted.needsReset)
+    XCTAssertEqual(deleted.pendingResetGeneration, 3)
+    XCTAssertEqual(deleted.pendingNewGroupID, "05060708")
+
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 3,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 3
+      )
+    )
+    XCTAssertEqual(try resetAuthoritySnapshot(conversationID: conversationID), deleted)
+  }
+
   func testClearResetPendingForDeleteIsExactAndDoesNotProjectActiveOrTarget() throws {
     let adapter = try makeAdapter()
     try adapter.ensureConversationExists(
