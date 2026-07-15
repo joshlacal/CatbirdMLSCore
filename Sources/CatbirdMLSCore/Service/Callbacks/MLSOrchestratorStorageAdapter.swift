@@ -845,6 +845,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
               isActive = 1,
               needsReset = 0,
               needsRejoin = 0,
+              rejoinRequestedAt = NULL,
               isUnrecoverable = 0,
               pendingNewGroupId = NULL,
               pendingResetGeneration = NULL,

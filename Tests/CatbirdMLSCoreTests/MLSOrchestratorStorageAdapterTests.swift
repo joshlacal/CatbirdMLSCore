@@ -878,6 +878,46 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(groupID.hexEncodedString(), "090a0b0c")
   }
 
+  func testCompleteResetPendingClearsRejoinRequestSoLaterRecoveryCanRearm() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-clear-rejoin-request"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markNeedsRejoin(conversationId: conversationID)
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 3,
+      notifiedAtMs: 300
+    )
+
+    XCTAssertNotNil(try rejoinRequestedAt(conversationID: conversationID))
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 2,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
+    XCTAssertNotNil(try rejoinRequestedAt(conversationID: conversationID))
+
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 3,
+        expectedNewGroupIdHex: "05060708"
+      )
+    )
+    XCTAssertNil(try rejoinRequestedAt(conversationID: conversationID))
+
+    try adapter.markNeedsRejoin(conversationId: conversationID)
+    XCTAssertTrue(try adapter.needsRejoin(conversationId: conversationID))
+    XCTAssertNotNil(try rejoinRequestedAt(conversationID: conversationID))
+  }
+
   func testClearResetPendingForDeleteIsExactAndDoesNotProjectActiveOrTarget() throws {
     let adapter = try makeAdapter()
     try adapter.ensureConversationExists(
@@ -1294,6 +1334,20 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       userDID: userDID,
       mlsContext: context
     )
+  }
+
+  private func rejoinRequestedAt(conversationID: String) throws -> Date? {
+    try dbPool.read { db in
+      try Date.fetchOne(
+        db,
+        sql: """
+          SELECT rejoinRequestedAt
+          FROM MLSConversationModel
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
   }
 
   private func makeReceipt(
