@@ -989,14 +989,17 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func clearRejoinFlag(conversationId: String) throws {
     try dbPool.write { db in
-      if let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
-        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
-        .fetchOne(db)
-      {
-        let updated = conversation.withRejoinState(needsRejoin: false, rejoinRequestedAt: nil)
-        try updated.update(db)
-      }
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET needsRejoin = 0,
+              rejoinRequestedAt = NULL,
+              updatedAt = ?
+          WHERE conversationID = ? AND currentUserDID = ?
+            AND needsReset = 0
+          """,
+        arguments: [Date(), conversationId, userDID]
+      )
     }
   }
 

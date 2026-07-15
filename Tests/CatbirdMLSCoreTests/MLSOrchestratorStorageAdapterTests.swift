@@ -1204,6 +1204,39 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(groupID.hexEncodedString(), "01020304")
   }
 
+  func testStaleRejoinClearCannotDisarmNewerPendingReset() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-stale-rejoin-clear"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markNeedsRejoin(conversationId: conversationID)
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+    let pending = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertTrue(pending.needsReset)
+    XCTAssertTrue(pending.needsRejoin)
+    XCTAssertNotNil(pending.rejoinRequestedAt)
+
+    try adapter.clearRejoinFlag(conversationId: conversationID)
+
+    XCTAssertEqual(try resetAuthoritySnapshot(conversationID: conversationID), pending)
+    let restarted = try makeAdapter()
+    let state = try XCTUnwrap(
+      restarted.getConversationState(conversationId: conversationID)
+    )
+    XCTAssertEqual(state.state, "reset_pending")
+    XCTAssertEqual(state.newGroupId, "05060708")
+    XCTAssertEqual(state.resetGeneration, 7)
+    XCTAssertEqual(state.notifiedAtMs, 700)
+  }
+
   func testAppliedGenerationHighWaterRejectsStaleReplayAfterLaterCompletion() throws {
     let adapter = try makeAdapter()
     try adapter.ensureConversationExists(
