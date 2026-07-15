@@ -38,6 +38,28 @@ cd "$(dirname "$0")/../../catbird-mls"
 echo "📦 Step 1: Building XCFramework..."
 ./create-xcframework.sh
 
+# create-xcframework.sh materializes each native slice twice: first under
+# build/libs, then inside the completed XCFramework. On release runners, keeping
+# both copies while making a third package copy can exhaust the disk. Verify the
+# durable outputs first, then release only the reproducible staging copies. Keep
+# Cargo target outputs intact so the workflow can still save its build cache.
+for framework_library in \
+    CatbirdMLSFFI.xcframework/ios-arm64/libCatbirdMLSFFI.a \
+    CatbirdMLSFFI.xcframework/ios-arm64_x86_64-simulator/libCatbirdMLSFFI.a \
+    CatbirdMLSFFI.xcframework/ios-arm64_x86_64-maccatalyst/libCatbirdMLSFFI.a \
+    CatbirdMLSFFI.xcframework/macos-arm64_x86_64/libCatbirdMLSFFI.a; do
+    if [[ ! -s "$framework_library" ]]; then
+        echo "❌ Completed XCFramework is missing ${framework_library}"
+        exit 1
+    fi
+done
+if [[ ! -s build/bindings/CatbirdMLS.swift ]]; then
+    echo "❌ Generated Swift binding is missing"
+    exit 1
+fi
+rm -rf build/libs build/frameworks
+echo "🧹 Released verified XCFramework staging copies"
+
 echo ""
 echo "📋 Step 2: Copying XCFramework to CatbirdMLSCore..."
 rm -rf ../CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework
