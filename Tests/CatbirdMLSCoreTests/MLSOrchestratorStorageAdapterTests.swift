@@ -570,6 +570,176 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(state.notifiedAtMs, 100)
   }
 
+  func testAdoptResetPendingTargetAtomicallyChangesOnlyTargetAndSurvivesRestart() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-adopt"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel SET needsRejoin = 0
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+      try db.execute(
+        sql: """
+          UPDATE mls_orchestrator_security_state SET applied_reset_generation = 6
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+    let before = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+
+    XCTAssertTrue(
+      try adapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    let after = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertEqual(after.groupID, before.groupID)
+    XCTAssertEqual(after.isActive, before.isActive)
+    XCTAssertTrue(after.needsReset)
+    XCTAssertTrue(after.needsRejoin)
+    XCTAssertEqual(after.isUnrecoverable, before.isUnrecoverable)
+    XCTAssertEqual(after.pendingNewGroupID, "090a0b0c")
+    XCTAssertEqual(after.pendingResetGeneration, before.pendingResetGeneration)
+    XCTAssertEqual(after.conversationUpdatedAt, before.conversationUpdatedAt)
+    XCTAssertEqual(after.resetNotifiedAt, before.resetNotifiedAt)
+    XCTAssertEqual(after.appliedResetGeneration, before.appliedResetGeneration)
+    XCTAssertEqual(after.securityUpdatedAt, before.securityUpdatedAt)
+
+    XCTAssertFalse(
+      try adapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "0d0e0f10"
+      )
+    )
+    let restartedAdapter = try makeAdapter()
+    let restarted = try XCTUnwrap(
+      restartedAdapter.getConversationState(conversationId: conversationID)
+    )
+    XCTAssertEqual(restarted.state, "reset_pending")
+    XCTAssertEqual(restarted.newGroupId, "090a0b0c")
+    XCTAssertEqual(restarted.resetGeneration, 7)
+    XCTAssertEqual(restarted.notifiedAtMs, 700)
+    XCTAssertTrue(
+      try restartedAdapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "090a0b0c",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    XCTAssertEqual(try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)), after)
+  }
+
+  func testAdoptResetPendingTargetRejectsStaleOrIncompleteAuthorityWithoutMutation() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-adopt-reject"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+    let committed = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+
+    XCTAssertFalse(
+      try adapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 6,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    XCTAssertFalse(
+      try adapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "0d0e0f10",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    XCTAssertEqual(try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)), committed)
+
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE mls_orchestrator_security_state SET reset_notified_at_ms = NULL
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+    let incomplete = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertFalse(
+      try adapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    XCTAssertEqual(try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)), incomplete)
+  }
+
+  func testAdoptResetPendingTargetRejectsNonCanonicalInputs() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-reset-adopt-invalid",
+      groupId: "01020304"
+    )
+    assertThrowsStorageError("must not be negative") {
+      _ = try adapter.adoptResetPendingTarget(
+        conversationId: "convo-reset-adopt-invalid",
+        expectedGeneration: -1,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    }
+    for invalidTarget in ["", "not-hex", "0506070", "0506070A"] {
+      assertThrowsStorageError("canonical hexadecimal") {
+        _ = try adapter.adoptResetPendingTarget(
+          conversationId: "convo-reset-adopt-invalid",
+          expectedGeneration: 7,
+          expectedOldTarget: invalidTarget,
+          authoritativeNewTarget: "090a0b0c"
+        )
+      }
+      assertThrowsStorageError("canonical hexadecimal") {
+        _ = try adapter.adoptResetPendingTarget(
+          conversationId: "convo-reset-adopt-invalid",
+          expectedGeneration: 7,
+          expectedOldTarget: "05060708",
+          authoritativeNewTarget: invalidTarget
+        )
+      }
+    }
+  }
+
   func testCompleteResetPendingRequiresExactGenerationAndTarget() throws {
     let adapter = try makeAdapter()
     try adapter.ensureConversationExists(
@@ -993,6 +1163,57 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       Set(try db.columns(in: "mls_orchestrator_security_state").map(\.name))
     }
     XCTAssertTrue(columns.contains("applied_reset_generation"))
+  }
+
+  private struct ResetAuthoritySnapshot: Equatable {
+    let groupID: Data
+    let isActive: Bool
+    let needsReset: Bool
+    let needsRejoin: Bool
+    let isUnrecoverable: Bool
+    let pendingNewGroupID: String?
+    let pendingResetGeneration: Int64?
+    let conversationUpdatedAt: Date
+    let resetNotifiedAt: Int64?
+    let appliedResetGeneration: Int64?
+    let securityUpdatedAt: Date
+  }
+
+  private func resetAuthoritySnapshot(
+    conversationID: String
+  ) throws -> ResetAuthoritySnapshot? {
+    try dbPool.read { db in
+      guard let row = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT c.groupID, c.isActive, c.needsReset, c.needsRejoin,
+                 c.isUnrecoverable, c.pendingNewGroupId, c.pendingResetGeneration,
+                 c.updatedAt AS conversation_updated_at,
+                 s.reset_notified_at_ms, s.applied_reset_generation,
+                 s.updated_at AS security_updated_at
+          FROM MLSConversationModel AS c
+          JOIN mls_orchestrator_security_state AS s
+            ON s.conversation_id = c.conversationID
+           AND s.user_did = c.currentUserDID
+          WHERE c.conversationID = ? AND c.currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      ) else { return nil }
+
+      return try ResetAuthoritySnapshot(
+        groupID: row.decode(forColumn: "groupID"),
+        isActive: row.decode(forColumn: "isActive"),
+        needsReset: row.decode(forColumn: "needsReset"),
+        needsRejoin: row.decode(forColumn: "needsRejoin"),
+        isUnrecoverable: row.decode(forColumn: "isUnrecoverable"),
+        pendingNewGroupID: row.decode(forColumn: "pendingNewGroupId"),
+        pendingResetGeneration: row.decode(forColumn: "pendingResetGeneration"),
+        conversationUpdatedAt: row.decode(forColumn: "conversation_updated_at"),
+        resetNotifiedAt: row.decode(forColumn: "reset_notified_at_ms"),
+        appliedResetGeneration: row.decode(forColumn: "applied_reset_generation"),
+        securityUpdatedAt: row.decode(forColumn: "security_updated_at")
+      )
+    }
   }
 
   private func makeAdapter(

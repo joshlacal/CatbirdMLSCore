@@ -264,6 +264,16 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  private func requireCanonicalGroupID(_ value: String, field: String) throws {
+    try requireNonEmptyIdentifier(value, field: field)
+    guard let decoded = Data(hexEncoded: value),
+          !decoded.isEmpty,
+          decoded.hexEncodedString() == value
+    else {
+      throw storageFailure("\(field) must be non-empty canonical hexadecimal")
+    }
+  }
+
   private func requireValidDID(_ value: String, field: String) throws {
     let components = value.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
     guard components.count == 3,
@@ -758,6 +768,57 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           """,
         arguments: [conversationId, userDID, notifiedAtMs, Date()]
       )
+    }
+  }
+
+  /// Atomically replace the losing reset candidate with the server-authoritative
+  /// winner without completing the reset or changing any generation fence.
+  ///
+  /// This CAS is intentionally narrower than `markResetPending`: same-generation
+  /// replacement is allowed only when the caller supplies the exact durable old
+  /// target, and only for a complete ResetPending tuple with a notification.
+  public func adoptResetPendingTarget(
+    conversationId: String,
+    expectedGeneration: Int32,
+    expectedOldTarget: String,
+    authoritativeNewTarget: String
+  ) throws -> Bool {
+    guard expectedGeneration >= 0 else {
+      throw storageFailure("expected reset generation must not be negative")
+    }
+    try requireCanonicalGroupID(expectedOldTarget, field: "expected old reset target")
+    try requireCanonicalGroupID(authoritativeNewTarget, field: "authoritative reset target")
+
+    return try dbPool.write { db in
+      try requireOwnedConversation(conversationId, in: db)
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET pendingNewGroupId = ?,
+              needsReset = 1,
+              needsRejoin = 1
+          WHERE conversationID = ? AND currentUserDID = ?
+            AND needsReset = 1
+            AND pendingResetGeneration = ?
+            AND pendingNewGroupId = ?
+            AND EXISTS (
+              SELECT 1
+              FROM mls_orchestrator_security_state AS security
+              WHERE security.conversation_id = MLSConversationModel.conversationID
+                AND security.user_did = MLSConversationModel.currentUserDID
+                AND security.reset_notified_at_ms IS NOT NULL
+                AND security.reset_notified_at_ms >= 0
+            )
+          """,
+        arguments: [
+          authoritativeNewTarget,
+          conversationId,
+          userDID,
+          Int64(expectedGeneration),
+          expectedOldTarget,
+        ]
+      )
+      return db.changesCount == 1
     }
   }
 
