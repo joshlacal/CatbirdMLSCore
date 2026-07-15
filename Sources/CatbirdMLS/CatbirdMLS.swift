@@ -14439,7 +14439,7 @@ public protocol OrchestratorStorageCallback: AnyObject {
      * durable group mapping to that target, clear its payload, project durable
      * Active, and clear the durable rejoin flag.
      */
-    func completeResetPending(conversationId: String, expectedGeneration: Int32, expectedNewGroupIdHex: String) throws -> Bool
+    func completeResetPending(conversationId: String, expectedGeneration: Int32, expectedNewGroupIdHex: String, landedEpoch: UInt64) throws -> Bool
 
     /**
      * Clear an exact reset generation for local deletion without projecting
@@ -14780,6 +14780,7 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
             conversationId: RustBuffer,
             expectedGeneration: Int32,
             expectedNewGroupIdHex: RustBuffer,
+            landedEpoch: UInt64,
             uniffiOutReturn: UnsafeMutablePointer<Int8>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -14791,7 +14792,8 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
                 return try uniffiObj.completeResetPending(
                     conversationId: FfiConverterString.lift(conversationId),
                     expectedGeneration: FfiConverterInt32.lift(expectedGeneration),
-                    expectedNewGroupIdHex: FfiConverterString.lift(expectedNewGroupIdHex)
+                    expectedNewGroupIdHex: FfiConverterString.lift(expectedNewGroupIdHex),
+                    landedEpoch: FfiConverterUInt64.lift(landedEpoch)
                 )
             }
 
@@ -17777,7 +17779,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 908 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 58111 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 37086 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 22873 {
