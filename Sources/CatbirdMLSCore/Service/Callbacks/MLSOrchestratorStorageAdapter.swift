@@ -663,7 +663,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       return FfiConversationState(
         state: state,
         newGroupId: newGroupId,
-        resetGeneration: generation,
+        // A completed generation remains durable as the legacy replay fence,
+        // but it is no longer part of the public ResetPending payload.
+        resetGeneration: needsReset ? generation : nil,
         notifiedAtMs: notifiedAt,
         quarantineReason: reason,
         quarantinedSinceMs: since
@@ -853,7 +855,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
               rejoinRequestedAt = NULL,
               isUnrecoverable = 0,
               pendingNewGroupId = NULL,
-              pendingResetGeneration = NULL,
+              pendingResetGeneration = ?,
               updatedAt = ?
           WHERE conversationID = ? AND currentUserDID = ?
             AND isActive = 1
@@ -862,7 +864,8 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             AND pendingNewGroupId = ?
           """,
         arguments: [
-          expectedGroupID, durableEpoch, durableEpoch, Date(), conversationId, userDID,
+          expectedGroupID, durableEpoch, durableEpoch, Int64(expectedGeneration), Date(),
+          conversationId, userDID,
           Int64(expectedGeneration), expectedNewGroupIdHex,
         ]
       )

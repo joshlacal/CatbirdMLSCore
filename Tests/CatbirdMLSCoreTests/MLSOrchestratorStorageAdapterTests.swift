@@ -1024,9 +1024,26 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertFalse(completed.isUnrecoverable)
     XCTAssertNil(completed.rejoinRequestedAt)
     XCTAssertNil(completed.pendingNewGroupID)
-    XCTAssertNil(completed.pendingResetGeneration)
+    XCTAssertEqual(
+      completed.pendingResetGeneration,
+      3,
+      "completed generation remains as the stale-replay fence for legacy reset handlers"
+    )
     XCTAssertNil(completed.resetNotifiedAt)
     XCTAssertEqual(completed.appliedResetGeneration, 3)
+
+    let legacyFence = try dbPool.read { db in
+      try MLSConversationResetSQL.loadPendingResetGeneration(
+        db: db,
+        conversationID: conversationID,
+        currentUserDID: "did:plc:receiver"
+      )
+    }
+    XCTAssertEqual(
+      legacyFence,
+      3,
+      "a replayed legacy reset must be rejected before deleting the landed group"
+    )
   }
 
   func testCompleteResetPendingDoesNotResurrectConversationDeletedDuringRecovery() throws {
