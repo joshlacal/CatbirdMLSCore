@@ -1093,6 +1093,52 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(try resetAuthoritySnapshot(conversationID: conversationID), deleted)
   }
 
+  func testCompleteResetPendingRequiresPublishedNotificationAuthority() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-missing-notification-authority"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 3,
+      notifiedAtMs: 300
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE mls_orchestrator_security_state
+          SET reset_notified_at_ms = NULL
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+
+    let incompleteAuthority = try XCTUnwrap(
+      resetAuthoritySnapshot(conversationID: conversationID)
+    )
+    XCTAssertTrue(incompleteAuthority.needsReset)
+    XCTAssertNil(incompleteAuthority.resetNotifiedAt)
+
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 3,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 3
+      ),
+      "completion must not project Active without published notification authority"
+    )
+    XCTAssertEqual(
+      try resetAuthoritySnapshot(conversationID: conversationID),
+      incompleteAuthority
+    )
+  }
+
   func testClearResetPendingForDeleteIsExactAndDoesNotProjectActiveOrTarget() throws {
     let adapter = try makeAdapter()
     try adapter.ensureConversationExists(

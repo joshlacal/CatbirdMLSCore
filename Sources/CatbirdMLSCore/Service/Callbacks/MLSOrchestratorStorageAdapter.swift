@@ -862,6 +862,14 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             AND needsReset = 1
             AND pendingResetGeneration = ?
             AND pendingNewGroupId = ?
+            AND EXISTS (
+              SELECT 1
+              FROM mls_orchestrator_security_state AS security
+              WHERE security.conversation_id = MLSConversationModel.conversationID
+                AND security.user_did = MLSConversationModel.currentUserDID
+                AND security.reset_notified_at_ms IS NOT NULL
+                AND security.reset_notified_at_ms >= 0
+            )
           """,
         arguments: [
           expectedGroupID, durableEpoch, durableEpoch, Int64(expectedGeneration), Date(),
