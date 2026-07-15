@@ -827,21 +827,27 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func completeResetPending(
     conversationId: String,
     expectedGeneration: Int32,
-    expectedNewGroupIdHex: String
+    expectedNewGroupIdHex: String,
+    landedEpoch: UInt64
   ) throws -> Bool {
     guard expectedGeneration >= 0 else {
       throw storageFailure("expected reset generation must not be negative")
     }
+    guard let durableEpoch = Int64(exactly: landedEpoch) else {
+      throw storageFailure("landed epoch exceeds durable storage range")
+    }
+    try requireNonEmptyIdentifier(conversationId, field: "conversation id")
     try requireNonEmptyIdentifier(expectedNewGroupIdHex, field: "expected reset group id")
     guard let expectedGroupID = Data(hexEncoded: expectedNewGroupIdHex) else {
       throw storageFailure("expected reset group id must be valid hexadecimal")
     }
     return try dbPool.write { db in
-      try requireOwnedConversation(conversationId, in: db)
       try db.execute(
         sql: """
           UPDATE MLSConversationModel
           SET groupID = ?,
+              epoch = ?,
+              joinEpoch = ?,
               isActive = 1,
               needsReset = 0,
               needsRejoin = 0,
@@ -856,7 +862,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             AND pendingNewGroupId = ?
           """,
         arguments: [
-          expectedGroupID, Date(), conversationId, userDID,
+          expectedGroupID, durableEpoch, durableEpoch, Date(), conversationId, userDID,
           Int64(expectedGeneration), expectedNewGroupIdHex,
         ]
       )

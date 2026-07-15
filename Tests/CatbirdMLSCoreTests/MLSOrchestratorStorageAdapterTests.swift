@@ -171,7 +171,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: "convo-security",
         expectedGeneration: 4,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     XCTAssertTrue(
@@ -220,7 +221,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try restartedAdapter.completeResetPending(
         conversationId: "convo-active-transition",
         expectedGeneration: 5,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     state = try XCTUnwrap(
@@ -516,7 +518,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: "convo-coexist",
         expectedGeneration: 12,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     let quarantined = try XCTUnwrap(adapter.getConversationState(conversationId: "convo-coexist"))
@@ -833,14 +836,16 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: "convo-reset-clear-cas",
         expectedGeneration: 1,
-        expectedNewGroupIdHex: "090a0b0c"
+        expectedNewGroupIdHex: "090a0b0c",
+        landedEpoch: 0
       )
     )
     XCTAssertFalse(
       try adapter.completeResetPending(
         conversationId: "convo-reset-clear-cas",
         expectedGeneration: 2,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     var state = try XCTUnwrap(
@@ -855,7 +860,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: "convo-reset-clear-cas",
         expectedGeneration: 2,
-        expectedNewGroupIdHex: "090a0b0c"
+        expectedNewGroupIdHex: "090a0b0c",
+        landedEpoch: 0
       )
     )
     state = try XCTUnwrap(
@@ -899,7 +905,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: conversationID,
         expectedGeneration: 2,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     XCTAssertNotNil(try rejoinRequestedAt(conversationID: conversationID))
@@ -908,7 +915,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: conversationID,
         expectedGeneration: 3,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     XCTAssertNil(try rejoinRequestedAt(conversationID: conversationID))
@@ -916,6 +924,90 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     try adapter.markNeedsRejoin(conversationId: conversationID)
     XCTAssertTrue(try adapter.needsRejoin(conversationId: conversationID))
     XCTAssertNotNil(try rejoinRequestedAt(conversationID: conversationID))
+  }
+
+  func testCompleteResetPendingAtomicallyProjectsLandedEpochAndPreservesAuthorityOnMisses() throws {
+    let adapter = try makeAdapter()
+    let conversationID = "convo-reset-landed-epoch"
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapter.markNeedsRejoin(conversationId: conversationID)
+    try adapter.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 3,
+      notifiedAtMs: 300
+    )
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET epoch = 741, joinEpoch = 742
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+
+    let pending = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertEqual(pending.epoch, 741)
+    XCTAssertEqual(pending.joinEpoch, 742)
+    XCTAssertNotNil(pending.rejoinRequestedAt)
+
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 2,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 3
+      )
+    )
+    XCTAssertEqual(try resetAuthoritySnapshot(conversationID: conversationID), pending)
+
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 3,
+        expectedNewGroupIdHex: "090a0b0c",
+        landedEpoch: 3
+      )
+    )
+    XCTAssertEqual(try resetAuthoritySnapshot(conversationID: conversationID), pending)
+
+    XCTAssertFalse(
+      try adapter.completeResetPending(
+        conversationId: "convo-reset-landed-epoch-missing",
+        expectedGeneration: 3,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 3
+      )
+    )
+    XCTAssertEqual(try resetAuthoritySnapshot(conversationID: conversationID), pending)
+
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: conversationID,
+        expectedGeneration: 3,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 3
+      )
+    )
+    let completed = try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID))
+    XCTAssertEqual(completed.groupID.hexEncodedString(), "05060708")
+    XCTAssertEqual(completed.epoch, 3)
+    XCTAssertEqual(completed.joinEpoch, 3)
+    XCTAssertTrue(completed.isActive)
+    XCTAssertFalse(completed.needsReset)
+    XCTAssertFalse(completed.needsRejoin)
+    XCTAssertFalse(completed.isUnrecoverable)
+    XCTAssertNil(completed.rejoinRequestedAt)
+    XCTAssertNil(completed.pendingNewGroupID)
+    XCTAssertNil(completed.pendingResetGeneration)
+    XCTAssertNil(completed.resetNotifiedAt)
+    XCTAssertEqual(completed.appliedResetGeneration, 3)
   }
 
   func testClearResetPendingForDeleteIsExactAndDoesNotProjectActiveOrTarget() throws {
@@ -981,14 +1073,24 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       _ = try adapter.completeResetPending(
         conversationId: "convo-reset-clear-negative",
         expectedGeneration: -1,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     }
     assertThrowsStorageError("valid hexadecimal") {
       _ = try adapter.completeResetPending(
         conversationId: "convo-reset-clear-negative",
         expectedGeneration: 1,
-        expectedNewGroupIdHex: "not-hex"
+        expectedNewGroupIdHex: "not-hex",
+        landedEpoch: 0
+      )
+    }
+    assertThrowsStorageError("durable storage range") {
+      _ = try adapter.completeResetPending(
+        conversationId: "convo-reset-clear-negative",
+        expectedGeneration: 1,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: UInt64.max
       )
     }
     assertThrowsStorageError("expected reset generation must not be negative") {
@@ -1053,7 +1155,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: "convo-reset-high-water",
         expectedGeneration: 1,
-        expectedNewGroupIdHex: "05060708"
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 0
       )
     )
     try adapter.markResetPending(
@@ -1066,7 +1169,8 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       try adapter.completeResetPending(
         conversationId: "convo-reset-high-water",
         expectedGeneration: 2,
-        expectedNewGroupIdHex: "090a0b0c"
+        expectedNewGroupIdHex: "090a0b0c",
+        landedEpoch: 0
       )
     )
 
@@ -1276,10 +1380,13 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
 
   private struct ResetAuthoritySnapshot: Equatable {
     let groupID: Data
+    let epoch: Int64
+    let joinEpoch: Int64
     let isActive: Bool
     let needsReset: Bool
     let needsRejoin: Bool
     let isUnrecoverable: Bool
+    let rejoinRequestedAt: Date?
     let pendingNewGroupID: String?
     let pendingResetGeneration: Int64?
     let conversationUpdatedAt: Date
@@ -1295,8 +1402,9 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       guard let row = try Row.fetchOne(
         db,
         sql: """
-          SELECT c.groupID, c.isActive, c.needsReset, c.needsRejoin,
-                 c.isUnrecoverable, c.pendingNewGroupId, c.pendingResetGeneration,
+          SELECT c.groupID, c.epoch, c.joinEpoch, c.isActive, c.needsReset, c.needsRejoin,
+                 c.isUnrecoverable, c.rejoinRequestedAt,
+                 c.pendingNewGroupId, c.pendingResetGeneration,
                  c.updatedAt AS conversation_updated_at,
                  s.reset_notified_at_ms, s.applied_reset_generation,
                  s.updated_at AS security_updated_at
@@ -1311,10 +1419,13 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
 
       return try ResetAuthoritySnapshot(
         groupID: row.decode(forColumn: "groupID"),
+        epoch: row.decode(forColumn: "epoch"),
+        joinEpoch: row.decode(forColumn: "joinEpoch"),
         isActive: row.decode(forColumn: "isActive"),
         needsReset: row.decode(forColumn: "needsReset"),
         needsRejoin: row.decode(forColumn: "needsRejoin"),
         isUnrecoverable: row.decode(forColumn: "isUnrecoverable"),
+        rejoinRequestedAt: row.decode(forColumn: "rejoinRequestedAt"),
         pendingNewGroupID: row.decode(forColumn: "pendingNewGroupId"),
         pendingResetGeneration: row.decode(forColumn: "pendingResetGeneration"),
         conversationUpdatedAt: row.decode(forColumn: "conversation_updated_at"),
