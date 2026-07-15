@@ -794,11 +794,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       try db.execute(
         sql: """
           UPDATE MLSConversationModel
-          SET pendingNewGroupId = ?,
-              needsReset = 1,
-              needsRejoin = 1
+          SET pendingNewGroupId = ?
           WHERE conversationID = ? AND currentUserDID = ?
             AND needsReset = 1
+            AND needsRejoin = 1
             AND pendingResetGeneration = ?
             AND pendingNewGroupId = ?
             AND EXISTS (

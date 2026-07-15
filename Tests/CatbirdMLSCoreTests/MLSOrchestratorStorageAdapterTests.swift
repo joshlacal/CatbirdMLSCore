@@ -587,13 +587,6 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     try dbPool.write { db in
       try db.execute(
         sql: """
-          UPDATE MLSConversationModel SET needsRejoin = 0
-          WHERE conversationID = ? AND currentUserDID = ?
-          """,
-        arguments: [conversationID, "did:plc:receiver"]
-      )
-      try db.execute(
-        sql: """
           UPDATE mls_orchestrator_security_state SET applied_reset_generation = 6
           WHERE conversation_id = ? AND user_did = ?
           """,
@@ -650,6 +643,50 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)), after)
   }
 
+  func testAdoptResetPendingTargetAllowsOnlyOneCompetingWinnerAcrossReopen() async throws {
+    let adapterOne = try makeAdapter()
+    let adapterTwo = try makeAdapter()
+    let conversationID = "convo-reset-adopt-race"
+    try adapterOne.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: conversationID,
+      groupId: "01020304"
+    )
+    try adapterOne.markResetPending(
+      conversationId: conversationID,
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 700
+    )
+
+    let winnerOne = Task.detached {
+      try adapterOne.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    }
+    let winnerTwo = Task.detached {
+      try adapterTwo.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "0d0e0f10"
+      )
+    }
+    let results = try await [winnerOne.value, winnerTwo.value]
+    XCTAssertEqual(results.filter { $0 }.count, 1)
+
+    let expectedWinner = results[0] ? "090a0b0c" : "0d0e0f10"
+    let reopened = try makeAdapter()
+    let state = try XCTUnwrap(reopened.getConversationState(conversationId: conversationID))
+    XCTAssertEqual(state.state, "reset_pending")
+    XCTAssertEqual(state.newGroupId, expectedWinner)
+    XCTAssertEqual(state.resetGeneration, 7)
+    XCTAssertEqual(state.notifiedAtMs, 700)
+  }
+
   func testAdoptResetPendingTargetRejectsStaleOrIncompleteAuthorityWithoutMutation() throws {
     let adapter = try makeAdapter()
     let conversationID = "convo-reset-adopt-reject"
@@ -703,6 +740,38 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       )
     )
     XCTAssertEqual(try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)), incomplete)
+
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel SET needsRejoin = 0
+          WHERE conversationID = ? AND currentUserDID = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+      try db.execute(
+        sql: """
+          UPDATE mls_orchestrator_security_state SET reset_notified_at_ms = 700
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationID, "did:plc:receiver"]
+      )
+    }
+    let missingRejoinAuthority = try XCTUnwrap(
+      resetAuthoritySnapshot(conversationID: conversationID)
+    )
+    XCTAssertFalse(
+      try adapter.adoptResetPendingTarget(
+        conversationId: conversationID,
+        expectedGeneration: 7,
+        expectedOldTarget: "05060708",
+        authoritativeNewTarget: "090a0b0c"
+      )
+    )
+    XCTAssertEqual(
+      try XCTUnwrap(resetAuthoritySnapshot(conversationID: conversationID)),
+      missingRejoinAuthority
+    )
   }
 
   func testAdoptResetPendingTargetRejectsNonCanonicalInputs() throws {
