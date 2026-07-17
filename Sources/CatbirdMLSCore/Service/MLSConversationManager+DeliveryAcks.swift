@@ -142,7 +142,7 @@ extension MLSConversationManager {
             epoch: Int(localEpoch),
             seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
-            messageType: "deliveryAck"
+            messageType: .value_app
           ),
           payload: payload,
           senderDID: userDid,
@@ -285,7 +285,7 @@ extension MLSConversationManager {
             epoch: Int(localEpoch),
             seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
-            messageType: "recoveryRequest"
+            messageType: .value_app
           ),
           payload: payload,
           senderDID: userDid,
@@ -442,7 +442,7 @@ extension MLSConversationManager {
             epoch: Int(localEpoch),
             seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
-            messageType: originalPayload.messageType.rawValue
+            messageType: .value_app
           ),
           payload: recoveryPayload,
           senderDID: userDid,

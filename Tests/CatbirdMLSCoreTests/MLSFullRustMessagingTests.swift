@@ -26,6 +26,36 @@ final class MLSFullRustMessagingTests: XCTestCase {
     try super.tearDownWithError()
   }
 
+  func testTypedMessageKindsKeepOnlyCommitOnProtocolPath() {
+    XCTAssertTrue(MLSConversationManager.isApplicationMessageType(.value_app))
+    XCTAssertFalse(MLSConversationManager.isApplicationMessageType(.value_commit))
+    XCTAssertTrue(MLSConversationManager.isApplicationMessageType(nil))
+  }
+
+  func testUnknownMessageKindDegradesToLegacyNonCommitPath() throws {
+    let message = BlueCatbirdMlsChatDefs.MessageView(
+      id: "msg-future-kind",
+      convoId: "convo-future-kind",
+      ciphertext: Bytes(data: Data([0x01])),
+      epoch: 1,
+      seq: 1,
+      createdAt: ATProtocolDate(date: Date(timeIntervalSince1970: 0)),
+      messageType: .value_app
+    )
+    let encoded = try JSONEncoder().encode(message)
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    object["messageType"] = "future-protocol-kind"
+    let futureWire = try JSONSerialization.data(withJSONObject: object)
+
+    let decoded = try JSONDecoder().decode(
+      BlueCatbirdMlsChatDefs.MessageView.self,
+      from: futureWire
+    )
+
+    XCTAssertNil(decoded.messageType)
+    XCTAssertTrue(MLSConversationManager.isApplicationMessageType(decoded.messageType))
+  }
+
   func testRustFullSendUsesResultBridgeAndSkipsLegacySendPath() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     try await seedConversation(conversationID: "convo-send", on: manager)
@@ -94,7 +124,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
       epoch: 7,
       seq: 44,
       createdAt: ATProtocolDate(date: Date()),
-      messageType: "message"
+      messageType: .value_app
     )
 
     let outcome = try await manager.processServerMessage(message, source: "unit-test")
@@ -130,7 +160,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
       epoch: 7,
       seq: 44,
       createdAt: ATProtocolDate(date: Date()),
-      messageType: "message"
+      messageType: .value_app
     )
 
     _ = try await manager.processServerMessage(message, source: "unit-test")

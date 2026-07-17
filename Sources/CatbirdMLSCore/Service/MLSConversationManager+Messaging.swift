@@ -9,6 +9,16 @@ import Synchronization
 public extension MLSConversationManager {
   private typealias AdoptedReaction = MLSStorage.AdoptedReaction
 
+  /// Only the canonical commit discriminator may enter commit-first processing.
+  /// A missing discriminator is the legacy application-message representation;
+  /// generated decoding also degrades future enum values to nil after logging,
+  /// so they cannot be silently promoted to a protocol commit.
+  internal static func isApplicationMessageType(
+    _ messageType: BlueCatbirdMlsChatDefs.MessageViewMessageType?
+  ) -> Bool {
+    messageType != .value_commit
+  }
+
   internal struct RustEngineResetNotification {
     let convoId: String
     let newGroupId: String
@@ -679,7 +689,7 @@ public extension MLSConversationManager {
               epoch: Int(localEpoch),
               seq: optimisticSeq,
               createdAt: ATProtocolDate(date: Date()),
-              messageType: "app"
+              messageType: .value_app
             ),
             payload: payload,
             senderDID: userDid,
@@ -944,7 +954,7 @@ public extension MLSConversationManager {
             epoch: Int(localEpoch),
             seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
-            messageType: "reaction"
+            messageType: .value_app
         ),
         payload: payload,
         senderDID: userDid,
@@ -1215,7 +1225,7 @@ public extension MLSConversationManager {
     )
 
     // 🔍 DEBUG: Log decision for all messages
-    logger.info("🔍 [PROCESS-DECISION] msg=\(message.id.prefix(16)) seq=\(message.seq) type=\(message.messageType ?? "nil") epoch=\(message.epoch) decision=\(String(describing: decision))")
+    logger.info("🔍 [PROCESS-DECISION] msg=\(message.id.prefix(16)) seq=\(message.seq) type=\(message.messageType?.rawValue ?? "nil") epoch=\(message.epoch) decision=\(String(describing: decision))")
 
     switch decision {
     case .alreadyProcessed:
@@ -2377,8 +2387,7 @@ public extension MLSConversationManager {
       ) {
         logger.info("🔍 [CACHE-LOOKUP] Found cached message \(message.id.prefix(16)) - processingError=\(cachedMessage.processingError ?? "nil"), payloadExpired=\(cachedMessage.payloadExpired), hasPayload=\(cachedMessage.parsedPayload != nil)")
         if let processingError = cachedMessage.processingError {
-          let normalizedType = (message.messageType ?? "app").lowercased()
-          let isApplication = normalizedType == "app" || normalizedType == "application"
+          let isApplication = Self.isApplicationMessageType(message.messageType)
           let shouldShowCachedAppPlaceholder =
             isApplication
             && processingError == "Message from old epoch"
@@ -2854,8 +2863,7 @@ public extension MLSConversationManager {
       throw MLSConversationError.noAuthentication
     }
 
-    let normalizedType = (message.messageType ?? "app").lowercased()
-    let isApplication = normalizedType == "app" || normalizedType == "application"
+    let isApplication = Self.isApplicationMessageType(message.messageType)
     let placeholderPayload = placeholderPayload(for: message, text: "⚠️ Message unavailable")
     try await persistPlaceholderPayload(
       message: message,
@@ -2929,8 +2937,7 @@ public extension MLSConversationManager {
     for message: BlueCatbirdMlsChatDefs.MessageView,
     text: String
   ) -> MLSMessagePayload {
-    let normalizedType = (message.messageType ?? "app").lowercased()
-    if normalizedType == "app" || normalizedType == "application" {
+    if Self.isApplicationMessageType(message.messageType) {
       return MLSMessagePayload.text(text, embed: nil)
     }
     return MLSMessagePayload.typing(isTyping: false)
@@ -3014,8 +3021,7 @@ public extension MLSConversationManager {
 
       clearSelfDecryptFailures(conversationID: message.convoId)
 
-      let normalizedType = (message.messageType ?? "app").lowercased()
-      if normalizedType == "app" || normalizedType == "application" {
+      if Self.isApplicationMessageType(message.messageType) {
         return .application(payload: cachedPayload, sender: userDid)
       }
       return .nonApplication
@@ -3151,8 +3157,7 @@ public extension MLSConversationManager {
       let (appMessages, commitMessages) = epochMessages.reduce(
         into: (app: [BlueCatbirdMlsChatDefs.MessageView](), commit: [BlueCatbirdMlsChatDefs.MessageView]())
       ) { result, msg in
-        let msgType = (msg.messageType ?? "app").lowercased()
-        if msgType == "app" || msgType == "application" {
+        if Self.isApplicationMessageType(msg.messageType) {
           result.app.append(msg)
         } else {
           result.commit.append(msg)
