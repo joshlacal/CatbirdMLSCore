@@ -154,15 +154,12 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
     XCTAssertEqual(queryHashes, [hashes[0], hashes[1]])
   }
 
-  func testWelcomeHashQueryCapsOversizedLocalManifest() {
+  func testWelcomeHashQueryOmitsOversizedLocalManifest() {
     let hashes = (0 ... MLSAPIClient.maxWelcomeKeyPackageHashesForQuery).map {
       String(format: "%064x", $0)
     }
 
-    XCTAssertEqual(
-      MLSAPIClient.welcomeKeyPackageHashesForQuery(hashes),
-      Array(hashes.prefix(MLSAPIClient.maxWelcomeKeyPackageHashesForQuery))
-    )
+    XCTAssertNil(MLSAPIClient.welcomeKeyPackageHashesForQuery(hashes))
   }
 
   func testGroupResetDetectionAcceptsTypedHTTP410() {

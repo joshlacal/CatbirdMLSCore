@@ -621,8 +621,10 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
         "withRustAuthoritativeRuntime",
       ],
       "public func syncWithServer(fullSync: Bool = false) async throws": [
+        "bridgeMissingMetadataTitlesAfterRustSync",
         "hydrateSwiftCachesFromDatabaseAfterRustSync",
         "hydrateSwiftCachesFromRustSnapshotsAfterRustSync",
+        "persistRustHydratedMembers",
         "withRustAuthoritativeRuntime",
       ],
       "internal func runDeferredEpochRecovery() async throws": [

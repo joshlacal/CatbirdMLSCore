@@ -1583,10 +1583,56 @@ public actor MLSCoreContext {
           plaintext = ""
           embedData = nil
 
-        // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
-        // Treat like deliveryAck/recoveryRequest for now: non-displayable, still
-        // persisted below so sequence numbers advance correctly.
-        case .edit, .delete, .unknown:
+        case .edit:
+          plaintext = ""
+          embedData = nil
+          if let editPayload = payload.edit, actualSender != "unknown" {
+            do {
+              _ = try await storage.applyOrPersistOrphanedEdit(
+                conversationID: conversationID,
+                targetMessageID: editPayload.targetMessageId,
+                newText: editPayload.newText,
+                editorUserDID: actualSender,
+                editSeq: actualSeq,
+                currentUserDID: userDid,
+                context: context,
+                database: database
+              )
+              logger.info(
+                "[DECRYPT] Applied/parked edit for \(editPayload.targetMessageId.prefix(16))... (ephemeral=\(useEphemeralAccess))"
+              )
+            } catch {
+              logger.error(
+                "❌ [DECRYPT] FAILED to apply edit for \(editPayload.targetMessageId.prefix(16))... error: \(error.localizedDescription)"
+              )
+            }
+          }
+
+        case .delete:
+          plaintext = ""
+          embedData = nil
+          if let deletePayload = payload.delete, actualSender != "unknown" {
+            do {
+              _ = try await storage.applyOrPersistOrphanedDelete(
+                conversationID: conversationID,
+                targetMessageID: deletePayload.targetMessageId,
+                senderUserDID: actualSender,
+                deleteSeq: actualSeq,
+                currentUserDID: userDid,
+                context: context,
+                database: database
+              )
+              logger.info(
+                "[DECRYPT] Applied/parked delete for \(deletePayload.targetMessageId.prefix(16))... (ephemeral=\(useEphemeralAccess))"
+              )
+            } catch {
+              logger.error(
+                "❌ [DECRYPT] FAILED to apply delete for \(deletePayload.targetMessageId.prefix(16))... error: \(error.localizedDescription)"
+              )
+            }
+          }
+
+        case .unknown:
           plaintext = ""
           embedData = nil
         }
@@ -2498,8 +2544,16 @@ public actor MLSCoreContext {
       return payload.text ?? "System message"
     case .deliveryAck, .recoveryRequest:
       return ""
-    // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
-    case .edit, .delete, .unknown:
+    case .edit:
+      // Notification-only convenience text; the actual mutation is applied via
+      // `storage.applyOrPersistOrphanedEdit` in `performDecryption`.
+      if let edit = payload.edit {
+        return "Edited: \(edit.newText)"
+      }
+      return "Edited a message"
+    case .delete:
+      return "Message deleted"
+    case .unknown:
       return ""
     }
   }
@@ -2526,8 +2580,16 @@ public actor MLSCoreContext {
       return payload.text ?? "System message"
     case .deliveryAck, .recoveryRequest:
       return nil
-    // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
-    case .edit, .delete, .unknown:
+    case .edit:
+      return payload.edit?.newText
+    case .delete:
+      // Non-nil sentinel so a persisted `.delete` satisfies the idempotency
+      // pre-checks above (matching `.edit`'s non-nil `newText`) — otherwise
+      // `if let plaintext = cachedPlaintext(from: payload)` always fails for
+      // an already-applied tombstone and the message is re-decrypted on
+      // every call instead of being recognized as already handled.
+      return ""
+    case .unknown:
       return nil
     }
   }

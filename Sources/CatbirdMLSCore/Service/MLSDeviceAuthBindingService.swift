@@ -1,3 +1,4 @@
+import CatbirdMLS
 import Foundation
 import Petrel
 import PetrelCatbird
@@ -96,6 +97,13 @@ public enum MLSDeviceAuthBindingError: Error, Equatable, Sendable {
   case bindingMismatch
   case concurrentEnrollment
   case transportFailure
+  /// The Rust orchestrator bridge refused to sign because the initialized user
+  /// changed mid-call (or the bridge was not yet initialized / already shut
+  /// down). This is expected transient churn around a lifecycle-generation
+  /// switch, not a terminal failure requiring user intervention — callers
+  /// should retry once the user-lifecycle generation has settled rather than
+  /// surfacing it as `.signingFailed`.
+  case notAuthenticated
 }
 
 extension MLSDeviceAuthBindingError: LocalizedError {
@@ -123,6 +131,8 @@ extension MLSDeviceAuthBindingError: LocalizedError {
       return "Another MLS device binding attempt is already active"
     case .transportFailure:
       return "The MLS device binding request failed"
+    case .notAuthenticated:
+      return "The MLS device binding challenge could not be signed because the active user changed"
     }
   }
 }
@@ -284,6 +294,14 @@ public actor MLSDeviceAuthBindingService {
       signature = try await signer(challenge.challenge)
     } catch is CancellationError {
       throw CancellationError()
+    } catch let bridgeError as OrchestratorBridgeError {
+      // Preserve the specific lifecycle-generation condition: it is expected,
+      // retryable churn around a user switch, never a hard signing failure.
+      // Never collapse this into `.signingFailed` (see `.notAuthenticated` doc).
+      if case .NotAuthenticated = bridgeError {
+        throw MLSDeviceAuthBindingError.notAuthenticated
+      }
+      throw MLSDeviceAuthBindingError.signingFailed
     } catch {
       throw MLSDeviceAuthBindingError.signingFailed
     }

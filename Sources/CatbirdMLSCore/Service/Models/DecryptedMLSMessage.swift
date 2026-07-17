@@ -72,15 +72,14 @@ public extension DecryptedMLSMessage {
     payload.messageType == .text
   }
 
-  /// Whether this is a control message (reaction)
+  /// Whether this is a control message (reaction, edit, delete — never rendered
+  /// as their own chat bubble; edit/delete mutate an existing message instead).
   var isControlMessage: Bool {
     switch payload.messageType {
-    case .reaction:
+    case .reaction, .edit, .delete:
       return true
     case .text, .readReceipt, .typing, .adminRoster, .adminAction, .system,
-         .deliveryAck, .recoveryRequest,
-         // B1-TODO: apply edit/tombstone (a later milestone implements real behavior).
-         .edit, .delete, .unknown:
+         .deliveryAck, .recoveryRequest, .unknown:
       return false
     }
   }

@@ -252,7 +252,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
   }
 
-  func testRustFullStartupDeviceAndKeyPackageReadinessUsesRustRuntime() async throws {
+  func testRustFullStartupDeviceReadinessUsesRustRuntimeAndDefersKeyPackageReplenishment() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingStartupReconcileBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
@@ -270,11 +270,17 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
       userDid: "did:plc:testuser",
       operation: "unitStartupReadiness"
     )
-    await manager.keyPackageRefreshTask?.value
 
+    // Replenishment is deferred onto the background `keyPackageRefreshTask`,
+    // not run synchronously as part of startup readiness.
     XCTAssertTrue(prepared)
     XCTAssertEqual(bridge.startupReconcileCallCount, 1)
     XCTAssertEqual(bridge.ensureDeviceRegisteredCallCount, 1)
+    XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 0)
+
+    // Once the deferred task actually runs (after device auth binding has
+    // settled), replenishment completes in the background.
+    await manager.keyPackageRefreshTask?.value
     XCTAssertEqual(bridge.replenishKeyPackagesCallCount, 1)
   }
 

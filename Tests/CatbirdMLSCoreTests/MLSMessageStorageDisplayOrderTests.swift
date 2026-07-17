@@ -81,7 +81,8 @@ final class MLSMessageStorageDisplayOrderTests: XCTestCase {
       epoch: epoch,
       sequenceNumber: sequenceNumber,
       isDelivered: true,
-      processingState: MLSMessageProcessingState.cached
+      processingState: MLSMessageProcessingState.cached,
+      payloadKeyVersion: 1
     )
 
     try await dbQueue.write { db in
@@ -114,6 +115,14 @@ final class MLSMessageStorageDisplayOrderTests: XCTestCase {
       t.column("processingError", .text)
       t.column("processingAttempts", .integer).notNull().defaults(to: 0)
       t.column("validationFailureReason", .text)
+      t.column("payloadEncrypted", .blob)
+      t.column("entryHMAC", .blob)
+      t.column("payloadKeyVersion", .integer).notNull().defaults(to: 1)
+      t.column("isTombstone", .integer).notNull().defaults(to: 0)
+      t.column("deletedAt", .integer)
+      t.column("isEdited", .integer).notNull().defaults(to: 0)
+      t.column("editedAt", .datetime)
+      t.column("appliedEditSeq", .integer)
     }
   }
 }

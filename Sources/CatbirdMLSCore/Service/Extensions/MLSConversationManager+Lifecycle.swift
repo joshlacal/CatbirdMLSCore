@@ -1607,6 +1607,35 @@ extension MLSConversationManager {
     force: Bool = false,
     suspendedResumePermit: MLSClient.SuspendedResumeCapability? = nil
   ) async throws -> MLSDeviceAuthBindingStatus {
+    do {
+      return try await bindRustDeviceAuthenticationAttempt(
+        userDid: userDid,
+        force: force,
+        suspendedResumePermit: suspendedResumePermit
+      )
+    } catch MLSDeviceAuthBindingError.notAuthenticated {
+      // The Rust bridge discarded the in-flight signature because the
+      // initialized user changed mid-call (or the bridge briefly sat between
+      // shutdown and re-initialize). That is expected lifecycle-generation
+      // churn, not a terminal failure requiring user intervention: retry
+      // exactly once, re-resolving the runtime and device id fresh so the
+      // retry binds to whichever user generation has now settled. The failed
+      // attempt already self-cleaned its enrollment/binding bookkeeping in
+      // `MLSClient.awaitDeviceAuthEnrollment`'s failure path, so no explicit
+      // `force` invalidation is needed before retrying.
+      return try await bindRustDeviceAuthenticationAttempt(
+        userDid: userDid,
+        force: force,
+        suspendedResumePermit: suspendedResumePermit
+      )
+    }
+  }
+
+  private func bindRustDeviceAuthenticationAttempt(
+    userDid: String,
+    force: Bool,
+    suspendedResumePermit: MLSClient.SuspendedResumeCapability?
+  ) async throws -> MLSDeviceAuthBindingStatus {
     if force {
       await MLSClient.shared.invalidateDeviceAuthBindingForReplacement(
         for: userDid,
