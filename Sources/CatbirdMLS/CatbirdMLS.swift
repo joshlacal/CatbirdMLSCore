@@ -4816,6 +4816,565 @@ public func FfiConverterTypeChatMessage_lower(_ value: ChatMessage) -> RustBuffe
 }
 
 /**
+ * One named capability, with the sentence that explains it.
+ *
+ * The description is not decoration. These lists coordinate lanes and outlive
+ * the context of whoever wrote them: an entry reading only `mls-crypto-seam`
+ * tells a reader in six months that something is missing but not what, and a
+ * bare name in the outstanding list is the kind of thing that gets deleted
+ * because nobody remembers why it is there.
+ */
+public struct ChatV2Capability {
+    /**
+     * The stable identifier lanes coordinate on.
+     */
+    public var name: String
+    /**
+     * One line: what it is, and for an outstanding entry, why it is not done.
+     */
+    public var description: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * The stable identifier lanes coordinate on.
+         */ name: String,
+        /* 
+            * One line: what it is, and for an outstanding entry, why it is not done.
+            */ description: String
+    ) {
+        self.name = name
+        self.description = description
+    }
+}
+
+extension ChatV2Capability: Equatable, Hashable {
+    public static func == (lhs: ChatV2Capability, rhs: ChatV2Capability) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.description != rhs.description {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(description)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2Capability: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2Capability {
+        return
+            try ChatV2Capability(
+                name: FfiConverterString.read(from: &buf),
+                description: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ChatV2Capability, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2Capability_lift(_ buf: RustBuffer) throws -> ChatV2Capability {
+    return try FfiConverterTypeChatV2Capability.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2Capability_lower(_ value: ChatV2Capability) -> RustBuffer {
+    return FfiConverterTypeChatV2Capability.lower(value)
+}
+
+/**
+ * A classified `blue.catbird.chat.*` endpoint failure.
+ *
+ * The three policy answers are carried as precomputed fields rather than left
+ * to the platform to derive from `class`. Deriving them per platform is how
+ * five clients end up with five retry policies.
+ */
+public struct ChatV2EndpointError {
+    /**
+     * The NSID of the endpoint that failed.
+     */
+    public var endpoint: String
+    /**
+     * The exact wire error code, preserved even when unrecognized.
+     */
+    public var code: String
+    /**
+     * Whether this build recognizes the code.
+     */
+    public var isKnownCode: Bool
+    /**
+     * The server's human-readable detail, if any. Never a policy input.
+     *
+     * Named `detail` rather than `message` on purpose: the Android build
+     * post-processes generated Kotlin to rename error `message` members that
+     * collide with `Throwable.message`, against a hardcoded type list.
+     */
+    public var detail: String?
+    /**
+     * The policy classification.
+     */
+    public var `class`: ChatV2ErrorClass
+    /**
+     * Whether the same request may be retried after a backoff delay.
+     */
+    public var isRetryableAfterBackoff: Bool
+    /**
+     * Whether local state must be refetched and the request rebuilt.
+     */
+    public var requiresStateResync: Bool
+    /**
+     * Whether the device's authentication must be repaired first.
+     */
+    public var requiresReauthentication: Bool
+    /**
+     * Whether no automatic action can advance this attempt.
+     */
+    public var isTerminalForRequest: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * The NSID of the endpoint that failed.
+         */ endpoint: String,
+        /* 
+            * The exact wire error code, preserved even when unrecognized.
+            */ code: String,
+        /* 
+            * Whether this build recognizes the code.
+            */ isKnownCode: Bool,
+        /* 
+            * The server's human-readable detail, if any. Never a policy input.
+            *
+            * Named `detail` rather than `message` on purpose: the Android build
+            * post-processes generated Kotlin to rename error `message` members that
+            * collide with `Throwable.message`, against a hardcoded type list.
+            */ detail: String?,
+        /* 
+            * The policy classification.
+            */ class: ChatV2ErrorClass,
+        /* 
+            * Whether the same request may be retried after a backoff delay.
+            */ isRetryableAfterBackoff: Bool,
+        /* 
+            * Whether local state must be refetched and the request rebuilt.
+            */ requiresStateResync: Bool,
+        /* 
+            * Whether the device's authentication must be repaired first.
+            */ requiresReauthentication: Bool,
+        /* 
+            * Whether no automatic action can advance this attempt.
+            */ isTerminalForRequest: Bool
+    ) {
+        self.endpoint = endpoint
+        self.code = code
+        self.isKnownCode = isKnownCode
+        self.detail = detail
+        self.class = `class`
+        self.isRetryableAfterBackoff = isRetryableAfterBackoff
+        self.requiresStateResync = requiresStateResync
+        self.requiresReauthentication = requiresReauthentication
+        self.isTerminalForRequest = isTerminalForRequest
+    }
+}
+
+extension ChatV2EndpointError: Equatable, Hashable {
+    public static func == (lhs: ChatV2EndpointError, rhs: ChatV2EndpointError) -> Bool {
+        if lhs.endpoint != rhs.endpoint {
+            return false
+        }
+        if lhs.code != rhs.code {
+            return false
+        }
+        if lhs.isKnownCode != rhs.isKnownCode {
+            return false
+        }
+        if lhs.detail != rhs.detail {
+            return false
+        }
+        if lhs.class != rhs.class {
+            return false
+        }
+        if lhs.isRetryableAfterBackoff != rhs.isRetryableAfterBackoff {
+            return false
+        }
+        if lhs.requiresStateResync != rhs.requiresStateResync {
+            return false
+        }
+        if lhs.requiresReauthentication != rhs.requiresReauthentication {
+            return false
+        }
+        if lhs.isTerminalForRequest != rhs.isTerminalForRequest {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(endpoint)
+        hasher.combine(code)
+        hasher.combine(isKnownCode)
+        hasher.combine(detail)
+        hasher.combine(`class`)
+        hasher.combine(isRetryableAfterBackoff)
+        hasher.combine(requiresStateResync)
+        hasher.combine(requiresReauthentication)
+        hasher.combine(isTerminalForRequest)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2EndpointError: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2EndpointError {
+        return
+            try ChatV2EndpointError(
+                endpoint: FfiConverterString.read(from: &buf),
+                code: FfiConverterString.read(from: &buf),
+                isKnownCode: FfiConverterBool.read(from: &buf),
+                detail: FfiConverterOptionString.read(from: &buf),
+                class: FfiConverterTypeChatV2ErrorClass.read(from: &buf),
+                isRetryableAfterBackoff: FfiConverterBool.read(from: &buf),
+                requiresStateResync: FfiConverterBool.read(from: &buf),
+                requiresReauthentication: FfiConverterBool.read(from: &buf),
+                isTerminalForRequest: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ChatV2EndpointError, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.endpoint, into: &buf)
+        FfiConverterString.write(value.code, into: &buf)
+        FfiConverterBool.write(value.isKnownCode, into: &buf)
+        FfiConverterOptionString.write(value.detail, into: &buf)
+        FfiConverterTypeChatV2ErrorClass.write(value.class, into: &buf)
+        FfiConverterBool.write(value.isRetryableAfterBackoff, into: &buf)
+        FfiConverterBool.write(value.requiresStateResync, into: &buf)
+        FfiConverterBool.write(value.requiresReauthentication, into: &buf)
+        FfiConverterBool.write(value.isTerminalForRequest, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2EndpointError_lift(_ buf: RustBuffer) throws -> ChatV2EndpointError {
+    return try FfiConverterTypeChatV2EndpointError.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2EndpointError_lower(_ value: ChatV2EndpointError) -> RustBuffer {
+    return FfiConverterTypeChatV2EndpointError.lower(value)
+}
+
+/**
+ * The single recovery projection every platform consumes.
+ *
+ * There are deliberately no platform-specific variants. A per-platform
+ * projection is how two clients come to disagree about whether a device may
+ * escalate, and the ladder's bound only means something if every client reads
+ * the same answer.
+ *
+ * Every policy field is **precomputed here**. A platform must never derive
+ * `may_escalate` from `is_exhausted`, or decide for itself what "exhausted"
+ * implies — that is five clients with five policies again.
+ */
+public struct ChatV2RecoveryProjection {
+    /**
+     * The highest rung already attempted in this episode, if any.
+     */
+    public var reachedRung: ChatV2RecoveryRung?
+    /**
+     * The rung this device must attempt next, if any.
+     *
+     * `None` means exhausted. It never means "choose one".
+     */
+    public var nextRung: ChatV2RecoveryRung?
+    /**
+     * Precomputed: whether any rung remains.
+     */
+    public var mayEscalate: Bool
+    /**
+     * Precomputed: whether every rung has been tried.
+     *
+     * Exhaustion is **not** a licence to act outside the ladder. There is no
+     * step above a reset request, and a platform reaching this state escalates
+     * to a human, never to an external commit or a local reset.
+     */
+    public var isExhausted: Bool
+    /**
+     * Precomputed: whether the next step mutates conversation state.
+     *
+     * False for catch-up **and when the ladder is exhausted**, since there is
+     * no next step at all to mutate anything. The second case is easy to read
+     * past: `false` here does not mean "safe to retry", it means "nothing this
+     * field describes". A platform must consult `next_rung` — `None` is
+     * exhaustion, and the answer there is escalation to a human, never a
+     * retry.
+     *
+     * A platform may retry a non-mutating *step* freely and must not retry a
+     * mutating one without going through Rust.
+     */
+    public var nextStepMutates: Bool
+    /**
+     * A display label for the next step. **Never a policy input.**
+     */
+    public var nextStepLabel: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * The highest rung already attempted in this episode, if any.
+         */ reachedRung: ChatV2RecoveryRung?,
+        /* 
+            * The rung this device must attempt next, if any.
+            *
+            * `None` means exhausted. It never means "choose one".
+            */ nextRung: ChatV2RecoveryRung?,
+        /* 
+            * Precomputed: whether any rung remains.
+            */ mayEscalate: Bool,
+        /* 
+            * Precomputed: whether every rung has been tried.
+            *
+            * Exhaustion is **not** a licence to act outside the ladder. There is no
+            * step above a reset request, and a platform reaching this state escalates
+            * to a human, never to an external commit or a local reset.
+            */ isExhausted: Bool,
+        /* 
+            * Precomputed: whether the next step mutates conversation state.
+            *
+            * False for catch-up **and when the ladder is exhausted**, since there is
+            * no next step at all to mutate anything. The second case is easy to read
+            * past: `false` here does not mean "safe to retry", it means "nothing this
+            * field describes". A platform must consult `next_rung` — `None` is
+            * exhaustion, and the answer there is escalation to a human, never a
+            * retry.
+            *
+            * A platform may retry a non-mutating *step* freely and must not retry a
+            * mutating one without going through Rust.
+            */ nextStepMutates: Bool,
+        /* 
+            * A display label for the next step. **Never a policy input.**
+            */ nextStepLabel: String?
+    ) {
+        self.reachedRung = reachedRung
+        self.nextRung = nextRung
+        self.mayEscalate = mayEscalate
+        self.isExhausted = isExhausted
+        self.nextStepMutates = nextStepMutates
+        self.nextStepLabel = nextStepLabel
+    }
+}
+
+extension ChatV2RecoveryProjection: Equatable, Hashable {
+    public static func == (lhs: ChatV2RecoveryProjection, rhs: ChatV2RecoveryProjection) -> Bool {
+        if lhs.reachedRung != rhs.reachedRung {
+            return false
+        }
+        if lhs.nextRung != rhs.nextRung {
+            return false
+        }
+        if lhs.mayEscalate != rhs.mayEscalate {
+            return false
+        }
+        if lhs.isExhausted != rhs.isExhausted {
+            return false
+        }
+        if lhs.nextStepMutates != rhs.nextStepMutates {
+            return false
+        }
+        if lhs.nextStepLabel != rhs.nextStepLabel {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(reachedRung)
+        hasher.combine(nextRung)
+        hasher.combine(mayEscalate)
+        hasher.combine(isExhausted)
+        hasher.combine(nextStepMutates)
+        hasher.combine(nextStepLabel)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2RecoveryProjection: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2RecoveryProjection {
+        return
+            try ChatV2RecoveryProjection(
+                reachedRung: FfiConverterOptionTypeChatV2RecoveryRung.read(from: &buf),
+                nextRung: FfiConverterOptionTypeChatV2RecoveryRung.read(from: &buf),
+                mayEscalate: FfiConverterBool.read(from: &buf),
+                isExhausted: FfiConverterBool.read(from: &buf),
+                nextStepMutates: FfiConverterBool.read(from: &buf),
+                nextStepLabel: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ChatV2RecoveryProjection, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeChatV2RecoveryRung.write(value.reachedRung, into: &buf)
+        FfiConverterOptionTypeChatV2RecoveryRung.write(value.nextRung, into: &buf)
+        FfiConverterBool.write(value.mayEscalate, into: &buf)
+        FfiConverterBool.write(value.isExhausted, into: &buf)
+        FfiConverterBool.write(value.nextStepMutates, into: &buf)
+        FfiConverterOptionString.write(value.nextStepLabel, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2RecoveryProjection_lift(_ buf: RustBuffer) throws -> ChatV2RecoveryProjection {
+    return try FfiConverterTypeChatV2RecoveryProjection.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2RecoveryProjection_lower(_ value: ChatV2RecoveryProjection) -> RustBuffer {
+    return FfiConverterTypeChatV2RecoveryProjection.lower(value)
+}
+
+/**
+ * Readiness of the clean chat protocol implementation in this build.
+ */
+public struct ChatV2Status {
+    /**
+     * The protocol version this build implements.
+     */
+    public var protocolVersion: String
+    /**
+     * Whether the protocol can actually be used end to end.
+     *
+     * The types are bindable well before the protocol is usable, and
+     * conflating the two is how a half-built protocol reaches a release. This
+     * claims **protocol completeness**, not the completeness of whichever lane
+     * happens to be working — see [`chat_v2_status`].
+     */
+    public var isOperational: Bool
+    /**
+     * Capabilities this build implements, for lane coordination.
+     */
+    public var implementedCapabilities: [ChatV2Capability]
+    /**
+     * Capabilities still outstanding before `is_operational` can be true.
+     */
+    public var outstandingCapabilities: [ChatV2Capability]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * The protocol version this build implements.
+         */ protocolVersion: String,
+        /* 
+            * Whether the protocol can actually be used end to end.
+            *
+            * The types are bindable well before the protocol is usable, and
+            * conflating the two is how a half-built protocol reaches a release. This
+            * claims **protocol completeness**, not the completeness of whichever lane
+            * happens to be working — see [`chat_v2_status`].
+            */ isOperational: Bool,
+        /* 
+            * Capabilities this build implements, for lane coordination.
+            */ implementedCapabilities: [ChatV2Capability],
+        /* 
+            * Capabilities still outstanding before `is_operational` can be true.
+            */ outstandingCapabilities: [ChatV2Capability]
+    ) {
+        self.protocolVersion = protocolVersion
+        self.isOperational = isOperational
+        self.implementedCapabilities = implementedCapabilities
+        self.outstandingCapabilities = outstandingCapabilities
+    }
+}
+
+extension ChatV2Status: Equatable, Hashable {
+    public static func == (lhs: ChatV2Status, rhs: ChatV2Status) -> Bool {
+        if lhs.protocolVersion != rhs.protocolVersion {
+            return false
+        }
+        if lhs.isOperational != rhs.isOperational {
+            return false
+        }
+        if lhs.implementedCapabilities != rhs.implementedCapabilities {
+            return false
+        }
+        if lhs.outstandingCapabilities != rhs.outstandingCapabilities {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(protocolVersion)
+        hasher.combine(isOperational)
+        hasher.combine(implementedCapabilities)
+        hasher.combine(outstandingCapabilities)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2Status: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2Status {
+        return
+            try ChatV2Status(
+                protocolVersion: FfiConverterString.read(from: &buf),
+                isOperational: FfiConverterBool.read(from: &buf),
+                implementedCapabilities: FfiConverterSequenceTypeChatV2Capability.read(from: &buf),
+                outstandingCapabilities: FfiConverterSequenceTypeChatV2Capability.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: ChatV2Status, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.protocolVersion, into: &buf)
+        FfiConverterBool.write(value.isOperational, into: &buf)
+        FfiConverterSequenceTypeChatV2Capability.write(value.implementedCapabilities, into: &buf)
+        FfiConverterSequenceTypeChatV2Capability.write(value.outstandingCapabilities, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2Status_lift(_ buf: RustBuffer) throws -> ChatV2Status {
+    return try FfiConverterTypeChatV2Status.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2Status_lower(_ value: ChatV2Status) -> RustBuffer {
+    return FfiConverterTypeChatV2Status.lower(value)
+}
+
+/**
  * Metadata key material derived from a commit's next-epoch exporter.
  *
  * Returned alongside commit processing results so the caller (Swift/FFI layer)
@@ -10580,6 +11139,430 @@ public func FfiConverterTypeWelcomeResult_lower(_ value: WelcomeResult) -> RustB
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * What a chat error means for synchronization and recovery policy.
+ *
+ * Mirrors [`ChatErrorClass`] across the FFI boundary.
+ */
+
+public enum ChatV2ErrorClass {
+    /**
+     * The device credential, DPoP binding, or authentication generation is no
+     * longer valid.
+     */
+    case authentication
+    /**
+     * Authenticated but not permitted in this state.
+     */
+    case authorization
+    /**
+     * A relationship or declaration policy denied the operation.
+     */
+    case relationshipPolicy
+    /**
+     * A peer is not yet in a state where the operation can succeed.
+     */
+    case readiness
+    /**
+     * The request was built against a coordinate the server has moved past.
+     */
+    case staleCoordinate
+    /**
+     * Another writer won, or this operation identity carries different bytes.
+     */
+    case conflict
+    /**
+     * The named resource does not exist.
+     */
+    case notFound
+    /**
+     * A time-bounded resource lapsed.
+     */
+    case expired
+    /**
+     * A protocol quota or cap was reached.
+     */
+    case limitReached
+    /**
+     * The request was structurally or cryptographically invalid.
+     */
+    case malformedRequest
+    /**
+     * A checked increment would pass the safe-integer ceiling.
+     */
+    case overflow
+    /**
+     * A temporary server-side condition.
+     */
+    case transient
+    /**
+     * The client is speaking the superseded protocol and must be upgraded.
+     */
+    case cutoverRequired
+    /**
+     * A code this build does not recognize.
+     */
+    case unknown
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2ErrorClass: FfiConverterRustBuffer {
+    typealias SwiftType = ChatV2ErrorClass
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2ErrorClass {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .authentication
+
+        case 2: return .authorization
+
+        case 3: return .relationshipPolicy
+
+        case 4: return .readiness
+
+        case 5: return .staleCoordinate
+
+        case 6: return .conflict
+
+        case 7: return .notFound
+
+        case 8: return .expired
+
+        case 9: return .limitReached
+
+        case 10: return .malformedRequest
+
+        case 11: return .overflow
+
+        case 12: return .transient
+
+        case 13: return .cutoverRequired
+
+        case 14: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChatV2ErrorClass, into buf: inout [UInt8]) {
+        switch value {
+        case .authentication:
+            writeInt(&buf, Int32(1))
+
+        case .authorization:
+            writeInt(&buf, Int32(2))
+
+        case .relationshipPolicy:
+            writeInt(&buf, Int32(3))
+
+        case .readiness:
+            writeInt(&buf, Int32(4))
+
+        case .staleCoordinate:
+            writeInt(&buf, Int32(5))
+
+        case .conflict:
+            writeInt(&buf, Int32(6))
+
+        case .notFound:
+            writeInt(&buf, Int32(7))
+
+        case .expired:
+            writeInt(&buf, Int32(8))
+
+        case .limitReached:
+            writeInt(&buf, Int32(9))
+
+        case .malformedRequest:
+            writeInt(&buf, Int32(10))
+
+        case .overflow:
+            writeInt(&buf, Int32(11))
+
+        case .transient:
+            writeInt(&buf, Int32(12))
+
+        case .cutoverRequired:
+            writeInt(&buf, Int32(13))
+
+        case .unknown:
+            writeInt(&buf, Int32(14))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2ErrorClass_lift(_ buf: RustBuffer) throws -> ChatV2ErrorClass {
+    return try FfiConverterTypeChatV2ErrorClass.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2ErrorClass_lower(_ value: ChatV2ErrorClass) -> RustBuffer {
+    return FfiConverterTypeChatV2ErrorClass.lower(value)
+}
+
+extension ChatV2ErrorClass: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * Which frozen grammar a value should be checked against.
+ */
+
+public enum ChatV2IdentifierKind {
+    /**
+     * Canonical lowercase hyphenated RFC 4122 variant UUIDv4.
+     */
+    case conversationId
+    /**
+     * Append-row replay identity. Never substitutes for a transition ID.
+     */
+    case entryId
+    /**
+     * Signed control transition identity.
+     */
+    case transitionId
+    /**
+     * Send idempotency identity.
+     */
+    case messageId
+    /**
+     * Registered device identity.
+     */
+    case deviceId
+    /**
+     * Production canonical bare ATProto DID, 12-261 ASCII bytes.
+     */
+    case bareDid
+    /**
+     * 43-character base64url SHA-256 thumbprint of a raw Ed25519 key.
+     */
+    case keyId
+    /**
+     * Exactly `YYYY-MM-DDTHH:MM:SS.sssZ`.
+     */
+    case timestamp
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2IdentifierKind: FfiConverterRustBuffer {
+    typealias SwiftType = ChatV2IdentifierKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2IdentifierKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .conversationId
+
+        case 2: return .entryId
+
+        case 3: return .transitionId
+
+        case 4: return .messageId
+
+        case 5: return .deviceId
+
+        case 6: return .bareDid
+
+        case 7: return .keyId
+
+        case 8: return .timestamp
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChatV2IdentifierKind, into buf: inout [UInt8]) {
+        switch value {
+        case .conversationId:
+            writeInt(&buf, Int32(1))
+
+        case .entryId:
+            writeInt(&buf, Int32(2))
+
+        case .transitionId:
+            writeInt(&buf, Int32(3))
+
+        case .messageId:
+            writeInt(&buf, Int32(4))
+
+        case .deviceId:
+            writeInt(&buf, Int32(5))
+
+        case .bareDid:
+            writeInt(&buf, Int32(6))
+
+        case .keyId:
+            writeInt(&buf, Int32(7))
+
+        case .timestamp:
+            writeInt(&buf, Int32(8))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2IdentifierKind_lift(_ buf: RustBuffer) throws -> ChatV2IdentifierKind {
+    return try FfiConverterTypeChatV2IdentifierKind.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2IdentifierKind_lower(_ value: ChatV2IdentifierKind) -> RustBuffer {
+    return FfiConverterTypeChatV2IdentifierKind.lower(value)
+}
+
+extension ChatV2IdentifierKind: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * One rung of the bounded recovery ladder, across the FFI boundary.
+ *
+ * Mirrors [`RecoveryRung`]. Exactly four, in one order, and no variant for
+ * anything above a reset request — the ladder's bound is part of the exported
+ * type, not a rule the platform is asked to honour.
+ */
+
+public enum ChatV2RecoveryRung {
+    /**
+     * Fetch and apply already-entitled entries. Non-mutating.
+     */
+    case catchUp
+    /**
+     * Process a Welcome already waiting for this device.
+     */
+    case pendingWelcome
+    /**
+     * Sign `requestLeafRecovery` and wait for a healthy different-DID leaf.
+     */
+    case targetDeviceRecoveryRequest
+    /**
+     * Sign a durable reset intent. Activation is a separate authorized act.
+     */
+    case resetRequest
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2RecoveryRung: FfiConverterRustBuffer {
+    typealias SwiftType = ChatV2RecoveryRung
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2RecoveryRung {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .catchUp
+
+        case 2: return .pendingWelcome
+
+        case 3: return .targetDeviceRecoveryRequest
+
+        case 4: return .resetRequest
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChatV2RecoveryRung, into buf: inout [UInt8]) {
+        switch value {
+        case .catchUp:
+            writeInt(&buf, Int32(1))
+
+        case .pendingWelcome:
+            writeInt(&buf, Int32(2))
+
+        case .targetDeviceRecoveryRequest:
+            writeInt(&buf, Int32(3))
+
+        case .resetRequest:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2RecoveryRung_lift(_ buf: RustBuffer) throws -> ChatV2RecoveryRung {
+    return try FfiConverterTypeChatV2RecoveryRung.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChatV2RecoveryRung_lower(_ value: ChatV2RecoveryRung) -> RustBuffer {
+    return FfiConverterTypeChatV2RecoveryRung.lower(value)
+}
+
+extension ChatV2RecoveryRung: Equatable, Hashable {}
+
+/**
+ * A value failed a frozen protocol grammar.
+ */
+public enum ChatV2ValidationError {
+    /**
+     * The value did not satisfy its grammar. `reason` names the exact
+     * predicate that rejected it.
+     */
+    case Invalid(
+        /* 
+         * The grammar that was applied.
+         */ kind: String,
+        /* 
+            * The exact predicate that rejected the value.
+            */ reason: String
+    )
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChatV2ValidationError: FfiConverterRustBuffer {
+    typealias SwiftType = ChatV2ValidationError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2ValidationError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return try .Invalid(
+                kind: FfiConverterString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf)
+            )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChatV2ValidationError, into buf: inout [UInt8]) {
+        switch value {
+        case let .Invalid(kind, reason):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(kind, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+        }
+    }
+}
+
+extension ChatV2ValidationError: Equatable, Hashable {}
+
+extension ChatV2ValidationError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum DecryptContentType {
     case application
@@ -16109,6 +17092,30 @@ private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeChatV2RecoveryRung: FfiConverterRustBuffer {
+    typealias SwiftType = ChatV2RecoveryRung?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeChatV2RecoveryRung.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeChatV2RecoveryRung.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeFFIConversationRecoveryState: FfiConverterRustBuffer {
     typealias SwiftType = FfiConversationRecoveryState?
 
@@ -16346,6 +17353,31 @@ private struct FfiConverterSequenceTypeChatMessage: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeChatMessage.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeChatV2Capability: FfiConverterRustBuffer {
+    typealias SwiftType = [ChatV2Capability]
+
+    static func write(_ value: [ChatV2Capability], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeChatV2Capability.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ChatV2Capability] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ChatV2Capability]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeChatV2Capability.read(from: &buf))
         }
         return seq
     }
@@ -16965,6 +17997,96 @@ public func uniffiForeignFutureHandleCountCatbirdMls() -> Int {
 }
 
 /**
+ * Builds the exact MLS BasicCredential identity for a DID and device.
+ *
+ * Exposed so no platform hand-concatenates it. The identity is compared
+ * byte-for-byte against the authenticated MLS sender leaf before attribution,
+ * so a platform that assembled it slightly differently would fail
+ * attribution in a way that looks like a crypto bug.
+ */
+public func chatV2BasicCredential(actorDid: String, deviceId: String) throws -> String {
+    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeChatV2ValidationError.lift) {
+        uniffi_catbird_mls_fn_func_chat_v2_basic_credential(
+            FfiConverterString.lower(actorDid),
+            FfiConverterString.lower(deviceId), $0
+        )
+    })
+}
+
+/**
+ * Classifies a `blue.catbird.chat.*` error code received off the wire.
+ *
+ * Unknown codes are preserved verbatim and classified conservatively: not
+ * retryable, not resync, terminal.
+ */
+public func chatV2ClassifyEndpointError(endpoint: String, code: String, detail: String?) -> ChatV2EndpointError {
+    return try! FfiConverterTypeChatV2EndpointError.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_chat_v2_classify_endpoint_error(
+            FfiConverterString.lower(endpoint),
+            FfiConverterString.lower(code),
+            FfiConverterOptionString.lower(detail), $0
+        )
+    })
+}
+
+/**
+ * Projects a recovery episode for platform consumption.
+ *
+ * Takes the rung already reached, mirroring how a platform stores it, and
+ * returns every answer precomputed.
+ */
+public func chatV2RecoveryProjection(reachedRung: ChatV2RecoveryRung?) -> ChatV2RecoveryProjection {
+    return try! FfiConverterTypeChatV2RecoveryProjection.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_chat_v2_recovery_projection(
+            FfiConverterOptionTypeChatV2RecoveryRung.lower(reachedRung), $0
+        )
+    })
+}
+
+/**
+ * Reports what this build of the clean chat protocol can do.
+ *
+ * # The outstanding list tracks the protocol, not a lane
+ *
+ * It previously read `["storage"]`, which was the work one lane had left
+ * rather than the work the protocol had left. Storage landing therefore
+ * appeared to empty the list — and because `is_operational` is pinned to
+ * `outstanding.is_empty()`, that would have flipped this build to advertising a
+ * usable protocol.
+ *
+ * It would not have been usable. Two seams do not exist in this tree at all,
+ * and both are named below. Their absence was established with needles that
+ * *fire* on the v1 tree before their silence on `chat_v2` was trusted:
+ * `reqwest`/`xrpc`/`HttpClient` hit `src/orchestrator/api_client.rs`, and
+ * `openmls`/`MlsGroup` hit `src/mls_context.rs`, while neither matches anything
+ * under `src/chat_v2`.
+ *
+ * So the list is corrected to describe protocol completeness, which is what
+ * `is_operational` actually claims. Entries beyond the current lane's scope
+ * belong here for exactly that reason.
+ */
+public func chatV2Status() -> ChatV2Status {
+    return try! FfiConverterTypeChatV2Status.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_chat_v2_status($0)
+    })
+}
+
+/**
+ * Validates a value against one of the protocol's frozen grammars.
+ *
+ * Values are rejected, never normalized: a near-miss spelling is an error, not
+ * something to repair.
+ */
+public func chatV2ValidateIdentifier(kind: ChatV2IdentifierKind, value: String) throws {
+    try rustCallWithError(FfiConverterTypeChatV2ValidationError.lift) {
+        uniffi_catbird_mls_fn_func_chat_v2_validate_identifier(
+            FfiConverterTypeChatV2IdentifierKind.lower(kind),
+            FfiConverterString.lower(value), $0
+        )
+    }
+}
+
+/**
  * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
  * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
  * This is a pure function — no bridge or MLS context needed.
@@ -17243,6 +18365,21 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_catbird_mls_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_chat_v2_basic_credential() != 19557 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_chat_v2_classify_endpoint_error() != 52338 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_chat_v2_recovery_projection() != 32827 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_chat_v2_status() != 50843 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_chat_v2_validate_identifier() != 21313 {
+        return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_func_ffi_decode_opus_to_pcm() != 476 {
         return InitializationResult.apiChecksumMismatch

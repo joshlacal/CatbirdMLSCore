@@ -659,7 +659,16 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       let isUnrecoverable: Bool = try row.decode(forColumn: "isUnrecoverable")
       let needsRejoin: Bool = try row.decode(forColumn: "needsRejoin")
       let isActive: Bool = try row.decode(forColumn: "isActive")
-      let state = reason != nil ? "quarantined" : needsReset ? "reset_pending" : isUnrecoverable ? "failed" : needsRejoin ? "needs_rejoin" : isActive ? "active" : "left"
+      // The regenerated bindings' mapper accepts exactly seven tags and errors
+      // on anything else, so an inactive-but-untagged row (a left or
+      // soft-deleted conversation) has no durable state to rehydrate and must
+      // report absence rather than a tag Rust would reject.
+      guard let state = reason != nil ? "quarantined"
+        : needsReset ? "reset_pending"
+        : isUnrecoverable ? "failed"
+        : needsRejoin ? "needs_rejoin"
+        : isActive ? "active" : nil
+      else { return nil }
       return FfiConversationState(
         state: state,
         newGroupId: newGroupId,
