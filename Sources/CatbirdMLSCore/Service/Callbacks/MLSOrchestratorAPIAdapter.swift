@@ -395,6 +395,20 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     try blocking { try await self.apiClient.getWelcome(convoId: convoId) }
   }
 
+  public func requestWelcomeReissue(
+    convoId: String,
+    recipientDeviceDid: String,
+    reason: String
+  ) throws {
+    _ = try blocking {
+      try await self.apiClient.requestWelcomeReissue(
+        convoId: convoId,
+        recipientDeviceDid: recipientDeviceDid,
+        reason: reason
+      )
+    }
+  }
+
   public func processExternalCommit(
     convoId: String,
     commitData: Data,

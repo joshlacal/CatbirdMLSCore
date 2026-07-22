@@ -1220,6 +1220,13 @@ public protocol MlsContextProtocol: AnyObject {
     func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret
 
     /**
+     * Finalize an epoch transition after the host's stable projection is
+     * durable. The caller-provided epoch must exactly match current crypto
+     * state; stale or speculative projections cannot trigger secret pruning.
+     */
+    func finalizeEpochTransition(groupId: Data, projectedEpoch: UInt64) throws -> UInt32
+
+    /**
      * Flush all pending database writes and CLOSE the database connections.
      *
      * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
@@ -1384,20 +1391,30 @@ public protocol MlsContextProtocol: AnyObject {
      *
      * Returns the new (post-merge) epoch.
      *
+     * This method durably flushes the OpenMLS merge before returning, but it
+     * deliberately does not prune retained epoch secrets. The caller must
+     * first persist its own GroupState/projection for `target_epoch`, then use
+     * `finalize_epoch_transition` (or the in-process cleanup hook). Pruning
+     * inside this method could destroy recovery material before the outer
+     * transaction is durable.
+     *
      * Errors:
      * - `MLSError::invalid_input` if no staged commit exists for
      * `(group_id, target_epoch)` — the entry was never staged, or
      * `discard_incoming_commit` already cleared it.
-     * - `MLSError::MergeFailed` if OpenMLS `merge_staged_commit` fails; the
-     * StagedCommit is dropped (caller must re-fetch from the DS if recovery
-     * is needed). This matches the pre-refactor behavior where a failed
-     * merge left no resumable state.
+     * - `MLSError::MergeFailed`, epoch mismatch, or storage failure while
+     * applying the transition. The staged handle is preserved. If OpenMLS
+     * advanced before a barrier failure, retrying completes the barrier
+     * idempotently and only then consumes the handle.
      */
     func mergeIncomingCommit(groupId: Data, targetEpoch: UInt64) throws -> UInt64
 
     /**
-     * Merge a pending commit after validation
-     * This should be called after the commit has been accepted by the delivery service
+     * Merge a pending commit after validation.
+     *
+     * The merged OpenMLS state is durably flushed before return. Epoch-secret
+     * pruning is deliberately deferred until the host has persisted its
+     * stable GroupState projection and calls finalize_epoch_transition.
      */
     func mergePendingCommit(groupId: Data) throws -> MergePendingCommitResult
 
@@ -1614,6 +1631,12 @@ public protocol MlsContextProtocol: AnyObject {
      * Only one pending commit may exist per group at a time (OpenMLS
      * constraint). Staging a second commit while one is already pending
      * returns `MLSError::InvalidInput`.
+     *
+     * Add/Swap authority is derived from the exact multiset of bare DID roots
+     * embedded in the supplied KeyPackage credentials. The direct context has
+     * no platform credential resolver, so authorized-device-key resolution
+     * remains the responsibility of the higher-level orchestrator; callers
+     * that need that policy must use `OrchestratorBridge::stage_commit`.
      */
     func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data) throws -> FfiCommitPlan
 
@@ -2347,6 +2370,19 @@ open class MlsContext:
     }
 
     /**
+     * Finalize an epoch transition after the host's stable projection is
+     * durable. The caller-provided epoch must exactly match current crypto
+     * state; stale or speculative projections cannot trigger secret pruning.
+     */
+    open func finalizeEpochTransition(groupId: Data, projectedEpoch: UInt64) throws -> UInt32 {
+        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_finalize_epoch_transition(self.uniffiClonePointer(),
+                                                                              FfiConverterData.lower(groupId),
+                                                                              FfiConverterUInt64.lower(projectedEpoch), $0)
+        })
+    }
+
+    /**
      * Flush all pending database writes and CLOSE the database connections.
      *
      * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
@@ -2591,14 +2627,21 @@ open class MlsContext:
      *
      * Returns the new (post-merge) epoch.
      *
+     * This method durably flushes the OpenMLS merge before returning, but it
+     * deliberately does not prune retained epoch secrets. The caller must
+     * first persist its own GroupState/projection for `target_epoch`, then use
+     * `finalize_epoch_transition` (or the in-process cleanup hook). Pruning
+     * inside this method could destroy recovery material before the outer
+     * transaction is durable.
+     *
      * Errors:
      * - `MLSError::invalid_input` if no staged commit exists for
      * `(group_id, target_epoch)` — the entry was never staged, or
      * `discard_incoming_commit` already cleared it.
-     * - `MLSError::MergeFailed` if OpenMLS `merge_staged_commit` fails; the
-     * StagedCommit is dropped (caller must re-fetch from the DS if recovery
-     * is needed). This matches the pre-refactor behavior where a failed
-     * merge left no resumable state.
+     * - `MLSError::MergeFailed`, epoch mismatch, or storage failure while
+     * applying the transition. The staged handle is preserved. If OpenMLS
+     * advanced before a barrier failure, retrying completes the barrier
+     * idempotently and only then consumes the handle.
      */
     open func mergeIncomingCommit(groupId: Data, targetEpoch: UInt64) throws -> UInt64 {
         return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
@@ -2609,8 +2652,11 @@ open class MlsContext:
     }
 
     /**
-     * Merge a pending commit after validation
-     * This should be called after the commit has been accepted by the delivery service
+     * Merge a pending commit after validation.
+     *
+     * The merged OpenMLS state is durably flushed before return. Epoch-secret
+     * pruning is deliberately deferred until the host has persisted its
+     * stable GroupState projection and calls finalize_epoch_transition.
      */
     open func mergePendingCommit(groupId: Data) throws -> MergePendingCommitResult {
         return try FfiConverterTypeMergePendingCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
@@ -2964,6 +3010,12 @@ open class MlsContext:
      * Only one pending commit may exist per group at a time (OpenMLS
      * constraint). Staging a second commit while one is already pending
      * returns `MLSError::InvalidInput`.
+     *
+     * Add/Swap authority is derived from the exact multiset of bare DID roots
+     * embedded in the supplied KeyPackage credentials. The direct context has
+     * no platform credential resolver, so authorized-device-key resolution
+     * remains the responsibility of the higher-level orchestrator; callers
+     * that need that policy must use `OrchestratorBridge::stage_commit`.
      */
     open func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data) throws -> FfiCommitPlan {
         return try FfiConverterTypeFFICommitPlan.lift(rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
@@ -5174,14 +5226,39 @@ public struct DecryptResult {
     public var epoch: UInt64
     public var sequenceNumber: UInt64
     public var senderCredential: CredentialData
+    /**
+     * Authenticated MLS content class. Plaintext length is not a safe
+     * discriminator: valid application messages may be empty, while Proposal
+     * and Commit frames both carry no application plaintext.
+     */
+    public var contentType: DecryptContentType
+    /**
+     * Exact TLS-serialized OpenMLS ProposalRef for a staged standalone
+     * proposal. The orchestrator accepts or discards this handle only after
+     * envelope-to-credential authorization succeeds.
+     */
+    public var proposalRef: Data?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(plaintext: Data, epoch: UInt64, sequenceNumber: UInt64, senderCredential: CredentialData) {
+    public init(plaintext: Data, epoch: UInt64, sequenceNumber: UInt64, senderCredential: CredentialData,
+                /* 
+                    * Authenticated MLS content class. Plaintext length is not a safe
+                    * discriminator: valid application messages may be empty, while Proposal
+                    * and Commit frames both carry no application plaintext.
+                    */ contentType: DecryptContentType,
+                /* 
+                    * Exact TLS-serialized OpenMLS ProposalRef for a staged standalone
+                    * proposal. The orchestrator accepts or discards this handle only after
+                    * envelope-to-credential authorization succeeds.
+                    */ proposalRef: Data?)
+    {
         self.plaintext = plaintext
         self.epoch = epoch
         self.sequenceNumber = sequenceNumber
         self.senderCredential = senderCredential
+        self.contentType = contentType
+        self.proposalRef = proposalRef
     }
 }
 
@@ -5199,6 +5276,12 @@ extension DecryptResult: Equatable, Hashable {
         if lhs.senderCredential != rhs.senderCredential {
             return false
         }
+        if lhs.contentType != rhs.contentType {
+            return false
+        }
+        if lhs.proposalRef != rhs.proposalRef {
+            return false
+        }
         return true
     }
 
@@ -5207,6 +5290,8 @@ extension DecryptResult: Equatable, Hashable {
         hasher.combine(epoch)
         hasher.combine(sequenceNumber)
         hasher.combine(senderCredential)
+        hasher.combine(contentType)
+        hasher.combine(proposalRef)
     }
 }
 
@@ -5220,7 +5305,9 @@ public struct FfiConverterTypeDecryptResult: FfiConverterRustBuffer {
                 plaintext: FfiConverterData.read(from: &buf),
                 epoch: FfiConverterUInt64.read(from: &buf),
                 sequenceNumber: FfiConverterUInt64.read(from: &buf),
-                senderCredential: FfiConverterTypeCredentialData.read(from: &buf)
+                senderCredential: FfiConverterTypeCredentialData.read(from: &buf),
+                contentType: FfiConverterTypeDecryptContentType.read(from: &buf),
+                proposalRef: FfiConverterOptionData.read(from: &buf)
             )
     }
 
@@ -5229,6 +5316,8 @@ public struct FfiConverterTypeDecryptResult: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.epoch, into: &buf)
         FfiConverterUInt64.write(value.sequenceNumber, into: &buf)
         FfiConverterTypeCredentialData.write(value.senderCredential, into: &buf)
+        FfiConverterTypeDecryptContentType.write(value.contentType, into: &buf)
+        FfiConverterOptionData.write(value.proposalRef, into: &buf)
     }
 }
 
@@ -10491,6 +10580,70 @@ public func FfiConverterTypeWelcomeResult_lower(_ value: WelcomeResult) -> RustB
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum DecryptContentType {
+    case application
+    case proposal
+    case externalJoinProposal
+    case commit
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDecryptContentType: FfiConverterRustBuffer {
+    typealias SwiftType = DecryptContentType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DecryptContentType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .application
+
+        case 2: return .proposal
+
+        case 3: return .externalJoinProposal
+
+        case 4: return .commit
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DecryptContentType, into buf: inout [UInt8]) {
+        switch value {
+        case .application:
+            writeInt(&buf, Int32(1))
+
+        case .proposal:
+            writeInt(&buf, Int32(2))
+
+        case .externalJoinProposal:
+            writeInt(&buf, Int32(3))
+
+        case .commit:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDecryptContentType_lift(_ buf: RustBuffer) throws -> DecryptContentType {
+    return try FfiConverterTypeDecryptContentType.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDecryptContentType_lower(_ value: DecryptContentType) -> RustBuffer {
+    return FfiConverterTypeDecryptContentType.lower(value)
+}
+
+extension DecryptContentType: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /* 
  * The kind of commit to stage. Each variant corresponds to an existing
  * atomic method on `OrchestratorBridge`.
@@ -12948,6 +13101,22 @@ public protocol OrchestratorApiCallback: AnyObject {
     func getWelcome(convoId: String) throws -> Data
 
     /**
+     * Ask the server to reissue a Welcome for this device.
+     *
+     * Platform impls should POST to `blue.catbird.mlsChat.reissueWelcome`
+     * with the conversation id, the recipient device DID, and the reason
+     * string (e.g. `"no_matching_key_package"`). The active inviter/admin
+     * fulfills the request by resealing a Welcome to one of this device's
+     * CURRENT key packages — the recovery path for a Welcome sealed to a
+     * key package whose private key this device no longer holds
+     * (`NoMatchingKeyPackage`).
+     *
+     * Errors should be returned (not swallowed); the orchestrator records
+     * the attempt either way so the reissue backoff ladder keeps moving.
+     */
+    func requestWelcomeReissue(convoId: String, recipientDeviceDid: String, reason: String) throws
+
+    /**
      * Submit an External Commit to join/rejoin a conversation.
      *
      * Platform impls should POST to `blue.catbird.mlsChat.commitGroupChange`
@@ -13590,6 +13759,34 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        requestWelcomeReissue: { (
+            uniffiHandle: UInt64,
+            convoId: RustBuffer,
+            recipientDeviceDid: RustBuffer,
+            reason: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.requestWelcomeReissue(
+                    convoId: FfiConverterString.lift(convoId),
+                    recipientDeviceDid: FfiConverterString.lift(recipientDeviceDid),
+                    reason: FfiConverterString.lift(reason)
+                )
+            }
+
+            let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -17254,6 +17451,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_export_secret() != 18925 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_mlscontext_finalize_epoch_transition() != 35444 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_mlscontext_flush_and_prepare_close() != 26050 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17305,10 +17505,10 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_list_pending_proposals() != 22913 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_merge_incoming_commit() != 47130 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_merge_incoming_commit() != 27040 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 9121 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 30340 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_merge_staged_commit() != 13981 {
@@ -17377,13 +17577,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_sign_with_identity_key() != 63625 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 12530 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 12424 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_storage_lifecycle_status() != 61806 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 33747 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 50154 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_swap_members() != 32132 {
@@ -17692,19 +17892,22 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 14448 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 39089 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_request_welcome_reissue() != 4775 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 46497 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 4703 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_group_metadata_blob() != 23395 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 37829 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 1124 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_group_metadata_blob() != 38505 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_commit_group_change() != 20031 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 30704 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_commit_group_change() != 24802 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272 {
