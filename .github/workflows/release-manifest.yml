@@ -1,0 +1,32 @@
+name: Release manifest
+
+on:
+  push:
+    tags: ['v*.*.*', '*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-manifest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  path-dependencies:
+    name: Tagged manifest resolves for consumers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject local path dependencies
+        run: |
+          set -euo pipefail
+          # Day-to-day work switches this manifest to .package(path: "../Petrel")
+          # and .package(path: "../PetrelCatbird") so the MLS layer can be built
+          # against local checkouts. Publishing that form breaks resolution for
+          # every consumer, including the Catbird app, and nothing else checks it.
+          if grep -nE '\.package\(path:' Package.swift; then
+            echo "::error file=Package.swift::Tagged releases must declare dependencies by URL; path dependencies do not resolve for consumers." >&2
+            exit 1
+          fi
