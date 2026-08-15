@@ -15605,6 +15605,14 @@ public protocol OrchestratorStorageCallback: AnyObject {
      * `needs_rejoin = true`, rejecting stale generations while preserving the
      * old durable group mapping for restart-safe predecessor cleanup. Missing
      * support fails closed.
+     *
+     * That same commit must also clear any persisted quarantine for the
+     * conversation: a server reset is a documented quarantine exit (ruling 2a,
+     * 2026-08-15), so tag, payload, rejoin route, and quarantine clear land
+     * together. Deferring the clear to the separate `clear_quarantine`
+     * callback leaves a window in which the platform can persist a row that
+     * is both reset-pending and quarantined, which rehydrates quarantined
+     * forever because the replayed reset dedupes before reaching the clear.
      */
     func markResetPending(conversationId: String, newGroupIdHex: String, resetGeneration: Int32, notifiedAtMs: Int64) throws
 
@@ -18350,6 +18358,29 @@ public func mlsSkipServerEpochFence() -> UInt64 {
     })
 }
 
+/**
+ * The `SecurityStorageCapabilities.version` this build's bridge constructor
+ * requires, exposed so platform test suites can pin their hand-declared value
+ * against the library they actually ship.
+ *
+ * TEST-TIME USE ONLY. Production platform code MUST keep declaring a literal
+ * version: the declaration is an attestation of which contract the platform
+ * has actually implemented, so echoing this value back into
+ * `SecurityStorageCapabilities` would make the check compare the library to
+ * itself and defeat the gate entirely. The whole point of
+ * `validate_security_capabilities` is to refuse a platform whose
+ * implementation predates the contract it is being handed.
+ *
+ * Without this, the constant is `pub(crate)` and absent from the UniFFI
+ * surface, so a stale platform literal compiles and unit-tests clean and only
+ * fails when the real library rejects bridge construction at app runtime.
+ */
+public func securityStorageCapabilitiesVersion() -> UInt16 {
+    return try! FfiConverterUInt16.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_security_storage_capabilities_version($0)
+    })
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -18433,6 +18464,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_func_mls_skip_server_epoch_fence() != 10918 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_security_storage_capabilities_version() != 19278 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_add_participants() != 9190 {
@@ -19113,7 +19147,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 39371 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 60873 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 45552 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 908 {
