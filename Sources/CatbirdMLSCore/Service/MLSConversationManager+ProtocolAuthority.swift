@@ -193,12 +193,19 @@ extension MLSConversationManager {
         context = try await MLSCoreContext.shared.getContext(for: userDid)
       }
       let apiAdapter = MLSOrchestratorAPIAdapter(apiClient: apiClient)
+      // ADR-009: Rust verifies every leaf signature key against the DID's
+      // published device records. The callback is synchronous, so it reads the
+      // record service's already-resolved keys rather than fetching.
+      let authorizedDeviceKeyStore = deviceRecordService.authorizedDeviceKeyStore
       return try MLSOrchestratorRuntime(
         userDID: userDid,
         mode: protocolAuthorityMode,
         mlsContext: context,
         databasePool: databasePool,
-        apiClient: apiAdapter
+        apiClient: apiAdapter,
+        authorizedDeviceKeyResolver: { did in
+          authorizedDeviceKeyStore.keys(for: did)
+        }
       )
     } catch {
       if suspendedResumeCapability != nil, let acquiredContextIdentity {

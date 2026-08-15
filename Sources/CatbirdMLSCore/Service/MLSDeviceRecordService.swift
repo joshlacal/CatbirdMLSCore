@@ -14,6 +14,11 @@ internal actor MLSDeviceRecordService {
   private var deviceKeyCache: [String: (keys: Set<String>, fetchedAt: Date)] = [:]
   private let cacheTTL: TimeInterval = 5 * 60
 
+  /// Synchronously readable mirror of everything this service has resolved, for
+  /// the Rust orchestrator's ADR-009 device-key callback (which cannot await an
+  /// actor). Written here, read by `MLSOrchestratorCredentialAdapter`.
+  nonisolated let authorizedDeviceKeyStore = MLSAuthorizedDeviceKeyStore()
+
   init(atProtoClient: ATProtoClient, mlsClient: MLSClient) {
     self.atProtoClient = atProtoClient
     self.mlsClient = mlsClient
@@ -44,6 +49,17 @@ internal actor MLSDeviceRecordService {
       )
     }
 
+    // Seed the local account's own authorized keys. Nothing else resolves our
+    // own DID (the verification path only runs against peers), yet Rust checks
+    // our credential whenever another of our devices joins.
+    var ownKeys = existing.compactMap { record in
+      decodeDeviceRecord(from: record.value)?.mlsSignaturePublicKey.data
+    }
+    if !alreadyPublished {
+      ownKeys.append(sigMaterial.publicKey)
+    }
+    authorizedDeviceKeyStore.store(keys: ownKeys, for: normalized)
+
     // One-time cleanup of legacy declaration chain records
     let cleanupKey = "mls.device.legacy.cleanup.\(normalized)"
     if !UserDefaults.standard.bool(forKey: cleanupKey) {
@@ -60,6 +76,11 @@ internal actor MLSDeviceRecordService {
     let collection = try NSID(nsidString: Self.deviceCollection)
     let records = try await fetchDeviceRecordsFromPDS(did: did)
     let targetKeyB64 = signaturePublicKey.base64EncodedString()
+
+    // Whatever we resolved before this deletion is now wrong; drop it so the
+    // orchestrator sees "unknown" instead of a revoked key.
+    deviceKeyCache.removeValue(forKey: normalized)
+    authorizedDeviceKeyStore.invalidate(normalized)
 
     for record in records {
       guard let device = decodeDeviceRecord(from: record.value),
@@ -276,6 +297,11 @@ internal actor MLSDeviceRecordService {
       )
       return nil
     }
+
+    // The fetch itself succeeded, so the result is authoritative for ADR-009
+    // even when the repo publishes no device records — "resolved, zero
+    // authorized devices" is a real answer, distinct from the TOFU nil below.
+    authorizedDeviceKeyStore.store(keys: keysData, for: targetDid)
 
     if keysData.isEmpty { return nil }
 

@@ -168,8 +168,42 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
 
   // MARK: - Authorized Device Keys
 
+  /// Resolve the authorized MLS device signing keys for `userDid` (ADR-009).
+  ///
+  /// The three outcomes map onto the three states the Rust `CredentialStore`
+  /// capability distinguishes:
+  /// - no resolver installed → `nil`, i.e. this platform exposes no
+  ///   DID-resolution surface at all; Rust treats it as unsupported;
+  /// - resolver installed and the DID has been resolved → those keys, where an
+  ///   empty array means "resolved, zero authorized devices";
+  /// - resolver installed but this DID has never been resolved → throw. Rust
+  ///   fails the current operation closed but, unlike `nil` or `[]`, does not
+  ///   cache the answer, so the next attempt sees a warmed resolver instead of
+  ///   being locked out for `DEVICE_KEY_CACHE_TTL`.
   public func getAuthorizedDeviceKeys(userDid: String) throws -> [Data]? {
     logger.debug("Resolving authorized device keys for user: \(userDid.prefix(20))...")
-    return authorizedDeviceKeyResolver?(userDid)
+    guard let authorizedDeviceKeyResolver else { return nil }
+    guard let keys = authorizedDeviceKeyResolver(userDid) else {
+      logger.warning(
+        "No authorized device keys resolved yet for user: \(userDid.prefix(20), privacy: .private)..."
+      )
+      throw MLSAuthorizedDeviceKeyResolutionError.unresolved(userDid)
+    }
+    return keys
+  }
+}
+
+// MARK: - MLSAuthorizedDeviceKeyResolutionError
+
+/// Raised when the authorized-device-key resolver is installed but holds no
+/// resolution for the requested DID.
+public enum MLSAuthorizedDeviceKeyResolutionError: LocalizedError {
+  case unresolved(String)
+
+  public var errorDescription: String? {
+    switch self {
+    case .unresolved(let did):
+      return "No authorized device keys have been resolved for \(did) yet"
+    }
   }
 }
