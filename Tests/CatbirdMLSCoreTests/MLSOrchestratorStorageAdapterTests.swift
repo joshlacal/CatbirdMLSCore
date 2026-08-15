@@ -146,11 +146,14 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       reasonTag: "peer_bad_commit",
       sinceMs: 1_752_345_678_901
     )
+    // Ruling 2a: quarantine arriving after reset authority does not outrank it.
+    // The metadata stays durable on the row, but the tag remains reset_pending
+    // so recovery can still adopt the server's new group.
     let restartedWhileQuarantined = try makeAdapter()
     let quarantined = try XCTUnwrap(
       restartedWhileQuarantined.getConversationState(conversationId: "convo-security")
     )
-    XCTAssertEqual(quarantined.state, "quarantined")
+    XCTAssertEqual(quarantined.state, "reset_pending")
     XCTAssertEqual(quarantined.quarantineReason, "peer_bad_commit")
     XCTAssertEqual(quarantined.quarantinedSinceMs, 1_752_345_678_901)
 
@@ -509,6 +512,9 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     XCTAssertEqual(reset.notifiedAtMs, 1_752_345_679_000)
     XCTAssertNil(reset.quarantineReason)
 
+    // Ruling 2a: a quarantine raised while the reset is still pending must not
+    // survive completion. Leaving it would re-project `quarantined` the instant
+    // needsReset drops, which is the same wedge arriving through the back door.
     try adapter.markQuarantined(
       conversationId: "convo-coexist",
       reasonTag: "multi_peer_bad_commits",
@@ -522,11 +528,134 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
         landedEpoch: 0
       )
     )
-    let quarantined = try XCTUnwrap(adapter.getConversationState(conversationId: "convo-coexist"))
-    XCTAssertEqual(quarantined.state, "quarantined")
-    XCTAssertEqual(quarantined.quarantineReason, "multi_peer_bad_commits")
-    XCTAssertEqual(quarantined.quarantinedSinceMs, 1_752_345_679_200)
-    XCTAssertNil(quarantined.notifiedAtMs)
+    let completed = try XCTUnwrap(adapter.getConversationState(conversationId: "convo-coexist"))
+    XCTAssertEqual(completed.state, "active")
+    XCTAssertNil(completed.quarantineReason)
+    XCTAssertNil(completed.quarantinedSinceMs)
+    XCTAssertNil(completed.notifiedAtMs)
+  }
+
+  // MARK: - Ruling 2a: a server reset exits quarantine, durably and atomically
+
+  /// (a) Publishing reset authority over a quarantined row clears the
+  /// quarantine columns in the same transaction, so no crash window can leave
+  /// the two disagreeing.
+  func testMarkResetPendingExitsQuarantineInTheAuthorityTransaction() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-2a-exit",
+      groupId: "01020304"
+    )
+    try adapter.markQuarantined(
+      conversationId: "convo-2a-exit",
+      reasonTag: "peer_bad_commit",
+      sinceMs: 1_752_345_680_000
+    )
+    let beforeReset = try XCTUnwrap(adapter.getConversationState(conversationId: "convo-2a-exit"))
+    XCTAssertEqual(beforeReset.state, "quarantined")
+
+    try adapter.markResetPending(
+      conversationId: "convo-2a-exit",
+      newGroupIdHex: "05060708",
+      resetGeneration: 3,
+      notifiedAtMs: 1_752_345_680_100
+    )
+
+    let afterReset = try XCTUnwrap(
+      try makeAdapter().getConversationState(conversationId: "convo-2a-exit")
+    )
+    XCTAssertEqual(afterReset.state, "reset_pending")
+    XCTAssertEqual(afterReset.newGroupId, "05060708")
+    XCTAssertEqual(afterReset.resetGeneration, 3)
+    XCTAssertNil(afterReset.quarantineReason)
+    XCTAssertNil(afterReset.quarantinedSinceMs)
+    XCTAssertNil(try quarantineColumns(conversationID: "convo-2a-exit").reason)
+    XCTAssertNil(try quarantineColumns(conversationID: "convo-2a-exit").since)
+  }
+
+  /// (b) A row already carrying both a reset payload and quarantine metadata —
+  /// the artifact of a process death between the authority commit and the old
+  /// separate quarantine clear — rehydrates as reset_pending and completes to
+  /// Active with no residue. Same-generation replay of the reset is the
+  /// self-heal for rows wedged before this fix shipped.
+  func testCrashWindowRowRehydratesResetPendingAndCompletesWithoutQuarantineResidue() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-2a-crash",
+      groupId: "01020304"
+    )
+    try adapter.markResetPending(
+      conversationId: "convo-2a-crash",
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 1_752_345_680_200
+    )
+    // Stand in for the crash window: quarantine metadata present alongside live
+    // reset authority, with Rust's follow-up clear never having run.
+    try adapter.markQuarantined(
+      conversationId: "convo-2a-crash",
+      reasonTag: "repeated_framing_failures",
+      sinceMs: 1_752_345_680_300
+    )
+
+    let rehydrated = try XCTUnwrap(
+      try makeAdapter().getConversationState(conversationId: "convo-2a-crash")
+    )
+    XCTAssertEqual(rehydrated.state, "reset_pending")
+    XCTAssertEqual(rehydrated.newGroupId, "05060708")
+    XCTAssertEqual(rehydrated.resetGeneration, 7)
+
+    // Same-generation replay re-runs the authority path and heals the row.
+    try adapter.markResetPending(
+      conversationId: "convo-2a-crash",
+      newGroupIdHex: "05060708",
+      resetGeneration: 7,
+      notifiedAtMs: 1_752_345_680_200
+    )
+    XCTAssertNil(try quarantineColumns(conversationID: "convo-2a-crash").reason)
+
+    XCTAssertTrue(
+      try adapter.completeResetPending(
+        conversationId: "convo-2a-crash",
+        expectedGeneration: 7,
+        expectedNewGroupIdHex: "05060708",
+        landedEpoch: 4
+      )
+    )
+    let completed = try XCTUnwrap(
+      try makeAdapter().getConversationState(conversationId: "convo-2a-crash")
+    )
+    XCTAssertEqual(completed.state, "active")
+    XCTAssertNil(completed.quarantineReason)
+    XCTAssertNil(completed.quarantinedSinceMs)
+    XCTAssertNil(try quarantineColumns(conversationID: "convo-2a-crash").reason)
+    XCTAssertNil(try quarantineColumns(conversationID: "convo-2a-crash").since)
+  }
+
+  /// (c) Quarantine without reset authority is untouched by the ruling.
+  func testQuarantineWithoutResetAuthorityStillProjectsQuarantined() throws {
+    let adapter = try makeAdapter()
+    try adapter.ensureConversationExists(
+      userDid: "did:plc:receiver",
+      conversationId: "convo-2a-plain",
+      groupId: "01020304"
+    )
+    try adapter.markQuarantined(
+      conversationId: "convo-2a-plain",
+      reasonTag: "multi_peer_bad_commits",
+      sinceMs: 1_752_345_680_400
+    )
+
+    let state = try XCTUnwrap(
+      try makeAdapter().getConversationState(conversationId: "convo-2a-plain")
+    )
+    XCTAssertEqual(state.state, "quarantined")
+    XCTAssertEqual(state.quarantineReason, "multi_peer_bad_commits")
+    XCTAssertEqual(state.quarantinedSinceMs, 1_752_345_680_400)
+    XCTAssertNil(state.newGroupId)
+    XCTAssertNil(state.resetGeneration)
   }
 
   func testResetReplayMustMatchAndGenerationMustAdvanceMonotonically() throws {
@@ -1607,6 +1736,29 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
       userDID: userDID,
       mlsContext: context
     )
+  }
+
+  /// Read the durable quarantine columns directly, so ruling-2a assertions prove
+  /// the stored row is clean rather than only the projection above it.
+  private func quarantineColumns(
+    conversationID: String,
+    userDID: String = "did:plc:receiver"
+  ) throws -> (reason: String?, since: Int64?) {
+    try dbPool.read { db in
+      guard let row = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT quarantine_reason, quarantined_since_ms
+          FROM mls_orchestrator_security_state
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationID, MLSStorageHelpers.normalizeDID(userDID)]
+      ) else { return (nil, nil) }
+      return (
+        try row.decode(forColumn: "quarantine_reason"),
+        try row.decode(forColumn: "quarantined_since_ms")
+      )
+    }
   }
 
   private func rejoinRequestedAt(conversationID: String) throws -> Date? {

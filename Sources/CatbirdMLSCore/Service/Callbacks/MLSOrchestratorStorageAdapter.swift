@@ -302,6 +302,23 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  /// Ruling 2a: drop quarantine metadata as part of resolving reset authority.
+  /// Callers must run this inside the transaction that clears the reset tuple,
+  /// otherwise the row re-projects `quarantined` the moment `needsReset` drops
+  /// and the wedge returns through the back door.
+  private func clearQuarantineState(conversationId: String, in db: Database) throws {
+    try db.execute(
+      sql: """
+        UPDATE mls_orchestrator_security_state
+        SET quarantine_reason = NULL,
+            quarantined_since_ms = NULL,
+            updated_at = ?
+        WHERE conversation_id = ? AND user_did = ?
+        """,
+      arguments: [Date(), conversationId, userDID]
+    )
+  }
+
   private func clearResetNotification(conversationId: String, in db: Database) throws {
     try db.execute(
       sql: """
@@ -663,8 +680,15 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       // on anything else, so an inactive-but-untagged row (a left or
       // soft-deleted conversation) has no durable state to rehydrate and must
       // report absence rather than a tag Rust would reject.
-      guard let state = reason != nil ? "quarantined"
-        : needsReset ? "reset_pending"
+      //
+      // Ruling 2a: a server reset exits quarantine, so reset authority outranks
+      // quarantine metadata. A row carrying both is the crash-window artifact
+      // (the process died between the reset authority commit and the separate
+      // quarantine clear) — legal input to be healed, not a malformed state.
+      // Projecting `reset_pending` lets Rust proceed to adoption, and the
+      // quarantine columns it ignores on this tag are cleared on completion.
+      guard let state = needsReset ? "reset_pending"
+        : reason != nil ? "quarantined"
         : isUnrecoverable ? "failed"
         : needsRejoin ? "needs_rejoin"
         : isActive ? "active" : nil
@@ -768,6 +792,14 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           """,
         arguments: [newGroupIdHex, incomingGen, Date(), conversationId, userDID]
       )
+      // Ruling 2a: publishing reset authority exits quarantine, in the same
+      // transaction and the same statement. Rust clears quarantine in a later,
+      // separate call; a crash in between used to rehydrate the row quarantined
+      // forever, because the replayed reset takes the same-generation dedupe
+      // early-return before reaching that clear. The INSERT branch leaves both
+      // columns NULL by omission, so one statement covers new and existing rows
+      // — and because same-generation replay re-runs this path, it also heals
+      // rows already wedged by the old ordering.
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_security_state
@@ -775,6 +807,8 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           VALUES (?, ?, ?, ?)
           ON CONFLICT(conversation_id, user_did) DO UPDATE SET
             reset_notified_at_ms = excluded.reset_notified_at_ms,
+            quarantine_reason = NULL,
+            quarantined_since_ms = NULL,
             updated_at = excluded.updated_at
           """,
         arguments: [conversationId, userDID, notifiedAtMs, Date()]
@@ -892,6 +926,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         generation: Int64(expectedGeneration),
         in: db
       )
+      try clearQuarantineState(conversationId: conversationId, in: db)
       try clearResetNotification(conversationId: conversationId, in: db)
       return true
     }
@@ -928,6 +963,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         generation: Int64(expectedGeneration),
         in: db
       )
+      try clearQuarantineState(conversationId: conversationId, in: db)
       try clearResetNotification(conversationId: conversationId, in: db)
       return true
     }
