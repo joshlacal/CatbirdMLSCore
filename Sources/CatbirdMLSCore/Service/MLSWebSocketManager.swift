@@ -295,10 +295,12 @@ public actor MLSWebSocketManager {
     private func runSubscription(convoId: String?, key: String, cursor: String?) async {
         logger.info("🔌 WS: runSubscription() started for \(key), cursor: \(cursor ?? "nil")")
         var reconnectAttempts = 0
+        var latestSavedCursor = cursor
         // Spec §7: Exponential backoff (1s, 2s, 4s, 8s, max 30s), no give-up limit
         let maxReconnectDelay: TimeInterval = 30.0
 
         while !Task.isCancelled, shouldStop[key] != true {
+            latestSavedCursor = lastCursor[key] ?? latestSavedCursor
 
             do {
                 logger.info("🔌 WS: Attempting connection for: \(key), attempt: \(reconnectAttempts + 1)")
@@ -309,19 +311,23 @@ public actor MLSWebSocketManager {
                 // snapshot. Never reuse the legacy ticket endpoint or proxy the
                 // WebSocket upgrade through a second DPoP flow.
                 let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
-                let snapshotCursor = inventory.snapshotEventCursor
-                if let cursor, cursor != snapshotCursor {
+                let sessionCursor = inventory.snapshotEventCursor
+                if let latestSavedCursor {
                     logger.info(
-                        "🔌 WS: Resuming from canonical inventory fence \(snapshotCursor.prefix(20))... (previous cursor \(cursor.prefix(20))... is superseded by the fence)"
+                        "🔌 WS: Last hydrated cursor \(latestSavedCursor.prefix(20)); new ticket fence \(sessionCursor.prefix(20))..."
+                    )
+                } else {
+                    logger.info(
+                        "🔌 WS: Starting from canonical inventory fence \(sessionCursor.prefix(20))..."
                     )
                 }
                 let ticket = try await apiClient.getCanonicalSubscriptionTicket(
                     inventorySessionId: inventory.inventorySessionId,
-                    eventCursor: snapshotCursor
+                    eventCursor: sessionCursor
                 )
                 let stream = try await apiClient.subscribeCanonicalEvents(
                     ticket: ticket.ticket,
-                    cursor: snapshotCursor
+                    cursor: sessionCursor
                 )
                 connectionState[key] = .connected
                 logger.info("🔌 WS: Connected for \(key) - entering event loop")
@@ -410,51 +416,39 @@ public actor MLSWebSocketManager {
 
         switch message {
         case let .blueCatbirdChatDefsEventEnvelope(envelope):
-            saveCursor(envelope.cursor, for: key)
             switch envelope.payload {
             case let .blueCatbirdChatDefsMessageAvailableEvent(available):
+                let availableConversationId = String(describing: available.conversationId)
+                guard key == "__global__" || key == availableConversationId else {
+                    saveCursor(envelope.cursor, for: key)
+                    return
+                }
                 do {
                     let entries = try await apiClient.getCanonicalEntries(
-                        conversationId: String(describing: available.conversationId),
+                        conversationId: availableConversationId,
                         afterSeq: max(0, available.seq - 1),
                         limit: 100
                     )
                     for entry in entries.entries {
-                        guard case let .blueCatbirdChatDefsApplicationEntry(application) = entry else {
+                        guard let message = MLSCanonicalTransportAdapter.projectMessageView(from: entry),
+                              message.convoId == availableConversationId
+                        else {
                             continue
                         }
-                        let priorEpoch: Int
-                        let ciphertext: Bytes
-                        switch application.signedRequest.body {
-                        case let .blueCatbirdChatDefsApplicationSendBody(body):
-                            priorEpoch = body.prior.epoch
-                            ciphertext = body.applicationMessage.bytes
-                        case .unexpected:
-                            priorEpoch = 0
-                            ciphertext = Bytes(data: Data())
-                        }
-                        let message = BlueCatbirdMlsChatDefs.MessageView(
-                            id: String(describing: application.entryId),
-                            convoId: String(describing: application.conversationId),
-                            ciphertext: ciphertext,
-                            epoch: priorEpoch,
-                            seq: application.seq,
-                            createdAt: ATProtocolDate(date: application.receivedAt.date),
-                            messageType: nil
-                        )
                         let event = BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
                             cursor: envelope.cursor,
                             message: message,
                             ephemeral: nil,
-                            epoch: priorEpoch
+                            epoch: message.epoch
                         )
                         await handler.onMessage?(event)
                     }
+                    saveCursor(envelope.cursor, for: key)
                 } catch {
                     await handler.onError?(error)
                 }
             default:
-                break
+                saveCursor(envelope.cursor, for: key)
             }
         case .blueCatbirdChatDefsTypingEvent:
             // Typing is intentionally not projected into the durable cursor

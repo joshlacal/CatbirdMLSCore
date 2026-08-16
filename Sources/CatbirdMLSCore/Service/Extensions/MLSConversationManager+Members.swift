@@ -826,7 +826,7 @@ public extension MLSConversationManager {
     convoId: String,
     groupId: String
   ) async throws {
-    let (convos, _) = try await apiClient.getConversations(limit: 100)
+    let (convos, _) = try await apiClient.getCanonicalConversationViews(limit: 100)
 
     guard let updatedConvo = convos.first(where: { $0.groupId == groupId }) else {
       logger.warning(

@@ -36,7 +36,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
 
   public func getConversations(limit: UInt32, cursor: String?) throws -> FfiConversationListPage {
     let result = try blocking {
-      try await self.apiClient.getConversations(limit: Int(limit), cursor: cursor)
+      try await self.apiClient.getCanonicalConversationViews(limit: Int(limit), cursor: cursor)
     }
     return FfiConversationListPage(
       conversations: result.convos.map(Self.conversationView),
@@ -165,20 +165,18 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     toEpoch: UInt32?
   ) throws -> FfiMessagesPage {
     let result = try blocking {
-      let input = BlueCatbirdMlsChatGetMessages.Parameters(
-        convoId: convoId,
+      let page = try await self.apiClient.getCanonicalMessagePage(
+        conversationId: convoId,
+        afterSeq: cursor.flatMap(Int.init) ?? 0,
         limit: Int(limit),
-        sinceSeq: cursor.flatMap(Int.init),
-        type: messageType,
-        fromEpoch: fromEpoch.map(Int.init),
-        toEpoch: toEpoch.map(Int.init)
+        messageType: messageType.flatMap(BlueCatbirdMlsChatDefs.MessageViewMessageType.init(rawValue:))
       )
-      let (responseCode, output) = try await self.apiClient.client.blue.catbird.mlsChat
-        .getMessages(input: input)
-      guard responseCode == 200, let output else {
-        throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch messages")
+      let messages = page.messages.filter { message in
+        (fromEpoch == nil || UInt32(clamping: message.epoch) >= fromEpoch!)
+          && (toEpoch == nil || UInt32(clamping: message.epoch) <= toEpoch!)
+          && (messageType == nil || message.messageType?.rawValue == messageType)
       }
-      return output
+      return (messages: messages, lastSeq: page.lastSeq)
     }
     return FfiMessagesPage(
       envelopes: result.messages.map(Self.incomingEnvelope),

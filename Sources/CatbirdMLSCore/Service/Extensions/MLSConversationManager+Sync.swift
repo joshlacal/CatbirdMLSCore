@@ -493,7 +493,7 @@ public extension MLSConversationManager {
         // This prevents continuing to fetch while account is switching
         try throwIfShuttingDown("syncWithServer pagination")
 
-        let result = try await apiClient.getConversations(limit: 100, cursor: cursor)
+        let result = try await apiClient.getCanonicalConversationViews(limit: 100, cursor: cursor)
         allConvos.append(contentsOf: result.convos)
         cursor = result.cursor
       } while cursor != nil
@@ -1764,7 +1764,7 @@ public extension MLSConversationManager {
     // Phase 0 Q3: groupResetEvent carries no roster, fetch fresh from server.
     let convoView: BlueCatbirdMlsChatDefs.ConvoView
     do {
-      guard let fetched = try await apiClient.getConversation(convoId: convoId) else {
+      guard let fetched = try await apiClient.getCanonicalConversationView(conversationId: convoId) else {
         logger.error(
           "❌ [BOOTSTRAP] getConversation returned nil for \(convoId.prefix(16)) — leaving RESET_PENDING set"
         )
@@ -2045,7 +2045,7 @@ public extension MLSConversationManager {
       // and avoids the extra round trip.
       let refetchedGeneration: Int64? = await {
         do {
-          if let refetched = try await apiClient.getConversation(convoId: convoId),
+          if let refetched = try await apiClient.getCanonicalConversationView(conversationId: convoId),
              let serverGen = refetched.resetGeneration
           {
             return Int64(serverGen)
@@ -2200,7 +2200,7 @@ public extension MLSConversationManager {
           )
           let serverConvo: BlueCatbirdMlsChatDefs.ConvoView?
           do {
-            serverConvo = try await apiClient.getConversation(convoId: convoId)
+            serverConvo = try await apiClient.getCanonicalConversationView(conversationId: convoId)
           } catch {
             serverConvo = nil
           }
@@ -2338,7 +2338,7 @@ public extension MLSConversationManager {
           // the 200 path above for the rationale.
           let refetchedGeneration409: Int64? = await {
             do {
-              if let refetched = try await apiClient.getConversation(convoId: convoId),
+              if let refetched = try await apiClient.getCanonicalConversationView(conversationId: convoId),
                  let serverGen = refetched.resetGeneration
               {
                 return Int64(serverGen)

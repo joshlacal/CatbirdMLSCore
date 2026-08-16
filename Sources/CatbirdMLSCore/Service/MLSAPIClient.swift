@@ -303,6 +303,59 @@ public final class MLSAPIClient {
         }
         return output
     }
+    /// Compatibility projection for manager code that still consumes the legacy
+    /// view model. The read itself is always the canonical chat procedure.
+    public func getCanonicalConversationView(
+        conversationId: String
+    ) async throws -> BlueCatbirdMlsChatDefs.ConvoView? {
+        let output = try await getCanonicalConversationState(conversationId: conversationId)
+        return MLSCanonicalTransportAdapter.projectConversationView(from: output.state)
+    }
+
+    /// Read one canonical inventory page and project active state items for
+    /// compatibility callers. Pagination remains the canonical page cursor.
+    public func getCanonicalConversationViews(
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> (convos: [BlueCatbirdMlsChatDefs.ConvoView], cursor: String?) {
+        let output = try await getCanonicalConversationInventory(limit: limit, cursor: cursor)
+        let views = output.items.compactMap { item -> BlueCatbirdMlsChatDefs.ConvoView? in
+            guard case let .blueCatbirdChatDefsConversationInventoryState(state) = item else {
+                return nil
+            }
+            return MLSCanonicalTransportAdapter.projectConversationView(from: state.state)
+        }
+        return (views, output.nextPageCursor)
+    }
+    /// Read canonical entries and project only valid application-send entries
+    /// into the manager's decryptable message view. Unknown body variants are
+    /// intentionally skipped rather than represented as empty ciphertext.
+    public func getCanonicalMessagePage(
+        conversationId: String,
+        afterSeq: Int,
+        limit: Int = 100,
+        messageType: BlueCatbirdMlsChatDefs.MessageViewMessageType? = nil
+    ) async throws -> (
+        messages: [BlueCatbirdMlsChatDefs.MessageView],
+        lastSeq: Int?,
+        gapInfo: BlueCatbirdMlsChatGetMessages.GapInfo?
+    ) {
+        let output = try await getCanonicalEntries(
+            conversationId: conversationId,
+            afterSeq: afterSeq,
+            limit: limit
+        )
+        let messages = output.entries.compactMap { entry -> BlueCatbirdMlsChatDefs.MessageView? in
+            guard let message = MLSCanonicalTransportAdapter.projectMessageView(
+                from: entry,
+                messageType: messageType ?? .value_app
+            ) else {
+                return nil
+            }
+            return message
+        }
+        return (messages, output.nextAfterSeq, nil)
+    }
 
     /// Mint a one-use ticket bound to the exact inventory snapshot cursor.
     public func getCanonicalSubscriptionTicket(
@@ -3615,6 +3668,7 @@ public final class MLSAPIClient {
 
     // sendEncryptedReadReceipt and sendEncryptedTypingIndicator have been removed
     // to reduce complexity. Only sendEncryptedReaction remains for control messages.
+
 }
 
 // MARK: - Error Types

@@ -538,7 +538,7 @@ public extension MLSConversationManager {
       logger.warning("⚠️ Conversation \(convoId.prefix(16))... not found locally, attempting on-demand fetch")
 
       // Try to fetch this specific conversation from server
-      if let fetchedConvo = try? await apiClient.getConversation(convoId: convoId) {
+      if let fetchedConvo = try? await apiClient.getCanonicalConversationView(conversationId: convoId) {
         // Add to local state
         conversations[convoId] = fetchedConvo
 
@@ -2440,10 +2440,10 @@ public extension MLSConversationManager {
 
         // Fetch missing messages from server
         let sinceParam = max(0, Int(missingStart) - 1)
-        let (messages, _, _) = try await apiClient.getMessages(
-          convoId: conversationID,
-          limit: 50,
-          sinceSeq: sinceParam
+        let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+          conversationId: conversationID,
+          afterSeq: sinceParam,
+          limit: 50
         )
 
         // Filter to only the relevant range and sort by sequence
@@ -2646,10 +2646,10 @@ public extension MLSConversationManager {
       // Fetch missing messages
       // Note: getMessages expects 'sinceSeq', so to get 'startSeq', pass 'startSeq - 1'
       let sinceParam = max(0, startSeq - 1)
-      let (messages, _, _) = try await apiClient.getMessages(
-        convoId: conversationID,
-        limit: limit,
-        sinceSeq: sinceParam
+      let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+        conversationId: conversationID,
+        afterSeq: sinceParam,
+        limit: limit
       )
 
       let relevantMessages = messages.filter { Int($0.seq) <= endSeq }
@@ -4183,10 +4183,10 @@ public extension MLSConversationManager {
           logger.warning("⚠️ [CATCHUP] Session invalidated - aborting catchup")
           return
         }
-        let (messages, _, gapInfo) = try await apiClient.getMessages(
-          convoId: convo.conversationId,
-          limit: 100,
-          sinceSeq: sinceSeq
+        let (messages, _, gapInfo) = try await apiClient.getCanonicalMessagePage(
+          conversationId: convo.conversationId,
+          afterSeq: sinceSeq ?? 0,
+          limit: 100
         )
 
         guard !messages.isEmpty else { break }
@@ -4268,10 +4268,10 @@ public extension MLSConversationManager {
 
     for (startSeq, endSeq) in ranges {
       do {
-        let (messages, _, _) = try await apiClient.getMessages(
-          convoId: conversationID,
-          limit: (endSeq - startSeq) + 10,
-          sinceSeq: max(0, startSeq - 1)
+        let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+          conversationId: conversationID,
+          afterSeq: max(0, startSeq - 1),
+          limit: (endSeq - startSeq) + 10
         )
         if !messages.isEmpty {
           try await processMessagesInOrder(
@@ -4320,10 +4320,10 @@ public extension MLSConversationManager {
     do {
       // Fetch messages with lookback
       // This will return messages > lookbackSeq
-      let (messages, _, _) = try await apiClient.getMessages(
-        convoId: convo.conversationId,
-        limit: 100,
-        sinceSeq: lookbackSeq
+      let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+        conversationId: convo.conversationId,
+        afterSeq: lookbackSeq,
+        limit: 100
       )
 
       if !messages.isEmpty {
@@ -5372,7 +5372,7 @@ public extension MLSConversationManager {
           // → joinByExternalCommit → getGroupInfo → 410 again. Loops
           // until backoff. Admin reset path is the convergence step.
           do {
-            if let serverConvo = try await apiClient.getConversation(convoId: convoId) {
+            if let serverConvo = try await apiClient.getCanonicalConversationView(conversationId: convoId) {
               let serverGroupIdHex = serverConvo.groupId
               let serverGeneration = serverConvo.resetGeneration.map { Int64($0) }
               if !serverGroupIdHex.isEmpty

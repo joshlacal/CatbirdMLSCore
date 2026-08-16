@@ -269,11 +269,13 @@ public actor MLSEventStreamManager {
         print("[SSE] runSubscription() started for convoId: \(convoId.prefix(12))...")
         logger.info("📡 SSE: runSubscription() started for convoId: \(convoId), cursor: \(cursor ?? "nil")")
         var reconnectAttempts = 0
+        var latestSavedCursor = cursor
         let maxReconnectAttempts = 5
         let reconnectDelay: TimeInterval = 2.0
 
         // Check both Task.isCancelled and shouldStop flag for graceful shutdown
         while !Task.isCancelled, shouldStop[convoId] != true, reconnectAttempts < maxReconnectAttempts {
+            latestSavedCursor = lastCursor[convoId] ?? latestSavedCursor
             let connectionStartTime = Date()
 
             do {
@@ -287,14 +289,23 @@ public actor MLSEventStreamManager {
                 // session and an exact snapshot cursor in both ticket and
                 // upgrade. Legacy SSE has no equivalent cursor binding.
                 let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
-                let snapshotCursor = inventory.snapshotEventCursor
+                let sessionCursor = inventory.snapshotEventCursor
+                if let latestSavedCursor {
+                    logger.info(
+                        "📡 SSE: Last hydrated cursor \(latestSavedCursor.prefix(20)); new ticket fence \(sessionCursor.prefix(20))..."
+                    )
+                } else {
+                    logger.info(
+                        "📡 SSE: Starting from canonical inventory fence \(sessionCursor.prefix(20))..."
+                    )
+                }
                 let ticket = try await apiClient.getCanonicalSubscriptionTicket(
                     inventorySessionId: inventory.inventorySessionId,
-                    eventCursor: snapshotCursor
+                    eventCursor: sessionCursor
                 )
                 let eventStream = try await apiClient.subscribeCanonicalEvents(
                     ticket: ticket.ticket,
-                    cursor: snapshotCursor
+                    cursor: sessionCursor
                 )
 
                 connectionState[convoId] = .connected
@@ -414,48 +425,41 @@ public actor MLSEventStreamManager {
         guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
             return
         }
-        saveCursor(envelope.cursor, for: convoId)
 
         guard case let .blueCatbirdChatDefsMessageAvailableEvent(available) = envelope.payload else {
+            saveCursor(envelope.cursor, for: convoId)
+            return
+        }
+        let availableConversationId = String(describing: available.conversationId)
+        guard availableConversationId == convoId else {
+            logger.debug(
+                "📡 SSE: Ignoring event for \(availableConversationId) on subscription \(convoId)"
+            )
+            saveCursor(envelope.cursor, for: convoId)
             return
         }
 
         do {
             let entries = try await apiClient.getCanonicalEntries(
-                conversationId: String(describing: available.conversationId),
+                conversationId: availableConversationId,
                 afterSeq: max(0, available.seq - 1),
                 limit: 100
             )
             for entry in entries.entries {
-                guard case let .blueCatbirdChatDefsApplicationEntry(application) = entry else {
+                guard let message = MLSCanonicalTransportAdapter.projectMessageView(from: entry),
+                      message.convoId == convoId
+                else {
                     continue
-                }
-                let priorEpoch: Int
-                let ciphertext: Bytes
-                switch application.signedRequest.body {
-                case let .blueCatbirdChatDefsApplicationSendBody(body):
-                    priorEpoch = body.prior.epoch
-                    ciphertext = body.applicationMessage.bytes
-                case .unexpected:
-                    priorEpoch = 0
-                    ciphertext = Bytes(data: Data())
                 }
                 let event = BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
                     cursor: envelope.cursor,
-                    message: BlueCatbirdMlsChatDefs.MessageView(
-                        id: String(describing: application.entryId),
-                        convoId: String(describing: application.conversationId),
-                        ciphertext: ciphertext,
-                        epoch: priorEpoch,
-                        seq: application.seq,
-                        createdAt: ATProtocolDate(date: application.receivedAt.date),
-                        messageType: nil
-                    ),
+                    message: message,
                     ephemeral: nil,
-                    epoch: priorEpoch
+                    epoch: message.epoch
                 )
                 await handler.onMessage?(event)
             }
+            saveCursor(envelope.cursor, for: convoId)
         } catch {
             await handler.onError?(error)
         }
