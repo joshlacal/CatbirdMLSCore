@@ -92,6 +92,35 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             PRIMARY KEY (conversation_id, user_did)
           )
           """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_quarantine (
+            conversation_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            reason_tag TEXT NOT NULL,
+            since_ms INTEGER NOT NULL,
+            PRIMARY KEY (conversation_id, user_did)
+          )
+          """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_pending_messages (
+            message_id TEXT PRIMARY KEY NOT NULL,
+            conversation_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            created_at DATETIME NOT NULL
+          )
+          """)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_sequencer_receipts (
+            conversation_id TEXT NOT NULL,
+            user_did TEXT NOT NULL,
+            epoch INTEGER NOT NULL,
+            commit_hash BLOB NOT NULL,
+            sequencer_did TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            signature BLOB NOT NULL,
+            PRIMARY KEY (conversation_id, user_did, epoch)
+          )
+          """)
       }
     } catch {
       // Non-fatal: tables may already exist or will be created on first write.
@@ -296,6 +325,98 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  public func getConversationState(conversationId: String) throws -> FfiConversationState? {
+    try dbPool.read { db in
+      guard let conversation = try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
+        .fetchOne(db)
+      else {
+        return nil
+      }
+
+      if let quarantine = try Row.fetchOne(
+        db,
+        sql: """
+          SELECT reason_tag, since_ms
+          FROM mls_orchestrator_quarantine
+          WHERE conversation_id = ? AND user_did = ?
+          """,
+        arguments: [conversationId, userDID]
+      ) {
+        return FfiConversationState(
+          state: "quarantined",
+          newGroupId: nil,
+          resetGeneration: nil,
+          notifiedAtMs: nil,
+          quarantineReason: quarantine["reason_tag"],
+          quarantinedSinceMs: quarantine["since_ms"]
+        )
+      }
+
+      if conversation.needsReset, let newGroupId = conversation.pendingNewGroupId,
+         let generation = conversation.pendingResetGeneration
+      {
+        return FfiConversationState(
+          state: "reset_pending",
+          newGroupId: newGroupId,
+          resetGeneration: Int32(clamping: generation),
+          notifiedAtMs: Int64(conversation.updatedAt.timeIntervalSince1970 * 1_000),
+          quarantineReason: nil,
+          quarantinedSinceMs: nil
+        )
+      }
+
+      let state: String
+      if conversation.needsRejoin {
+        state = "needs_rejoin"
+      } else if conversation.isUnrecoverable {
+        state = "failed"
+      } else if conversation.isActive {
+        state = "active"
+      } else {
+        // The Rust state projection has no `left` state. Inactive rows are
+        // not eligible for recovery, so expose the durable failure state.
+        state = "failed"
+      }
+      return FfiConversationState(
+        state: state,
+        newGroupId: nil,
+        resetGeneration: nil,
+        notifiedAtMs: nil,
+        quarantineReason: nil,
+        quarantinedSinceMs: nil
+      )
+    }
+  }
+
+  public func markQuarantined(conversationId: String, reasonTag: String, sinceMs: Int64) throws {
+    guard ["peer_bad_commit", "multi_peer_bad_commits", "repeated_framing_failures"].contains(reasonTag) else {
+      throw OrchestratorBridgeError.Storage(message: "Unknown quarantine reason: \(reasonTag)")
+    }
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_quarantine (conversation_id, user_did, reason_tag, since_ms)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(conversation_id, user_did) DO UPDATE SET
+            reason_tag = excluded.reason_tag,
+            since_ms = excluded.since_ms
+          """,
+        arguments: [conversationId, userDID, reasonTag, sinceMs]
+      )
+    }
+  }
+
+  public func clearQuarantine(conversationId: String) throws {
+    try dbPool.write { db in
+      try db.execute(
+        sql: "DELETE FROM mls_orchestrator_quarantine WHERE conversation_id = ? AND user_did = ?",
+        arguments: [conversationId, userDID]
+      )
+    }
+  }
+
   // MARK: - Reset Pending Operations (§8.5 Phase 1)
 
   /// Persist the `RESET_PENDING` payload so recovery survives app restart.
@@ -495,6 +616,95 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedDID)
         .fetchCount(db)
       return count > 0
+    }
+  }
+
+  public func storePendingMessage(conversationId: String, messageId: String) throws {
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_pending_messages (message_id, conversation_id, user_did, created_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(message_id) DO UPDATE SET
+            conversation_id = excluded.conversation_id,
+            user_did = excluded.user_did
+          """,
+        arguments: [messageId, conversationId, userDID, Date()]
+      )
+    }
+  }
+
+  public func removePendingMessage(messageId: String) throws -> Bool {
+    try dbPool.write { db in
+      try db.execute(
+        sql: "DELETE FROM mls_orchestrator_pending_messages WHERE message_id = ? AND user_did = ?",
+        arguments: [messageId, userDID]
+      )
+      return db.changesCount > 0
+    }
+  }
+
+  public func storeSequencerReceipt(receipt: FfiSequencerReceipt) throws {
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          INSERT INTO mls_orchestrator_sequencer_receipts
+            (conversation_id, user_did, epoch, commit_hash, sequencer_did, issued_at, signature)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(conversation_id, user_did, epoch) DO UPDATE SET
+            commit_hash = excluded.commit_hash,
+            sequencer_did = excluded.sequencer_did,
+            issued_at = excluded.issued_at,
+            signature = excluded.signature
+          """,
+        arguments: [
+          receipt.convoId,
+          userDID,
+          receipt.epoch,
+          receipt.commitHash,
+          receipt.sequencerDid,
+          receipt.issuedAt,
+          receipt.signature,
+        ]
+      )
+    }
+  }
+
+  public func getSequencerReceipts(
+    conversationId: String,
+    sinceEpoch: Int32?
+  ) throws -> [FfiSequencerReceipt] {
+    try dbPool.read { db in
+      var sql = """
+        SELECT conversation_id, epoch, commit_hash, sequencer_did, issued_at, signature
+        FROM mls_orchestrator_sequencer_receipts
+        WHERE conversation_id = ? AND user_did = ?
+        """
+      var arguments: StatementArguments = [conversationId, userDID]
+      if let sinceEpoch {
+        sql += " AND epoch >= ?"
+        arguments += [sinceEpoch]
+      }
+      sql += " ORDER BY epoch ASC"
+      return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
+        FfiSequencerReceipt(
+          convoId: row["conversation_id"],
+          epoch: row["epoch"],
+          commitHash: row["commit_hash"],
+          sequencerDid: row["sequencer_did"],
+          issuedAt: row["issued_at"],
+          signature: row["signature"]
+        )
+      }
+    }
+  }
+
+  public func clearSequencerReceipts(conversationId: String) throws {
+    try dbPool.write { db in
+      try db.execute(
+        sql: "DELETE FROM mls_orchestrator_sequencer_receipts WHERE conversation_id = ? AND user_did = ?",
+        arguments: [conversationId, userDID]
+      )
     }
   }
 

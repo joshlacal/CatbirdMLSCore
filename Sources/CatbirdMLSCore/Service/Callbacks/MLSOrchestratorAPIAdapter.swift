@@ -88,7 +88,11 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         welcomeMessage: welcomeData
       )
     }
-    return FfiAddMembersResult(success: result.success, newEpoch: UInt64(clamping: result.newEpoch))
+    return FfiAddMembersResult(
+      success: result.success,
+      newEpoch: UInt64(clamping: result.newEpoch),
+      receipt: nil
+    )
   }
 
   public func addMembersWithIdempotency(
@@ -108,7 +112,11 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         idempotencyKey: idempotencyKey
       )
     }
-    return FfiAddMembersResult(success: result.success, newEpoch: UInt64(clamping: result.newEpoch))
+    return FfiAddMembersResult(
+      success: result.success,
+      newEpoch: UInt64(clamping: result.newEpoch),
+      receipt: nil
+    )
   }
 
   public func removeMembers(convoId: String, memberDids: [String], commitData: Data) throws {
@@ -349,7 +357,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
     return FfiProcessExternalCommitResult(
       epoch: UInt64(clamping: result.newEpoch),
-      rejoinedAt: Self.iso8601Formatter.string(from: Date())
+      rejoinedAt: Self.iso8601Formatter.string(from: Date()),
+      receipt: nil
     )
   }
 

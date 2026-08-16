@@ -55,13 +55,32 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     self.apiClient = apiClient
     self.credentialAdapter = credentialAdapter
     self.eventCallback = eventCallback
-    bridge = OrchestratorBridge(
-      mlsContext: mlsContext,
-      storage: storageAdapter,
-      apiClient: apiClient,
-      credentials: credentialAdapter,
-      config: config ?? .default
+    let capabilities = SecurityStorageCapabilities(
+      version: 1,
+      resetState: true,
+      quarantine: true,
+      pendingMessageProtection: true,
+      sequencerReceipts: true,
+      recoveryBackoff: true,
+      pendingDeletion: true,
+      authorizedDeviceResolution: true
     )
+    do {
+      bridge = try OrchestratorBridge(
+        mlsContext: mlsContext,
+        storage: storageAdapter,
+        apiClient: apiClient,
+        credentials: credentialAdapter,
+        capabilities: capabilities,
+        config: config ?? .default
+      )
+    } catch {
+      // Capabilities are compile-time paired with this adapter surface. A
+      // rejected bridge is therefore a programming/configuration failure and
+      // must not leave a runtime that appears initialized but cannot enforce
+      // the Rust security contract.
+      fatalError("Failed to initialize MLS orchestrator bridge: \(error)")
+    }
     bridge.setEventCallback(callback: eventCallback)
     bridge.setStoreControlMessages(enabled: mode.usesRustForDecisions)
 
