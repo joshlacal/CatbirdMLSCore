@@ -41,5 +41,23 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       )
     }
   }
+  func testCanonicalReadAndTicketRoutesStayOnGeneratedChatNamespace() {
+    XCTAssertEqual(
+      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getConvos")?.canonical,
+      "blue.catbird.chat.getConversations"
+    )
+    XCTAssertEqual(
+      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getMessages")?.canonical,
+      "blue.catbird.chat.getEntries"
+    )
+    XCTAssertEqual(
+      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getSubscriptionTicket")?.canonical,
+      "blue.catbird.chat.getSubscriptionTicket"
+    )
+    XCTAssertEqual(
+      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.subscribeEvents")?.canonical,
+      "blue.catbird.chat.subscribeEvents"
+    )
+  }
 
 }

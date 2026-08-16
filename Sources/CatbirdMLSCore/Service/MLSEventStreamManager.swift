@@ -283,13 +283,18 @@ public actor MLSEventStreamManager {
 
                 connectionState[convoId] = .connecting
 
-                // Get event stream from API client via SSE
-                // Always use the latest in-memory cursor for reconnect attempts to avoid replaying
-                // already-processed events (and missing events during transient disconnects).
-                let cursorToUse = lastCursor[convoId] ?? cursor
-                let eventStream = try await apiClient.subscribeEvents(
-                    convoId: convoId,
-                    cursor: cursorToUse
+                // Canonical subscriptions require a completed inventory
+                // session and an exact snapshot cursor in both ticket and
+                // upgrade. Legacy SSE has no equivalent cursor binding.
+                let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
+                let snapshotCursor = inventory.snapshotEventCursor
+                let ticket = try await apiClient.getCanonicalSubscriptionTicket(
+                    inventorySessionId: inventory.inventorySessionId,
+                    eventCursor: snapshotCursor
+                )
+                let eventStream = try await apiClient.subscribeCanonicalEvents(
+                    ticket: ticket.ticket,
+                    cursor: snapshotCursor
                 )
 
                 connectionState[convoId] = .connected
@@ -318,7 +323,7 @@ public actor MLSEventStreamManager {
                     eventCount += 1
                     print("[SSE] 📡 Event #\(eventCount) received for: \(convoId.prefix(12))...")
                     logger.info("📡 SSE: Event #\(eventCount) received from stream for convoId: \(convoId)")
-                    await handleEvent(output, for: convoId)
+                    await handleCanonicalEvent(output, for: convoId)
                 }
 
                 // Check if we're stopping gracefully
@@ -397,117 +402,66 @@ public actor MLSEventStreamManager {
         }
     }
 
-    private func handleEvent(_ message: BlueCatbirdMlsChatSubscribeEvents.Message, for convoId: String) async {
+    private func handleCanonicalEvent(
+        _ message: BlueCatbirdChatSubscribeEvents.Message,
+        for convoId: String
+    ) async {
         guard let handler = eventHandlers[convoId] else {
-            logger.warning("📡 SSE: No handler found for convoId: \(convoId) - event dropped!")
+            logger.warning("📡 SSE: No handler found for canonical stream \(convoId)")
             return
         }
 
-        logger.info("📡 SSE: handleEvent() called for convoId: \(convoId)")
+        guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
+            return
+        }
+        saveCursor(envelope.cursor, for: convoId)
 
-        // Handle the event based on the union type
-        switch message {
-        case let .messageEvent(messageEvent):
-            print("[SSE] 📨 MESSAGE EVENT received - id: \(messageEvent.message.id.prefix(12))...")
-            logger.info("📡 SSE: MESSAGE EVENT received - id: \(messageEvent.message.id), calling onMessage handler")
-            saveCursor(messageEvent.cursor, for: convoId)
-            await handler.onMessage?(messageEvent)
+        guard case let .blueCatbirdChatDefsMessageAvailableEvent(available) = envelope.payload else {
+            return
+        }
 
-        case let .reactionEvent(reactionEvent):
-            logger.info(
-                "📡 SSE: REACTION EVENT received - convo: \(convoId.prefix(16)), action: \(reactionEvent.action), reaction: \(reactionEvent.reaction), calling onReaction handler"
+        do {
+            let entries = try await apiClient.getCanonicalEntries(
+                conversationId: String(describing: available.conversationId),
+                afterSeq: max(0, available.seq - 1),
+                limit: 100
             )
-            saveCursor(reactionEvent.cursor, for: convoId)
-            await handler.onReaction?(reactionEvent)
-
-        case let .typingEvent(typingEvent):
-            saveCursor(typingEvent.cursor, for: convoId)
-            await handler.onTyping?(typingEvent)
-
-        case let .infoEvent(infoEvent):
-            logger.info(
-                "📡 SSE: INFO EVENT received - convo: \(convoId.prefix(16)), info: \(infoEvent.info), calling onInfo handler"
-            )
-            saveCursor(infoEvent.cursor, for: convoId)
-            await handler.onInfo?(infoEvent)
-
-        case let .newDeviceEvent(newDeviceEvent):
-            logger.info("New device event: user=\(newDeviceEvent.userDid), device=\(newDeviceEvent.deviceId), convo=\(newDeviceEvent.convoId)")
-            saveCursor(newDeviceEvent.cursor, for: convoId)
-            await handler.onNewDevice?(newDeviceEvent)
-
-        case let .treeChanged(treeChanged):
-            logger.info("Tree changed: convo=\(treeChanged.convoId), epoch=\(treeChanged.epoch)")
-            saveCursor(treeChanged.cursor, for: convoId)
-            await handler.onTreeChanged?(treeChanged)
-
-        case let .groupResetEvent(groupReset):
-            logger.info(
-                "Group reset: convo=\(groupReset.convoId), newGroup=\(groupReset.newGroupId.prefix(16)), gen=\(groupReset.resetGeneration)"
-            )
-            saveCursor(groupReset.cursor, for: convoId)
-            await handler.onGroupReset?(groupReset)
-
-        case let .resetRequestedEvent(resetRequested):
-            logger.info(
-                "Reset requested: convo=\(resetRequested.convoId), gen=\(resetRequested.generation), trigger=\(resetRequested.trigger), eventId=\(resetRequested.requestEventId.prefix(16))"
-            )
-            saveCursor(resetRequested.cursor, for: convoId)
-            await handler.onResetRequested?(resetRequested)
-
-        case let .groupInfoRefreshRequestedEvent(refreshEvent):
-            logger.info("GroupInfo refresh requested: convo=\(refreshEvent.convoId)")
-            saveCursor(refreshEvent.cursor, for: convoId)
-            await handler.onGroupInfoRefreshRequested?(refreshEvent)
-
-        case let .readditionRequestedEvent(readditionEvent):
-            logger.info("Readdition requested: convo=\(readditionEvent.convoId)")
-            saveCursor(readditionEvent.cursor, for: convoId)
-            await handler.onReadditionRequested?(readditionEvent)
-
-        case let .welcomeReissueRequestedEvent(reissueEvent):
-            logger.info(
-                "Welcome reissue requested: convo=\(reissueEvent.convoId), recipient=\(reissueEvent.recipientDeviceDid.description.prefix(32)), requestId=\(reissueEvent.requestId.prefix(16))"
-            )
-            saveCursor(reissueEvent.cursor, for: convoId)
-            await handler.onWelcomeReissueRequested?(reissueEvent)
-
-        case let .membershipChangeEvent(membershipEvent):
-            logger.info("Membership change: convo=\(membershipEvent.convoId), did=\(membershipEvent.did)")
-            saveCursor(membershipEvent.cursor, for: convoId)
-            if let action = MembershipAction(rawValue: membershipEvent.action) {
-                await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
+            for entry in entries.entries {
+                guard case let .blueCatbirdChatDefsApplicationEntry(application) = entry else {
+                    continue
+                }
+                let priorEpoch: Int
+                let ciphertext: Bytes
+                switch application.signedRequest.body {
+                case let .blueCatbirdChatDefsApplicationSendBody(body):
+                    priorEpoch = body.prior.epoch
+                    ciphertext = body.applicationMessage.bytes
+                case .unexpected:
+                    priorEpoch = 0
+                    ciphertext = Bytes(data: Data())
+                }
+                let event = BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
+                    cursor: envelope.cursor,
+                    message: BlueCatbirdMlsChatDefs.MessageView(
+                        id: String(describing: application.entryId),
+                        convoId: String(describing: application.conversationId),
+                        ciphertext: ciphertext,
+                        epoch: priorEpoch,
+                        seq: application.seq,
+                        createdAt: ATProtocolDate(date: application.receivedAt.date),
+                        messageType: nil
+                    ),
+                    ephemeral: nil,
+                    epoch: priorEpoch
+                )
+                await handler.onMessage?(event)
             }
-
-        case let .circuitBreakerTrippedEvent(cbEvent):
-            logger.warning("Circuit breaker tripped: convo=\(cbEvent.convoId), resetCount=\(cbEvent.resetCount), at=\(cbEvent.trippedAt.iso8601String)")
-            saveCursor(cbEvent.cursor, for: convoId)
-
-        @unknown default:
-            let summary = encodedEventSummary(message)
-            if let cursor = summary.cursor {
-                saveCursor(cursor, for: convoId)
-            }
-            logger.warning(
-                "📡 SSE: Unknown subscribeEvents case for convoId=\(convoId.prefix(16)), type=\(summary.type ?? "unavailable"), cursorSaved=\(summary.cursor != nil), event=\(String(describing: message))"
-            )
+        } catch {
+            await handler.onError?(error)
         }
     }
 
-    private func encodedEventSummary(
-        _ message: BlueCatbirdMlsChatSubscribeEvents.Message
-    ) -> (type: String?, cursor: String?) {
-        guard let data = try? JSONEncoder().encode(message),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            return (nil, nil)
-        }
 
-        return (
-            object["$type"] as? String,
-            object["cursor"] as? String
-        )
-    }
 
     /// Save cursor to both in-memory cache and persistent storage
     private func saveCursor(_ cursor: String, for convoId: String) {

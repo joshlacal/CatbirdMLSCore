@@ -264,6 +264,114 @@ public final class MLSAPIClient {
         }
         return output
     }
+    /// Read one canonical conversation state through Petrel's clean-chat
+    /// procedure. The canonical response is intentionally kept as generated
+    /// DTOs; callers must not project it back into a legacy route payload.
+    public func getCanonicalConversationState(
+        conversationId: String
+    ) async throws -> BlueCatbirdChatGetConversationState.Output {
+        let input = BlueCatbirdChatGetConversationState.Parameters(
+            conversationId: conversationId
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getConversationState(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical conversation state"
+            )
+        }
+        return output
+    }
+
+    /// Read canonical entries strictly after a global sequence position.
+    public func getCanonicalEntries(
+        conversationId: String,
+        afterSeq: Int,
+        limit: Int = 100
+    ) async throws -> BlueCatbirdChatGetEntries.Output {
+        let input = BlueCatbirdChatGetEntries.Parameters(
+            conversationId: conversationId,
+            afterSeq: afterSeq,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getEntries(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical conversation entries"
+            )
+        }
+        return output
+    }
+
+    /// Mint a one-use ticket bound to the exact inventory snapshot cursor.
+    public func getCanonicalSubscriptionTicket(
+        inventorySessionId: String,
+        eventCursor: String
+    ) async throws -> BlueCatbirdChatGetSubscriptionTicket.Output {
+        let input = BlueCatbirdChatGetSubscriptionTicket.Input(
+            inventorySessionId: inventorySessionId,
+            eventCursor: eventCursor
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getSubscriptionTicket(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to get canonical subscription ticket"
+            )
+        }
+        return output
+    }
+
+    /// Open the canonical ticketed stream. The cursor must be byte-identical
+    /// to the cursor used to mint the ticket.
+    public func subscribeCanonicalEvents(
+        ticket: String,
+        cursor: String
+    ) async throws -> AsyncThrowingStream<BlueCatbirdChatSubscribeEvents.Message, Error> {
+        try await client.blue.catbird.chat.subscribeEvents(ticket: ticket, cursor: cursor)
+    }
+
+    /// Fetch every inventory page so the ticket barrier is established for one
+    /// coherent session before opening the event stream.
+    public func getCanonicalInventorySnapshot(
+        limit: Int = 100
+    ) async throws -> BlueCatbirdChatGetConversations.Output {
+        var cursor: String?
+        var firstPage: BlueCatbirdChatGetConversations.Output?
+        while true {
+            let page = try await getCanonicalConversationInventory(limit: limit, cursor: cursor)
+            if let firstPage {
+                guard firstPage.inventorySessionId == page.inventorySessionId,
+                      firstPage.snapshotEventCursor == page.snapshotEventCursor
+                else {
+                    throw MLSAPIError.httpError(
+                        statusCode: 409,
+                        message: "Canonical inventory session changed while paging"
+                    )
+                }
+            } else {
+                firstPage = page
+            }
+            guard page.hasMore else { break }
+            guard let nextPageCursor = page.nextPageCursor else {
+                throw MLSAPIError.httpError(
+                    statusCode: 502,
+                    message: "Canonical inventory marked hasMore without a page cursor"
+                )
+            }
+            cursor = nextPageCursor
+        }
+
+        guard let firstPage else {
+            throw MLSAPIError.httpError(
+                statusCode: 502,
+                message: "Canonical inventory returned no page"
+            )
+        }
+        return firstPage
+    }
+
 
     /// Get conversations for the authenticated user using Petrel client
     /// - Parameters:
@@ -1936,18 +2044,11 @@ public final class MLSAPIClient {
     /// - Parameter convoId: Conversation identifier
     /// - Returns: Current epoch number
     public func getEpoch(convoId: String) async throws -> Int {
-        logger.debug("Fetching epoch for conversation: \(convoId)")
-
-        let input = BlueCatbirdMlsChatGetGroupState.Parameters(convoId: convoId, include: "epoch")
-
-        let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupState(input: input)
-
-        guard responseCode == 200, let output = output else {
-            throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch epoch")
-        }
-
-        logger.debug("Current epoch for \(convoId): \(output.epoch ?? 0)")
-        return output.epoch ?? 0
+        logger.debug("Fetching canonical epoch for conversation: \(convoId)")
+        let output = try await getCanonicalConversationState(conversationId: convoId)
+        let epoch = output.state.coordinates.epoch
+        logger.debug("Current canonical epoch for \(convoId): \(epoch)")
+        return epoch
     }
 
     /// Get commit messages only (type: "commit") for pre-send sync and send recovery.

@@ -293,38 +293,36 @@ public actor MLSWebSocketManager {
     // MARK: - Private Methods
 
     private func runSubscription(convoId: String?, key: String, cursor: String?) async {
-        let logPrefix = convoId != nil ? "convoId: \(convoId!.prefix(12))..." : "GLOBAL"
         logger.info("🔌 WS: runSubscription() started for \(key), cursor: \(cursor ?? "nil")")
         var reconnectAttempts = 0
         // Spec §7: Exponential backoff (1s, 2s, 4s, 8s, max 30s), no give-up limit
         let maxReconnectDelay: TimeInterval = 30.0
 
         while !Task.isCancelled, shouldStop[key] != true {
-            let connectionStartTime = Date()
 
             do {
                 logger.info("🔌 WS: Attempting connection for: \(key), attempt: \(reconnectAttempts + 1)")
 
                 connectionState[key] = .connecting
-                let cursorToUse = lastCursor[key] ?? cursor
 
-                // Get authentication ticket
-                logger.info("🔌 WS: Requesting subscription ticket for \(key)...")
-                let ticketInput = BlueCatbirdMlsChatGetSubscriptionTicket.Input(convoIds: convoId.map { [$0] })
-                let ticketResponse = try await apiClient.client.blue.catbird.mlsChat.getSubscriptionTicket(
-                    input: ticketInput
-                )
-                guard let ticket = ticketResponse.data?.ticket else {
-                    logger.error("🔌 WS: Failed to get ticket - no data in response")
-                    throw WebSocketError.ticketExpired
+                // The canonical stream is ticketed by one completed inventory
+                // snapshot. Never reuse the legacy ticket endpoint or proxy the
+                // WebSocket upgrade through a second DPoP flow.
+                let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
+                let snapshotCursor = inventory.snapshotEventCursor
+                if let cursor, cursor != snapshotCursor {
+                    logger.info(
+                        "🔌 WS: Resuming from canonical inventory fence \(snapshotCursor.prefix(20))... (previous cursor \(cursor.prefix(20))... is superseded by the fence)"
+                    )
                 }
-                logger.info("🔌 WS: Got ticket, connecting...")
-
-                let stream = try await apiClient.client.blue.catbird.mlsChat.subscribeEvents(
-                    ticket: ticket,
-                    cursor: cursorToUse
+                let ticket = try await apiClient.getCanonicalSubscriptionTicket(
+                    inventorySessionId: inventory.inventorySessionId,
+                    eventCursor: snapshotCursor
                 )
-
+                let stream = try await apiClient.subscribeCanonicalEvents(
+                    ticket: ticket.ticket,
+                    cursor: snapshotCursor
+                )
                 connectionState[key] = .connected
                 logger.info("🔌 WS: Connected for \(key) - entering event loop")
 
@@ -347,9 +345,9 @@ public actor MLSWebSocketManager {
                         break
                     }
                     eventCount += 1
-                    logger.info("🔌 WS: Event #\(eventCount) received for \(key)")
-                    await handleEvent(message, for: key)
+                    await handleCanonicalEvent(message, for: key)
                 }
+
 
                 if shouldStop[key] == true {
                     logger.info("🔌 WS: Exiting loop due to graceful shutdown for: \(key)")
@@ -398,116 +396,76 @@ public actor MLSWebSocketManager {
         }
         connectionState[key] = .disconnected
     }
-
-    private func handleEvent(
-        _ message: BlueCatbirdMlsChatSubscribeEvents.Message, for convoId: String
+    /// Translate canonical availability notifications into the legacy message
+    /// callback only after fetching the visible entries. Availability events
+    /// deliberately do not carry ciphertext.
+    private func handleCanonicalEvent(
+        _ message: BlueCatbirdChatSubscribeEvents.Message,
+        for key: String
     ) async {
-        guard let handler = eventHandlers[convoId] else {
-            logger.warning("🔌 WS: No handler found for convoId: \(convoId) - event dropped!")
+        guard let handler = eventHandlers[key] else {
+            logger.warning("🔌 WS: No handler found for canonical stream key \(key)")
             return
         }
 
-        logger.info("🔌 WS: handleEvent() called for convoId: \(convoId)")
-
         switch message {
-        case let .messageEvent(messageEvent):
-            logger.info("🔌 WS: MESSAGE EVENT received - id: \(messageEvent.message.id)")
-            saveCursor(messageEvent.cursor, for: convoId)
-            await handler.onMessage?(messageEvent)
-
-        case let .reactionEvent(reactionEvent):
-            logger.info("🔌 WS: REACTION EVENT received - action: \(reactionEvent.action)")
-            saveCursor(reactionEvent.cursor, for: convoId)
-            await handler.onReaction?(reactionEvent)
-
-        case let .typingEvent(typingEvent):
-            saveCursor(typingEvent.cursor, for: convoId)
-            await handler.onTyping?(typingEvent)
-
-        case let .infoEvent(infoEvent):
-            logger.info("🔌 WS: INFO EVENT received - info: \(infoEvent.info)")
-            saveCursor(infoEvent.cursor, for: convoId)
-            await handler.onInfo?(infoEvent)
-
-        case let .newDeviceEvent(newDeviceEvent):
-            logger.info(
-                "New device event: user=\(newDeviceEvent.userDid), device=\(newDeviceEvent.deviceId)"
-            )
-            saveCursor(newDeviceEvent.cursor, for: convoId)
-            await handler.onNewDevice?(newDeviceEvent)
-
-        case let .treeChanged(treeChanged):
-            logger.info("🔌 WS: TREE CHANGED - convo: \(treeChanged.convoId.prefix(16)), epoch: \(treeChanged.epoch)")
-            saveCursor(treeChanged.cursor, for: convoId)
-            await handler.onTreeChanged?(treeChanged)
-
-        case let .groupResetEvent(groupReset):
-            logger.info(
-                "🔌 WS: GROUP RESET - convo: \(groupReset.convoId.prefix(16)), newGroup: \(groupReset.newGroupId.prefix(16)), gen: \(groupReset.resetGeneration)"
-            )
-            saveCursor(groupReset.cursor, for: convoId)
-            await handler.onGroupReset?(groupReset)
-
-        case let .resetRequestedEvent(resetRequested):
-            logger.info(
-                "🔌 WS: RESET REQUESTED - convo: \(resetRequested.convoId.prefix(16)), gen: \(resetRequested.generation), trigger: \(resetRequested.trigger), eventId: \(resetRequested.requestEventId.prefix(16))"
-            )
-            saveCursor(resetRequested.cursor, for: convoId)
-            await handler.onResetRequested?(resetRequested)
-
-        case let .groupInfoRefreshRequestedEvent(refreshEvent):
-            logger.info("🔌 WS: GROUP INFO REFRESH REQUESTED - convo: \(refreshEvent.convoId.prefix(16))")
-            saveCursor(refreshEvent.cursor, for: convoId)
-            await handler.onGroupInfoRefreshRequested?(refreshEvent)
-
-        case let .readditionRequestedEvent(readditionEvent):
-            logger.info("🔌 WS: READDITION REQUESTED - convo: \(readditionEvent.convoId.prefix(16))")
-            saveCursor(readditionEvent.cursor, for: convoId)
-            await handler.onReadditionRequested?(readditionEvent)
-
-        case let .welcomeReissueRequestedEvent(reissueEvent):
-            logger.info(
-                "🔌 WS: WELCOME REISSUE REQUESTED - convo: \(reissueEvent.convoId.prefix(16)), recipient: \(reissueEvent.recipientDeviceDid.description.prefix(32)), requestId: \(reissueEvent.requestId.prefix(16))"
-            )
-            saveCursor(reissueEvent.cursor, for: convoId)
-            await handler.onWelcomeReissueRequested?(reissueEvent)
-
-        case let .membershipChangeEvent(membershipEvent):
-            logger.info("🔌 WS: MEMBERSHIP CHANGE - convo: \(membershipEvent.convoId.prefix(16)), did: \(membershipEvent.did)")
-            saveCursor(membershipEvent.cursor, for: convoId)
-            if let action = MembershipAction(rawValue: membershipEvent.action) {
-                await handler.onMembershipChanged?(membershipEvent.convoId, membershipEvent.did, action)
+        case let .blueCatbirdChatDefsEventEnvelope(envelope):
+            saveCursor(envelope.cursor, for: key)
+            switch envelope.payload {
+            case let .blueCatbirdChatDefsMessageAvailableEvent(available):
+                do {
+                    let entries = try await apiClient.getCanonicalEntries(
+                        conversationId: String(describing: available.conversationId),
+                        afterSeq: max(0, available.seq - 1),
+                        limit: 100
+                    )
+                    for entry in entries.entries {
+                        guard case let .blueCatbirdChatDefsApplicationEntry(application) = entry else {
+                            continue
+                        }
+                        let priorEpoch: Int
+                        let ciphertext: Bytes
+                        switch application.signedRequest.body {
+                        case let .blueCatbirdChatDefsApplicationSendBody(body):
+                            priorEpoch = body.prior.epoch
+                            ciphertext = body.applicationMessage.bytes
+                        case .unexpected:
+                            priorEpoch = 0
+                            ciphertext = Bytes(data: Data())
+                        }
+                        let message = BlueCatbirdMlsChatDefs.MessageView(
+                            id: String(describing: application.entryId),
+                            convoId: String(describing: application.conversationId),
+                            ciphertext: ciphertext,
+                            epoch: priorEpoch,
+                            seq: application.seq,
+                            createdAt: ATProtocolDate(date: application.receivedAt.date),
+                            messageType: nil
+                        )
+                        let event = BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
+                            cursor: envelope.cursor,
+                            message: message,
+                            ephemeral: nil,
+                            epoch: priorEpoch
+                        )
+                        await handler.onMessage?(event)
+                    }
+                } catch {
+                    await handler.onError?(error)
+                }
+            default:
+                break
             }
-
-        case let .circuitBreakerTrippedEvent(cbEvent):
-            logger.warning("🔌 WS: CIRCUIT BREAKER TRIPPED - convo: \(cbEvent.convoId.prefix(16)), resetCount: \(cbEvent.resetCount)")
-            saveCursor(cbEvent.cursor, for: convoId)
-
-        @unknown default:
-            let summary = encodedEventSummary(message)
-            if let cursor = summary.cursor {
-                saveCursor(cursor, for: convoId)
-            }
-            logger.warning(
-                "🔌 WS: Unknown subscribeEvents case for convoId=\(convoId.prefix(16)), type=\(summary.type ?? "unavailable"), cursorSaved=\(summary.cursor != nil), event=\(String(describing: message))"
-            )
+        case .blueCatbirdChatDefsTypingEvent:
+            // Typing is intentionally not projected into the durable cursor
+            // chain; its canonical payload has no cursor.
+            break
+        case .unexpected:
+            logger.warning("🔌 WS: Unknown canonical subscription payload")
         }
     }
 
-    private func encodedEventSummary(
-        _ message: BlueCatbirdMlsChatSubscribeEvents.Message
-    ) -> (type: String?, cursor: String?) {
-        guard let data = try? JSONEncoder().encode(message),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            return (nil, nil)
-        }
 
-        return (
-            object["$type"] as? String,
-            object["cursor"] as? String
-        )
-    }
 
     /// Save cursor to both in-memory cache and persistent storage
     private func saveCursor(_ cursor: String, for convoId: String) {
