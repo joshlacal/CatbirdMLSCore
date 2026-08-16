@@ -142,7 +142,7 @@ extension MLSConversationManager {
             epoch: Int(localEpoch),
             seq: optimisticSeq,
             createdAt: ATProtocolDate(date: Date()),
-            messageType: "deliveryAck"
+            messageType: try MLSMessageViewProjection.viewType(for: payload)
           ),
           payload: payload,
           senderDID: userDid,
@@ -247,80 +247,84 @@ extension MLSConversationManager {
     guard let userDid = userDid, let convo = conversations[conversationId] else { return }
     guard let groupIdData = Data(hexEncoded: convo.groupId) else { return }
 
-    _ = try? await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
-      try throwIfShuttingDown("sendRecoveryRequest-queued")
+    do {
+      try await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
+        try throwIfShuttingDown("sendRecoveryRequest-queued")
 
-      let payload = MLSMessagePayload.recoveryRequest(
-        messageId: messageId,
-        epoch: epoch,
-        sequenceNumber: sequenceNumber
-      )
-      let payloadData = try payload.encodeToJSON()
+        let payload = MLSMessagePayload.recoveryRequest(
+          messageId: messageId,
+          epoch: epoch,
+          sequenceNumber: sequenceNumber
+        )
+        let payloadData = try payload.encodeToJSON()
 
-      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
-        let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
-        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
-        let tagB64 = tagData?.base64EncodedString()
-        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
-        let paddedSize = ciphertext.count
-        let localMsgId = UUID().uuidString
+        let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+          let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+          let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+          let tagB64 = tagData?.base64EncodedString()
+          let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+          let paddedSize = ciphertext.count
+          let localMsgId = UUID().uuidString
 
-        let optimisticSeq: Int
-        if let cursor = try? await storage.fetchLastMessageCursor(
-          conversationID: conversationId,
-          currentUserDID: userDid,
-          database: database
-        ) {
-          optimisticSeq = Int(cursor.seq) + 1
-        } else {
-          optimisticSeq = 1
+          let optimisticSeq: Int
+          if let cursor = try? await storage.fetchLastMessageCursor(
+            conversationID: conversationId,
+            currentUserDID: userDid,
+            database: database
+          ) {
+            optimisticSeq = Int(cursor.seq) + 1
+          } else {
+            optimisticSeq = 1
+          }
+
+          try throwIfShuttingDown("sendRecoveryRequest-preCache")
+          try await cacheControlMessageEnvelope(
+            message: BlueCatbirdMlsChatDefs.MessageView(
+              id: localMsgId,
+              convoId: conversationId,
+              ciphertext: Bytes(data: ciphertext),
+              epoch: Int(localEpoch),
+              seq: optimisticSeq,
+              createdAt: ATProtocolDate(date: Date()),
+              messageType: try MLSMessageViewProjection.viewType(for: payload)
+            ),
+            payload: payload,
+            senderDID: userDid,
+            currentUserDID: userDid,
+            processingState: MLSMessageProcessingState.pendingSelfSend
+          )
+
+          let sendResult = try await apiClient.sendMessage(
+            convoId: conversationId,
+            msgId: localMsgId,
+            ciphertext: ciphertext,
+            epoch: Int(localEpoch),
+            paddedSize: paddedSize,
+            senderDid: try DID(didString: userDid),
+            confirmationTag: tagB64
+          )
+          return (localMsgId, sendResult)
         }
 
-        try throwIfShuttingDown("sendRecoveryRequest-preCache")
-        try await cacheControlMessageEnvelope(
-          message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId,
-            convoId: conversationId,
-            ciphertext: Bytes(data: ciphertext),
-            epoch: Int(localEpoch),
-            seq: optimisticSeq,
-            createdAt: ATProtocolDate(date: Date()),
-            messageType: "recoveryRequest"
-          ),
-          payload: payload,
-          senderDID: userDid,
-          currentUserDID: userDid,
-          processingState: MLSMessageProcessingState.pendingSelfSend
-        )
-
-        let sendResult = try await apiClient.sendMessage(
-          convoId: conversationId,
-          msgId: localMsgId,
-          ciphertext: ciphertext,
-          epoch: Int(localEpoch),
-          paddedSize: paddedSize,
-          senderDid: try DID(didString: userDid),
-          confirmationTag: tagB64
-        )
-        return (localMsgId, sendResult)
+        let (localMsgId, sendResult) = result
+        do {
+          try await storage.updateMessageMetadata(
+            messageID: localMsgId,
+            currentUserDID: userDid,
+            epoch: sendResult.epoch,
+            sequenceNumber: sendResult.sequenceNumber,
+            timestamp: sendResult.receivedAt.date,
+            database: database,
+            newMessageID: sendResult.messageId
+          )
+        } catch {
+          logger.error(
+            "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, recovery-request-send) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
+          )
+        }
       }
-
-      let (localMsgId, sendResult) = result
-      do {
-        try await storage.updateMessageMetadata(
-          messageID: localMsgId,
-          currentUserDID: userDid,
-          epoch: sendResult.epoch,
-          sequenceNumber: sendResult.sequenceNumber,
-          timestamp: sendResult.receivedAt.date,
-          database: database,
-          newMessageID: sendResult.messageId
-        )
-      } catch {
-        logger.error(
-          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, recovery-request-send) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
-        )
-      }
+    } catch {
+      logger.error("❌ [SEND] Recovery request failed for \(conversationId.prefix(16)): \(error.localizedDescription)")
     }
   }
 
@@ -405,79 +409,83 @@ extension MLSConversationManager {
           let groupIdData = Data(hexEncoded: convo.groupId)
     else { return }
 
-    _ = try? await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
-      let recoveryPayload = MLSMessagePayload(
-        messageType: originalPayload.messageType,
-        text: originalPayload.text,
-        embed: originalPayload.embed,
-        recoveredMessageId: payload.messageId
-      )
-      let payloadData = try recoveryPayload.encodeToJSON()
+    do {
+      try await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
+        let recoveryPayload = MLSMessagePayload(
+          messageType: originalPayload.messageType,
+          text: originalPayload.text,
+          embed: originalPayload.embed,
+          recoveredMessageId: payload.messageId
+        )
+        let payloadData = try recoveryPayload.encodeToJSON()
 
-      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
-        let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
-        let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
-        let tagB64 = tagData?.base64EncodedString()
-        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
-        let paddedSize = ciphertext.count
-        let localMsgId = UUID().uuidString
+        let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+          let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
+          let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
+          let tagB64 = tagData?.base64EncodedString()
+          let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+          let paddedSize = ciphertext.count
+          let localMsgId = UUID().uuidString
 
-        let optimisticSeq: Int
-        if let cursor = try? await storage.fetchLastMessageCursor(
-          conversationID: conversationId,
-          currentUserDID: userDid,
-          database: database
-        ) {
-          optimisticSeq = Int(cursor.seq) + 1
-        } else {
-          optimisticSeq = 1
+          let optimisticSeq: Int
+          if let cursor = try? await storage.fetchLastMessageCursor(
+            conversationID: conversationId,
+            currentUserDID: userDid,
+            database: database
+          ) {
+            optimisticSeq = Int(cursor.seq) + 1
+          } else {
+            optimisticSeq = 1
+          }
+
+          try throwIfShuttingDown("handleRecoveryRequest-preCache")
+          try await cacheControlMessageEnvelope(
+            message: BlueCatbirdMlsChatDefs.MessageView(
+              id: localMsgId,
+              convoId: conversationId,
+              ciphertext: Bytes(data: ciphertext),
+              epoch: Int(localEpoch),
+              seq: optimisticSeq,
+              createdAt: ATProtocolDate(date: Date()),
+              messageType: try MLSMessageViewProjection.viewType(for: recoveryPayload)
+            ),
+            payload: recoveryPayload,
+            senderDID: userDid,
+            currentUserDID: userDid,
+            processingState: MLSMessageProcessingState.pendingSelfSend
+          )
+
+          let sendResult = try await apiClient.sendMessage(
+            convoId: conversationId,
+            msgId: localMsgId,
+            ciphertext: ciphertext,
+            epoch: Int(localEpoch),
+            paddedSize: paddedSize,
+            senderDid: try DID(didString: userDid),
+            confirmationTag: tagB64
+          )
+          return (localMsgId, sendResult)
         }
 
-        try throwIfShuttingDown("handleRecoveryRequest-preCache")
-        try await cacheControlMessageEnvelope(
-          message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId,
-            convoId: conversationId,
-            ciphertext: Bytes(data: ciphertext),
-            epoch: Int(localEpoch),
-            seq: optimisticSeq,
-            createdAt: ATProtocolDate(date: Date()),
-            messageType: originalPayload.messageType.rawValue
-          ),
-          payload: recoveryPayload,
-          senderDID: userDid,
-          currentUserDID: userDid,
-          processingState: MLSMessageProcessingState.pendingSelfSend
-        )
-
-        let sendResult = try await apiClient.sendMessage(
-          convoId: conversationId,
-          msgId: localMsgId,
-          ciphertext: ciphertext,
-          epoch: Int(localEpoch),
-          paddedSize: paddedSize,
-          senderDid: try DID(didString: userDid),
-          confirmationTag: tagB64
-        )
-        return (localMsgId, sendResult)
+        let (localMsgId, sendResult) = result
+        do {
+          try await storage.updateMessageMetadata(
+            messageID: localMsgId,
+            currentUserDID: userDid,
+            epoch: sendResult.epoch,
+            sequenceNumber: sendResult.sequenceNumber,
+            timestamp: sendResult.receivedAt.date,
+            database: database,
+            newMessageID: sendResult.messageId
+          )
+        } catch {
+          logger.error(
+            "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, recovery-resend) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
+          )
+        }
       }
-
-      let (localMsgId, sendResult) = result
-      do {
-        try await storage.updateMessageMetadata(
-          messageID: localMsgId,
-          currentUserDID: userDid,
-          epoch: sendResult.epoch,
-          sequenceNumber: sendResult.sequenceNumber,
-          timestamp: sendResult.receivedAt.date,
-          database: database,
-          newMessageID: sendResult.messageId
-        )
-      } catch {
-        logger.error(
-          "❌ [SEND] PERSISTENCE FAILURE (updateMessageMetadata, recovery-resend) for \(conversationId.prefix(16)) msgId=\(localMsgId.prefix(16)): \(error.localizedDescription) — server-confirmed seq/epoch/timestamp NOT persisted locally; pending self-send row not reconciled (E7 write-through violated)"
-        )
-      }
+    } catch {
+      logger.error("❌ [SEND] Recovery resend failed for \(conversationId.prefix(16)): \(error.localizedDescription)")
     }
   }
 }

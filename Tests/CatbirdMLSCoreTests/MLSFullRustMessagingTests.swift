@@ -94,7 +94,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
       epoch: 7,
       seq: 44,
       createdAt: ATProtocolDate(date: Date()),
-      messageType: "message"
+      messageType: .value_app
     )
 
     let outcome = try await manager.processServerMessage(message, source: "unit-test")
@@ -130,7 +130,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
       epoch: 7,
       seq: 44,
       createdAt: ATProtocolDate(date: Date()),
-      messageType: "message"
+      messageType: .value_app
     )
 
     _ = try await manager.processServerMessage(message, source: "unit-test")
