@@ -72,6 +72,23 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
     XCTAssertTrue(signed.allSatisfy(\.requiresSignedRequest))
   }
 
+  func testUploadAndWelcomeResponseMappingsPreserveDistinctCanonicalSemantics() {
+    let upload = try! XCTUnwrap(
+      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.uploadBlob")
+    )
+    XCTAssertEqual(upload.canonical, "blue.catbird.chat.uploadBlob")
+    XCTAssertEqual(upload.disposition, .adapterBlocked)
+    XCTAssertFalse(upload.requiresSignedRequest)
+
+    let welcomeResponse = try! XCTUnwrap(
+      MLSChatEndpointCatalog.route(
+        forLegacyEndpoint: "blue.catbird.mlsChat.reissueWelcomeRespond"
+      )
+    )
+    XCTAssertNil(welcomeResponse.canonical)
+    XCTAssertEqual(welcomeResponse.disposition, .adapterBlocked)
+  }
+
   func testRecoveryAndRecordRoutesRemainExplicitlyBlockedUntilAdaptersExist() {
     let blocked = MLSChatEndpointCatalog.routes.filter {
       $0.disposition == .adapterBlocked

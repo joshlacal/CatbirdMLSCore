@@ -69,7 +69,7 @@ public enum MLSChatEndpointCatalog {
     signed("beginTransitionAttestation", "submitTransition"),
     signed("finalizeGroupChange", "submitTransition"),
     signed("deleteBlob", "deleteBlob"),
-    compound("uploadBlob", "prepareBlobUpload"),
+    unsignedAdapter("uploadBlob", "uploadBlob"),
     adapter("getConvos", "getConversations"),
     adapter("getMessages", "getEntries"),
     adapter("getGroupState", "getConversationState"),
@@ -93,7 +93,7 @@ public enum MLSChatEndpointCatalog {
     adapter("reconcileKeyPackages", nil),
     adapter("invalidateKeyPackage", nil),
     adapter("reissueWelcome", nil),
-    adapter("reissueWelcomeRespond", "acknowledgeWelcome"),
+    adapter("reissueWelcomeRespond", nil),
     adapter("reportRecoveryFailure", "requestLeafRecovery"),
     adapter("reportSpam", nil),
     adapter("requestFailover", nil),
@@ -133,6 +133,13 @@ public enum MLSChatEndpointCatalog {
     MLSChatEndpointRoute(
       legacy: legacyName(legacy), canonical: canonical.map(canonicalName),
       disposition: .adapterBlocked, requiresSignedRequest: canonical != nil
+    )
+  }
+
+  private static func unsignedAdapter(_ legacy: String, _ canonical: String) -> MLSChatEndpointRoute {
+    MLSChatEndpointRoute(
+      legacy: legacyName(legacy), canonical: canonicalName(canonical),
+      disposition: .adapterBlocked, requiresSignedRequest: false
     )
   }
 
