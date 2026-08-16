@@ -290,23 +290,30 @@ public actor MLSEventStreamManager {
                 // upgrade. Legacy SSE has no equivalent cursor binding.
                 let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
                 let sessionCursor = inventory.snapshotEventCursor
-                if let latestSavedCursor {
+                let resumeCursor = MLSCanonicalTransportAdapter.reconciledResumeCursor(
+                    savedCursor: latestSavedCursor,
+                    inventorySnapshotCursor: sessionCursor
+                )
+                if let latestSavedCursor, latestSavedCursor != resumeCursor {
                     logger.info(
-                        "📡 SSE: Last hydrated cursor \(latestSavedCursor.prefix(20)); new ticket fence \(sessionCursor.prefix(20))..."
+                        "📡 SSE: Reconciled persisted cursor \(latestSavedCursor.prefix(20)) to inventory snapshot fence \(resumeCursor.prefix(20))"
                     )
                 } else {
                     logger.info(
-                        "📡 SSE: Starting from canonical inventory fence \(sessionCursor.prefix(20))..."
+                        "📡 SSE: Using inventory snapshot fence \(resumeCursor.prefix(20))"
                     )
                 }
                 let ticket = try await apiClient.getCanonicalSubscriptionTicket(
                     inventorySessionId: inventory.inventorySessionId,
-                    eventCursor: sessionCursor
+                    eventCursor: resumeCursor
                 )
                 let eventStream = try await apiClient.subscribeCanonicalEvents(
                     ticket: ticket.ticket,
-                    cursor: sessionCursor
+                    cursor: resumeCursor
                 )
+                if latestSavedCursor != resumeCursor {
+                    saveCursor(resumeCursor, for: convoId)
+                }
 
                 connectionState[convoId] = .connected
                 print("[SSE] Connected to: \(convoId.prefix(12))... - entering event loop")
@@ -413,6 +420,7 @@ public actor MLSEventStreamManager {
         }
     }
 
+    /// Dispatch one canonical event through the shared availability handler.
     private func handleCanonicalEvent(
         _ message: BlueCatbirdChatSubscribeEvents.Message,
         for convoId: String
@@ -422,47 +430,27 @@ public actor MLSEventStreamManager {
             return
         }
 
-        guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
-            return
-        }
-
-        guard case let .blueCatbirdChatDefsMessageAvailableEvent(available) = envelope.payload else {
-            saveCursor(envelope.cursor, for: convoId)
-            return
-        }
-        let availableConversationId = String(describing: available.conversationId)
-        guard availableConversationId == convoId else {
-            logger.debug(
-                "📡 SSE: Ignoring event for \(availableConversationId) on subscription \(convoId)"
-            )
-            saveCursor(envelope.cursor, for: convoId)
-            return
-        }
-
-        do {
-            let entries = try await apiClient.getCanonicalEntries(
-                conversationId: availableConversationId,
-                afterSeq: max(0, available.seq - 1),
-                limit: 100
-            )
-            for entry in entries.entries {
-                guard let message = MLSCanonicalTransportAdapter.projectMessageView(from: entry),
-                      message.convoId == convoId
-                else {
-                    continue
-                }
-                let event = BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
-                    cursor: envelope.cursor,
-                    message: message,
-                    ephemeral: nil,
-                    epoch: message.epoch
-                )
+        let apiClient = self.apiClient
+        await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+            message,
+            subscriptionKey: convoId,
+            loadEntries: { conversationId, afterSeq in
+                try await apiClient.getCanonicalEntries(
+                    conversationId: conversationId,
+                    afterSeq: afterSeq,
+                    limit: 100
+                ).entries
+            },
+            onMessage: { event in
                 await handler.onMessage?(event)
+            },
+            onError: { error in
+                await handler.onError?(error)
+            },
+            saveCursor: { cursor in
+                self.saveCursor(cursor, for: convoId)
             }
-            saveCursor(envelope.cursor, for: convoId)
-        } catch {
-            await handler.onError?(error)
-        }
+        )
     }
 
 

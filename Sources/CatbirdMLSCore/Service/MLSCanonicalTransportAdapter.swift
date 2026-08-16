@@ -82,26 +82,107 @@ public enum MLSCanonicalTransportAdapter {
     )
   }
 
-  /// Project one canonical entry only when it is a valid application-send
-  /// entry. Unknown signed-body variants are dropped, never delivered with
-  /// synthesized empty ciphertext.
+  /// Project one canonical entry into a compatibility message view without
+  /// changing its semantic type. A requested type is a filter, never a relabel.
   public static func projectMessageView(
     from entry: BlueCatbirdChatDefs.ConversationEntry,
-    messageType: BlueCatbirdMlsChatDefs.MessageViewMessageType = .value_app
+    messageType: BlueCatbirdMlsChatDefs.MessageViewMessageType? = nil
   ) -> BlueCatbirdMlsChatDefs.MessageView? {
-    guard case let .blueCatbirdChatDefsApplicationEntry(application) = entry,
-          case let .blueCatbirdChatDefsApplicationSendBody(body) = application.signedRequest.body
-    else {
+    switch entry {
+    case let .blueCatbirdChatDefsApplicationEntry(application):
+      guard messageType == nil || messageType == .value_app,
+            case let .blueCatbirdChatDefsApplicationSendBody(body) = application.signedRequest.body
+      else {
+        return nil
+      }
+      return BlueCatbirdMlsChatDefs.MessageView(
+        id: String(describing: application.entryId),
+        convoId: String(describing: application.conversationId),
+        ciphertext: body.applicationMessage.bytes,
+        epoch: body.prior.epoch,
+        seq: application.seq,
+        createdAt: ATProtocolDate(date: application.receivedAt.date),
+        messageType: .value_app
+      )
+
+    case let .blueCatbirdChatDefsCommitEntry(commit):
+      guard messageType == nil || messageType == .value_commit,
+            case let .blueCatbirdChatDefsCommitTransitionBody(body) = commit.signedRequest.body
+      else {
+        return nil
+      }
+      return BlueCatbirdMlsChatDefs.MessageView(
+        id: String(describing: commit.entryId),
+        convoId: String(describing: commit.conversationId),
+        ciphertext: body.commit.bytes,
+        epoch: body.prior.epoch,
+        seq: commit.seq,
+        createdAt: ATProtocolDate(date: commit.receivedAt.date),
+        messageType: .value_commit
+      )
+
+    default:
       return nil
     }
-    return BlueCatbirdMlsChatDefs.MessageView(
-      id: String(describing: application.entryId),
-      convoId: String(describing: application.conversationId),
-      ciphertext: body.applicationMessage.bytes,
-      epoch: body.prior.epoch,
-      seq: application.seq,
-      createdAt: ATProtocolDate(date: application.receivedAt.date),
-      messageType: messageType
-    )
+  }
+
+  /// The inventory snapshot is the ticket's cursor fence. A persisted event
+  /// cursor may be older than that fence after reconnect; explicitly reconcile
+  /// it to the fresh snapshot cursor instead of logging it and silently
+  /// discarding it.
+  internal static func reconciledResumeCursor(
+    savedCursor: String?,
+    inventorySnapshotCursor: String
+  ) -> String {
+    inventorySnapshotCursor
+  }
+
+  /// Shared canonical stream-handler seam used by both WebSocket and SSE.
+  /// Durable envelopes advance the cursor exactly once; entries are filtered
+  /// by the subscribed conversation and unknown variants are skipped.
+  internal static func handleCanonicalStreamMessage(
+    _ message: BlueCatbirdChatSubscribeEvents.Message,
+    subscriptionKey: String,
+    loadEntries: @escaping (String, Int) async throws -> [BlueCatbirdChatDefs.ConversationEntry],
+    onMessage: @escaping (BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void,
+    onError: @escaping (Error) async -> Void,
+    saveCursor: @escaping (String) -> Void
+  ) async {
+    guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
+      return
+    }
+
+    guard case let .blueCatbirdChatDefsMessageAvailableEvent(available) = envelope.payload else {
+      saveCursor(envelope.cursor)
+      return
+    }
+
+    let availableConversationId = String(describing: available.conversationId)
+    guard subscriptionKey == "__global__" || subscriptionKey == availableConversationId else {
+      saveCursor(envelope.cursor)
+      return
+    }
+
+    do {
+      let entries = try await loadEntries(availableConversationId, max(0, available.seq - 1))
+      for entry in entries {
+        guard let message = projectMessageView(from: entry),
+              message.convoId == availableConversationId
+        else {
+          continue
+        }
+        await onMessage(
+          BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
+            cursor: envelope.cursor,
+            message: message,
+            ephemeral: nil,
+            epoch: message.epoch
+          )
+        )
+      }
+      saveCursor(envelope.cursor)
+    } catch {
+      await onError(error)
+    }
   }
 }

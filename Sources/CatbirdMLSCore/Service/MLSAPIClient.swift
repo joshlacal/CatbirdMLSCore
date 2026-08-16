@@ -348,7 +348,7 @@ public final class MLSAPIClient {
         let messages = output.entries.compactMap { entry -> BlueCatbirdMlsChatDefs.MessageView? in
             guard let message = MLSCanonicalTransportAdapter.projectMessageView(
                 from: entry,
-                messageType: messageType ?? .value_app
+                messageType: messageType
             ) else {
                 return nil
             }

@@ -312,23 +312,30 @@ public actor MLSWebSocketManager {
                 // WebSocket upgrade through a second DPoP flow.
                 let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
                 let sessionCursor = inventory.snapshotEventCursor
-                if let latestSavedCursor {
+                let resumeCursor = MLSCanonicalTransportAdapter.reconciledResumeCursor(
+                    savedCursor: latestSavedCursor,
+                    inventorySnapshotCursor: sessionCursor
+                )
+                if let latestSavedCursor, latestSavedCursor != resumeCursor {
                     logger.info(
-                        "🔌 WS: Last hydrated cursor \(latestSavedCursor.prefix(20)); new ticket fence \(sessionCursor.prefix(20))..."
+                        "🔌 WS: Reconciled persisted cursor \(latestSavedCursor.prefix(20)) to inventory snapshot fence \(resumeCursor.prefix(20))"
                     )
                 } else {
                     logger.info(
-                        "🔌 WS: Starting from canonical inventory fence \(sessionCursor.prefix(20))..."
+                        "🔌 WS: Using inventory snapshot fence \(resumeCursor.prefix(20))"
                     )
                 }
                 let ticket = try await apiClient.getCanonicalSubscriptionTicket(
                     inventorySessionId: inventory.inventorySessionId,
-                    eventCursor: sessionCursor
+                    eventCursor: resumeCursor
                 )
                 let stream = try await apiClient.subscribeCanonicalEvents(
                     ticket: ticket.ticket,
-                    cursor: sessionCursor
+                    cursor: resumeCursor
                 )
+                if latestSavedCursor != resumeCursor {
+                    saveCursor(resumeCursor, for: key)
+                }
                 connectionState[key] = .connected
                 logger.info("🔌 WS: Connected for \(key) - entering event loop")
 
@@ -402,9 +409,8 @@ public actor MLSWebSocketManager {
         }
         connectionState[key] = .disconnected
     }
-    /// Translate canonical availability notifications into the legacy message
-    /// callback only after fetching the visible entries. Availability events
-    /// deliberately do not carry ciphertext.
+
+    /// Dispatch one canonical event through the shared availability handler.
     private func handleCanonicalEvent(
         _ message: BlueCatbirdChatSubscribeEvents.Message,
         for key: String
@@ -414,49 +420,27 @@ public actor MLSWebSocketManager {
             return
         }
 
-        switch message {
-        case let .blueCatbirdChatDefsEventEnvelope(envelope):
-            switch envelope.payload {
-            case let .blueCatbirdChatDefsMessageAvailableEvent(available):
-                let availableConversationId = String(describing: available.conversationId)
-                guard key == "__global__" || key == availableConversationId else {
-                    saveCursor(envelope.cursor, for: key)
-                    return
-                }
-                do {
-                    let entries = try await apiClient.getCanonicalEntries(
-                        conversationId: availableConversationId,
-                        afterSeq: max(0, available.seq - 1),
-                        limit: 100
-                    )
-                    for entry in entries.entries {
-                        guard let message = MLSCanonicalTransportAdapter.projectMessageView(from: entry),
-                              message.convoId == availableConversationId
-                        else {
-                            continue
-                        }
-                        let event = BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
-                            cursor: envelope.cursor,
-                            message: message,
-                            ephemeral: nil,
-                            epoch: message.epoch
-                        )
-                        await handler.onMessage?(event)
-                    }
-                    saveCursor(envelope.cursor, for: key)
-                } catch {
-                    await handler.onError?(error)
-                }
-            default:
-                saveCursor(envelope.cursor, for: key)
+        let apiClient = self.apiClient
+        await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+            message,
+            subscriptionKey: key,
+            loadEntries: { conversationId, afterSeq in
+                try await apiClient.getCanonicalEntries(
+                    conversationId: conversationId,
+                    afterSeq: afterSeq,
+                    limit: 100
+                ).entries
+            },
+            onMessage: { event in
+                await handler.onMessage?(event)
+            },
+            onError: { error in
+                await handler.onError?(error)
+            },
+            saveCursor: { cursor in
+                self.saveCursor(cursor, for: key)
             }
-        case .blueCatbirdChatDefsTypingEvent:
-            // Typing is intentionally not projected into the durable cursor
-            // chain; its canonical payload has no cursor.
-            break
-        case .unexpected:
-            logger.warning("🔌 WS: Unknown canonical subscription payload")
-        }
+        )
     }
 
 
