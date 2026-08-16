@@ -99,15 +99,20 @@ public final class MLSAPIClient {
 
     /// Configure MLS service DID and proxy headers
     private func configureMLSService() async {
-        // Set the service DID for MLS namespace (blue.catbird.mlsChat)
-        // This enables atproto-proxy header routing through the PDS
-        await client.setServiceDID(mlsServiceDID, for: "blue.catbird.mlsChat")
+        // Keep the legacy mapping during the compatibility window, and also
+        // configure the canonical clean-chat namespace for generated calls.
+        // The two mappings are intentionally explicit: changing the old
+        // mapping in place would route still-legacy DTOs to signed endpoints.
+        await client.setServiceDID(mlsServiceDID, for: MLSChatEndpointCatalog.legacyNamespace)
+        await client.setServiceDID(mlsServiceDID, for: MLSChatEndpointCatalog.canonicalNamespace)
 
         // All MLS requests go through PDS with atproto-proxy header
         // The PDS handles routing to the MLS service with proper authentication
 
         let serviceDID = mlsServiceDID
-        logger.debug("Configured MLS service DID: \(serviceDID) for namespace blue.catbird.mlsChat")
+        logger.debug(
+            "Configured MLS service DID: \(serviceDID) for namespaces \(MLSChatEndpointCatalog.legacyNamespace) and \(MLSChatEndpointCatalog.canonicalNamespace)"
+        )
     }
 
     /// Apply or remove cache-bypass headers for force-refresh requests.
