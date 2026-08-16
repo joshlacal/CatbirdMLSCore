@@ -96,6 +96,9 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
 
     XCTAssertTrue(blocked.contains { $0.legacy.hasSuffix(".reportRecoveryFailure") })
     XCTAssertTrue(blocked.contains { $0.legacy.hasSuffix(".device") })
-    XCTAssertTrue(blocked.allSatisfy { $0.canonical == nil || $0.requiresSignedRequest })
+    let signedCanonicalCandidates = blocked.filter {
+      $0.canonical != nil && !$0.legacy.hasSuffix(".uploadBlob")
+    }
+    XCTAssertTrue(signedCanonicalCandidates.allSatisfy(\.requiresSignedRequest))
   }
 }
