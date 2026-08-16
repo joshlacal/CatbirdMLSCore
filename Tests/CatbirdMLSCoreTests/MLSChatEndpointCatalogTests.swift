@@ -89,6 +89,28 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
     XCTAssertEqual(welcomeResponse.disposition, .adapterBlocked)
   }
 
+  func testReadAndTicketAdaptersUseTransportAuthOnly() {
+    let unsignedLegacyNames = [
+      "getConvos", "getMessages", "getGroupState", "getBlobUsage",
+      "getSubscriptionTicket", "subscribeEvents", "listDevices", "getPendingDevices",
+      "getGroupMetadataBlob"
+    ]
+
+    for legacyName in unsignedLegacyNames {
+      let route = try! XCTUnwrap(
+        MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.\(legacyName)")
+      )
+      XCTAssertFalse(route.requiresSignedRequest, "\(legacyName) is a DPoP transport-auth read")
+    }
+
+    let recovery = try! XCTUnwrap(
+      MLSChatEndpointCatalog.route(
+        forLegacyEndpoint: "blue.catbird.mlsChat.reportRecoveryFailure"
+      )
+    )
+    XCTAssertTrue(recovery.requiresSignedRequest)
+  }
+
   func testRecoveryAndRecordRoutesRemainExplicitlyBlockedUntilAdaptersExist() {
     let blocked = MLSChatEndpointCatalog.routes.filter {
       $0.disposition == .adapterBlocked
@@ -96,9 +118,9 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
 
     XCTAssertTrue(blocked.contains { $0.legacy.hasSuffix(".reportRecoveryFailure") })
     XCTAssertTrue(blocked.contains { $0.legacy.hasSuffix(".device") })
-    let signedCanonicalCandidates = blocked.filter {
-      $0.canonical != nil && !$0.legacy.hasSuffix(".uploadBlob")
-    }
-    XCTAssertTrue(signedCanonicalCandidates.allSatisfy(\.requiresSignedRequest))
+    let recovery = try! XCTUnwrap(
+      blocked.first { $0.legacy.hasSuffix(".reportRecoveryFailure") }
+    )
+    XCTAssertTrue(recovery.requiresSignedRequest)
   }
 }

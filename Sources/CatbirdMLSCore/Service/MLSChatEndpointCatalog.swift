@@ -94,7 +94,7 @@ public enum MLSChatEndpointCatalog {
     adapter("invalidateKeyPackage", nil),
     adapter("reissueWelcome", nil),
     adapter("reissueWelcomeRespond", nil),
-    adapter("reportRecoveryFailure", "requestLeafRecovery"),
+    signedAdapter("reportRecoveryFailure", "requestLeafRecovery"),
     adapter("reportSpam", nil),
     adapter("requestFailover", nil),
     record("device"),
@@ -132,7 +132,14 @@ public enum MLSChatEndpointCatalog {
   private static func adapter(_ legacy: String, _ canonical: String?) -> MLSChatEndpointRoute {
     MLSChatEndpointRoute(
       legacy: legacyName(legacy), canonical: canonical.map(canonicalName),
-      disposition: .adapterBlocked, requiresSignedRequest: canonical != nil
+      disposition: .adapterBlocked, requiresSignedRequest: false
+    )
+  }
+
+  private static func signedAdapter(_ legacy: String, _ canonical: String) -> MLSChatEndpointRoute {
+    MLSChatEndpointRoute(
+      legacy: legacyName(legacy), canonical: canonicalName(canonical),
+      disposition: .adapterBlocked, requiresSignedRequest: true
     )
   }
 
