@@ -45,6 +45,14 @@ public enum MLSChatEndpointCatalog {
   public static let legacyNamespace = "blue.catbird.mlsChat"
   public static let canonicalNamespace = "blue.catbird.chat"
 
+  /// `Defs` is a generated shared-type container, not a transport route. It
+  /// is intentionally excluded from `routes`; all 43 legacy procedures and
+  /// records are represented below. Four additional call-site-only names
+  /// (`getKeyPackageStats`, `blockChatSender`, `declaration`, and `message`)
+  /// are retained because they occur in core source but have no checked-in
+  /// legacy generated file.
+  public static let excludedLegacyGeneratedTypes = ["\(legacyNamespace).defs"]
+
   public static let routes: [MLSChatEndpointRoute] = [
     direct("getBlob", "getBlob"),
     signed("sendMessage", "sendMessage"),
@@ -56,15 +64,25 @@ public enum MLSChatEndpointCatalog {
     signed("leaveConvo", "requestLeave"),
     signed("resetGroup", "requestReset"),
     compound("bootstrapResetGroup", "activateReset"),
+    compound("beginDeviceAuthBinding", "rebindDeviceAuthentication"),
+    compound("completeDeviceAuthBinding", "rebindDeviceAuthentication"),
+    signed("beginTransitionAttestation", "submitTransition"),
+    signed("finalizeGroupChange", "submitTransition"),
+    signed("deleteBlob", "deleteBlob"),
+    compound("uploadBlob", "prepareBlobUpload"),
     adapter("getConvos", "getConversations"),
     adapter("getMessages", "getEntries"),
     adapter("getGroupState", "getConversationState"),
+    adapter("getBlobUsage", "getBlobUsage"),
     adapter("getSubscriptionTicket", "getSubscriptionTicket"),
     adapter("subscribeEvents", "subscribeEvents"),
     adapter("listDevices", "getOwnDevices"),
+    adapter("getPendingDevices", "getOwnDevices"),
     adapter("getKeyPackages", nil),
+    adapter("getKeyPackageStatus", nil),
     adapter("getGroupMetadataBlob", "getBlob"),
     compound("putGroupMetadataBlob", "prepareBlobUpload"),
+    adapter("getConvoSettings", nil),
     adapter("getKeyPackageStats", nil),
     adapter("blockChatSender", nil),
     adapter("checkBlocks", nil),
@@ -75,8 +93,10 @@ public enum MLSChatEndpointCatalog {
     adapter("reconcileKeyPackages", nil),
     adapter("invalidateKeyPackage", nil),
     adapter("reissueWelcome", nil),
+    adapter("reissueWelcomeRespond", "acknowledgeWelcome"),
     adapter("reportRecoveryFailure", "requestLeafRecovery"),
     adapter("reportSpam", nil),
+    adapter("requestFailover", nil),
     record("device"),
     record("declaration"),
     record("policy"),

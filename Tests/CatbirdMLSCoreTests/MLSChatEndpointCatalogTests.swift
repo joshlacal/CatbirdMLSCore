@@ -4,8 +4,34 @@ import XCTest
 final class MLSChatEndpointCatalogTests: XCTestCase {
   func testEveryLegacyTransportRouteHasAnExplicitCanonicalDisposition() {
     let routes = Set(MLSChatEndpointCatalog.routes.map(\.legacy))
+    let expectedLegacyLexicons = Set([
+      "beginDeviceAuthBinding", "beginTransitionAttestation", "bootstrapResetGroup",
+      "checkBlocks", "commitGroupChange", "completeDeviceAuthBinding", "createConvo",
+      "deleteBlob", "device", "finalizeGroupChange", "getBlob", "getBlobUsage",
+      "getBlockStatus", "getConvoSettings", "getConvos", "getGroupMetadataBlob",
+      "getGroupState", "getKeyPackageStatus", "getKeyPackages", "getMessages",
+      "getPendingDevices", "getSubscriptionTicket", "invalidateKeyPackage", "leaveConvo",
+      "listDevices", "optIn", "policy", "publishKeyPackages", "putGroupMetadataBlob",
+      "reconcileKeyPackages", "registerDevice", "reissueWelcome", "reissueWelcomeRespond",
+      "removeDevice", "reportRecoveryFailure", "reportSpam", "requestFailover", "resetGroup",
+      "sendMessage", "subscribeEvents", "updateConvo", "updateCursor", "uploadBlob"
+    ].map { "blue.catbird.mlsChat.\($0)" })
 
-    XCTAssertEqual(routes.count, 35)
+    XCTAssertTrue(expectedLegacyLexicons.isSubset(of: routes))
+    XCTAssertEqual(expectedLegacyLexicons.count, 43)
+    XCTAssertEqual(
+      routes.subtracting(expectedLegacyLexicons),
+      [
+        "blue.catbird.mlsChat.blockChatSender",
+        "blue.catbird.mlsChat.declaration",
+        "blue.catbird.mlsChat.getKeyPackageStats",
+        "blue.catbird.mlsChat.message"
+      ]
+    )
+    XCTAssertEqual(
+      MLSChatEndpointCatalog.excludedLegacyGeneratedTypes,
+      ["blue.catbird.mlsChat.defs"]
+    )
     XCTAssertTrue(routes.contains("blue.catbird.mlsChat.sendMessage"))
     XCTAssertTrue(routes.contains("blue.catbird.mlsChat.commitGroupChange"))
     XCTAssertTrue(routes.contains("blue.catbird.mlsChat.device"))
