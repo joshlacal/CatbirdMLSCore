@@ -270,7 +270,8 @@ public final class MLSConversationManager {
     static let trifectaWindow: TimeInterval = 600 // 10 min
 
     /// Track initialization state for conversations to prevent race conditions
-    public var conversationStates: [String: ConversationInitState] = [:]
+    /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
+    public let conversationStates = ObservableMutexDictionary<String, ConversationInitState>()
 
     /// Track group IDs currently being created to prevent reconciliation from deleting them.
     /// Maps group ID → creation timestamp. Entries are kept for `recentCreationWindow` seconds
