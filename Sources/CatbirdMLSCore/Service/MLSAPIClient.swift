@@ -221,7 +221,10 @@ public final class MLSAPIClient {
         // Note: A dedicated health endpoint would be more efficient, but listing
         // conversations with limit=1 works as a connectivity check
         do {
-            _ = try await getConversations(limit: 1)
+            // Health checks are a cutover signal, so they must exercise the
+            // canonical generated procedure rather than report a healthy
+            // legacy route while clean-chat is unavailable.
+            _ = try await getCanonicalConversationInventory(limit: 1)
             isHealthy = true
             lastHealthCheck = Date()
             logger.info("Health check passed")
@@ -237,6 +240,30 @@ public final class MLSAPIClient {
     // MARK: - API Endpoints (using Petrel BlueCatbirdMls* models)
 
     // MARK: Conversations
+
+    /// Read the canonical clean-chat inventory through Petrel's generated
+    /// DTOs. This is intentionally separate from `getConversations`, whose
+    /// legacy projection remains needed by compatibility callers until their
+    /// view models are migrated. Keeping the return type canonical prevents a
+    /// legacy `ConvoView` from being sent to a clean-chat route by accident.
+    public func getCanonicalConversationInventory(
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> BlueCatbirdChatGetConversations.Output {
+        let input = BlueCatbirdChatGetConversations.Parameters(
+            pageCursor: cursor,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getConversations(input: input)
+
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical conversation inventory"
+            )
+        }
+        return output
+    }
 
     /// Get conversations for the authenticated user using Petrel client
     /// - Parameters:
