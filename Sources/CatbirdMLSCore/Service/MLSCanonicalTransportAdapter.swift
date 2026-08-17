@@ -166,15 +166,6 @@ public enum MLSCanonicalTransportAdapter {
   /// reset, recovery, leave, access, and watermark handlers. Missing actions
   /// are failures, never successful no-ops.
   public struct MLSCanonicalDurableEventActions {
-    /// Stable reviewed capability revision for this concrete action table.
-    /// Managers persist terminal failures against this value; changing it is
-    /// an explicit support transition, while reconnecting with the same value
-    /// must preserve a prior terminal block.
-    public let supportRevision: String
-
-    public static let defaultSupportRevision = "canonical-durable-actions-v1"
-    public static let missingTableSupportRevision = "canonical-durable-actions-missing-v1"
-
     public typealias ConversationChangedHandler =
       (BlueCatbirdChatDefs.ConversationChangedEvent) async throws -> Void
     public typealias ConversationClosedHandler =
@@ -225,10 +216,8 @@ public enum MLSCanonicalTransportAdapter {
       onLeaveRequest: LeaveRequestHandler? = nil,
       onAccessEnded: AccessEndedHandler? = nil,
       onWatermark: WatermarkHandler? = nil,
-      onTyping: TypingHandler? = nil,
-      supportRevision: String = MLSCanonicalDurableEventActions.defaultSupportRevision
+      onTyping: TypingHandler? = nil
     ) {
-      self.supportRevision = supportRevision
       self.onConversationChanged = onConversationChanged
       self.onConversationClosed = onConversationClosed
       self.onMessageAvailable = onMessageAvailable
@@ -240,6 +229,32 @@ public enum MLSCanonicalTransportAdapter {
       self.onAccessEnded = onAccessEnded
       self.onWatermark = onWatermark
       self.onTyping = onTyping
+    }
+
+    /// A canonical subscription may start only when every generated event arm
+    /// has a concrete throwing action. Typing is included in this check even
+    /// though it does not advance the durable cursor, so no generated union
+    /// arm can be silently dropped.
+    internal var hasCompleteRequiredActions: Bool {
+      onConversationChanged != nil &&
+        onConversationClosed != nil &&
+        onMessageAvailable != nil &&
+        onWelcomeAvailable != nil &&
+        onWelcomeDisposition != nil &&
+        onResetRequested != nil &&
+        onLeafRecovery != nil &&
+        onLeaveRequest != nil &&
+        onAccessEnded != nil &&
+        onWatermark != nil &&
+        onTyping != nil
+    }
+
+    /// Capability identity is Core-owned and compiled from the generated
+    /// union revision plus action-table completeness. There is no caller
+    /// supplied revision string that can authorize recovery.
+    internal var capabilityIdentity: MLSCanonicalSubscriptionCapability? {
+      guard hasCompleteRequiredActions else { return nil }
+      return .current
     }
 
     internal func dispatch(_ event: MLSCanonicalDurableEvent) async throws {
@@ -522,10 +537,11 @@ public enum MLSCanonicalTransportAdapter {
     for conversationId: String,
     store: MLSEventCursorStore?
   ) async throws {
-    if let store {
-      try await MainActor.run {
-        try store.updateCursor(for: conversationId, cursor: cursor)
-      }
+    guard let store else {
+      throw MLSCanonicalSubscriptionFailureConfigurationError.missingStorage
+    }
+    try await MainActor.run {
+      try store.updateCursor(for: conversationId, cursor: cursor)
     }
   }
 

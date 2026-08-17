@@ -317,13 +317,16 @@ public actor MLSEventStreamManager {
         var latestSavedCursor = cursor
         var subscriptionFence: MLSCanonicalSubscriptionFence?
         let initialHandler = eventHandlers[convoId]
-        var failureCoordinator = Self.makeCanonicalSubscriptionFailureCoordinator(
-            scope: await canonicalSubscriptionScope(for: convoId),
-            handler: initialHandler,
-            store: cursorStore
-        )
+        var failureCoordinator: MLSCanonicalSubscriptionFailureCoordinator
         do {
-            try await failureCoordinator.load()
+            let scope = try await canonicalSubscriptionScope(for: convoId)
+            var coordinator = try Self.makeCanonicalSubscriptionFailureCoordinator(
+                scope: scope,
+                handler: initialHandler,
+                store: cursorStore
+            )
+            try await coordinator.load()
+            failureCoordinator = coordinator
         } catch {
             logger.error("📡 SSE: Failed to load canonical subscription failure state for \(convoId): \(error)")
             connectionState[convoId] = .error(error)
@@ -405,6 +408,7 @@ public actor MLSEventStreamManager {
                 print("[SSE] Starting event loop for: \(convoId.prefix(12))..., waiting for events...")
                 logger.info("📡 SSE: Starting event loop for convoId: \(convoId)")
                 var reconnectRequested = false
+                var failurePersistenceUnavailable = false
                 let loopOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
                     eventStream,
                     shouldStop: { await self.shouldStop[convoId] == true },
@@ -441,8 +445,15 @@ public actor MLSEventStreamManager {
                     } catch {
                         logger.error("📡 SSE: Failed to persist canonical subscription failure for \(convoId): \(error)")
                         await handler.onError?(error)
+                        failurePersistenceUnavailable = true
                     }
-                    reconnectRequested = true
+                    if !failurePersistenceUnavailable {
+                        reconnectRequested = true
+                    }
+                }
+
+                if failurePersistenceUnavailable {
+                    break
                 }
 
                 // Check if we're stopping gracefully
@@ -499,6 +510,7 @@ public actor MLSEventStreamManager {
                     if let handler = eventHandlers[convoId] {
                         await handler.onError?(error)
                     }
+                    break
                 }
 
                 print("[SSE] Connection error for \(convoId.prefix(12))...: \(error.localizedDescription)")
@@ -602,11 +614,6 @@ public actor MLSEventStreamManager {
             ?? MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions()
     }
 
-    internal static func canonicalSupportRevision(for handler: EventHandler?) -> String {
-        handler?.onCanonicalDurableEventActions?.supportRevision
-            ?? MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions.missingTableSupportRevision
-    }
-
     /// Construct the lifecycle coordinator used by every subscription run.
     /// Keeping this factory on the manager makes manager recreation and app
     /// restart use the same scoped durable-state path as reconnect.
@@ -614,21 +621,29 @@ public actor MLSEventStreamManager {
         scope: MLSCanonicalSubscriptionScope?,
         handler: EventHandler?,
         store: MLSEventCursorStore?
-    ) -> MLSCanonicalSubscriptionFailureCoordinator {
-        MLSCanonicalSubscriptionFailureCoordinator(
+    ) throws -> MLSCanonicalSubscriptionFailureCoordinator {
+        guard let actions = handler?.onCanonicalDurableEventActions else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.incompleteActionTable
+        }
+        return try MLSCanonicalSubscriptionFailureCoordinator(
             scope: scope,
-            supportRevision: canonicalSupportRevision(for: handler),
+            capability: actions.capabilityIdentity,
             store: store
         )
     }
 
-    private func canonicalSubscriptionScope(for convoId: String) async -> MLSCanonicalSubscriptionScope? {
+    private func canonicalSubscriptionScope(for convoId: String) async throws -> MLSCanonicalSubscriptionScope {
         guard let account = await apiClient.authenticatedUserDID() else {
-            logger.warning("📡 SSE: No authenticated account; canonical failure state will remain in-memory")
-            return nil
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
         }
         let normalizedAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedAccount.isEmpty else { return nil }
+        guard !normalizedAccount.isEmpty else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
+        }
+        let environment = apiClient.mlsServiceDID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !environment.isEmpty else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
+        }
 
         let device: String?
         if let configured = canonicalSubscriptionDeviceIdentifier {
@@ -645,15 +660,18 @@ public actor MLSEventStreamManager {
             #endif
         }
         guard let device, !device.isEmpty else {
-            logger.warning("📡 SSE: No stable device identity; canonical failure state will remain in-memory")
-            return nil
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
+        }
+        let normalizedKey = convoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedKey.isEmpty else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
         }
 
         return MLSCanonicalSubscriptionScope(
             accountIdentifier: normalizedAccount,
-            environmentIdentifier: apiClient.mlsServiceDID,
+            environmentIdentifier: environment,
             deviceIdentifier: device,
-            subscriptionIdentifier: convoId
+            subscriptionIdentifier: normalizedKey
         )
     }
 

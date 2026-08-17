@@ -343,13 +343,16 @@ public actor MLSWebSocketManager {
         var latestSavedCursor = cursor
         var subscriptionFence: MLSCanonicalSubscriptionFence?
         let initialHandler = eventHandlers[key]
-        var failureCoordinator = Self.makeCanonicalSubscriptionFailureCoordinator(
-            scope: await canonicalSubscriptionScope(for: key),
-            handler: initialHandler,
-            store: cursorStore
-        )
+        var failureCoordinator: MLSCanonicalSubscriptionFailureCoordinator
         do {
-            try await failureCoordinator.load()
+            let scope = try await canonicalSubscriptionScope(for: key)
+            var coordinator = try Self.makeCanonicalSubscriptionFailureCoordinator(
+                scope: scope,
+                handler: initialHandler,
+                store: cursorStore
+            )
+            try await coordinator.load()
+            failureCoordinator = coordinator
         } catch {
             logger.error("🔌 WS: Failed to load canonical subscription failure state for \(key): \(error)")
             connectionState[key] = .error(error)
@@ -426,6 +429,7 @@ public actor MLSWebSocketManager {
 
                 // 4. Process messages
                 var reconnectRequested = false
+                var failurePersistenceUnavailable = false
                 let loopOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
                     stream,
                     shouldStop: { await self.shouldStop[key] == true },
@@ -463,8 +467,15 @@ public actor MLSWebSocketManager {
                     } catch {
                         logger.error("🔌 WS: Failed to persist canonical subscription failure for \(key): \(error)")
                         await handler.onError?(error)
+                        failurePersistenceUnavailable = true
                     }
-                    reconnectRequested = true
+                    if !failurePersistenceUnavailable {
+                        reconnectRequested = true
+                    }
+                }
+
+                if failurePersistenceUnavailable {
+                    break
                 }
 
                 if shouldStop[key] == true {
@@ -503,6 +514,7 @@ public actor MLSWebSocketManager {
                     if let handler = eventHandlers[key] {
                         await handler.onError?(error)
                     }
+                    break
                 }
 
                 logger.error("🔌 WS: Connection error for \(key): \(error)")
@@ -597,11 +609,6 @@ public actor MLSWebSocketManager {
             ?? MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions()
     }
 
-    internal static func canonicalSupportRevision(for handler: EventHandler?) -> String {
-        handler?.onCanonicalDurableEventActions?.supportRevision
-            ?? MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions.missingTableSupportRevision
-    }
-
     /// Construct the lifecycle coordinator used by every subscription run.
     /// Keeping this factory on the manager makes manager recreation and app
     /// restart use the same scoped durable-state path as reconnect.
@@ -609,21 +616,29 @@ public actor MLSWebSocketManager {
         scope: MLSCanonicalSubscriptionScope?,
         handler: EventHandler?,
         store: MLSEventCursorStore?
-    ) -> MLSCanonicalSubscriptionFailureCoordinator {
-        MLSCanonicalSubscriptionFailureCoordinator(
+    ) throws -> MLSCanonicalSubscriptionFailureCoordinator {
+        guard let actions = handler?.onCanonicalDurableEventActions else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.incompleteActionTable
+        }
+        return try MLSCanonicalSubscriptionFailureCoordinator(
             scope: scope,
-            supportRevision: canonicalSupportRevision(for: handler),
+            capability: actions.capabilityIdentity,
             store: store
         )
     }
 
-    private func canonicalSubscriptionScope(for key: String) async -> MLSCanonicalSubscriptionScope? {
+    private func canonicalSubscriptionScope(for key: String) async throws -> MLSCanonicalSubscriptionScope {
         guard let account = await apiClient.authenticatedUserDID() else {
-            logger.warning("🔌 WS: No authenticated account; canonical failure state will remain in-memory")
-            return nil
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
         }
         let normalizedAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedAccount.isEmpty else { return nil }
+        guard !normalizedAccount.isEmpty else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
+        }
+        let environment = apiClient.mlsServiceDID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !environment.isEmpty else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
+        }
 
         let device: String?
         if let configured = canonicalSubscriptionDeviceIdentifier {
@@ -640,15 +655,18 @@ public actor MLSWebSocketManager {
             #endif
         }
         guard let device, !device.isEmpty else {
-            logger.warning("🔌 WS: No stable device identity; canonical failure state will remain in-memory")
-            return nil
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
+        }
+        let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedKey.isEmpty else {
+            throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
         }
 
         return MLSCanonicalSubscriptionScope(
             accountIdentifier: normalizedAccount,
-            environmentIdentifier: apiClient.mlsServiceDID,
+            environmentIdentifier: environment,
             deviceIdentifier: device,
-            subscriptionIdentifier: key
+            subscriptionIdentifier: normalizedKey
         )
     }
 
