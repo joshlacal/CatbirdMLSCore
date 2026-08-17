@@ -24,7 +24,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if command -v swift >/dev/null 2>&1; then
-    deps="$(swift package show-dependencies 2>&1 || true)"
+    deps="$(swift package show-dependencies 2>&1)" || {
+        echo "FAIL: 'swift package show-dependencies' failed (exit $?) — cannot verify Petrel identity" >&2
+        exit 1
+    }
 else
     echo "error: swift not found on PATH" >&2
     exit 1
