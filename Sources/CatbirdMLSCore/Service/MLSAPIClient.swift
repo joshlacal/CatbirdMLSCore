@@ -49,10 +49,45 @@ private extension MLSCredentialBinding.KeyPackageBindingStatus {
 /// Properly configured with atproto-proxy header for MLS service routing
 @Observable
 public final class MLSAPIClient {
-    /// Rust owns the signed body transcript and returns a request whose
-    /// Authorization/DPoP fields are intentionally empty. The host supplies
-    /// the current binding snapshot; it cannot provide an arbitrary proof or
-    /// key identifier to this closure.
+    /// Nest-issued clean-chat authority. It is deliberately distinct from
+    /// Petrel's ordinary PDS session and is the only authority accepted by
+    /// canonical clean-chat transport.
+    public struct CleanChatTransportAuthority: Equatable, Sendable {
+      public let accessToken: String
+      public let dpopProof: String
+      public let dpopJkt: String
+      public let deviceId: String
+      public let authGeneration: Int64?
+
+      public init(
+        accessToken: String,
+        dpopProof: String,
+        dpopJkt: String,
+        deviceId: String,
+        authGeneration: Int64?
+      ) {
+        self.accessToken = accessToken
+        self.dpopProof = dpopProof
+        self.dpopJkt = dpopJkt
+        self.deviceId = deviceId
+        self.authGeneration = authGeneration
+      }
+    }
+
+    public enum CanonicalTransportAuthority: Equatable, Sendable {
+      case cleanChat(CleanChatTransportAuthority)
+      case pdsSession
+    }
+
+    /// Opaque wrapper around the generated FFI DTO. The generated DTO's
+    /// memberwise initializer is never an executable transport input.
+    public struct CanonicalPreparedRequest: @unchecked Sendable {
+      package let ffi: CleanChatPreparedRequestFfi
+      package init(ffi: CleanChatPreparedRequestFfi) {
+        self.ffi = ffi
+      }
+    }
+
     public typealias CanonicalSignedRequestPreparer = @Sendable (
       CleanChatSigningContextFfi,
       CleanChatOperationFfi,
@@ -61,15 +96,21 @@ public final class MLSAPIClient {
 
     public enum CanonicalLiveTransportError: Error, LocalizedError, Equatable {
       case signerUnavailable
+      case cleanChatAuthorityRequired
       case signedRequestContainedTransportCredentials
+      case invalidPreparedRequest
       case invalidPath(String)
 
       public var errorDescription: String? {
         switch self {
         case .signerUnavailable:
           return "Clean-chat signer is unavailable; the mutation was not sent"
+        case .cleanChatAuthorityRequired:
+          return "Clean-chat authority is required; the PDS session was not sent"
         case .signedRequestContainedTransportCredentials:
           return "Signed clean-chat request contained caller-supplied transport credentials"
+        case .invalidPreparedRequest:
+          return "Prepared clean-chat request was not produced by Rust"
         case let .invalidPath(path):
           return "Invalid clean-chat request path: \(path)"
         }
@@ -77,9 +118,9 @@ public final class MLSAPIClient {
 
       public var userActionCategory: MLSUserActionCategory {
         switch self {
-        case .signerUnavailable:
+        case .signerUnavailable, .cleanChatAuthorityRequired:
           return .rebind
-        case .signedRequestContainedTransportCredentials:
+        case .signedRequestContainedTransportCredentials, .invalidPreparedRequest:
           return .reauthenticate
         case .invalidPath:
           return .retry
@@ -225,7 +266,7 @@ public final class MLSAPIClient {
       operation: CleanChatOperationFfi,
       binding: CleanChatSigningContextFfi,
       input: Input
-    ) throws -> CleanChatPreparedRequestFfi {
+    ) throws -> CanonicalPreparedRequest {
       canonicalSignedRequestPreparerLock.lock()
       let preparer = canonicalSignedRequestPreparer
       canonicalSignedRequestPreparerLock.unlock()
@@ -233,65 +274,83 @@ public final class MLSAPIClient {
         throw CanonicalLiveTransportError.signerUnavailable
       }
       let inputJSON = try JSONEncoder().encode(input)
-      let prepared = try preparer(binding, operation, inputJSON)
-      guard prepared.authorization == nil, prepared.dpop == nil else {
+      let ffi = try preparer(binding, operation, inputJSON)
+      guard ffi.authorization == nil, ffi.dpop == nil else {
         throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
       }
-      return prepared
+      return CanonicalPreparedRequest(ffi: ffi)
     }
 
-    /// Execute a Rust-prepared request through Petrel's authenticated network
-    /// pipeline. Petrel attaches the current session Authorization/DPoP after
-    /// Rust has signed the body; callers cannot inject either proof here.
+    /// Execute only an opaque Rust-prepared request with Nest clean-chat
+    /// authority. This intentionally bypasses Petrel's PDS session pipeline.
     public func executeCanonicalSignedRequest(
-      _ prepared: CleanChatPreparedRequestFfi
+      _ prepared: CanonicalPreparedRequest,
+      authority: CanonicalTransportAuthority
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-      guard prepared.authorization == nil, prepared.dpop == nil else {
+      guard case let .cleanChat(cleanAuthority) = authority else {
+        throw CanonicalLiveTransportError.cleanChatAuthorityRequired
+      }
+      let ffi = prepared.ffi
+      guard ffi.authorization == nil, ffi.dpop == nil,
+            let body = ffi.body
+      else {
         throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
+      }
+      guard !cleanAuthority.accessToken.isEmpty,
+            !cleanAuthority.dpopProof.isEmpty,
+            !cleanAuthority.dpopJkt.isEmpty,
+            !cleanAuthority.deviceId.isEmpty
+      else {
+        throw CanonicalLiveTransportError.cleanChatAuthorityRequired
       }
       let endpoint: String
-      if prepared.path.hasPrefix("/xrpc/") {
-        endpoint = String(prepared.path.dropFirst("/xrpc/".count))
-      } else if prepared.path.hasPrefix("xrpc/") {
-        endpoint = String(prepared.path.dropFirst("xrpc/".count))
+      if ffi.path.hasPrefix("/xrpc/") {
+        endpoint = String(ffi.path.dropFirst("/xrpc/".count))
+      } else if ffi.path.hasPrefix("xrpc/") {
+        endpoint = String(ffi.path.dropFirst("xrpc/".count))
       } else {
-        throw CanonicalLiveTransportError.invalidPath(prepared.path)
+        throw CanonicalLiveTransportError.invalidPath(ffi.path)
       }
-      let headers = [
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      ]
-      let request = try await client.networkService.createURLRequest(
+      var request = try await client.networkService.createURLRequest(
         endpoint: endpoint,
-        method: prepared.method,
-        headers: headers,
-        body: prepared.body,
+        method: ffi.method,
+        headers: [
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Authorization": "DPoP \(cleanAuthority.accessToken)",
+          "DPoP": cleanAuthority.dpopProof,
+          "atproto-proxy": mlsServiceDID
+        ],
+        body: body,
         queryItems: nil
       )
-      let proxyHeaders = ["atproto-proxy": mlsServiceDID]
-      return try await client.networkService.performRequestReturningHTTPErrorResponses(
-        request,
-        skipTokenRefresh: false,
-        additionalHeaders: proxyHeaders
-      )
+      request.setValue("DPoP \(cleanAuthority.accessToken)", forHTTPHeaderField: "Authorization")
+      request.setValue(cleanAuthority.dpopProof, forHTTPHeaderField: "DPoP")
+      request.setValue(mlsServiceDID, forHTTPHeaderField: "atproto-proxy")
+      let (data, response) = try await URLSession.shared.data(for: request)
+      guard let httpResponse = response as? HTTPURLResponse else {
+        throw MLSAPIError.invalidResponse(message: "Clean-chat response was not HTTP")
+      }
+      return (data, httpResponse)
     }
 
-    /// Execute and strictly decode one signed canonical response through the
-    /// Rust operation decoder before decoding the generated response DTO.
     public func executeCanonicalSignedRequest<Response: Decodable>(
-      _ prepared: CleanChatPreparedRequestFfi,
+      _ prepared: CanonicalPreparedRequest,
+      authority: CanonicalTransportAuthority,
       as responseType: Response.Type = Response.self
     ) async throws -> Response {
-      let (data, response) = try await executeCanonicalSignedRequest(prepared)
+      let (data, response) = try await executeCanonicalSignedRequest(
+        prepared,
+        authority: authority
+      )
       guard (200 ... 299).contains(response.statusCode) else {
-        throw MLSAPIError.httpError(
-          statusCode: response.statusCode,
-          message: "Canonical clean-chat request failed"
-        )
+        let detail = String(data: data, encoding: .utf8)
+          ?? "Canonical clean-chat request failed"
+        throw MLSAPIError.httpError(statusCode: response.statusCode, message: detail)
       }
       return try MLSCanonicalTransportAdapter.decode(
         data,
-        operation: prepared.operation,
+        operation: prepared.ffi.operation,
         as: responseType
       )
     }

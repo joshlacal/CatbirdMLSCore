@@ -40,14 +40,55 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     }
   }
 
+  /// Atomic signing authority snapshot resolved per call. Any component
+  /// mismatch between before and after signing invalidates the whole call.
+  public struct SigningAuthoritySnapshot: Equatable, Sendable {
+    public let actorDid: String
+    public let deviceId: String
+    public let dpopJkt: String
+    public let authGeneration: Int64?
+    public let signerHandle: String
+    public let publicKey: Data
+    public let signer: TranscriptSigner
+
+    public init(
+      actorDid: String,
+      deviceId: String,
+      dpopJkt: String,
+      authGeneration: Int64?,
+      signerHandle: String,
+      publicKey: Data,
+      signer: @escaping TranscriptSigner
+    ) {
+      self.actorDid = actorDid
+      self.deviceId = deviceId
+      self.dpopJkt = dpopJkt
+      self.authGeneration = authGeneration
+      self.signerHandle = signerHandle
+      self.publicKey = publicKey
+      self.signer = signer
+    }
+
+    public static func == (lhs: SigningAuthoritySnapshot, rhs: SigningAuthoritySnapshot) -> Bool {
+      lhs.actorDid == rhs.actorDid &&
+      lhs.deviceId == rhs.deviceId &&
+      lhs.dpopJkt == rhs.dpopJkt &&
+      lhs.authGeneration == rhs.authGeneration &&
+      lhs.signerHandle == rhs.signerHandle &&
+      lhs.publicKey == rhs.publicKey
+    }
+  }
+
   /// The signer runs inside platform-owned key custody. The callback returns
   /// only signature bytes; private key material is not part of this seam.
   public typealias TranscriptSigner = @Sendable (String, Data) throws -> Data
   public typealias SigningPublicKeyResolver = @Sendable (String) -> Data?
   public typealias SigningBindingResolver = @Sendable (String) -> SigningBindingSnapshot?
+  public typealias SigningAuthorityResolver = @Sendable (String) -> SigningAuthoritySnapshot?
 
   private let keychainManager: MLSKeychainManager
   private let authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)?
+  private let signingAuthorityResolver: SigningAuthorityResolver?
   private let transcriptSigner: TranscriptSigner?
   private let signingPublicKeyResolver: SigningPublicKeyResolver?
   private let signingBindingResolver: SigningBindingResolver?
@@ -66,12 +107,14 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   public init(
     keychainManager: MLSKeychainManager = .shared,
     authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil,
+    signingAuthorityResolver: SigningAuthorityResolver? = nil,
     transcriptSigner: TranscriptSigner? = nil,
     signingPublicKeyResolver: SigningPublicKeyResolver? = nil,
     signingBindingResolver: SigningBindingResolver? = nil
   ) {
     self.keychainManager = keychainManager
     self.authorizedDeviceKeyResolver = authorizedDeviceKeyResolver
+    self.signingAuthorityResolver = signingAuthorityResolver
     self.transcriptSigner = transcriptSigner
     self.signingPublicKeyResolver = signingPublicKeyResolver
     self.signingBindingResolver = signingBindingResolver
@@ -118,6 +161,47 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     guard !transcript.isEmpty else {
       logger.error("Refusing to sign an empty clean-chat transcript")
       return nil
+    }
+
+    if let signingAuthorityResolver {
+      guard let authorityBefore = signingAuthorityResolver(userDid),
+            authorityBefore.actorDid == userDid,
+            !authorityBefore.deviceId.isEmpty,
+            !authorityBefore.dpopJkt.isEmpty,
+            !authorityBefore.publicKey.isEmpty
+      else {
+        logger.error("Clean-chat atomic signing authority is unavailable before signing for user: \(userDid.prefix(20))...")
+        return nil
+      }
+
+      guard Self.keyIdentifier(forPublicKey: authorityBefore.publicKey) == keyId else {
+        logger.error("Clean-chat signer key identifier did not match the requested authority")
+        return nil
+      }
+
+      let signature = try authorityBefore.signer(userDid, transcript)
+
+      guard let verificationKey = try? Curve25519.Signing.PublicKey(rawRepresentation: authorityBefore.publicKey),
+            verificationKey.isValidSignature(signature, for: transcript)
+      else {
+        logger.error("Clean-chat signer returned a signature/public-key pair that failed verification")
+        return nil
+      }
+
+      guard let authorityAfter = signingAuthorityResolver(userDid),
+            authorityAfter == authorityBefore
+      else {
+        logger.error("Clean-chat atomic signing authority changed while signing")
+        return nil
+      }
+
+      return CleanChatSigningAuthorityFfi(
+        publicKey: authorityAfter.publicKey,
+        signature: signature,
+        deviceId: authorityAfter.deviceId,
+        dpopJkt: authorityAfter.dpopJkt,
+        authGeneration: authorityAfter.authGeneration
+      )
     }
 
     // Capture the authenticated authority before entering key custody. The

@@ -628,6 +628,7 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
       ],
       "public func sendMessage(": [
         "handleRustEngineEvents",
+        "rustGroupIdHex",
         "withRustAuthoritativeRuntime",
       ],
       "internal func processServerMessage(": [

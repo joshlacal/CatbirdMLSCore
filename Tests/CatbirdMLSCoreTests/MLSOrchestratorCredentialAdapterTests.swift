@@ -93,6 +93,47 @@ final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
     XCTAssertTrue(body.contains("bindingAfterSignature == bindingBeforeSignature"))
     XCTAssertTrue(body.contains("isValidSignature(signature, for: transcript)"))
   }
+  private final class TestAtomicCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    func increment() -> Int {
+      lock.lock()
+      defer { lock.unlock() }
+      _count += 1
+      return _count
+    }
+  }
+
+  func testAtomicAuthoritySnapshotRotationRejectsWholeSignature() throws {
+    let identity = "did:plc:atomic-\(UUID().uuidString.lowercased())"
+    let key = Curve25519.Signing.PrivateKey()
+    let counter = TestAtomicCounter()
+    let adapter = MLSOrchestratorCredentialAdapter(
+      signingAuthorityResolver: { did in
+        let calls = counter.increment()
+        guard did == identity else { return nil }
+        return .init(
+          actorDid: did,
+          deviceId: "device-1",
+          dpopJkt: "jkt-1",
+          authGeneration: calls == 1 ? 1 : 2,
+          signerHandle: "signer-v\(calls)",
+          publicKey: key.publicKey.rawRepresentation,
+          signer: { _, payload in try key.signature(for: payload) }
+        )
+      }
+    )
+
+    XCTAssertNil(
+      try adapter.signCleanChatTranscript(
+        userDid: identity,
+        transcript: Data("atomic".utf8),
+        keyId: MLSOrchestratorCredentialAdapter.keyIdentifier(
+          forPublicKey: key.publicKey.rawRepresentation
+        )
+      )
+    )
+  }
 
   private func sourceFileURL(relativePath: String) -> URL {
     let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()

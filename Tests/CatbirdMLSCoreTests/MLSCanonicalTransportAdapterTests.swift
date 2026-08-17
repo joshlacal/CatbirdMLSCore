@@ -42,6 +42,29 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       )
     }
   }
+  func testPlainPDSSessionCannotExecuteCleanChatBeforeNetwork() async throws {
+    let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://127.0.0.1")!)
+    let apiClient = await MLSAPIClient(client: atProtoClient, environment: .production)
+    let request = CleanChatPreparedRequestFfi(
+      operation: .sendMessage,
+      method: "POST",
+      path: "/xrpc/blue.catbird.chat.sendMessage",
+      authorization: nil,
+      dpop: nil,
+      body: Data("{}".utf8)
+    )
+    let prepared = MLSAPIClient.CanonicalPreparedRequest(ffi: request)
+
+    do {
+      _ = try await apiClient.executeCanonicalSignedRequest(
+        prepared,
+        authority: .pdsSession
+      )
+      XCTFail("PDS session authority must be rejected before network")
+    } catch let error as MLSAPIClient.CanonicalLiveTransportError {
+      XCTAssertEqual(error, .cleanChatAuthorityRequired)
+    }
+  }
   func testCanonicalReadAndTicketRoutesStayOnGeneratedChatNamespace() {
     XCTAssertEqual(
       MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getConvos")?.canonical,
