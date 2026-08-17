@@ -35,6 +35,8 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     apiClient: OrchestratorApiCallback,
     keychainManager: MLSKeychainManager = .shared,
     authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil,
+    signingPublicKeyResolver: MLSOrchestratorCredentialAdapter.SigningPublicKeyResolver? = nil,
+    signingBindingResolver: MLSOrchestratorCredentialAdapter.SigningBindingResolver? = nil,
     config: FfiOrchestratorConfig? = nil,
     eventCallback: OrchestratorEventCallback? = nil
   ) {
@@ -46,7 +48,12 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     )
     let credentialAdapter = MLSOrchestratorCredentialAdapter(
       keychainManager: keychainManager,
-      authorizedDeviceKeyResolver: authorizedDeviceKeyResolver
+      authorizedDeviceKeyResolver: authorizedDeviceKeyResolver,
+      transcriptSigner: { identity, transcript in
+        try mlsContext.signWithIdentityKey(identity: identity, payload: transcript)
+      },
+      signingPublicKeyResolver: signingPublicKeyResolver,
+      signingBindingResolver: signingBindingResolver
     )
 
     self.userDID = normalizedDID
@@ -135,6 +142,22 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     deadlineMs: UInt64 = 1_500
   ) throws -> FfiSuspendResult {
     try bridge.prepareForSuspend(reason: reason, deadlineMs: deadlineMs)
+  }
+
+  /// Prepare one canonical signed mutation through the Rust-owned signer.
+  /// The returned request intentionally contains no Authorization or DPoP
+  /// values; the selected host transport attaches its own current session
+  /// credentials after this exact binding snapshot is signed.
+  public func prepareCleanChatSignedRequest(
+    binding: CleanChatSigningContextFfi,
+    operation: CleanChatOperationFfi,
+    bodyJson: Data
+  ) throws -> CleanChatPreparedRequestFfi {
+    try bridge.prepareCleanChatSignedRequest(
+      binding: binding,
+      operation: operation,
+      bodyJson: bodyJson
+    )
   }
 
   public func reattachAfterSuspend(reason: String) throws {

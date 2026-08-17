@@ -49,6 +49,44 @@ private extension MLSCredentialBinding.KeyPackageBindingStatus {
 /// Properly configured with atproto-proxy header for MLS service routing
 @Observable
 public final class MLSAPIClient {
+    /// Rust owns the signed body transcript and returns a request whose
+    /// Authorization/DPoP fields are intentionally empty. The host supplies
+    /// the current binding snapshot; it cannot provide an arbitrary proof or
+    /// key identifier to this closure.
+    public typealias CanonicalSignedRequestPreparer = @Sendable (
+      CleanChatSigningContextFfi,
+      CleanChatOperationFfi,
+      Data
+    ) throws -> CleanChatPreparedRequestFfi
+
+    public enum CanonicalLiveTransportError: Error, LocalizedError, Equatable {
+      case signerUnavailable
+      case signedRequestContainedTransportCredentials
+      case invalidPath(String)
+
+      public var errorDescription: String? {
+        switch self {
+        case .signerUnavailable:
+          return "Clean-chat signer is unavailable; the mutation was not sent"
+        case .signedRequestContainedTransportCredentials:
+          return "Signed clean-chat request contained caller-supplied transport credentials"
+        case let .invalidPath(path):
+          return "Invalid clean-chat request path: \(path)"
+        }
+      }
+
+      public var userActionCategory: MLSUserActionCategory {
+        switch self {
+        case .signerUnavailable:
+          return .rebind
+        case .signedRequestContainedTransportCredentials:
+          return .reauthenticate
+        case .invalidPath:
+          return .retry
+        }
+      }
+    }
+
     private let logger = Logger(subsystem: "blue.catbird", category: "MLSAPIClient")
 
     // MARK: - Configuration
@@ -78,6 +116,9 @@ public final class MLSAPIClient {
     /// caller from accidentally reaching the ticket endpoint.
     private var completedInventorySessions: [String: MLSInventorySessionCompletion] = [:]
     private let completedInventorySessionsLock = NSLock()
+
+    private var canonicalSignedRequestPreparer: CanonicalSignedRequestPreparer?
+    private let canonicalSignedRequestPreparerLock = NSLock()
 
     // MARK: - Initialization
 
@@ -163,6 +204,96 @@ public final class MLSAPIClient {
         await configureMLSService()
 
         logger.info("Switched to environment: \(newEnvironment.description)")
+    }
+
+    /// Install the Rust-backed signed request seam before any canonical live
+    /// mutation is attempted. A missing seam fails closed; no legacy endpoint
+    /// is used as a fallback.
+    public func configureCanonicalSignedRequestPreparer(
+      _ preparer: CanonicalSignedRequestPreparer?
+    ) {
+      canonicalSignedRequestPreparerLock.lock()
+      canonicalSignedRequestPreparer = preparer
+      canonicalSignedRequestPreparerLock.unlock()
+    }
+
+    /// Compose a generated clean-chat input through the Rust signer. The input
+    /// remains the generated Petrel DTO's JSON, not a hand-maintained wire
+    /// schema. Transport execution is a separate step so callers can attach
+    /// only the current session credentials.
+    public func prepareCanonicalSignedRequest<Input: Encodable>(
+      operation: CleanChatOperationFfi,
+      binding: CleanChatSigningContextFfi,
+      input: Input
+    ) throws -> CleanChatPreparedRequestFfi {
+      canonicalSignedRequestPreparerLock.lock()
+      let preparer = canonicalSignedRequestPreparer
+      canonicalSignedRequestPreparerLock.unlock()
+      guard let preparer else {
+        throw CanonicalLiveTransportError.signerUnavailable
+      }
+      let inputJSON = try JSONEncoder().encode(input)
+      let prepared = try preparer(binding, operation, inputJSON)
+      guard prepared.authorization == nil, prepared.dpop == nil else {
+        throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
+      }
+      return prepared
+    }
+
+    /// Execute a Rust-prepared request through Petrel's authenticated network
+    /// pipeline. Petrel attaches the current session Authorization/DPoP after
+    /// Rust has signed the body; callers cannot inject either proof here.
+    public func executeCanonicalSignedRequest(
+      _ prepared: CleanChatPreparedRequestFfi
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+      guard prepared.authorization == nil, prepared.dpop == nil else {
+        throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
+      }
+      let endpoint: String
+      if prepared.path.hasPrefix("/xrpc/") {
+        endpoint = String(prepared.path.dropFirst("/xrpc/".count))
+      } else if prepared.path.hasPrefix("xrpc/") {
+        endpoint = String(prepared.path.dropFirst("xrpc/".count))
+      } else {
+        throw CanonicalLiveTransportError.invalidPath(prepared.path)
+      }
+      let headers = [
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      ]
+      let request = try await client.networkService.createURLRequest(
+        endpoint: endpoint,
+        method: prepared.method,
+        headers: headers,
+        body: prepared.body,
+        queryItems: nil
+      )
+      let proxyHeaders = ["atproto-proxy": mlsServiceDID]
+      return try await client.networkService.performRequestReturningHTTPErrorResponses(
+        request,
+        skipTokenRefresh: false,
+        additionalHeaders: proxyHeaders
+      )
+    }
+
+    /// Execute and strictly decode one signed canonical response through the
+    /// Rust operation decoder before decoding the generated response DTO.
+    public func executeCanonicalSignedRequest<Response: Decodable>(
+      _ prepared: CleanChatPreparedRequestFfi,
+      as responseType: Response.Type = Response.self
+    ) async throws -> Response {
+      let (data, response) = try await executeCanonicalSignedRequest(prepared)
+      guard (200 ... 299).contains(response.statusCode) else {
+        throw MLSAPIError.httpError(
+          statusCode: response.statusCode,
+          message: "Canonical clean-chat request failed"
+        )
+      }
+      return try MLSCanonicalTransportAdapter.decode(
+        data,
+        operation: prepared.operation,
+        as: responseType
+      )
     }
 
     // MARK: - Authentication Validation
@@ -3857,6 +3988,53 @@ public enum MLSAPIError: Error, LocalizedError {
             return true
         default:
             return false
+        }
+    }
+}
+
+/// Stable UI guidance for live clean-chat failures. These are categories, not
+/// automatic recovery authority: the host decides whether/when to retry,
+/// reauthenticate, rebind, rejoin, or show that access has ended.
+public enum MLSUserActionCategory: String, Codable, Equatable, Sendable {
+    case retry
+    case reauthenticate
+    case rebind
+    case rejoin
+    case accessEnded
+}
+
+public extension MLSAPIError {
+    var userActionCategory: MLSUserActionCategory {
+        switch self {
+        case .noAuthentication, .accountMismatch:
+            return .reauthenticate
+        case .rateLimited, .serverUnavailable:
+            return .retry
+        case let .httpError(statusCode, message):
+            let normalized = message.lowercased()
+            if statusCode == 401 || normalized.contains("authentication") || normalized.contains("session expired") {
+                return .reauthenticate
+            }
+            if normalized.contains("dpop") || normalized.contains("binding") || normalized.contains("device") || normalized.contains("generation") {
+                return .rebind
+            }
+            if statusCode == 409 || statusCode == 412 || statusCode == 423 || normalized.contains("stale") || normalized.contains("rejoin") {
+                return .rejoin
+            }
+            if statusCode == 410 || normalized.contains("access ended") || normalized.contains("revoked") || normalized.contains("not a member") {
+                return .accessEnded
+            }
+            if statusCode == 429 || statusCode >= 500 {
+                return .retry
+            }
+            return .retry
+        case .conversationNotFound, .notConversationMember, .notMember:
+            return .accessEnded
+        case .memberAlreadyExists, .memberBlocked, .mutualBlockDetected, .convoAlreadyExists,
+             .bootstrapTargetNotFound, .alreadyBootstrapped, .keyPackageNotFound,
+             .invalidCipherSuite, .tooManyMembers, .invalidBatchSize, .methodNotImplemented,
+             .messageTooLarge, .invalidResponse, .decodingError, .unknownError:
+            return .retry
         }
     }
 }

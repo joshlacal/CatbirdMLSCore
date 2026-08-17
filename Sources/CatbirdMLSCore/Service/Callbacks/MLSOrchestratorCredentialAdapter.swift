@@ -7,6 +7,7 @@
 //
 
 import CatbirdMLS
+import CryptoKit
 import Foundation
 import OSLog
 import Security
@@ -24,8 +25,32 @@ import Security
 /// All methods are synchronous and called from a Rust background thread.
 public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallback, @unchecked Sendable {
 
+  /// Binding metadata is resolved by the authenticated host. It is never
+  /// accepted from the request caller because the Rust signer binds the
+  /// transcript to this exact device/session snapshot.
+  public struct SigningBindingSnapshot: Equatable, Sendable {
+    public let deviceId: String
+    public let dpopJkt: String
+    public let authGeneration: Int64?
+
+    public init(deviceId: String, dpopJkt: String, authGeneration: Int64?) {
+      self.deviceId = deviceId
+      self.dpopJkt = dpopJkt
+      self.authGeneration = authGeneration
+    }
+  }
+
+  /// The signer runs inside platform-owned key custody. The callback returns
+  /// only signature bytes; private key material is not part of this seam.
+  public typealias TranscriptSigner = @Sendable (String, Data) throws -> Data
+  public typealias SigningPublicKeyResolver = @Sendable (String) -> Data?
+  public typealias SigningBindingResolver = @Sendable (String) -> SigningBindingSnapshot?
+
   private let keychainManager: MLSKeychainManager
   private let authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)?
+  private let transcriptSigner: TranscriptSigner?
+  private let signingPublicKeyResolver: SigningPublicKeyResolver?
+  private let signingBindingResolver: SigningBindingResolver?
   private let logger = Logger(subsystem: "blue.catbird", category: "OrchestratorCredentialAdapter")
 
   /// Keychain key prefix for MLS DID storage (scoped by user DID).
@@ -40,10 +65,16 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   /// - Parameter keychainManager: The keychain manager instance to use. Defaults to `.shared`.
   public init(
     keychainManager: MLSKeychainManager = .shared,
-    authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil
+    authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil,
+    transcriptSigner: TranscriptSigner? = nil,
+    signingPublicKeyResolver: SigningPublicKeyResolver? = nil,
+    signingBindingResolver: SigningBindingResolver? = nil
   ) {
     self.keychainManager = keychainManager
     self.authorizedDeviceKeyResolver = authorizedDeviceKeyResolver
+    self.transcriptSigner = transcriptSigner
+    self.signingPublicKeyResolver = signingPublicKeyResolver
+    self.signingBindingResolver = signingBindingResolver
   }
 
   public convenience init(
@@ -51,7 +82,10 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   ) {
     self.init(
       keychainManager: .shared,
-      authorizedDeviceKeyResolver: authorizedDeviceKeyResolver
+      authorizedDeviceKeyResolver: authorizedDeviceKeyResolver,
+      transcriptSigner: nil,
+      signingPublicKeyResolver: nil,
+      signingBindingResolver: nil
     )
   }
 
@@ -76,18 +110,75 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     }
   }
 
-  /// Clean-chat transcript signing remains explicitly unsupported until the
-  /// Core runtime has an authenticated device binding and non-exporting
-  /// signer authority. Returning `nil` preserves the Rust callback's
-  /// fail-closed missing-signer behavior; it must not fall back to exporting
-  /// the legacy private-key bytes through this callback.
   public func signCleanChatTranscript(
     userDid: String,
-    transcript _: Data,
-    keyId _: String
+    transcript: Data,
+    keyId: String
   ) throws -> CleanChatSigningAuthorityFfi? {
-    logger.debug("Clean-chat transcript signing unavailable for user: \(userDid.prefix(20))...")
-    return nil
+    guard !transcript.isEmpty else {
+      logger.error("Refusing to sign an empty clean-chat transcript")
+      return nil
+    }
+
+    // The normal path delegates to the Rust/OpenMLS context (or another
+    // platform non-exporting signer). A raw CryptoKit key is accepted only as
+    // a compatibility path for older keychain records; serialized OpenMLS
+    // keypairs never cross this callback and therefore fail closed unless a
+    // platform signer was injected.
+    let signature: Data
+    let publicKey: Data
+    if let transcriptSigner {
+      signature = try transcriptSigner(userDid, transcript)
+      guard let resolvedPublicKey = signingPublicKeyResolver?(userDid) else {
+        logger.error("Clean-chat signer returned a signature without an authority public key")
+        return nil
+      }
+      publicKey = resolvedPublicKey
+    } else {
+      let keyData = try getSigningKey(userDid: userDid)
+      guard let keyData,
+            let privateKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: keyData)
+      else {
+        logger.error("No non-exporting clean-chat signer is available for user: \(userDid.prefix(20))...")
+        return nil
+      }
+      signature = try privateKey.signature(for: transcript)
+      publicKey = privateKey.publicKey.rawRepresentation
+    }
+
+    guard Self.keyIdentifier(forPublicKey: publicKey) == keyId else {
+      logger.error("Clean-chat signer key identifier did not match the requested authority")
+      return nil
+    }
+
+    // Binding is authoritative host state. Do not invent a device/JKT or
+    // silently sign with stale metadata when the session has not supplied it.
+    guard let binding = signingBindingResolver?(userDid),
+          !binding.deviceId.isEmpty,
+          !binding.dpopJkt.isEmpty
+    else {
+      logger.error("Clean-chat signer binding is unavailable for user: \(userDid.prefix(20))...")
+      return nil
+    }
+
+    return CleanChatSigningAuthorityFfi(
+      publicKey: publicKey,
+      signature: signature,
+      deviceId: binding.deviceId,
+      dpopJkt: binding.dpopJkt,
+      authGeneration: binding.authGeneration
+    )
+  }
+
+  /// Rust derives clean-chat key IDs from the Ed25519 public key using
+  /// base64url without padding. Keep this helper local to the callback so the
+  /// caller cannot provide an unrelated public-key/signature tuple.
+  public static func keyIdentifier(forPublicKey publicKey: Data) -> String {
+    Data(SHA256.hash(data: publicKey))
+      .base64EncodedString()
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_")
+      .trimmingCharacters(in: CharacterSet(charactersIn: "="))
   }
 
   public func deleteSigningKey(userDid: String) throws {
