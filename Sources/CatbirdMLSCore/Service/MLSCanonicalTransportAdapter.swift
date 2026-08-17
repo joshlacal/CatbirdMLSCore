@@ -166,6 +166,15 @@ public enum MLSCanonicalTransportAdapter {
   /// reset, recovery, leave, access, and watermark handlers. Missing actions
   /// are failures, never successful no-ops.
   public struct MLSCanonicalDurableEventActions {
+    /// Stable reviewed capability revision for this concrete action table.
+    /// Managers persist terminal failures against this value; changing it is
+    /// an explicit support transition, while reconnecting with the same value
+    /// must preserve a prior terminal block.
+    public let supportRevision: String
+
+    public static let defaultSupportRevision = "canonical-durable-actions-v1"
+    public static let missingTableSupportRevision = "canonical-durable-actions-missing-v1"
+
     public typealias ConversationChangedHandler =
       (BlueCatbirdChatDefs.ConversationChangedEvent) async throws -> Void
     public typealias ConversationClosedHandler =
@@ -216,8 +225,10 @@ public enum MLSCanonicalTransportAdapter {
       onLeaveRequest: LeaveRequestHandler? = nil,
       onAccessEnded: AccessEndedHandler? = nil,
       onWatermark: WatermarkHandler? = nil,
-      onTyping: TypingHandler? = nil
+      onTyping: TypingHandler? = nil,
+      supportRevision: String = MLSCanonicalDurableEventActions.defaultSupportRevision
     ) {
+      self.supportRevision = supportRevision
       self.onConversationChanged = onConversationChanged
       self.onConversationClosed = onConversationClosed
       self.onMessageAvailable = onMessageAvailable

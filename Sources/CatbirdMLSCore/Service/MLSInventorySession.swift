@@ -430,7 +430,7 @@ internal struct MLSCanonicalSubscriptionFence: Equatable, Sendable {
 /// terminal subscription failure, not a transient reconnect condition. The
 /// latch is kept by the manager across reconnects and fence expiry so a new
 /// aggregate cannot silently move the ticket past the failed event.
-internal enum MLSCanonicalSubscriptionTerminalFailure: Error, Equatable, Sendable {
+internal enum MLSCanonicalSubscriptionTerminalFailure: Error, Codable, Equatable, Sendable {
   case unsupportedDurableEvent(typeIdentifier: String)
   case missingDurableAction(action: String)
   case missingInventoryAction(action: String)
@@ -458,6 +458,10 @@ internal enum MLSCanonicalSubscriptionRecoveryTransition: Equatable, Sendable {
 internal struct MLSCanonicalSubscriptionFailureLatch: Equatable, Sendable {
   internal private(set) var terminalFailure: MLSCanonicalSubscriptionTerminalFailure?
 
+  internal init(terminalFailure: MLSCanonicalSubscriptionTerminalFailure? = nil) {
+    self.terminalFailure = terminalFailure
+  }
+
   @discardableResult
   internal mutating func record(_ error: Error) -> Bool {
     let classified: MLSCanonicalSubscriptionTerminalFailure?
@@ -474,10 +478,13 @@ internal struct MLSCanonicalSubscriptionFailureLatch: Equatable, Sendable {
     guard let classified else { return false }
     // Preserve the first failed fence. A later error must not replace the
     // event that is awaiting a supported client transition.
-    if terminalFailure == nil {
-      terminalFailure = classified
-    }
+    guard terminalFailure == nil else { return false }
+    terminalFailure = classified
     return true
+  }
+
+  internal mutating func restore(_ failure: MLSCanonicalSubscriptionTerminalFailure?) {
+    terminalFailure = failure
   }
 
   internal mutating func clear(after transition: MLSCanonicalSubscriptionRecoveryTransition) {

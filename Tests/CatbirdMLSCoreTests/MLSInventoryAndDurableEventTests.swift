@@ -477,6 +477,219 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertNil(latch.terminalFailure)
   }
 
+  func testManagerLifecyclePersistsTerminalLatchAcrossReconnectRecreationAndRestart() async throws {
+    let scope = MLSCanonicalSubscriptionScope(
+      accountIdentifier: "did:plc:alice",
+      environmentIdentifier: "did:web:mls.example#atproto_mls",
+      deviceIdentifier: "device-1",
+      subscriptionIdentifier: "conversation-1"
+    )
+    let store = ScopedRecordingCursorStore()
+    let failure = MLSUnsupportedDurableEventError(typeIdentifier: "unknown")
+    let v1Actions = MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions(
+      supportRevision: "actions-v1"
+    )
+    let webSocketHandler = MLSWebSocketManager.EventHandler(
+      onCanonicalDurableEventActions: v1Actions
+    )
+    let sseHandler = MLSEventStreamManager.EventHandler(
+      onCanonicalDurableEventActions: v1Actions
+    )
+
+    var initialManager = MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: scope,
+      handler: webSocketHandler,
+      store: store
+    )
+    let initialRecorded = try await initialManager.record(failure)
+    XCTAssertTrue(initialRecorded)
+
+    // Public reconnect/resubscribe in the same capability revision must load
+    // the durable block rather than resetting it with a new task.
+    var reconnectManager = MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: scope,
+      handler: webSocketHandler,
+      store: store
+    )
+    try await reconnectManager.load()
+    XCTAssertEqual(
+      reconnectManager.terminalFailure,
+      .unsupportedDurableEvent(typeIdentifier: "unknown")
+    )
+
+    // A recreated manager in the same process sees the same block.
+    var recreatedManager = MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: scope,
+      handler: sseHandler,
+      store: store
+    )
+    try await recreatedManager.load()
+    XCTAssertEqual(recreatedManager.terminalFailure, reconnectManager.terminalFailure)
+
+    // A same-version app restart using the same protected store also sees it.
+    var restartedManager = MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: scope,
+      handler: webSocketHandler,
+      store: store
+    )
+    try await restartedManager.load()
+    XCTAssertEqual(restartedManager.terminalFailure, recreatedManager.terminalFailure)
+
+    var expiredFence: MLSCanonicalSubscriptionFence? = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: Date(timeIntervalSince1970: 1)
+    )
+    do {
+      _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+        fence: &expiredFence,
+        initialCursor: "cursor-0",
+        terminalFailure: restartedManager.terminalFailure,
+        fetchInventory: {
+          XCTFail("a persisted terminal block must prevent post-expiry inventory fetch")
+          return MLSCanonicalInventorySnapshot(
+            inventorySessionId: "unexpected",
+            snapshotEventCursor: "unexpected",
+            snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+            conversationItems: [],
+            pendingWelcomeItems: [],
+            leafRecoveryItems: []
+          )
+        },
+        reconcile: { _ in XCTFail("a persisted terminal block must prevent reconciliation") },
+        installCompletion: { _ in XCTFail("a persisted terminal block must prevent completion") },
+        persistFence: { _ in XCTFail("a persisted terminal block must prevent cursor writes") }
+      )
+      XCTFail("post-expiry persisted terminal failure must remain blocking")
+    } catch let error as MLSCanonicalSubscriptionCoordinatorError {
+      XCTAssertEqual(
+        error,
+        .blocked(.unsupportedDurableEvent(typeIdentifier: "unknown"))
+      )
+    }
+  }
+
+  func testManagerLifecycleRevisionChangeClearsOnlyThatScopedLatch() async throws {
+    let aliceScope = MLSCanonicalSubscriptionScope(
+      accountIdentifier: "did:plc:alice",
+      environmentIdentifier: "did:web:mls.example#atproto_mls",
+      deviceIdentifier: "device-1",
+      subscriptionIdentifier: "conversation-1"
+    )
+    let store = ScopedRecordingCursorStore()
+    let v1Actions = MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions(
+      supportRevision: "actions-v1"
+    )
+    let v2Actions = MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions(
+      supportRevision: "actions-v2"
+    )
+    let oldHandler = MLSWebSocketManager.EventHandler(
+      onCanonicalDurableEventActions: v1Actions
+    )
+    let newHandler = MLSWebSocketManager.EventHandler(
+      onCanonicalDurableEventActions: v2Actions
+    )
+    let sseV1Handler = MLSEventStreamManager.EventHandler(
+      onCanonicalDurableEventActions: v1Actions
+    )
+    var oldRevision = MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: oldHandler,
+      store: store
+    )
+    let oldRevisionRecorded = try await oldRevision.record(
+      MLSCanonicalActionMissingError.conversationChanged
+    )
+    XCTAssertTrue(oldRevisionRecorded)
+
+    // Installing a different reviewed action-table revision is the only
+    // implicit recovery; generic reconnect with v1 above remains blocked.
+    var newRevision = MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: newHandler,
+      store: store
+    )
+    try await newRevision.load()
+    XCTAssertNil(newRevision.terminalFailure)
+    try await newRevision.clear(after: .actionTableReplaced)
+    XCTAssertNil(newRevision.terminalFailure)
+
+    // The same revision on another account must not inherit Alice's block.
+    let bobScope = MLSCanonicalSubscriptionScope(
+      accountIdentifier: "did:plc:bob",
+      environmentIdentifier: aliceScope.environmentIdentifier,
+      deviceIdentifier: aliceScope.deviceIdentifier,
+      subscriptionIdentifier: aliceScope.subscriptionIdentifier
+    )
+    var bob = MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: bobScope,
+      handler: sseV1Handler,
+      store: store
+    )
+    try await bob.load()
+    XCTAssertNil(bob.terminalFailure)
+
+    // Device, environment, and subscription changes are also isolated.
+    for changedScope in [
+      MLSCanonicalSubscriptionScope(
+        accountIdentifier: aliceScope.accountIdentifier,
+        environmentIdentifier: "did:web:staging.example#atproto_mls",
+        deviceIdentifier: aliceScope.deviceIdentifier,
+        subscriptionIdentifier: aliceScope.subscriptionIdentifier
+      ),
+      MLSCanonicalSubscriptionScope(
+        accountIdentifier: aliceScope.accountIdentifier,
+        environmentIdentifier: aliceScope.environmentIdentifier,
+        deviceIdentifier: "device-2",
+        subscriptionIdentifier: aliceScope.subscriptionIdentifier
+      ),
+      MLSCanonicalSubscriptionScope(
+        accountIdentifier: aliceScope.accountIdentifier,
+        environmentIdentifier: aliceScope.environmentIdentifier,
+        deviceIdentifier: aliceScope.deviceIdentifier,
+        subscriptionIdentifier: "conversation-2"
+      ),
+    ] {
+      var isolated = MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+        scope: changedScope,
+        handler: sseV1Handler,
+        store: store
+      )
+      try await isolated.load()
+      XCTAssertNil(isolated.terminalFailure)
+    }
+  }
+
+  @MainActor
+  func testManagerFailurePersistenceErrorDoesNotClaimDurableLatch() async throws {
+    let scope = MLSCanonicalSubscriptionScope(
+      accountIdentifier: "did:plc:alice",
+      environmentIdentifier: "did:web:mls.example#atproto_mls",
+      deviceIdentifier: "device-1",
+      subscriptionIdentifier: "conversation-1"
+    )
+    let store = RecordingCursorStore(failure: .persistenceFailed)
+    let handler = MLSWebSocketManager.EventHandler(
+      onCanonicalDurableEventActions: .init(supportRevision: "actions-v1")
+    )
+    var coordinator = MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: scope,
+      handler: handler,
+      store: store
+    )
+
+    do {
+      _ = try await coordinator.record(
+        MLSUnsupportedDurableEventError(typeIdentifier: "unknown")
+      )
+      XCTFail("a protected-store failure must be observable")
+    } catch let error as DurableEventTestError {
+      XCTAssertEqual(error, .persistenceFailed)
+    }
+    XCTAssertNil(coordinator.terminalFailure)
+    XCTAssertTrue(store.savedCursors.isEmpty)
+  }
+
   func testChangedInventoryContinuationStateFailsClosed() async {
     do {
       _ = try await MLSInventorySessionAssembler.assemble(
@@ -1364,6 +1577,23 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
 private enum DurableEventTestError: Error, Equatable {
   case handlerFailed
   case persistenceFailed
+}
+
+@MainActor
+private final class ScopedRecordingCursorStore: MLSEventCursorStore {
+  private var values: [String: String] = [:]
+
+  func getCursor(for conversationId: String, eventType: String) throws -> String? {
+    values[key(conversationId: conversationId, eventType: eventType)]
+  }
+
+  func updateCursor(for conversationId: String, cursor: String, eventType: String) throws {
+    values[key(conversationId: conversationId, eventType: eventType)] = cursor
+  }
+
+  private func key(conversationId: String, eventType: String) -> String {
+    "\(conversationId)|\(eventType)"
+  }
 }
 
 @MainActor
