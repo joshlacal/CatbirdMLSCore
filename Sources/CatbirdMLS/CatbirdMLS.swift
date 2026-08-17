@@ -3331,6 +3331,15 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func performSilentRecovery(conversationIds: [String]) throws
 
+    /**
+     * Prepare a canonical clean-chat signed mutation.
+     *
+     * This method accepts only actor/device binding metadata. It deliberately
+     * returns no Authorization or DPoP proof: direct-DS and Nest-proxy
+     * adapters attach their own transport credentials after signing.
+     */
+    func prepareCleanChatSignedRequest(binding: CleanChatSigningContextFfi, operation: CleanChatOperationFfi, bodyJson: Data) throws -> CleanChatPreparedRequestFfi
+
     func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult
 
     /**
@@ -3963,6 +3972,22 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_perform_silent_recovery(self.uniffiClonePointer(),
                                                                                     FfiConverterSequenceString.lower(conversationIds), $0)
         }
+    }
+
+    /**
+     * Prepare a canonical clean-chat signed mutation.
+     *
+     * This method accepts only actor/device binding metadata. It deliberately
+     * returns no Authorization or DPoP proof: direct-DS and Nest-proxy
+     * adapters attach their own transport credentials after signing.
+     */
+    open func prepareCleanChatSignedRequest(binding: CleanChatSigningContextFfi, operation: CleanChatOperationFfi, bodyJson: Data) throws -> CleanChatPreparedRequestFfi {
+        return try FfiConverterTypeCleanChatPreparedRequestFfi.lift(rustCallWithError(FfiConverterTypeCleanChatTransportFfiError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_prepare_clean_chat_signed_request(self.uniffiClonePointer(),
+                                                                                              FfiConverterTypeCleanChatSigningContextFfi.lower(binding),
+                                                                                              FfiConverterTypeCleanChatOperationFfi.lower(operation),
+                                                                                              FfiConverterData.lower(bodyJson), $0)
+        })
     }
 
     open func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult {
@@ -4827,19 +4852,22 @@ public func FfiConverterTypeCleanChatAuthContextFfi_lower(_ value: CleanChatAuth
 
 /**
  * UniFFI-safe prepared request. The request body is the generated DTO's JSON
- * bytes; platform clients own the actual HTTP execution.
+ * bytes; platform clients own the actual HTTP execution. Unsigned requests
+ * carry their already-authenticated transport headers as `Some`; signed
+ * requests deliberately return `None` so the selected direct-DS or Nest
+ * adapter can attach its own transport credentials.
  */
 public struct CleanChatPreparedRequestFfi {
     public var operation: CleanChatOperationFfi
     public var method: String
     public var path: String
-    public var authorization: String
-    public var dpop: String
+    public var authorization: String?
+    public var dpop: String?
     public var body: Data?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(operation: CleanChatOperationFfi, method: String, path: String, authorization: String, dpop: String, body: Data?) {
+    public init(operation: CleanChatOperationFfi, method: String, path: String, authorization: String?, dpop: String?, body: Data?) {
         self.operation = operation
         self.method = method
         self.path = path
@@ -4892,8 +4920,8 @@ public struct FfiConverterTypeCleanChatPreparedRequestFfi: FfiConverterRustBuffe
                 operation: FfiConverterTypeCleanChatOperationFfi.read(from: &buf),
                 method: FfiConverterString.read(from: &buf),
                 path: FfiConverterString.read(from: &buf),
-                authorization: FfiConverterString.read(from: &buf),
-                dpop: FfiConverterString.read(from: &buf),
+                authorization: FfiConverterOptionString.read(from: &buf),
+                dpop: FfiConverterOptionString.read(from: &buf),
                 body: FfiConverterOptionData.read(from: &buf)
             )
     }
@@ -4902,8 +4930,8 @@ public struct FfiConverterTypeCleanChatPreparedRequestFfi: FfiConverterRustBuffe
         FfiConverterTypeCleanChatOperationFfi.write(value.operation, into: &buf)
         FfiConverterString.write(value.method, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
-        FfiConverterString.write(value.authorization, into: &buf)
-        FfiConverterString.write(value.dpop, into: &buf)
+        FfiConverterOptionString.write(value.authorization, into: &buf)
+        FfiConverterOptionString.write(value.dpop, into: &buf)
         FfiConverterOptionData.write(value.body, into: &buf)
     }
 }
@@ -4920,6 +4948,171 @@ public func FfiConverterTypeCleanChatPreparedRequestFfi_lift(_ buf: RustBuffer) 
 #endif
 public func FfiConverterTypeCleanChatPreparedRequestFfi_lower(_ value: CleanChatPreparedRequestFfi) -> RustBuffer {
     return FfiConverterTypeCleanChatPreparedRequestFfi.lower(value)
+}
+
+/**
+ * Public-key/signature result for the non-exporting signed-request callback.
+ */
+public struct CleanChatSigningAuthorityFfi {
+    public var publicKey: Data
+    public var signature: Data
+    public var deviceId: String
+    public var dpopJkt: String
+    public var authGeneration: Int64?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(publicKey: Data, signature: Data, deviceId: String, dpopJkt: String, authGeneration: Int64?) {
+        self.publicKey = publicKey
+        self.signature = signature
+        self.deviceId = deviceId
+        self.dpopJkt = dpopJkt
+        self.authGeneration = authGeneration
+    }
+}
+
+extension CleanChatSigningAuthorityFfi: Equatable, Hashable {
+    public static func == (lhs: CleanChatSigningAuthorityFfi, rhs: CleanChatSigningAuthorityFfi) -> Bool {
+        if lhs.publicKey != rhs.publicKey {
+            return false
+        }
+        if lhs.signature != rhs.signature {
+            return false
+        }
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.dpopJkt != rhs.dpopJkt {
+            return false
+        }
+        if lhs.authGeneration != rhs.authGeneration {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(publicKey)
+        hasher.combine(signature)
+        hasher.combine(deviceId)
+        hasher.combine(dpopJkt)
+        hasher.combine(authGeneration)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanChatSigningAuthorityFfi: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanChatSigningAuthorityFfi {
+        return
+            try CleanChatSigningAuthorityFfi(
+                publicKey: FfiConverterData.read(from: &buf),
+                signature: FfiConverterData.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                dpopJkt: FfiConverterString.read(from: &buf),
+                authGeneration: FfiConverterOptionInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CleanChatSigningAuthorityFfi, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.publicKey, into: &buf)
+        FfiConverterData.write(value.signature, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.dpopJkt, into: &buf)
+        FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanChatSigningAuthorityFfi_lift(_ buf: RustBuffer) throws -> CleanChatSigningAuthorityFfi {
+    return try FfiConverterTypeCleanChatSigningAuthorityFfi.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanChatSigningAuthorityFfi_lower(_ value: CleanChatSigningAuthorityFfi) -> RustBuffer {
+    return FfiConverterTypeCleanChatSigningAuthorityFfi.lower(value)
+}
+
+public struct CleanChatSigningContextFfi {
+    public var actorDid: String
+    public var deviceId: String
+    public var dpopJkt: String
+    public var authGeneration: Int64?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(actorDid: String, deviceId: String, dpopJkt: String, authGeneration: Int64?) {
+        self.actorDid = actorDid
+        self.deviceId = deviceId
+        self.dpopJkt = dpopJkt
+        self.authGeneration = authGeneration
+    }
+}
+
+extension CleanChatSigningContextFfi: Equatable, Hashable {
+    public static func == (lhs: CleanChatSigningContextFfi, rhs: CleanChatSigningContextFfi) -> Bool {
+        if lhs.actorDid != rhs.actorDid {
+            return false
+        }
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.dpopJkt != rhs.dpopJkt {
+            return false
+        }
+        if lhs.authGeneration != rhs.authGeneration {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(actorDid)
+        hasher.combine(deviceId)
+        hasher.combine(dpopJkt)
+        hasher.combine(authGeneration)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCleanChatSigningContextFfi: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanChatSigningContextFfi {
+        return
+            try CleanChatSigningContextFfi(
+                actorDid: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                dpopJkt: FfiConverterString.read(from: &buf),
+                authGeneration: FfiConverterOptionInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CleanChatSigningContextFfi, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.actorDid, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.dpopJkt, into: &buf)
+        FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanChatSigningContextFfi_lift(_ buf: RustBuffer) throws -> CleanChatSigningContextFfi {
+    return try FfiConverterTypeCleanChatSigningContextFfi.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCleanChatSigningContextFfi_lower(_ value: CleanChatSigningContextFfi) -> RustBuffer {
+    return FfiConverterTypeCleanChatSigningContextFfi.lower(value)
 }
 
 /**
@@ -14238,6 +14431,15 @@ public protocol OrchestratorCredentialCallback: AnyObject {
 
     func getSigningKey(userDid: String) throws -> Data?
 
+    /**
+     * Sign an exact clean-chat transcript inside platform-owned key custody.
+     * Only the public key, signature, and atomic binding snapshot return;
+     * private key bytes never cross this callback boundary. Binding fields
+     * are intentionally returned by the authority rather than supplied by
+     * the caller, preventing an echo of untrusted claims.
+     */
+    func signCleanChatTranscript(userDid: String, transcript: Data, keyId: String) throws -> CleanChatSigningAuthorityFfi?
+
     func deleteSigningKey(userDid: String) throws
 
     func storeMlsDid(userDid: String, mlsDid: String) throws
@@ -14303,6 +14505,34 @@ private enum UniffiCallbackInterfaceOrchestratorCredentialCallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        signCleanChatTranscript: { (
+            uniffiHandle: UInt64,
+            userDid: RustBuffer,
+            transcript: RustBuffer,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> CleanChatSigningAuthorityFfi? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.signCleanChatTranscript(
+                    userDid: FfiConverterString.lift(userDid),
+                    transcript: FfiConverterData.lift(transcript),
+                    keyId: FfiConverterString.lift(keyId)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeCleanChatSigningAuthorityFfi.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -16032,6 +16262,30 @@ private struct FfiConverterOptionTypeChatMessage: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeChatMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeCleanChatSigningAuthorityFfi: FfiConverterRustBuffer {
+    typealias SwiftType = CleanChatSigningAuthorityFfi?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCleanChatSigningAuthorityFfi.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCleanChatSigningAuthorityFfi.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17889,6 +18143,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_perform_silent_recovery() != 48593 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_clean_chat_signed_request() != 50998 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_for_suspend() != 11343 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18114,28 +18371,31 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_signing_key() != 54007 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 51869 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_sign_clean_chat_transcript() != 53865 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 4057 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 60734 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 19418 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 38979 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 1434 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 53768 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 56496 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 58159 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 44369 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 56049 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 40070 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 24059 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 51623 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 60789 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 2125 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantined() != 58743 {

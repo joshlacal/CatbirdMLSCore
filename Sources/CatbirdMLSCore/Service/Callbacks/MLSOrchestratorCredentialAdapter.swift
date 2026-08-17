@@ -76,6 +76,20 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     }
   }
 
+  /// Clean-chat transcript signing remains explicitly unsupported until the
+  /// Core runtime has an authenticated device binding and non-exporting
+  /// signer authority. Returning `nil` preserves the Rust callback's
+  /// fail-closed missing-signer behavior; it must not fall back to exporting
+  /// the legacy private-key bytes through this callback.
+  public func signCleanChatTranscript(
+    userDid: String,
+    transcript _: Data,
+    keyId _: String
+  ) throws -> CleanChatSigningAuthorityFfi? {
+    logger.debug("Clean-chat transcript signing unavailable for user: \(userDid.prefix(20))...")
+    return nil
+  }
+
   public func deleteSigningKey(userDid: String) throws {
     logger.debug("Deleting signing key for user: \(userDid.prefix(20))...")
     try MLSKeychain.deleteSignatureKey(forIdentity: userDid)
