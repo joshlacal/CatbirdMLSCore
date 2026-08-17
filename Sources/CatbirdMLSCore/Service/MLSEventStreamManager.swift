@@ -384,6 +384,7 @@ public actor MLSEventStreamManager {
                 // session and an exact snapshot cursor in both ticket and
                 // upgrade. Keep this fence across event-triggered reconnects;
                 // a newer aggregate would skip an unhandled event.
+                let previousFence = subscriptionFence
                 let fence = try await MLSCanonicalSubscriptionCoordinator.prepare(
                     fence: &subscriptionFence,
                     initialCursor: latestSavedCursor,
@@ -414,8 +415,9 @@ public actor MLSEventStreamManager {
                 // reconnect, replay already-committed events from this fence
                 // until the local unadvanced cursor is reached; never install
                 // a newer inventory fence merely because an event failed.
-                var replayGate = MLSCanonicalTransportAdapter.MLSCanonicalReplayGate(
-                    snapshotCursor: resumeCursor,
+                var replayGate = Self.canonicalReplayGate(
+                    previousFence: previousFence,
+                    currentFence: fence,
                     savedCursor: latestSavedCursor
                 )
 
@@ -641,6 +643,25 @@ public actor MLSEventStreamManager {
     ) -> MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions {
         return handler.onCanonicalDurableEventActions
             ?? MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions()
+    }
+
+    /// Build the replay gate from the fence that was active before this
+    /// attempt. A newly fetched and persisted snapshot is a new audience: a
+    /// stale input cursor from another/older stream must not become a replay
+    /// target. Only an unchanged same-fence reconnect may skip its committed
+    /// prefix using the local cursor.
+    internal static func canonicalReplayGate(
+        previousFence: MLSCanonicalSubscriptionFence?,
+        currentFence: MLSCanonicalSubscriptionFence,
+        savedCursor: String?
+    ) -> MLSCanonicalTransportAdapter.MLSCanonicalReplayGate {
+        let replayCursor = previousFence == currentFence
+            ? savedCursor
+            : currentFence.snapshotEventCursor
+        return MLSCanonicalTransportAdapter.MLSCanonicalReplayGate(
+            snapshotCursor: currentFence.snapshotEventCursor,
+            savedCursor: replayCursor
+        )
     }
 
     /// Construct the lifecycle coordinator used by every subscription run.

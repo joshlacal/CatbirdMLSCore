@@ -118,6 +118,119 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertEqual(persistedCursors, ["cursor-0"])
   }
 
+  func testManagersStartReplayAtFreshSnapshotFenceAndRetryFailedPostSnapshotEvent() async throws {
+    let freshSnapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-fresh",
+      snapshotEventCursor: "cursor-snapshot",
+      snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+      conversationItems: [],
+      pendingWelcomeItems: [],
+      leafRecoveryItems: []
+    )
+    var freshFence: MLSCanonicalSubscriptionFence?
+    var persistedSnapshotCursors: [String] = []
+    let prepared = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &freshFence,
+      initialCursor: "foreign-cursor",
+      fetchInventory: { freshSnapshot },
+      reconcile: { _ in },
+      installCompletion: { _ in },
+      persistFence: { persistedSnapshotCursors.append($0) }
+    )
+    XCTAssertEqual(prepared.snapshotEventCursor, "cursor-snapshot")
+    XCTAssertEqual(persistedSnapshotCursors, ["cursor-snapshot"])
+
+    let postSnapshotEvent = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
+      .init(
+        previousCursor: "cursor-snapshot",
+        cursor: "cursor-post-snapshot",
+        payload: .blueCatbirdChatDefsConversationChangedEvent(
+          .init(conversationId: "conversation-1")
+        ),
+        createdAt: expiry
+      )
+    )
+
+    // A fresh aggregate fence must discard a stale/foreign input cursor. Both
+    // managers use the same decision contract, but each factory is exercised
+    // independently so neither can regress to the stale cursor behavior.
+    let gateFactories: [
+      (MLSCanonicalSubscriptionFence?, MLSCanonicalSubscriptionFence, String?)
+        -> MLSCanonicalReplayGate
+    ] = [
+      MLSWebSocketManager.canonicalReplayGate,
+      MLSEventStreamManager.canonicalReplayGate,
+    ]
+    for makeGate in gateFactories {
+      var gate = makeGate(nil, prepared, "foreign-cursor")
+      guard case let .handle(expectedPreviousCursor) = gate.decide(postSnapshotEvent) else {
+        return XCTFail("a post-snapshot event must not be skipped by a stale cursor")
+      }
+      XCTAssertEqual(expectedPreviousCursor, "cursor-snapshot")
+
+      var savedCursors: [String] = []
+      var dispatched = 0
+      let success = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+        postSnapshotEvent,
+        subscriptionKey: "conversation-1",
+        expectedPreviousCursor: expectedPreviousCursor,
+        loadEntries: { _, _ in [] },
+        onDurableEvent: { _ in dispatched += 1 },
+        saveCursor: { savedCursors.append($0) }
+      )
+      XCTAssertEqual(success, .handled)
+      XCTAssertEqual(dispatched, 1)
+      XCTAssertEqual(savedCursors, ["cursor-post-snapshot"])
+
+      // A failed action must reconnect without advancing. Recreating the
+      // gate on the retained same fence must handle the exact event again,
+      // rather than skipping it because the earlier cursor was advertised.
+      var retryGate = makeGate(prepared, prepared, "cursor-snapshot")
+      guard case let .handle(retryPreviousCursor) = retryGate.decide(postSnapshotEvent) else {
+        return XCTFail("a failed post-snapshot event must remain replayable")
+      }
+      var failedSavedCursors: [String] = []
+      let failed = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+        postSnapshotEvent,
+        subscriptionKey: "conversation-1",
+        expectedPreviousCursor: retryPreviousCursor,
+        loadEntries: { _, _ in [] },
+        onDurableEvent: { _ in throw DurableEventTestError.handlerFailed },
+        saveCursor: { failedSavedCursors.append($0) }
+      )
+      guard case let .reconnect(error) = failed else {
+        return XCTFail("a failed post-snapshot action must request reconnect")
+      }
+      XCTAssertEqual(error as? DurableEventTestError, .handlerFailed)
+      XCTAssertTrue(failedSavedCursors.isEmpty)
+
+      var finalGate = makeGate(prepared, prepared, "cursor-snapshot")
+      guard case let .handle(finalPreviousCursor) = finalGate.decide(postSnapshotEvent) else {
+        return XCTFail("the failed post-snapshot event must replay on reconnect")
+      }
+      XCTAssertEqual(finalPreviousCursor, "cursor-snapshot")
+    }
+
+    // Snapshot-cursor persistence is a prerequisite for gate/stream setup.
+    // A protected-store failure leaves no installed fence and therefore no
+    // replay gate or stream attempt can be authorized.
+    var failedFence: MLSCanonicalSubscriptionFence?
+    do {
+      _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+        fence: &failedFence,
+        initialCursor: "foreign-cursor",
+        fetchInventory: { freshSnapshot },
+        reconcile: { _ in },
+        installCompletion: { _ in },
+        persistFence: { _ in throw DurableEventTestError.persistenceFailed }
+      )
+      XCTFail("snapshot persistence failure must stop before gate/stream setup")
+    } catch let error as DurableEventTestError {
+      XCTAssertEqual(error, .persistenceFailed)
+    }
+    XCTAssertNil(failedFence)
+  }
+
   func testStableFenceReplaySkipsCommittedPrefixWithoutRegressingCursor() async {
     let committed = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
       .init(
