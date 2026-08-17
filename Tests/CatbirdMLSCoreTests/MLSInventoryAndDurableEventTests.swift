@@ -5,7 +5,7 @@ import XCTest
 @testable import CatbirdMLSCore
 
 final class MLSInventoryAndDurableEventTests: XCTestCase {
-  private let expiry = ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_000))
+  private let expiry = ATProtocolDate(date: Date(timeIntervalSinceNow: 3_600))
 
   func testConversationOnlyInventoryCannotMintSubscriptionTicket() throws {
     let completion = MLSInventorySessionCompletion(
@@ -55,6 +55,184 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertEqual(conversationCursors.map { $0 ?? "nil" }, ["nil", "conversation-2"])
     XCTAssertEqual(welcomeCursors.map { $0 ?? "nil" }, ["nil", "welcome-2"])
     XCTAssertEqual(recoveryCursors.map { $0 ?? "nil" }, ["nil", "recovery-2"])
+  }
+
+  func testManagerOuterReconnectRetainsFailedFenceAndDoesNotFetchNewInventory() async throws {
+    let snapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: expiry.date,
+      conversationItems: [],
+      pendingWelcomeItems: [],
+      leafRecoveryItems: []
+    )
+    var inventoryFetches = 0
+    var completionInstalls = 0
+    var persistedCursors: [String] = []
+    var fence: MLSCanonicalSubscriptionFence?
+
+    let firstFence = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: nil,
+      fetchInventory: {
+        inventoryFetches += 1
+        return snapshot
+      },
+      reconcile: { _ in },
+      installCompletion: { _ in completionInstalls += 1 },
+      persistFence: { persistedCursors.append($0) }
+    )
+
+    let failedEvent = BlueCatbirdChatSubscribeEvents.Message.unexpected(.object([:]))
+    let failure = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      failedEvent,
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: firstFence.snapshotEventCursor,
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in XCTFail("unknown event must not dispatch") },
+      saveCursor: { _ in XCTFail("failed event must not advance the fence") }
+    )
+    guard case .reconnect = failure else {
+      return XCTFail("failed event must request an outer reconnect")
+    }
+
+    // This is the manager's next outer-loop attempt: the same coordinator
+    // state must issue the same ticket fence without fetching a newer snapshot.
+    let replayFence = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: "cursor-after-a-different-event",
+      fetchInventory: {
+        inventoryFetches += 1
+        XCTFail("event failure must not authorize a fresh inventory")
+        return snapshot
+      },
+      reconcile: { _ in XCTFail("event failure must not re-reconcile a new snapshot") },
+      installCompletion: { _ in completionInstalls += 1 },
+      persistFence: { persistedCursors.append($0) }
+    )
+
+    XCTAssertEqual(replayFence, firstFence)
+    XCTAssertEqual(fence, firstFence)
+    XCTAssertEqual(inventoryFetches, 1)
+    XCTAssertEqual(completionInstalls, 1)
+    XCTAssertEqual(persistedCursors, ["cursor-0"])
+  }
+
+  func testStableFenceReplaySkipsCommittedPrefixWithoutRegressingCursor() async {
+    let committed = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
+      .init(
+        previousCursor: "cursor-0",
+        cursor: "cursor-1",
+        payload: .blueCatbirdChatDefsConversationChangedEvent(
+          .init(conversationId: "conversation-1")
+        ),
+        createdAt: expiry
+      )
+    )
+    let next = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
+      .init(
+        previousCursor: "cursor-1",
+        cursor: "cursor-2",
+        payload: .blueCatbirdChatDefsConversationChangedEvent(
+          .init(conversationId: "conversation-1")
+        ),
+        createdAt: expiry
+      )
+    )
+    var gate = MLSCanonicalReplayGate(
+      snapshotCursor: "cursor-0",
+      savedCursor: "cursor-1"
+    )
+
+    guard case .skip = gate.decide(committed) else {
+      return XCTFail("the already-persisted prefix must be skipped")
+    }
+    XCTAssertEqual(gate.scanCursor, "cursor-1")
+    XCTAssertNil(gate.targetCursor)
+
+    guard case let .handle(expectedPreviousCursor) = gate.decide(next) else {
+      return XCTFail("the first uncommitted event must be handled")
+    }
+    XCTAssertEqual(expectedPreviousCursor, "cursor-1")
+
+    var dispatched = 0
+    var savedCursors: [String] = []
+    let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      next,
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: expectedPreviousCursor,
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in dispatched += 1 },
+      saveCursor: { savedCursors.append($0) }
+    )
+    guard case .handled = result else {
+      return XCTFail("the first uncommitted event must commit after handling")
+    }
+    XCTAssertEqual(dispatched, 1)
+    XCTAssertEqual(savedCursors, ["cursor-2"])
+
+    let unknown = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
+      .init(
+        previousCursor: "cursor-0",
+        cursor: "cursor-1",
+        payload: .unexpected(.object([:])),
+        createdAt: expiry
+      )
+    )
+    var failedReplayGate = MLSCanonicalReplayGate(
+      snapshotCursor: "cursor-0",
+      savedCursor: "cursor-2"
+    )
+    guard case let .handle(unknownExpectedCursor) = failedReplayGate.decide(unknown) else {
+      return XCTFail("an unknown envelope cannot be skipped during replay")
+    }
+    var unknownSavedCursors: [String] = []
+    let unknownResult = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      unknown,
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: unknownExpectedCursor,
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in XCTFail("unknown payload must not dispatch") },
+      saveCursor: { unknownSavedCursors.append($0) }
+    )
+    guard case .reconnect = unknownResult else {
+      return XCTFail("unknown replay payload must request reconnect")
+    }
+    XCTAssertTrue(unknownSavedCursors.isEmpty)
+  }
+
+  func testExpiredFenceForcesExplicitInventoryRefresh() async throws {
+    let refreshedSnapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-2",
+      snapshotEventCursor: "cursor-2",
+      snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+      conversationItems: [],
+      pendingWelcomeItems: [],
+      leafRecoveryItems: []
+    )
+    var fence: MLSCanonicalSubscriptionFence? = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-1",
+      snapshotExpiresAt: Date(timeIntervalSince1970: 1)
+    )
+    var fetched = 0
+
+    let refreshed = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: "cursor-1",
+      fetchInventory: {
+        fetched += 1
+        return refreshedSnapshot
+      },
+      reconcile: { _ in },
+      installCompletion: { _ in },
+      persistFence: { _ in }
+    )
+
+    XCTAssertEqual(fetched, 1)
+    XCTAssertEqual(refreshed.inventorySessionId, "session-2")
+    XCTAssertEqual(refreshed.snapshotEventCursor, "cursor-2")
+    XCTAssertEqual(fence, refreshed)
   }
 
   func testChangedInventoryContinuationStateFailsClosed() async {
@@ -414,8 +592,21 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     ]
 
     var websocketDispatched = 0
+    let websocketDurableActions = MLSCanonicalDurableEventActions(
+      onConversationChanged: { _ in websocketDispatched += 1 },
+      onConversationClosed: { _ in websocketDispatched += 1 },
+      onMessageAvailable: { _, _, _ in websocketDispatched += 1 },
+      onWelcomeAvailable: { _ in websocketDispatched += 1 },
+      onWelcomeDisposition: { _ in websocketDispatched += 1 },
+      onResetRequested: { _ in websocketDispatched += 1 },
+      onLeafRecovery: { _ in websocketDispatched += 1 },
+      onLeaveRequest: { _ in websocketDispatched += 1 },
+      onAccessEnded: { _ in websocketDispatched += 1 },
+      onWatermark: { _ in websocketDispatched += 1 },
+      onTyping: { _ in websocketDispatched += 1 }
+    )
     let websocketHandler = MLSWebSocketManager.EventHandler(
-      onCanonicalDurableEvent: { _ in websocketDispatched += 1 }
+      onCanonicalDurableEventActions: websocketDurableActions
     )
     let websocketActions = MLSWebSocketManager.canonicalDurableEventActions(for: websocketHandler)
     for event in events {
@@ -424,8 +615,21 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertEqual(websocketDispatched, events.count)
 
     var sseDispatched = 0
+    let sseDurableActions = MLSCanonicalDurableEventActions(
+      onConversationChanged: { _ in sseDispatched += 1 },
+      onConversationClosed: { _ in sseDispatched += 1 },
+      onMessageAvailable: { _, _, _ in sseDispatched += 1 },
+      onWelcomeAvailable: { _ in sseDispatched += 1 },
+      onWelcomeDisposition: { _ in sseDispatched += 1 },
+      onResetRequested: { _ in sseDispatched += 1 },
+      onLeafRecovery: { _ in sseDispatched += 1 },
+      onLeaveRequest: { _ in sseDispatched += 1 },
+      onAccessEnded: { _ in sseDispatched += 1 },
+      onWatermark: { _ in sseDispatched += 1 },
+      onTyping: { _ in sseDispatched += 1 }
+    )
     let sseHandler = MLSEventStreamManager.EventHandler(
-      onCanonicalDurableEvent: { _ in sseDispatched += 1 }
+      onCanonicalDurableEventActions: sseDurableActions
     )
     let sseActions = MLSEventStreamManager.canonicalDurableEventActions(for: sseHandler)
     for event in events {
@@ -445,6 +649,24 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     } catch let error as MLSCanonicalActionMissingError {
       XCTAssertEqual(error, .welcomeAvailable)
     }
+
+    var legacyMessageFallbackCalled = false
+    let missingMessageActions = MLSWebSocketManager.canonicalDurableEventActions(
+      for: MLSWebSocketManager.EventHandler(
+        onMessage: { _ in legacyMessageFallbackCalled = true }
+      )
+    )
+    do {
+      try await missingMessageActions.dispatch(.messageAvailable(
+        .init(conversationId: "conversation-1", seq: message.seq),
+        cursor: "cursor-1",
+        messages: [message]
+      ))
+      XCTFail("canonical message handling must require a throwing typed action")
+    } catch let error as MLSCanonicalActionMissingError {
+      XCTAssertEqual(error, .messageAvailable)
+    }
+    XCTAssertFalse(legacyMessageFallbackCalled)
   }
 
   func testDurableHandlerFailureDoesNotAdvanceCursor() async {

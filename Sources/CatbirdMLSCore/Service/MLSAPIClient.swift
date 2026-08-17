@@ -448,7 +448,7 @@ public final class MLSAPIClient {
     internal func getCanonicalInventoryAggregateSnapshot(
         limit: Int = 100
     ) async throws -> MLSCanonicalInventorySnapshot {
-        let snapshot = try await MLSInventorySessionAssembler.assemble(
+        return try await MLSInventorySessionAssembler.assemble(
             fetchConversations: { [self] cursor in
                 try await self.getCanonicalConversationInventory(limit: limit, cursor: cursor)
             },
@@ -467,13 +467,22 @@ public final class MLSAPIClient {
                 )
             }
         )
-        rememberCompletedInventory(snapshot.completion)
-        return snapshot
     }
 
-    /// Compatibility-facing conversation DTO. The underlying call still
-    /// completes pending-Welcome and recovery paging before returning, so code
-    /// using this older return shape cannot mint an incomplete ticket.
+    /// Install ticket evidence only after the caller has reconciled every
+    /// aggregate inventory item through its concrete Core actions. Fetching an
+    /// aggregate alone is intentionally insufficient to mint a ticket.
+    internal func recordCompletedCanonicalInventory(
+        _ snapshot: MLSCanonicalInventorySnapshot
+    ) {
+        rememberCompletedInventory(snapshot.completion)
+    }
+
+    /// Compatibility-facing conversation DTO. This method completes all three
+    /// reads for the returned snapshot, but it intentionally does not install
+    /// ticket evidence because it has no concrete reconciliation actions for
+    /// the retained Welcome/recovery/tombstone items. Stream managers must use
+    /// the aggregate API and reconcile before recording completion.
     public func getCanonicalInventorySnapshot(
         limit: Int = 100
     ) async throws -> BlueCatbirdChatGetConversations.Output {

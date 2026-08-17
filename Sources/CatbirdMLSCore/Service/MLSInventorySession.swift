@@ -396,3 +396,53 @@ internal enum MLSCanonicalInventoryReconciler {
     }
   }
 }
+
+/// The ticket fence is established once for a subscription attempt and is
+/// deliberately retained across stream reconnects. A failed durable event must
+/// replay against this same retained audience; fetching a fresh aggregate here
+/// would move the ticket fence past the failed event.
+internal struct MLSCanonicalSubscriptionFence: Equatable, Sendable {
+  internal let inventorySessionId: String
+  internal let snapshotEventCursor: String
+  internal let snapshotExpiresAt: Date
+}
+
+internal enum MLSCanonicalSubscriptionCoordinator {
+  internal static func prepare(
+    fence: inout MLSCanonicalSubscriptionFence?,
+    initialCursor: String?,
+    fetchInventory: @escaping () async throws -> MLSCanonicalInventorySnapshot,
+    reconcile: @escaping (MLSCanonicalInventorySnapshot) async throws -> Void,
+    installCompletion: @escaping (MLSCanonicalInventorySnapshot) -> Void,
+    persistFence: @escaping (String) async throws -> Void
+  ) async throws -> MLSCanonicalSubscriptionFence {
+    if let currentFence = fence {
+      if Date() < currentFence.snapshotExpiresAt {
+        return currentFence
+      }
+      // An expired retained audience is explicit unsupported-state recovery:
+      // it is the one case where a new aggregate is required. Event-handler
+      // failures and unknown payloads never reach this branch while the
+      // original fence is still valid.
+      fence = nil
+    }
+
+    let snapshot = try await fetchInventory()
+    // Concrete inventory actions must complete before either the cursor or the
+    // ticket evidence is installed. A failed action leaves the coordinator
+    // without a fence, so the caller can retry the same setup explicitly.
+    try await reconcile(snapshot)
+    if initialCursor != snapshot.snapshotEventCursor {
+      try await persistFence(snapshot.snapshotEventCursor)
+    }
+    installCompletion(snapshot)
+
+    let prepared = MLSCanonicalSubscriptionFence(
+      inventorySessionId: snapshot.inventorySessionId,
+      snapshotEventCursor: snapshot.snapshotEventCursor,
+      snapshotExpiresAt: snapshot.snapshotExpiresAt
+    )
+    fence = prepared
+    return prepared
+  }
+}

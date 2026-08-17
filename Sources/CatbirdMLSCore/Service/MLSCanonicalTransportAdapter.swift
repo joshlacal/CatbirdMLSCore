@@ -388,6 +388,72 @@ public enum MLSCanonicalTransportAdapter {
     case stopped(eventCount: Int)
   }
 
+  /// Decides whether a message belongs to the already-committed replay prefix
+  /// of a stable subscription fence. The server ticket starts at the snapshot
+  /// cursor on every reconnect, while the local cursor may already be farther
+  /// along that same stream. Known envelopes in that prefix are skipped after
+  /// validating their cursor chain; they must not be sent through `saveCursor`
+  /// again, which would regress durable storage. Unknown envelopes are never
+  /// skippable because a prior run could not have committed past them.
+  internal enum MLSCanonicalReplayDecision {
+    case handle(expectedPreviousCursor: String)
+    case skip
+    case reconnect(Error)
+  }
+
+  internal struct MLSCanonicalReplayGate {
+    private(set) var scanCursor: String
+    private(set) var targetCursor: String?
+
+    internal init(snapshotCursor: String, savedCursor: String?) {
+      self.scanCursor = snapshotCursor
+      self.targetCursor = savedCursor.flatMap { $0 == snapshotCursor ? nil : $0 }
+    }
+
+    internal mutating func decide(
+      _ message: BlueCatbirdChatSubscribeEvents.Message
+    ) -> MLSCanonicalReplayDecision {
+      guard targetCursor != nil else {
+        return .handle(expectedPreviousCursor: scanCursor)
+      }
+
+      // Typing is deliberately unsequenced and can be delivered while the
+      // durable replay prefix is being walked. It still requires its typed
+      // action, but it does not move the durable scan cursor.
+      if case .blueCatbirdChatDefsTypingEvent(_) = message {
+        return .handle(expectedPreviousCursor: scanCursor)
+      }
+
+      guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
+        return .handle(expectedPreviousCursor: scanCursor)
+      }
+
+      // An unknown payload is the first uncommitted event by definition. Let
+      // the canonical handler reject it and reconnect from the same cursor.
+      if case .unexpected = envelope.payload {
+        return .handle(expectedPreviousCursor: scanCursor)
+      }
+
+      guard envelope.previousCursor == scanCursor else {
+        return .reconnect(
+          MLSCanonicalCursorError.previousCursorMismatch(
+            expected: scanCursor,
+            actual: envelope.previousCursor
+          )
+        )
+      }
+      guard envelope.cursor != envelope.previousCursor else {
+        return .reconnect(MLSCanonicalCursorError.cursorDidNotAdvance(envelope.cursor))
+      }
+
+      scanCursor = envelope.cursor
+      if envelope.cursor == targetCursor {
+        targetCursor = nil
+      }
+      return .skip
+    }
+  }
+
   internal static func consumeCanonicalStream(
     _ stream: AsyncThrowingStream<BlueCatbirdChatSubscribeEvents.Message, Error>,
     shouldStop: @escaping () async -> Bool,
@@ -627,13 +693,13 @@ public enum MLSCanonicalTransportAdapter {
   }
 
   /// Shared canonical stream-handler seam used by both WebSocket and SSE.
-  /// This compatibility overload exposes the legacy message callback while the
-  /// typed overload above remains the source of truth for all durable events.
+  /// This compatibility overload accepts a throwing message reconciliation
+  /// action; canonical durable messages never use a fire-and-forget callback.
   internal static func handleCanonicalStreamMessage(
     _ message: BlueCatbirdChatSubscribeEvents.Message,
     subscriptionKey: String,
     loadEntries: @escaping (String, Int) async throws -> [BlueCatbirdChatDefs.ConversationEntry],
-    onMessage: @escaping (BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void,
+    onMessage: @escaping (BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async throws -> Void,
     onError: @escaping (Error) async -> Void,
     saveCursor: @escaping (String) async throws -> Void
   ) async {
@@ -645,7 +711,7 @@ public enum MLSCanonicalTransportAdapter {
         let actions = MLSCanonicalDurableEventActions(
           onMessageAvailable: { _, cursor, messages in
             for message in messages {
-              await onMessage(
+              try await onMessage(
                 BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
                   cursor: cursor,
                   message: message,
@@ -680,3 +746,5 @@ internal typealias MLSCanonicalMessageAvailabilityError =
   MLSCanonicalTransportAdapter.MLSCanonicalMessageAvailabilityError
 internal typealias MLSCanonicalTypingProjectionError =
   MLSCanonicalTransportAdapter.MLSCanonicalTypingProjectionError
+internal typealias MLSCanonicalReplayGate =
+  MLSCanonicalTransportAdapter.MLSCanonicalReplayGate
