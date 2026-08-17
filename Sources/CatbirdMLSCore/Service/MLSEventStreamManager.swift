@@ -27,6 +27,12 @@ public actor MLSEventStreamManager {
     /// Optional persistent cursor storage (survives app restart)
     private var cursorStore: MLSEventCursorStore?
 
+    /// Retains an unwritten terminal record after a subscription run exits.
+    /// Reconnect consumes it only after the exact scoped record is durably
+    /// written to the current protected store.
+    private let canonicalSubscriptionFailureLifecycle =
+        MLSCanonicalSubscriptionFailureLifecycle()
+
     /// Optional stable device identity supplied by the host. When omitted,
     /// the manager derives one from the existing protected device identity.
     /// A missing identity deliberately disables durable failure persistence
@@ -310,6 +316,28 @@ public actor MLSEventStreamManager {
 
     // MARK: - Private Methods
 
+    /// Shared startup gate used by public subscribe/reconnect. A pending
+    /// terminal write is retried before the run can load inventory or mint a
+    /// ticket. This internal seam lets Core tests exercise the manager-owned
+    /// lifecycle without opening a real network stream.
+    internal func prepareCanonicalSubscriptionForReconnect(
+        _ coordinator: MLSCanonicalSubscriptionFailureCoordinator
+    ) async throws -> MLSCanonicalSubscriptionFailureCoordinator {
+        var restored = try await canonicalSubscriptionFailureLifecycle
+            .restorePendingIfNeeded(coordinator)
+        try await restored.load()
+        return restored
+    }
+
+    /// Retain the coordinator when a run exits after a terminal write failure.
+    /// The value remains scoped inside this manager until public reconnect can
+    /// retry it against the current protected store.
+    internal func retainCanonicalSubscriptionFailure(
+        _ coordinator: MLSCanonicalSubscriptionFailureCoordinator
+    ) async {
+        await canonicalSubscriptionFailureLifecycle.remember(coordinator)
+    }
+
     private func runSubscription(convoId: String, cursor: String?) async {
         print("[SSE] runSubscription() started for convoId: \(convoId.prefix(12))...")
         logger.info("📡 SSE: runSubscription() started for convoId: \(convoId), cursor: \(cursor ?? "nil")")
@@ -320,13 +348,12 @@ public actor MLSEventStreamManager {
         var failureCoordinator: MLSCanonicalSubscriptionFailureCoordinator
         do {
             let scope = try await canonicalSubscriptionScope(for: convoId)
-            var coordinator = try Self.makeCanonicalSubscriptionFailureCoordinator(
+            let coordinator = try Self.makeCanonicalSubscriptionFailureCoordinator(
                 scope: scope,
                 handler: initialHandler,
                 store: cursorStore
             )
-            try await coordinator.load()
-            failureCoordinator = coordinator
+            failureCoordinator = try await prepareCanonicalSubscriptionForReconnect(coordinator)
         } catch {
             logger.error("📡 SSE: Failed to load canonical subscription failure state for \(convoId): \(error)")
             connectionState[convoId] = .error(error)
@@ -444,6 +471,7 @@ public actor MLSEventStreamManager {
                         _ = try await failureCoordinator.record(error)
                     } catch {
                         logger.error("📡 SSE: Failed to persist canonical subscription failure for \(convoId): \(error)")
+                        await canonicalSubscriptionFailureLifecycle.remember(failureCoordinator)
                         await handler.onError?(error)
                         failurePersistenceUnavailable = true
                     }
@@ -507,6 +535,7 @@ public actor MLSEventStreamManager {
                     _ = try await failureCoordinator.record(error)
                 } catch {
                     logger.error("📡 SSE: Failed to persist canonical subscription failure for \(convoId): \(error)")
+                    await canonicalSubscriptionFailureLifecycle.remember(failureCoordinator)
                     if let handler = eventHandlers[convoId] {
                         await handler.onError?(error)
                     }

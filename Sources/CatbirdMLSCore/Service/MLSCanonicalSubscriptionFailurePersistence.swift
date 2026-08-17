@@ -23,6 +23,15 @@ internal struct MLSCanonicalSubscriptionCapability: Codable, Equatable, Sendable
     generatedUnionRevision: .eventEnvelopeV1,
     actionTableRevision: .current
   )
+
+  /// Stable key material for the manager-owned pending lifecycle map. This is
+  /// derived only from Core-owned compiled capabilities; callers cannot supply
+  /// a label that would replace or merge another capability's poison.
+  internal var storageIdentifier: String {
+    [generatedUnionRevision.rawValue, actionTableRevision.rawValue]
+      .map { Data($0.utf8).base64EncodedString() }
+      .joined(separator: ".")
+  }
 }
 
 /// Exact durable namespace for a canonical subscription terminal state.
@@ -200,7 +209,8 @@ internal struct MLSCanonicalSubscriptionFailureCoordinator {
     scope: MLSCanonicalSubscriptionScope?,
     capability: MLSCanonicalSubscriptionCapability?,
     store: MLSEventCursorStore?,
-    initialFailure: MLSCanonicalSubscriptionTerminalFailure? = nil
+    initialFailure: MLSCanonicalSubscriptionTerminalFailure? = nil,
+    persistenceUnavailable: Bool = false
   ) throws {
     guard let scope, scope.hasExactComponents else {
       throw MLSCanonicalSubscriptionFailureConfigurationError.missingScope
@@ -215,10 +225,25 @@ internal struct MLSCanonicalSubscriptionFailureCoordinator {
     self.capability = capability
     self.store = store
     self.latch = MLSCanonicalSubscriptionFailureLatch(terminalFailure: initialFailure)
+    self.persistenceUnavailable = persistenceUnavailable
   }
 
   internal var terminalFailure: MLSCanonicalSubscriptionTerminalFailure? {
     latch.terminalFailure
+  }
+
+  /// A terminal record that failed to reach the protected store is carried by
+  /// the manager lifecycle after its run task exits. Only this exact scope and
+  /// Core-owned capability may be retried on a later reconnect.
+  internal var pendingFailure: MLSCanonicalSubscriptionPendingFailure? {
+    guard persistenceUnavailable, let failure = latch.terminalFailure else {
+      return nil
+    }
+    return MLSCanonicalSubscriptionPendingFailure(
+      scope: scope,
+      capability: capability,
+      failure: failure
+    )
   }
 
   internal mutating func load() async throws {
@@ -232,6 +257,28 @@ internal struct MLSCanonicalSubscriptionFailureCoordinator {
       persistenceUnavailable = false
     } catch let error as MLSCanonicalSubscriptionFailurePersistenceError {
       throw error
+    } catch {
+      persistenceUnavailable = true
+      throw MLSCanonicalSubscriptionFailureConfigurationError.persistenceUnavailable
+    }
+  }
+
+  /// Retry the retained terminal record against the coordinator's current
+  /// protected store. The manager invokes this before inventory/ticket/stream
+  /// setup on reconnect; failure keeps the latch and the unavailable state.
+  internal mutating func retryPendingPersistence() async throws {
+    guard let failure = latch.terminalFailure else {
+      persistenceUnavailable = false
+      return
+    }
+    do {
+      try await MLSCanonicalSubscriptionFailurePersistence.save(
+        failure: failure,
+        scope: scope,
+        capability: capability,
+        store: store
+      )
+      persistenceUnavailable = false
     } catch {
       persistenceUnavailable = true
       throw MLSCanonicalSubscriptionFailureConfigurationError.persistenceUnavailable
@@ -305,3 +352,60 @@ internal struct MLSCanonicalSubscriptionFailureCoordinator {
 // between tasks; this conformance documents that ownership boundary for Swift
 // 6 region isolation when a manager awaits persistence.
 extension MLSCanonicalSubscriptionFailureCoordinator: @unchecked Sendable {}
+
+/// Pending terminal poison retained by a manager after its subscription task
+/// exits because durable failure persistence was unavailable. This is a value,
+/// not a store reference: a later public reconnect can use the manager's
+/// current protected store after storage recovery without writing to an old
+/// account/device/environment scope.
+internal struct MLSCanonicalSubscriptionPendingFailure: Equatable, Sendable {
+  internal let scope: MLSCanonicalSubscriptionScope
+  internal let capability: MLSCanonicalSubscriptionCapability
+  internal let failure: MLSCanonicalSubscriptionTerminalFailure
+
+  internal var storageIdentifier: String {
+    "\(scope.storageIdentifier)|\(capability.storageIdentifier)"
+  }
+}
+
+/// Manager-owned lifecycle for terminal persistence failures. Both the
+/// WebSocket and SSE actors keep one instance so a run-task exit cannot erase
+/// an unwritten terminal record. A pending value is consumed only after its
+/// exact record has been written successfully to the current protected store.
+internal actor MLSCanonicalSubscriptionFailureLifecycle {
+  private var pending: [String: MLSCanonicalSubscriptionPendingFailure] = [:]
+
+  internal func remember(
+    _ coordinator: MLSCanonicalSubscriptionFailureCoordinator
+  ) {
+    guard let failure = coordinator.pendingFailure else { return }
+    pending[failure.storageIdentifier] = failure
+  }
+
+  internal func restorePendingIfNeeded(
+    _ coordinator: MLSCanonicalSubscriptionFailureCoordinator
+  ) async throws -> MLSCanonicalSubscriptionFailureCoordinator {
+    let key = "\(coordinator.scope.storageIdentifier)|\(coordinator.capability.storageIdentifier)"
+    guard let pendingFailure = pending[key] else {
+      return coordinator
+    }
+
+    var restored = try MLSCanonicalSubscriptionFailureCoordinator(
+      scope: coordinator.scope,
+      capability: coordinator.capability,
+      store: coordinator.store,
+      initialFailure: pendingFailure.failure,
+      persistenceUnavailable: true
+    )
+    do {
+      try await restored.retryPendingPersistence()
+    } catch {
+      // Keep the exact pending value for the next public reconnect. In
+      // particular, do not let a failed retry fall through to inventory.
+      remember(restored)
+      throw error
+    }
+    pending.removeValue(forKey: key)
+    return restored
+  }
+}

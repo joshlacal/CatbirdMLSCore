@@ -707,6 +707,188 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
   }
 
   @MainActor
+  func testManagerReconnectRetriesPendingTerminalWriteBeforeInventoryForWebSocketAndSSE() async throws {
+    let aliceScope = MLSCanonicalSubscriptionScope(
+      accountIdentifier: "did:plc:alice",
+      environmentIdentifier: "did:web:mls.example#atproto_mls",
+      deviceIdentifier: "device-1",
+      subscriptionIdentifier: "conversation-1"
+    )
+    let actions = makeCompleteCanonicalDurableActions()
+    let webSocketHandler = MLSWebSocketManager.EventHandler(
+      onCanonicalDurableEventActions: actions
+    )
+    let sseHandler = MLSEventStreamManager.EventHandler(
+      onCanonicalDurableEventActions: actions
+    )
+    let store = RecordingCursorStore(failure: .persistenceFailed)
+    let webSocketManager = await Self.makeWebSocketManager(
+      serviceDID: aliceScope.environmentIdentifier
+    )
+    await webSocketManager.configureCursorStore(store)
+
+    // A terminal event is classified in the run, but the protected write
+    // fails. The manager must retain the exact poison after that run exits.
+    var failedRun = try MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: webSocketHandler,
+      store: store
+    )
+    do {
+      _ = try await failedRun.record(
+        MLSUnsupportedDurableEventError(typeIdentifier: "unknown")
+      )
+      XCTFail("the first terminal write must fail with the protected store")
+    } catch let error as MLSCanonicalSubscriptionFailureConfigurationError {
+      XCTAssertEqual(error, .persistenceUnavailable)
+    }
+    await webSocketManager.retainCanonicalSubscriptionFailure(failedRun)
+    XCTAssertTrue(store.savedCursors.isEmpty)
+
+    // Public reconnect uses a newly-created coordinator and the same scoped
+    // store. While storage remains unavailable, retrying must fail closed and
+    // preserve the pending record for the next reconnect rather than allowing
+    // aggregate/ticket work to begin.
+    _ = try MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: sseHandler,
+      store: store
+    )
+    let failedReconnect = try MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: webSocketHandler,
+      store: store
+    )
+    do {
+      _ = try await webSocketManager.prepareCanonicalSubscriptionForReconnect(failedReconnect)
+      XCTFail("reconnect must remain hard stopped while the pending write fails")
+    } catch let error as MLSCanonicalSubscriptionFailureConfigurationError {
+      XCTAssertEqual(error, .persistenceUnavailable)
+    }
+    XCTAssertTrue(store.savedCursors.isEmpty)
+
+    // A second reconnect proves the failed pending state was retained after
+    // the first run exited; it must not silently fall through to a fresh
+    // inventory attempt.
+    let continuedFailure = try MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: webSocketHandler,
+      store: store
+    )
+    do {
+      _ = try await webSocketManager.prepareCanonicalSubscriptionForReconnect(continuedFailure)
+      XCTFail("continued storage failure must remain hard stopped")
+    } catch let error as MLSCanonicalSubscriptionFailureConfigurationError {
+      XCTAssertEqual(error, .persistenceUnavailable)
+    }
+    XCTAssertTrue(store.savedCursors.isEmpty)
+
+    // Recovery writes the exact pending terminal record before any aggregate
+    // fetch. Public reconnect enters this same manager startup gate.
+    store.failure = nil
+    let recoveredCandidate = try MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: webSocketHandler,
+      store: store
+    )
+    let recovered = try await webSocketManager.prepareCanonicalSubscriptionForReconnect(
+      recoveredCandidate
+    )
+    XCTAssertEqual(
+      recovered.terminalFailure,
+      .unsupportedDurableEvent(typeIdentifier: "unknown")
+    )
+    XCTAssertFalse(store.savedCursors.isEmpty)
+    let pendingRecord = try XCTUnwrap(
+      try JSONDecoder().decode(
+        MLSCanonicalSubscriptionFailureRecord.self,
+        from: Data(store.savedCursors[0].utf8)
+      )
+    )
+    XCTAssertEqual(pendingRecord.scope, aliceScope)
+    XCTAssertEqual(pendingRecord.capability, .current)
+    XCTAssertEqual(
+      pendingRecord.failure,
+      .unsupportedDurableEvent(typeIdentifier: "unknown")
+    )
+
+    // Exercise the mirrored SSE manager lifecycle with its own scoped store:
+    // its public reconnect startup gate must retain the same hard-stop order.
+    let sseStore = RecordingCursorStore(failure: .persistenceFailed)
+    let sseManager = await Self.makeEventStreamManager(
+      serviceDID: aliceScope.environmentIdentifier
+    )
+    await sseManager.configureCursorStore(sseStore)
+    var sseRun = try MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: sseHandler,
+      store: sseStore
+    )
+    do {
+      _ = try await sseRun.record(
+        MLSUnsupportedDurableEventError(typeIdentifier: "sse-unknown")
+      )
+      XCTFail("the SSE terminal write must fail with the protected store")
+    } catch let error as MLSCanonicalSubscriptionFailureConfigurationError {
+      XCTAssertEqual(error, .persistenceUnavailable)
+    }
+    await sseManager.retainCanonicalSubscriptionFailure(sseRun)
+    let sseRetry = try MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: sseHandler,
+      store: sseStore
+    )
+    do {
+      _ = try await sseManager.prepareCanonicalSubscriptionForReconnect(sseRetry)
+      XCTFail("SSE reconnect must remain hard stopped while storage fails")
+    } catch let error as MLSCanonicalSubscriptionFailureConfigurationError {
+      XCTAssertEqual(error, .persistenceUnavailable)
+    }
+    sseStore.failure = nil
+    let sseRecoveredCandidate = try MLSEventStreamManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: aliceScope,
+      handler: sseHandler,
+      store: sseStore
+    )
+    let sseRecovered = try await sseManager.prepareCanonicalSubscriptionForReconnect(
+      sseRecoveredCandidate
+    )
+    XCTAssertEqual(
+      sseRecovered.terminalFailure,
+      .unsupportedDurableEvent(typeIdentifier: "sse-unknown")
+    )
+    XCTAssertEqual(sseStore.savedCursors.count, 1)
+
+    do {
+      try await Self.prepareWithTerminalFailure(recovered.terminalFailure)
+      XCTFail("the retained terminal failure must remain blocking after persistence")
+    } catch let error as MLSCanonicalSubscriptionCoordinatorError {
+      XCTAssertEqual(
+        error,
+        .blocked(.unsupportedDurableEvent(typeIdentifier: "unknown"))
+      )
+    }
+    // A different account has a different durable key and cannot consume or
+    // write Alice's pending poison during an account switch.
+    let bobScope = MLSCanonicalSubscriptionScope(
+      accountIdentifier: "did:plc:bob",
+      environmentIdentifier: aliceScope.environmentIdentifier,
+      deviceIdentifier: aliceScope.deviceIdentifier,
+      subscriptionIdentifier: aliceScope.subscriptionIdentifier
+    )
+    let bobCandidate = try MLSWebSocketManager.makeCanonicalSubscriptionFailureCoordinator(
+      scope: bobScope,
+      handler: webSocketHandler,
+      store: store
+    )
+    let bob = try await webSocketManager.prepareCanonicalSubscriptionForReconnect(
+      bobCandidate
+    )
+    XCTAssertNil(bob.terminalFailure)
+    XCTAssertEqual(store.savedCursors.count, 1)
+  }
+
+  @MainActor
   func testManagerFailureLoadStopsBeforeSubscription() async throws {
     let scope = MLSCanonicalSubscriptionScope(
       accountIdentifier: "did:plc:alice",
@@ -1665,6 +1847,52 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     )
   }
 
+  private static func prepareWithTerminalFailure(
+    _ terminalFailure: MLSCanonicalSubscriptionTerminalFailure?
+  ) async throws {
+    var fence: MLSCanonicalSubscriptionFence?
+    _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: nil,
+      terminalFailure: terminalFailure,
+      fetchInventory: {
+        MLSCanonicalInventorySnapshot(
+          inventorySessionId: "unexpected",
+          snapshotEventCursor: "unexpected",
+          snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+          conversationItems: [],
+          pendingWelcomeItems: [],
+          leafRecoveryItems: []
+        )
+      },
+      reconcile: { _ in },
+      installCompletion: { _ in },
+      persistFence: { _ in }
+    )
+  }
+
+  nonisolated private static func makeWebSocketManager(
+    serviceDID: String
+  ) async -> MLSWebSocketManager {
+    let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let apiClient = await MLSAPIClient(
+      client: atProtoClient,
+      environment: .custom(serviceDID: serviceDID)
+    )
+    return MLSWebSocketManager(apiClient: apiClient)
+  }
+
+  nonisolated private static func makeEventStreamManager(
+    serviceDID: String
+  ) async -> MLSEventStreamManager {
+    let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let apiClient = await MLSAPIClient(
+      client: atProtoClient,
+      environment: .custom(serviceDID: serviceDID)
+    )
+    return MLSEventStreamManager(apiClient: apiClient)
+  }
+
   private func conversationPage(
     cursor: String?,
     session: String = "session-1",
@@ -1829,6 +2057,7 @@ private final class RecordingCursorStore: MLSEventCursorStore {
   var failure: DurableEventTestError?
   var readFailure: DurableEventTestError?
   var savedCursors: [String] = []
+  private var values: [String: String] = [:]
 
   init(
     failure: DurableEventTestError? = nil,
@@ -1838,17 +2067,22 @@ private final class RecordingCursorStore: MLSEventCursorStore {
     self.readFailure = readFailure
   }
 
-  func getCursor(for _: String, eventType _: String) throws -> String? {
+  func getCursor(for conversationId: String, eventType: String) throws -> String? {
     if let readFailure {
       throw readFailure
     }
-    return savedCursors.last
+    return values[key(conversationId: conversationId, eventType: eventType)]
   }
 
-  func updateCursor(for _: String, cursor: String, eventType _: String) throws {
+  func updateCursor(for conversationId: String, cursor: String, eventType: String) throws {
     if let failure {
       throw failure
     }
+    values[key(conversationId: conversationId, eventType: eventType)] = cursor
     savedCursors.append(cursor)
+  }
+
+  private func key(conversationId: String, eventType: String) -> String {
+    "\(conversationId)|\(eventType)"
   }
 }
