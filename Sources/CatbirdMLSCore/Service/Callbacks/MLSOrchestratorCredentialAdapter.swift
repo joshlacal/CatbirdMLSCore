@@ -120,6 +120,31 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
       return nil
     }
 
+    // Capture the authenticated authority before entering key custody. The
+    // second snapshot below must remain equal so a logout, key rotation, or
+    // account switch racing this synchronous callback fails closed rather than
+    // returning a signature bound to a different session.
+    guard let bindingBeforeSignature = signingBindingResolver?(userDid),
+          !bindingBeforeSignature.deviceId.isEmpty,
+          !bindingBeforeSignature.dpopJkt.isEmpty
+    else {
+      logger.error("Clean-chat signer binding is unavailable before signing for user: \(userDid.prefix(20))...")
+      return nil
+    }
+
+    // A platform signer and its public-key resolver are separate non-exporting
+    // handles. Resolve the key on both sides of signing so a concurrent key
+    // rotation cannot pair an old signature with a new authority key.
+    let publicKeyBeforeSignature = signingPublicKeyResolver?(userDid)
+    if transcriptSigner != nil {
+      guard let publicKeyBeforeSignature,
+            !publicKeyBeforeSignature.isEmpty
+      else {
+        logger.error("Clean-chat signer public key is unavailable before signing")
+        return nil
+      }
+    }
+
     // The normal path delegates to the Rust/OpenMLS context (or another
     // platform non-exporting signer). A raw CryptoKit key is accepted only as
     // a compatibility path for older keychain records; serialized OpenMLS
@@ -129,11 +154,13 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     let publicKey: Data
     if let transcriptSigner {
       signature = try transcriptSigner(userDid, transcript)
-      guard let resolvedPublicKey = signingPublicKeyResolver?(userDid) else {
-        logger.error("Clean-chat signer returned a signature without an authority public key")
+      guard let publicKeyAfterSignature = signingPublicKeyResolver?(userDid),
+            publicKeyAfterSignature == publicKeyBeforeSignature
+      else {
+        logger.error("Clean-chat signer authority changed while signing")
         return nil
       }
-      publicKey = resolvedPublicKey
+      publicKey = publicKeyAfterSignature
     } else {
       let keyData = try getSigningKey(userDid: userDid)
       guard let keyData,
@@ -151,22 +178,33 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
       return nil
     }
 
+    if transcriptSigner != nil {
+      guard let verificationKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKey),
+            verificationKey.isValidSignature(signature, for: transcript)
+      else {
+        logger.error("Clean-chat signer returned a signature/public-key pair that failed verification")
+        return nil
+      }
+    }
+
     // Binding is authoritative host state. Do not invent a device/JKT or
-    // silently sign with stale metadata when the session has not supplied it.
-    guard let binding = signingBindingResolver?(userDid),
-          !binding.deviceId.isEmpty,
-          !binding.dpopJkt.isEmpty
+    // silently sign with stale metadata when the session changes while the
+    // callback is executing.
+    guard let bindingAfterSignature = signingBindingResolver?(userDid),
+          bindingAfterSignature == bindingBeforeSignature,
+          !bindingAfterSignature.deviceId.isEmpty,
+          !bindingAfterSignature.dpopJkt.isEmpty
     else {
-      logger.error("Clean-chat signer binding is unavailable for user: \(userDid.prefix(20))...")
+      logger.error("Clean-chat signer authority changed while signing")
       return nil
     }
 
     return CleanChatSigningAuthorityFfi(
       publicKey: publicKey,
       signature: signature,
-      deviceId: binding.deviceId,
-      dpopJkt: binding.dpopJkt,
-      authGeneration: binding.authGeneration
+      deviceId: bindingAfterSignature.deviceId,
+      dpopJkt: bindingAfterSignature.dpopJkt,
+      authGeneration: bindingAfterSignature.authGeneration
     )
   }
 

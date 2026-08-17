@@ -61,4 +61,66 @@ final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
     XCTAssertEqual(authority.dpopJkt, "jkt-1")
     XCTAssertEqual(authority.authGeneration, 3)
   }
+
+  func testCleanChatSignerFailsClosedAcrossAuthorityRotationDuringSigning() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/Callbacks/MLSOrchestratorCredentialAdapter.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(signature: "public func signCleanChatTranscript(", from: source)
+    )
+
+    let bindingBefore = try XCTUnwrap(
+      body.range(of: "bindingBeforeSignature = signingBindingResolver?(userDid)")
+    )
+    let publicKeyBefore = try XCTUnwrap(
+      body.range(of: "let publicKeyBeforeSignature = signingPublicKeyResolver?(userDid)")
+    )
+    let signer = try XCTUnwrap(body.range(of: "signature = try transcriptSigner(userDid, transcript)"))
+    let publicKeyAfter = try XCTUnwrap(
+      body.range(of: "let publicKeyAfterSignature = signingPublicKeyResolver?(userDid)")
+    )
+    let bindingAfter = try XCTUnwrap(
+      body.range(of: "bindingAfterSignature = signingBindingResolver?(userDid)")
+    )
+
+    XCTAssertLessThan(bindingBefore.lowerBound, signer.lowerBound)
+    XCTAssertLessThan(publicKeyBefore.lowerBound, signer.lowerBound)
+    XCTAssertLessThan(signer.lowerBound, publicKeyAfter.lowerBound)
+    XCTAssertLessThan(publicKeyAfter.lowerBound, bindingAfter.lowerBound)
+    XCTAssertTrue(body.contains("publicKeyAfterSignature == publicKeyBeforeSignature"))
+    XCTAssertTrue(body.contains("bindingAfterSignature == bindingBeforeSignature"))
+    XCTAssertTrue(body.contains("isValidSignature(signature, for: transcript)"))
+  }
+
+  private func sourceFileURL(relativePath: String) -> URL {
+    let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let packageRoot = testsDirectory.deletingLastPathComponent().deletingLastPathComponent()
+    return packageRoot.appendingPathComponent(relativePath)
+  }
+
+  private func extractFunctionBody(signature: String, from source: String) -> String? {
+    guard let signatureRange = source.range(of: signature),
+          let bodyStart = source[signatureRange.upperBound...].firstIndex(of: "{")
+    else {
+      return nil
+    }
+
+    var depth = 0
+    var currentIndex = bodyStart
+    while currentIndex < source.endIndex {
+      let character = source[currentIndex]
+      if character == "{" {
+        depth += 1
+      } else if character == "}" {
+        depth -= 1
+        if depth == 0 {
+          return String(source[bodyStart...currentIndex])
+        }
+      }
+      currentIndex = source.index(after: currentIndex)
+    }
+    return nil
+  }
 }
