@@ -38,6 +38,10 @@ public actor MLSEventStreamManager {
     }
 
     public struct EventHandler {
+        /// Canonical clean-chat durable events. This is the typed reconciliation
+        /// seam for events that have no legacy MLS-chat DTO equivalent.
+        public var onCanonicalDurableEvent:
+            ((MLSCanonicalTransportAdapter.MLSCanonicalDurableEvent) async throws -> Void)?
         public var onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)?
         public var onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)?
         public var onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)?
@@ -63,6 +67,7 @@ public actor MLSEventStreamManager {
         public init() {}
 
         public init(
+            onCanonicalDurableEvent: ((MLSCanonicalTransportAdapter.MLSCanonicalDurableEvent) async throws -> Void)? = nil,
             onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)? = nil,
             onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)? = nil,
             onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)? = nil,
@@ -80,6 +85,7 @@ public actor MLSEventStreamManager {
             onError: ((Error) async -> Void)? = nil,
             onReconnected: (() async -> Void)? = nil
         ) {
+            self.onCanonicalDurableEvent = onCanonicalDurableEvent
             self.onMessage = onMessage
             self.onReaction = onReaction
             self.onTyping = onTyping
@@ -288,7 +294,7 @@ public actor MLSEventStreamManager {
                 // Canonical subscriptions require a completed inventory
                 // session and an exact snapshot cursor in both ticket and
                 // upgrade. Legacy SSE has no equivalent cursor binding.
-                let inventory = try await apiClient.getCanonicalInventorySnapshot(limit: 100)
+                let inventory = try await apiClient.getCanonicalInventoryAggregateSnapshot(limit: 100)
                 let sessionCursor = inventory.snapshotEventCursor
                 let resumeCursor = MLSCanonicalTransportAdapter.reconciledResumeCursor(
                     savedCursor: latestSavedCursor,
@@ -431,7 +437,7 @@ public actor MLSEventStreamManager {
         }
 
         let apiClient = self.apiClient
-        await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+        let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
             message,
             subscriptionKey: convoId,
             loadEntries: { conversationId, afterSeq in
@@ -441,16 +447,29 @@ public actor MLSEventStreamManager {
                     limit: 100
                 ).entries
             },
-            onMessage: { event in
-                await handler.onMessage?(event)
-            },
-            onError: { error in
-                await handler.onError?(error)
+            onDurableEvent: { event in
+                try await handler.onCanonicalDurableEvent?(event)
+                guard case let .messageAvailable(_, cursor, messages) = event else {
+                    return
+                }
+                for message in messages {
+                    await handler.onMessage?(
+                        BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
+                            cursor: cursor,
+                            message: message,
+                            ephemeral: nil,
+                            epoch: message.epoch
+                        )
+                    )
+                }
             },
             saveCursor: { cursor in
                 self.saveCursor(cursor, for: convoId)
             }
         )
+        if case let .reconnect(error) = result {
+            await handler.onError?(error)
+        }
     }
 
 

@@ -137,9 +137,202 @@ public enum MLSCanonicalTransportAdapter {
     inventorySnapshotCursor
   }
 
+  /// Every durable payload emitted by the generated clean-chat union. Keeping
+  /// the generated payload as the associated value prevents the client from
+  /// silently flattening status, identity, or terminal-sequence fields.
+  public enum MLSCanonicalDurableEvent {
+    /// Typing is a generated subscription variant but intentionally has no
+    /// durable cursor. It is surfaced here so a known best-effort message is
+    /// not mistaken for an unsupported durable payload.
+    case typing(BlueCatbirdChatDefs.TypingEvent)
+    case messageAvailable(
+      BlueCatbirdChatDefs.MessageAvailableEvent,
+      cursor: String,
+      messages: [BlueCatbirdMlsChatDefs.MessageView]
+    )
+    case conversationChanged(BlueCatbirdChatDefs.ConversationChangedEvent)
+    case conversationClosed(BlueCatbirdChatDefs.ConversationClosedEvent)
+    case welcomeAvailable(BlueCatbirdChatDefs.WelcomeAvailableEvent)
+    case welcomeDisposition(BlueCatbirdChatDefs.WelcomeDispositionEvent)
+    case resetRequested(BlueCatbirdChatDefs.ResetRequestedEvent)
+    case leafRecovery(BlueCatbirdChatDefs.LeafRecoveryEvent)
+    case leaveRequest(BlueCatbirdChatDefs.LeaveRequestEvent)
+    case accessEnded(BlueCatbirdChatDefs.AccessEndedEvent)
+    case watermark(BlueCatbirdChatDefs.WatermarkEvent)
+  }
+
+  internal struct MLSUnsupportedDurableEventError: Error, LocalizedError, Equatable {
+    internal let typeIdentifier: String
+
+    internal var errorDescription: String? {
+      "Unsupported durable event payload: \(typeIdentifier)"
+    }
+  }
+
+  internal enum MLSCanonicalStreamHandlingResult: Equatable {
+    case handled
+    case reconnect(Error)
+
+    static func == (
+      lhs: MLSCanonicalStreamHandlingResult,
+      rhs: MLSCanonicalStreamHandlingResult
+    ) -> Bool {
+      switch (lhs, rhs) {
+      case (.handled, .handled):
+        return true
+      case let (.reconnect(lhsError), .reconnect(rhsError)):
+        return String(describing: lhsError) == String(describing: rhsError)
+      default:
+        return false
+      }
+    }
+  }
+
+  /// Handle one generated durable envelope. The cursor is committed only once
+  /// the typed handler (and any message-entry reconciliation) has succeeded.
+  /// A handler failure or unknown payload requests reconnect and leaves the
+  /// cursor unchanged so replay can retry the exact durable event.
+  @discardableResult
+  internal static func handleCanonicalStreamMessage(
+    _ message: BlueCatbirdChatSubscribeEvents.Message,
+    subscriptionKey: String,
+    loadEntries: @escaping (String, Int) async throws -> [BlueCatbirdChatDefs.ConversationEntry],
+    onDurableEvent: @escaping (MLSCanonicalDurableEvent) async throws -> Void,
+    saveCursor: @escaping (String) -> Void
+  ) async -> MLSCanonicalStreamHandlingResult {
+    guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
+      if case let .blueCatbirdChatDefsTypingEvent(typing) = message {
+        do {
+          try await onDurableEvent(.typing(typing))
+          return .handled
+        } catch {
+          return .reconnect(error)
+        }
+      }
+      return .reconnect(
+        MLSUnsupportedDurableEventError(typeIdentifier: "blue.catbird.chat.defs#eventEnvelope")
+      )
+    }
+
+    let event: MLSCanonicalDurableEvent
+    switch envelope.payload {
+    case let .blueCatbirdChatDefsMessageAvailableEvent(available):
+      let conversationID = String(describing: available.conversationId)
+      guard subscriptionKey == "__global__" || subscriptionKey == conversationID else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      do {
+        let entries = try await loadEntries(conversationID, max(0, available.seq - 1))
+        let messages = entries.compactMap { entry -> BlueCatbirdMlsChatDefs.MessageView? in
+          guard let message = projectMessageView(from: entry),
+                message.convoId == conversationID
+          else {
+            return nil
+          }
+          return message
+        }
+        event = .messageAvailable(available, cursor: envelope.cursor, messages: messages)
+      } catch {
+        return .reconnect(error)
+      }
+
+    case let .blueCatbirdChatDefsConversationChangedEvent(changed):
+      guard subscriptionKey == "__global__"
+        || String(describing: changed.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .conversationChanged(changed)
+
+    case let .blueCatbirdChatDefsConversationClosedEvent(closed):
+      guard subscriptionKey == "__global__"
+        || String(describing: closed.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .conversationClosed(closed)
+
+    case let .blueCatbirdChatDefsWelcomeAvailableEvent(available):
+      guard subscriptionKey == "__global__"
+        || String(describing: available.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .welcomeAvailable(available)
+
+    case let .blueCatbirdChatDefsWelcomeDispositionEvent(disposition):
+      event = .welcomeDisposition(disposition)
+
+    case let .blueCatbirdChatDefsResetRequestedEvent(reset):
+      guard subscriptionKey == "__global__"
+        || String(describing: reset.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .resetRequested(reset)
+
+    case let .blueCatbirdChatDefsLeafRecoveryEvent(recovery):
+      guard subscriptionKey == "__global__"
+        || String(describing: recovery.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .leafRecovery(recovery)
+
+    case let .blueCatbirdChatDefsLeaveRequestEvent(leave):
+      guard subscriptionKey == "__global__"
+        || String(describing: leave.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .leaveRequest(leave)
+
+    case let .blueCatbirdChatDefsAccessEndedEvent(accessEnded):
+      guard subscriptionKey == "__global__"
+        || String(describing: accessEnded.conversationId) == subscriptionKey
+      else {
+        saveCursor(envelope.cursor)
+        return .handled
+      }
+      event = .accessEnded(accessEnded)
+
+    case let .blueCatbirdChatDefsWatermarkEvent(watermark):
+      event = .watermark(watermark)
+
+    case let .unexpected(container):
+      let typeIdentifier: String
+      switch container {
+      case let .unknownType(type, _):
+        typeIdentifier = type
+      case let .decodeError(message):
+        typeIdentifier = message
+      default:
+        typeIdentifier = "unknown"
+      }
+      return .reconnect(
+        MLSUnsupportedDurableEventError(typeIdentifier: typeIdentifier)
+      )
+    }
+
+    do {
+      try await onDurableEvent(event)
+    } catch {
+      return .reconnect(error)
+    }
+    saveCursor(envelope.cursor)
+    return .handled
+  }
+
   /// Shared canonical stream-handler seam used by both WebSocket and SSE.
-  /// Durable envelopes advance the cursor exactly once; entries are filtered
-  /// by the subscribed conversation and unknown variants are skipped.
+  /// This compatibility overload exposes the legacy message callback while the
+  /// typed overload above remains the source of truth for all durable events.
   internal static func handleCanonicalStreamMessage(
     _ message: BlueCatbirdChatSubscribeEvents.Message,
     subscriptionKey: String,
@@ -148,41 +341,36 @@ public enum MLSCanonicalTransportAdapter {
     onError: @escaping (Error) async -> Void,
     saveCursor: @escaping (String) -> Void
   ) async {
-    guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
-      return
-    }
-
-    guard case let .blueCatbirdChatDefsMessageAvailableEvent(available) = envelope.payload else {
-      saveCursor(envelope.cursor)
-      return
-    }
-
-    let availableConversationId = String(describing: available.conversationId)
-    guard subscriptionKey == "__global__" || subscriptionKey == availableConversationId else {
-      saveCursor(envelope.cursor)
-      return
-    }
-
-    do {
-      let entries = try await loadEntries(availableConversationId, max(0, available.seq - 1))
-      for entry in entries {
-        guard let message = projectMessageView(from: entry),
-              message.convoId == availableConversationId
+    let result = await handleCanonicalStreamMessage(
+      message,
+      subscriptionKey: subscriptionKey,
+      loadEntries: loadEntries,
+      onDurableEvent: { event in
+        guard case let .messageAvailable(_, _, messages) = event,
+              case let .blueCatbirdChatDefsEventEnvelope(envelope) = message
         else {
-          continue
+          return
         }
-        await onMessage(
-          BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
-            cursor: envelope.cursor,
-            message: message,
-            ephemeral: nil,
-            epoch: message.epoch
+        for message in messages {
+          await onMessage(
+            BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
+              cursor: envelope.cursor,
+              message: message,
+              ephemeral: nil,
+              epoch: message.epoch
+            )
           )
-        )
-      }
-      saveCursor(envelope.cursor)
-    } catch {
+        }
+      },
+      saveCursor: saveCursor
+    )
+    if case let .reconnect(error) = result {
       await onError(error)
     }
   }
 }
+
+// Keep the failure type discoverable at module scope for focused callers and
+// tests while retaining the adapter's implementation-local declaration.
+internal typealias MLSUnsupportedDurableEventError =
+  MLSCanonicalTransportAdapter.MLSUnsupportedDurableEventError

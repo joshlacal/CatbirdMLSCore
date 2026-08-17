@@ -72,6 +72,13 @@ public final class MLSAPIClient {
     private var forceRefreshHeaderCount = 0
     private let forceRefreshHeaderLock = NSLock()
 
+    /// Completion evidence for ticket minting. A ticket must be requested only
+    /// with the exact session/cursor returned by a completed three-domain
+    /// inventory; retaining this locally also prevents a conversation-only
+    /// caller from accidentally reaching the ticket endpoint.
+    private var completedInventorySessions: [String: MLSInventorySessionCompletion] = [:]
+    private let completedInventorySessionsLock = NSLock()
+
     // MARK: - Initialization
 
     /// Initialize MLS API client with ATProtoClient and environment
@@ -150,6 +157,7 @@ public final class MLSAPIClient {
         mlsServiceDID = newEnvironment.serviceDID
         isHealthy = false
         lastHealthCheck = nil
+        clearCompletedInventorySessions()
 
         // Reconfigure with new service DID
         await configureMLSService()
@@ -264,6 +272,50 @@ public final class MLSAPIClient {
         }
         return output
     }
+
+    /// Read one page of device-addressed pending Welcomes from the retained
+    /// inventory session created by `getConversations`.
+    public func getCanonicalPendingWelcomes(
+        inventorySessionId: String,
+        limit: Int = 100,
+        cursor: String? = nil
+    ) async throws -> BlueCatbirdChatGetPendingWelcomes.Output {
+        let input = BlueCatbirdChatGetPendingWelcomes.Parameters(
+            inventorySessionId: inventorySessionId,
+            pageCursor: cursor,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getPendingWelcomes(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical pending Welcomes"
+            )
+        }
+        return output
+    }
+
+    /// Read one page of the exact-device leaf recovery inbox from the retained
+    /// inventory session created by `getConversations`.
+    public func getCanonicalLeafRecoveryInbox(
+        inventorySessionId: String,
+        limit: Int = 100,
+        cursor: String? = nil
+    ) async throws -> BlueCatbirdChatGetLeafRecoveryInbox.Output {
+        let input = BlueCatbirdChatGetLeafRecoveryInbox.Parameters(
+            inventorySessionId: inventorySessionId,
+            pageCursor: cursor,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getLeafRecoveryInbox(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical leaf recovery inbox"
+            )
+        }
+        return output
+    }
     /// Read one canonical conversation state through Petrel's clean-chat
     /// procedure. The canonical response is intentionally kept as generated
     /// DTOs; callers must not project it back into a legacy route payload.
@@ -362,6 +414,12 @@ public final class MLSAPIClient {
         inventorySessionId: String,
         eventCursor: String
     ) async throws -> BlueCatbirdChatGetSubscriptionTicket.Output {
+        let completion = completedInventorySession(for: inventorySessionId)
+        try MLSInventorySessionCompletion.requireTicketReady(
+            inventorySessionId: inventorySessionId,
+            eventCursor: eventCursor,
+            completion: completion
+        )
         let input = BlueCatbirdChatGetSubscriptionTicket.Input(
             inventorySessionId: inventorySessionId,
             eventCursor: eventCursor
@@ -385,44 +443,70 @@ public final class MLSAPIClient {
         try await client.blue.catbird.chat.subscribeEvents(ticket: ticket, cursor: cursor)
     }
 
-    /// Fetch every inventory page so the ticket barrier is established for one
-    /// coherent session before opening the event stream.
+    /// Fetch every page in all three inventory domains so the ticket barrier is
+    /// established for one coherent session before opening the event stream.
+    internal func getCanonicalInventoryAggregateSnapshot(
+        limit: Int = 100
+    ) async throws -> MLSCanonicalInventorySnapshot {
+        let snapshot = try await MLSInventorySessionAssembler.assemble(
+            fetchConversations: { [self] cursor in
+                try await self.getCanonicalConversationInventory(limit: limit, cursor: cursor)
+            },
+            fetchPendingWelcomes: { [self] session, cursor in
+                try await self.getCanonicalPendingWelcomes(
+                    inventorySessionId: session,
+                    limit: limit,
+                    cursor: cursor
+                )
+            },
+            fetchLeafRecoveryInbox: { [self] session, cursor in
+                try await self.getCanonicalLeafRecoveryInbox(
+                    inventorySessionId: session,
+                    limit: limit,
+                    cursor: cursor
+                )
+            }
+        )
+        rememberCompletedInventory(snapshot.completion)
+        return snapshot
+    }
+
+    /// Compatibility-facing conversation DTO. The underlying call still
+    /// completes pending-Welcome and recovery paging before returning, so code
+    /// using this older return shape cannot mint an incomplete ticket.
     public func getCanonicalInventorySnapshot(
         limit: Int = 100
     ) async throws -> BlueCatbirdChatGetConversations.Output {
-        var cursor: String?
-        var firstPage: BlueCatbirdChatGetConversations.Output?
-        while true {
-            let page = try await getCanonicalConversationInventory(limit: limit, cursor: cursor)
-            if let firstPage {
-                guard firstPage.inventorySessionId == page.inventorySessionId,
-                      firstPage.snapshotEventCursor == page.snapshotEventCursor
-                else {
-                    throw MLSAPIError.httpError(
-                        statusCode: 409,
-                        message: "Canonical inventory session changed while paging"
-                    )
-                }
-            } else {
-                firstPage = page
-            }
-            guard page.hasMore else { break }
-            guard let nextPageCursor = page.nextPageCursor else {
-                throw MLSAPIError.httpError(
-                    statusCode: 502,
-                    message: "Canonical inventory marked hasMore without a page cursor"
-                )
-            }
-            cursor = nextPageCursor
-        }
+        let snapshot = try await getCanonicalInventoryAggregateSnapshot(limit: limit)
+        return BlueCatbirdChatGetConversations.Output(
+            items: snapshot.conversationItems,
+            inventorySessionId: snapshot.inventorySessionId,
+            snapshotEventCursor: snapshot.snapshotEventCursor,
+            nextPageCursor: nil,
+            hasMore: false,
+            snapshotExpiresAt: ATProtocolDate(date: snapshot.snapshotExpiresAt)
+        )
+    }
 
-        guard let firstPage else {
-            throw MLSAPIError.httpError(
-                statusCode: 502,
-                message: "Canonical inventory returned no page"
-            )
-        }
-        return firstPage
+    private func rememberCompletedInventory(_ completion: MLSInventorySessionCompletion) {
+        completedInventorySessionsLock.lock()
+        completedInventorySessions[completion.inventorySessionId] = completion
+        completedInventorySessionsLock.unlock()
+    }
+
+    private func completedInventorySession(for inventorySessionId: String)
+        -> MLSInventorySessionCompletion?
+    {
+        completedInventorySessionsLock.lock()
+        let completion = completedInventorySessions[inventorySessionId]
+        completedInventorySessionsLock.unlock()
+        return completion
+    }
+
+    private func clearCompletedInventorySessions() {
+        completedInventorySessionsLock.lock()
+        completedInventorySessions.removeAll()
+        completedInventorySessionsLock.unlock()
     }
 
 
