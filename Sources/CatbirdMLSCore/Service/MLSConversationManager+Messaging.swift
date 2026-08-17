@@ -459,6 +459,20 @@ public extension MLSConversationManager {
 
   // MARK: - Sending Messages
 
+  /// Resolve the MLS group id (hex) for a canonical conversation id (UUID).
+  ///
+  /// The Rust orchestrator hex-decodes the conversation id it is handed and
+  /// encrypts under that MLS group. The canonical projection exposes the UUID
+  /// `conversationId` and the hex `groupId` as separate fields, so the send
+  /// boundary must translate before handing the id to Rust — otherwise the
+  /// orchestrator fails with "Invalid hex group ID".
+  private func rustGroupIdHex(for convoId: String) throws -> String {
+    guard let convo = conversations[convoId], !convo.groupId.isEmpty else {
+      throw MLSConversationError.conversationNotFound
+    }
+    return convo.groupId
+  }
+
   /// Send a text message to a conversation
   /// - Parameters:
   ///   - convoId: The conversation group ID
@@ -475,9 +489,10 @@ public extension MLSConversationManager {
     try throwIfShuttingDown("sendMessage")
 
     if protocolAuthorityMode == .rustFull {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "sendMessage")
       let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
@@ -513,9 +528,10 @@ public extension MLSConversationManager {
     try await refreshDatabaseIfNeeded()
 
     if protocolAuthorityMode.usesRustForDecisions {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayload(conversationId: convoId, payload: payload)
+        try runtime.sendPayload(conversationId: groupIdHex, payload: payload)
       }
       let timestamp = ISO8601DateFormatter().date(from: ffiMessage.timestamp) ?? Date()
       return (
@@ -1041,8 +1057,9 @@ public extension MLSConversationManager {
     let payload = MLSMessagePayload.edit(targetMessageId: messageId, newText: newText)
 
     if protocolAuthorityMode == .rustFull {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "editMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "editMessage")
 
@@ -1195,8 +1212,9 @@ public extension MLSConversationManager {
     let payload = MLSMessagePayload.unsend(targetMessageId: messageId)
 
     if protocolAuthorityMode == .rustFull {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "unsendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "unsendMessage")
 

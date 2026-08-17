@@ -45,6 +45,9 @@ final class MLSFullRustMessagingTests: XCTestCase {
     XCTAssertEqual(bridge.sendPayloadResultCallCount, 1)
     XCTAssertEqual(bridge.sendPayloadJsonCallCount, 0)
     XCTAssertEqual(result.messageId, "msg-1")
+    // The send boundary must hand Rust the hex MLS group id, not the UUID
+    // conversation id — Rust hex-decodes the id it receives.
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, "deadbeef")
   }
 
   func testRustFullSendAppliesReturnedEngineEvents() async throws {
@@ -69,6 +72,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
     )
 
     XCTAssertEqual(bridge.sendPayloadResultCallCount, 1)
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, "deadbeef")
     XCTAssertNil(manager.groupStates["deadbeef"])
   }
 
@@ -405,6 +409,8 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
   private(set) var syncWithServerCallCount = 0
   private(set) var lastProcessIncomingServerEpoch: UInt64?
   private(set) var lastProcessServerEventJson: String?
+  private(set) var lastSendPayloadResultConversationId: String?
+  private(set) var lastSendPayloadConversationId: String?
 
   init() {
     super.init(noPointer: .init())
@@ -419,6 +425,7 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
     payloadJson: String
   ) throws -> FfiSendResult {
     sendPayloadResultCallCount += 1
+    lastSendPayloadResultConversationId = conversationId
     return sendResult
   }
 
@@ -427,6 +434,7 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
     payloadJson: String
   ) throws -> FfiMessage {
     sendPayloadJsonCallCount += 1
+    lastSendPayloadConversationId = conversationId
     guard let sendPayloadJsonResult else {
       throw UnexpectedLegacyBridgeCall.sendPayloadJson
     }
