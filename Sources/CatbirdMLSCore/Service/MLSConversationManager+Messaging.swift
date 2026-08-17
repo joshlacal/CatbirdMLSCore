@@ -892,9 +892,10 @@ public extension MLSConversationManager {
     }
 
     if protocolAuthorityMode.usesRustForDecisions {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendEncryptedReaction") { runtime in
         try runtime.sendReaction(
-          conversationId: convoId,
+          conversationId: groupIdHex,
           messageId: messageId,
           emoji: emoji,
           action: action
