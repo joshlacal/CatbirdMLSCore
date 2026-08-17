@@ -323,6 +323,25 @@ internal enum MLSCanonicalInventoryActionMissingError: Error, Equatable, Localiz
   case unsupportedLeafRecoveryItem
   case unsupportedConversationItem
 
+  internal var actionIdentifier: String {
+    switch self {
+    case .conversationState:
+      return "conversationState"
+    case .conversationRemoval:
+      return "conversationRemoval"
+    case .conversationClose:
+      return "conversationClose"
+    case .pendingWelcome:
+      return "pendingWelcome"
+    case .leafRecovery:
+      return "leafRecovery"
+    case .unsupportedLeafRecoveryItem:
+      return "unsupportedLeafRecoveryItem"
+    case .unsupportedConversationItem:
+      return "unsupportedConversationItem"
+    }
+  }
+
   internal var errorDescription: String? {
     switch self {
     case .conversationState:
@@ -407,10 +426,84 @@ internal struct MLSCanonicalSubscriptionFence: Equatable, Sendable {
   internal let snapshotExpiresAt: Date
 }
 
+/// A durable event that cannot be interpreted by the installed client is a
+/// terminal subscription failure, not a transient reconnect condition. The
+/// latch is kept by the manager across reconnects and fence expiry so a new
+/// aggregate cannot silently move the ticket past the failed event.
+internal enum MLSCanonicalSubscriptionTerminalFailure: Error, Equatable, Sendable {
+  case unsupportedDurableEvent(typeIdentifier: String)
+  case missingDurableAction(action: String)
+  case missingInventoryAction(action: String)
+
+  internal var errorDescription: String? {
+    switch self {
+    case let .unsupportedDurableEvent(typeIdentifier):
+      return "Unsupported durable event remains blocked: \(typeIdentifier)"
+    case let .missingDurableAction(action):
+      return "Required durable action remains missing: \(action)"
+    case let .missingInventoryAction(action):
+      return "Required inventory action remains missing: \(action)"
+    }
+  }
+}
+
+/// The only transitions that may clear a terminal durable-event latch. A
+/// network reconnect or snapshot expiry does not clear it; the caller must
+/// install a supported client/action-table transition explicitly.
+internal enum MLSCanonicalSubscriptionRecoveryTransition: Equatable, Sendable {
+  case supportedClientRecovery
+  case actionTableReplaced
+}
+
+internal struct MLSCanonicalSubscriptionFailureLatch: Equatable, Sendable {
+  internal private(set) var terminalFailure: MLSCanonicalSubscriptionTerminalFailure?
+
+  @discardableResult
+  internal mutating func record(_ error: Error) -> Bool {
+    let classified: MLSCanonicalSubscriptionTerminalFailure?
+    if let unsupported = error as? MLSUnsupportedDurableEventError {
+      classified = .unsupportedDurableEvent(typeIdentifier: unsupported.typeIdentifier)
+    } else if let missing = error as? MLSCanonicalActionMissingError {
+      classified = .missingDurableAction(action: missing.actionIdentifier)
+    } else if let missing = error as? MLSCanonicalInventoryActionMissingError {
+      classified = .missingInventoryAction(action: missing.actionIdentifier)
+    } else {
+      classified = nil
+    }
+
+    guard let classified else { return false }
+    // Preserve the first failed fence. A later error must not replace the
+    // event that is awaiting a supported client transition.
+    if terminalFailure == nil {
+      terminalFailure = classified
+    }
+    return true
+  }
+
+  internal mutating func clear(after transition: MLSCanonicalSubscriptionRecoveryTransition) {
+    switch transition {
+    case .supportedClientRecovery, .actionTableReplaced:
+      terminalFailure = nil
+    }
+  }
+}
+
+internal enum MLSCanonicalSubscriptionCoordinatorError: Error, Equatable, LocalizedError {
+  case blocked(MLSCanonicalSubscriptionTerminalFailure)
+
+  internal var errorDescription: String? {
+    switch self {
+    case let .blocked(failure):
+      return failure.errorDescription
+    }
+  }
+}
+
 internal enum MLSCanonicalSubscriptionCoordinator {
   internal static func prepare(
     fence: inout MLSCanonicalSubscriptionFence?,
     initialCursor: String?,
+    terminalFailure: MLSCanonicalSubscriptionTerminalFailure? = nil,
     fetchInventory: @escaping () async throws -> MLSCanonicalInventorySnapshot,
     reconcile: @escaping (MLSCanonicalInventorySnapshot) async throws -> Void,
     installCompletion: @escaping (MLSCanonicalInventorySnapshot) -> Void,
@@ -418,13 +511,28 @@ internal enum MLSCanonicalSubscriptionCoordinator {
   ) async throws -> MLSCanonicalSubscriptionFence {
     if let currentFence = fence {
       if Date() < currentFence.snapshotExpiresAt {
+        // A terminal event is replayed against the retained ticket fence
+        // while it remains valid. This is the same-fence reconnect path; it
+        // must not fetch or install a newer aggregate.
         return currentFence
+      }
+      if let terminalFailure {
+        // Once the retained fence expires, a terminal failure blocks before
+        // the expiry branch can discard it or fetch a newer aggregate.
+        throw MLSCanonicalSubscriptionCoordinatorError.blocked(terminalFailure)
       }
       // An expired retained audience is explicit unsupported-state recovery:
       // it is the one case where a new aggregate is required. Event-handler
       // failures and unknown payloads never reach this branch while the
       // original fence is still valid.
       fence = nil
+    }
+
+    if let terminalFailure {
+      // A failed inventory reconciliation has no installed fence. It still
+      // cannot authorize a fresh aggregate until an explicit recovery
+      // transition clears the latch.
+      throw MLSCanonicalSubscriptionCoordinatorError.blocked(terminalFailure)
     }
 
     let snapshot = try await fetchInventory()

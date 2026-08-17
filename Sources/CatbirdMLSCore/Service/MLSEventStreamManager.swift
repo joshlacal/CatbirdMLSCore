@@ -302,6 +302,10 @@ public actor MLSEventStreamManager {
         var reconnectAttempts = 0
         var latestSavedCursor = cursor
         var subscriptionFence: MLSCanonicalSubscriptionFence?
+        // This latch belongs to the whole subscription attempt, not one
+        // transport connection. Transport reconnects retain it; a caller
+        // installing a replacement action table starts a new subscribe call.
+        var subscriptionFailureLatch = MLSCanonicalSubscriptionFailureLatch()
         let maxReconnectAttempts = 5
         let reconnectDelay: TimeInterval = 2.0
 
@@ -328,6 +332,7 @@ public actor MLSEventStreamManager {
                 let fence = try await MLSCanonicalSubscriptionCoordinator.prepare(
                     fence: &subscriptionFence,
                     initialCursor: latestSavedCursor,
+                    terminalFailure: subscriptionFailureLatch.terminalFailure,
                     fetchInventory: {
                         try await apiClient.getCanonicalInventoryAggregateSnapshot(limit: 100)
                     },
@@ -385,6 +390,7 @@ public actor MLSEventStreamManager {
                             // duplicate action and never regress the cursor.
                             return .handled
                         case let .reconnect(error):
+                            _ = subscriptionFailureLatch.record(error)
                             await handler.onError?(error)
                             return .reconnect(error)
                         case let .handle(expectedPreviousCursor):
@@ -395,6 +401,8 @@ public actor MLSEventStreamManager {
                             )
                             if case .handled = result {
                                 latestSavedCursor = await self.lastCursor[convoId] ?? latestSavedCursor
+                            } else if case let .reconnect(error) = result {
+                                _ = subscriptionFailureLatch.record(error)
                             }
                             return result
                         }
@@ -455,6 +463,8 @@ public actor MLSEventStreamManager {
                     logger.info("📡 SSE: Exiting due to shutdown/cancellation for: \(convoId)")
                     break
                 }
+
+                _ = subscriptionFailureLatch.record(error)
 
                 print("[SSE] Connection error for \(convoId.prefix(12))...: \(error.localizedDescription)")
                 logger.error("📡 SSE: Connection error for \(convoId): \(error.localizedDescription) - \(String(describing: error))")

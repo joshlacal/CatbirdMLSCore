@@ -303,6 +303,33 @@ public enum MLSCanonicalTransportAdapter {
     case accessEnded
     case watermark
 
+    internal var actionIdentifier: String {
+      switch self {
+      case .typing:
+        return "typing"
+      case .messageAvailable:
+        return "messageAvailable"
+      case .conversationChanged:
+        return "conversationChanged"
+      case .conversationClosed:
+        return "conversationClosed"
+      case .welcomeAvailable:
+        return "welcomeAvailable"
+      case .welcomeDisposition:
+        return "welcomeDisposition"
+      case .resetRequested:
+        return "resetRequested"
+      case .leafRecovery:
+        return "leafRecovery"
+      case .leaveRequest:
+        return "leaveRequest"
+      case .accessEnded:
+        return "accessEnded"
+      case .watermark:
+        return "watermark"
+      }
+    }
+
     internal var errorDescription: String? {
       switch self {
       case .typing: return "No canonical typing action is installed"

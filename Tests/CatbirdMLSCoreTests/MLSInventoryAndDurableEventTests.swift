@@ -235,6 +235,248 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertEqual(fence, refreshed)
   }
 
+  func testUnsupportedEventLatchBlocksExpiredFenceUntilExplicitRecovery() async throws {
+    let failedEvent = BlueCatbirdChatSubscribeEvents.Message.unexpected(.object([:]))
+    let failureResult = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      failedEvent,
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: "cursor-0",
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in XCTFail("unknown event must not dispatch") },
+      saveCursor: { _ in XCTFail("unknown event must not advance the cursor") }
+    )
+    guard case let .reconnect(failure) = failureResult else {
+      return XCTFail("unknown event must produce a reconnect failure")
+    }
+
+    var latch = MLSCanonicalSubscriptionFailureLatch()
+    XCTAssertTrue(latch.record(failure))
+    XCTAssertEqual(
+      latch.terminalFailure,
+      .unsupportedDurableEvent(typeIdentifier: "blue.catbird.chat.defs#eventEnvelope")
+    )
+
+    var fence: MLSCanonicalSubscriptionFence? = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600)
+    )
+    var inventoryFetches = 0
+    var persistedCursors: [String] = []
+    let refreshedSnapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-2",
+      snapshotEventCursor: "cursor-2",
+      snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+      conversationItems: [],
+      pendingWelcomeItems: [],
+      leafRecoveryItems: []
+    )
+
+    let replayFence = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: "cursor-1",
+      terminalFailure: latch.terminalFailure,
+      fetchInventory: {
+        inventoryFetches += 1
+        XCTFail("same-fence reconnect must not fetch inventory")
+        return refreshedSnapshot
+      },
+      reconcile: { _ in XCTFail("same-fence reconnect must not reconcile") },
+      installCompletion: { _ in XCTFail("same-fence reconnect must not install completion") },
+      persistFence: { persistedCursors.append($0) }
+    )
+    XCTAssertEqual(replayFence.inventorySessionId, "session-1")
+    XCTAssertEqual(replayFence.snapshotEventCursor, "cursor-0")
+    fence = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: Date(timeIntervalSince1970: 1)
+    )
+
+    do {
+      _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+        fence: &fence,
+        initialCursor: "cursor-0",
+        terminalFailure: latch.terminalFailure,
+        fetchInventory: {
+          inventoryFetches += 1
+          return refreshedSnapshot
+        },
+        reconcile: { _ in XCTFail("blocked failure must not reconcile") },
+        installCompletion: { _ in XCTFail("blocked failure must not install completion") },
+        persistFence: { persistedCursors.append($0) }
+      )
+      XCTFail("terminal durable failure must block refresh")
+    } catch let error as MLSCanonicalSubscriptionCoordinatorError {
+      XCTAssertEqual(
+        error,
+        .blocked(.unsupportedDurableEvent(typeIdentifier: "blue.catbird.chat.defs#eventEnvelope"))
+      )
+    }
+    XCTAssertEqual(inventoryFetches, 0)
+    XCTAssertTrue(persistedCursors.isEmpty)
+    XCTAssertEqual(fence?.inventorySessionId, "session-1")
+
+    latch.clear(after: .supportedClientRecovery)
+    XCTAssertNil(latch.terminalFailure)
+    let refreshed = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: "cursor-0",
+      terminalFailure: latch.terminalFailure,
+      fetchInventory: {
+        inventoryFetches += 1
+        return refreshedSnapshot
+      },
+      reconcile: { _ in },
+      installCompletion: { _ in },
+      persistFence: { persistedCursors.append($0) }
+    )
+    XCTAssertEqual(refreshed.inventorySessionId, "session-2")
+    XCTAssertEqual(inventoryFetches, 1)
+    XCTAssertEqual(persistedCursors, ["cursor-2"])
+  }
+
+  func testMissingActionLatchAlsoSurvivesFenceExpiryUntilActionTableReplacement() async throws {
+    let envelope = BlueCatbirdChatDefs.EventEnvelope(
+      previousCursor: "cursor-0",
+      cursor: "cursor-1",
+      payload: .blueCatbirdChatDefsConversationChangedEvent(
+        .init(conversationId: "conversation-1")
+      ),
+      createdAt: expiry
+    )
+    let actions = MLSCanonicalDurableEventActions()
+    let failureResult = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      .blueCatbirdChatDefsEventEnvelope(envelope),
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: "cursor-0",
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { event in try await actions.dispatch(event) },
+      saveCursor: { _ in XCTFail("missing action must not advance the cursor") }
+    )
+    guard case let .reconnect(failure) = failureResult else {
+      return XCTFail("missing action must produce a reconnect failure")
+    }
+
+    var latch = MLSCanonicalSubscriptionFailureLatch()
+    XCTAssertTrue(latch.record(failure))
+    XCTAssertEqual(
+      latch.terminalFailure,
+      .missingDurableAction(action: "conversationChanged")
+    )
+
+    var fence: MLSCanonicalSubscriptionFence? = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600)
+    )
+    var inventoryFetches = 0
+    var persistedCursors: [String] = []
+    let replayFence = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: "cursor-1",
+      terminalFailure: latch.terminalFailure,
+      fetchInventory: {
+        inventoryFetches += 1
+        XCTFail("same-fence reconnect must not fetch inventory")
+        return MLSCanonicalInventorySnapshot(
+          inventorySessionId: "unexpected",
+          snapshotEventCursor: "unexpected",
+          snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+          conversationItems: [],
+          pendingWelcomeItems: [],
+          leafRecoveryItems: []
+        )
+      },
+      reconcile: { _ in XCTFail("same-fence reconnect must not reconcile") },
+      installCompletion: { _ in XCTFail("same-fence reconnect must not install completion") },
+      persistFence: { persistedCursors.append($0) }
+    )
+    XCTAssertEqual(replayFence.inventorySessionId, "session-1")
+    XCTAssertEqual(replayFence.snapshotEventCursor, "cursor-0")
+    fence = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: Date(timeIntervalSince1970: 1)
+    )
+    do {
+      _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+        fence: &fence,
+        initialCursor: "cursor-0",
+        terminalFailure: latch.terminalFailure,
+        fetchInventory: {
+          inventoryFetches += 1
+          XCTFail("missing action latch must block expired-fence fetch")
+          return MLSCanonicalInventorySnapshot(
+            inventorySessionId: "unexpected",
+            snapshotEventCursor: "unexpected",
+            snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+            conversationItems: [],
+            pendingWelcomeItems: [],
+            leafRecoveryItems: []
+          )
+        },
+        reconcile: { _ in XCTFail("blocked failure must not reconcile") },
+        installCompletion: { _ in XCTFail("blocked failure must not install completion") },
+        persistFence: { persistedCursors.append($0) }
+      )
+      XCTFail("missing action must remain terminal across expiry")
+    } catch let error as MLSCanonicalSubscriptionCoordinatorError {
+      XCTAssertEqual(
+        error,
+        .blocked(.missingDurableAction(action: "conversationChanged"))
+      )
+    }
+    XCTAssertEqual(inventoryFetches, 0)
+    XCTAssertTrue(persistedCursors.isEmpty)
+
+    // Replacing the action table is the supported client transition that
+    // clears the terminal latch and permits a new coherent inventory fence.
+    latch.clear(after: .actionTableReplaced)
+    XCTAssertNil(latch.terminalFailure)
+    let refreshed = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence,
+      initialCursor: "cursor-0",
+      terminalFailure: latch.terminalFailure,
+      fetchInventory: {
+        inventoryFetches += 1
+        return MLSCanonicalInventorySnapshot(
+          inventorySessionId: "session-2",
+          snapshotEventCursor: "cursor-2",
+          snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+          conversationItems: [],
+          pendingWelcomeItems: [],
+          leafRecoveryItems: []
+        )
+      },
+      reconcile: { _ in },
+      installCompletion: { _ in },
+      persistFence: { persistedCursors.append($0) }
+    )
+    XCTAssertEqual(refreshed.inventorySessionId, "session-2")
+    XCTAssertEqual(inventoryFetches, 1)
+    XCTAssertEqual(persistedCursors, ["cursor-2"])
+  }
+
+  func testTransientCursorAndProjectionFailuresDoNotLatchTerminalRecovery() {
+    var latch = MLSCanonicalSubscriptionFailureLatch()
+
+    XCTAssertFalse(
+      latch.record(
+        MLSCanonicalCursorError.cursorDidNotAdvance("cursor-1")
+      )
+    )
+    XCTAssertFalse(
+      latch.record(
+        MLSCanonicalMessageAvailabilityError(
+          conversationId: "conversation-1",
+          sequence: 7
+        )
+      )
+    )
+    XCTAssertNil(latch.terminalFailure)
+  }
+
   func testChangedInventoryContinuationStateFailsClosed() async {
     do {
       _ = try await MLSInventorySessionAssembler.assemble(

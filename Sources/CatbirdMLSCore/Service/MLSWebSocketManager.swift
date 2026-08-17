@@ -328,6 +328,10 @@ public actor MLSWebSocketManager {
         var reconnectAttempts = 0
         var latestSavedCursor = cursor
         var subscriptionFence: MLSCanonicalSubscriptionFence?
+        // This latch belongs to the whole subscription attempt, not one
+        // transport connection. Transport reconnects retain it; a caller
+        // installing a replacement action table starts a new subscribe call.
+        var subscriptionFailureLatch = MLSCanonicalSubscriptionFailureLatch()
         // Spec §7: Exponential backoff (1s, 2s, 4s, 8s, max 30s), no give-up limit
         let maxReconnectDelay: TimeInterval = 30.0
 
@@ -350,6 +354,7 @@ public actor MLSWebSocketManager {
                 let fence = try await MLSCanonicalSubscriptionCoordinator.prepare(
                     fence: &subscriptionFence,
                     initialCursor: latestSavedCursor,
+                    terminalFailure: subscriptionFailureLatch.terminalFailure,
                     fetchInventory: {
                         try await apiClient.getCanonicalInventoryAggregateSnapshot(limit: 100)
                     },
@@ -407,6 +412,7 @@ public actor MLSWebSocketManager {
                             // write its cursor backward into the store.
                             return .handled
                         case let .reconnect(error):
+                            _ = subscriptionFailureLatch.record(error)
                             await handler.onError?(error)
                             return .reconnect(error)
                         case let .handle(expectedPreviousCursor):
@@ -417,6 +423,8 @@ public actor MLSWebSocketManager {
                             )
                             if case .handled = result {
                                 latestSavedCursor = await self.lastCursor[key] ?? latestSavedCursor
+                            } else if case let .reconnect(error) = result {
+                                _ = subscriptionFailureLatch.record(error)
                             }
                             return result
                         }
@@ -459,6 +467,8 @@ public actor MLSWebSocketManager {
                     logger.info("🔌 WS: Exiting due to shutdown/cancellation for: \(key)")
                     break
                 }
+
+                _ = subscriptionFailureLatch.record(error)
 
                 logger.error("🔌 WS: Connection error for \(key): \(error)")
 
