@@ -18,6 +18,7 @@ internal enum MLSInventorySessionError: Error, Equatable, LocalizedError {
   case continuationChanged(MLSInventoryDomain)
   case missingContinuation(MLSInventoryDomain)
   case unexpectedContinuation(MLSInventoryDomain)
+  case repeatedContinuation(MLSInventoryDomain, String)
 
   var errorDescription: String? {
     switch self {
@@ -31,6 +32,8 @@ internal enum MLSInventorySessionError: Error, Equatable, LocalizedError {
       return "The \(domain.rawValue) inventory page omitted its required continuation cursor"
     case let .unexpectedContinuation(domain):
       return "The \(domain.rawValue) inventory page returned a continuation after its final page"
+    case let .repeatedContinuation(domain, cursor):
+      return "The \(domain.rawValue) inventory pagination repeated cursor \(cursor)"
     }
   }
 }
@@ -105,6 +108,7 @@ internal enum MLSInventorySessionAssembler {
     var conversationCursor: String?
     var conversationItems: [BlueCatbirdChatDefs.ConversationInventoryItem] = []
     var firstMetadata: InventoryPageMetadata?
+    var seenConversationCursors: Set<String> = []
 
     while true {
       let page = try await fetchConversations(conversationCursor)
@@ -119,7 +123,18 @@ internal enum MLSInventorySessionAssembler {
       try validate(metadata, against: &firstMetadata, domain: .conversations)
       conversationItems.append(contentsOf: page.items)
       guard page.hasMore else { break }
-      conversationCursor = page.nextPageCursor
+      guard let nextCursor = page.nextPageCursor else {
+        // pageMetadata already checks this, but keep the unwrap local so the
+        // progress invariant remains explicit at the loop boundary.
+        throw MLSInventorySessionError.missingContinuation(.conversations)
+      }
+      guard nextCursor != conversationCursor else {
+        throw MLSInventorySessionError.repeatedContinuation(.conversations, nextCursor)
+      }
+      guard seenConversationCursors.insert(nextCursor).inserted else {
+        throw MLSInventorySessionError.repeatedContinuation(.conversations, nextCursor)
+      }
+      conversationCursor = nextCursor
     }
 
     guard let firstMetadata else {
@@ -132,6 +147,7 @@ internal enum MLSInventorySessionAssembler {
 
     var welcomeCursor: String?
     var pendingWelcomeItems: [BlueCatbirdChatDefs.WelcomeView] = []
+    var seenWelcomeCursors: Set<String> = []
     repeat {
       let page = try await fetchPendingWelcomes(sessionId, welcomeCursor)
       let metadata = try pageMetadata(
@@ -145,7 +161,16 @@ internal enum MLSInventorySessionAssembler {
       try validate(metadata, matching: firstMetadata, domain: .pendingWelcomes)
       pendingWelcomeItems.append(contentsOf: page.items)
       if page.hasMore {
-        welcomeCursor = page.nextPageCursor
+        guard let nextCursor = page.nextPageCursor else {
+          throw MLSInventorySessionError.missingContinuation(.pendingWelcomes)
+        }
+        guard nextCursor != welcomeCursor else {
+          throw MLSInventorySessionError.repeatedContinuation(.pendingWelcomes, nextCursor)
+        }
+        guard seenWelcomeCursors.insert(nextCursor).inserted else {
+          throw MLSInventorySessionError.repeatedContinuation(.pendingWelcomes, nextCursor)
+        }
+        welcomeCursor = nextCursor
       } else {
         welcomeCursor = nil
       }
@@ -154,6 +179,7 @@ internal enum MLSInventorySessionAssembler {
 
     var recoveryCursor: String?
     var leafRecoveryItems: [BlueCatbirdChatDefs.LeafRecoveryInboxItem] = []
+    var seenRecoveryCursors: Set<String> = []
     repeat {
       let page = try await fetchLeafRecoveryInbox(sessionId, recoveryCursor)
       let metadata = try pageMetadata(
@@ -167,7 +193,16 @@ internal enum MLSInventorySessionAssembler {
       try validate(metadata, matching: firstMetadata, domain: .leafRecovery)
       leafRecoveryItems.append(contentsOf: page.items)
       if page.hasMore {
-        recoveryCursor = page.nextPageCursor
+        guard let nextCursor = page.nextPageCursor else {
+          throw MLSInventorySessionError.missingContinuation(.leafRecovery)
+        }
+        guard nextCursor != recoveryCursor else {
+          throw MLSInventorySessionError.repeatedContinuation(.leafRecovery, nextCursor)
+        }
+        guard seenRecoveryCursors.insert(nextCursor).inserted else {
+          throw MLSInventorySessionError.repeatedContinuation(.leafRecovery, nextCursor)
+        }
+        recoveryCursor = nextCursor
       } else {
         recoveryCursor = nil
       }
@@ -238,6 +273,126 @@ internal enum MLSInventorySessionAssembler {
           first.expiresAt == metadata.expiresAt
     else {
       throw MLSInventorySessionError.continuationChanged(domain)
+    }
+  }
+}
+
+/// Actions used to reconcile every item in the aggregate inventory before a
+/// stream cursor is installed. The generated unions remain intact so callers
+/// can route each variant to the existing conversation, Welcome, and recovery
+/// managers without silently dropping tombstones or terminal recovery views.
+internal struct MLSCanonicalInventoryActionSet {
+  internal typealias ConversationStateHandler =
+    (BlueCatbirdChatDefs.ConversationState) async throws -> Void
+  internal typealias ConversationRemovalHandler =
+    (BlueCatbirdChatDefs.ConversationRemovalTombstone) async throws -> Void
+  internal typealias ConversationCloseHandler =
+    (BlueCatbirdChatDefs.ConversationCloseTombstone) async throws -> Void
+  internal typealias WelcomeHandler =
+    (BlueCatbirdChatDefs.WelcomeView) async throws -> Void
+  internal typealias LeafRecoveryHandler =
+    (BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void
+
+  internal var onConversationState: ConversationStateHandler?
+  internal var onConversationRemoval: ConversationRemovalHandler?
+  internal var onConversationClose: ConversationCloseHandler?
+  internal var onPendingWelcome: WelcomeHandler?
+  internal var onLeafRecovery: LeafRecoveryHandler?
+
+  internal init(
+    onConversationState: ConversationStateHandler? = nil,
+    onConversationRemoval: ConversationRemovalHandler? = nil,
+    onConversationClose: ConversationCloseHandler? = nil,
+    onPendingWelcome: WelcomeHandler? = nil,
+    onLeafRecovery: LeafRecoveryHandler? = nil
+  ) {
+    self.onConversationState = onConversationState
+    self.onConversationRemoval = onConversationRemoval
+    self.onConversationClose = onConversationClose
+    self.onPendingWelcome = onPendingWelcome
+    self.onLeafRecovery = onLeafRecovery
+  }
+}
+
+internal enum MLSCanonicalInventoryActionMissingError: Error, Equatable, LocalizedError {
+  case conversationState
+  case conversationRemoval
+  case conversationClose
+  case pendingWelcome
+  case leafRecovery
+  case unsupportedLeafRecoveryItem
+  case unsupportedConversationItem
+
+  internal var errorDescription: String? {
+    switch self {
+    case .conversationState:
+      return "No canonical conversation-state reconciliation action is installed"
+    case .conversationRemoval:
+      return "No canonical conversation-removal reconciliation action is installed"
+    case .conversationClose:
+      return "No canonical conversation-close reconciliation action is installed"
+    case .pendingWelcome:
+      return "No canonical pending-Welcome reconciliation action is installed"
+    case .leafRecovery:
+      return "No canonical leaf-recovery reconciliation action is installed"
+    case .unsupportedLeafRecoveryItem:
+      return "Unsupported canonical leaf-recovery inventory item"
+    case .unsupportedConversationItem:
+      return "Unsupported canonical conversation inventory item"
+    }
+  }
+}
+
+/// Applies the aggregate in wire order. A caller must provide an action for
+/// every item variant that appears; this function never filters an item out.
+internal enum MLSCanonicalInventoryReconciler {
+  internal static func reconcile(
+    _ snapshot: MLSCanonicalInventorySnapshot,
+    actions: MLSCanonicalInventoryActionSet
+  ) async throws {
+    for item in snapshot.conversationItems {
+      switch item {
+      case let .blueCatbirdChatDefsConversationInventoryState(state):
+        guard let action = actions.onConversationState else {
+          throw MLSCanonicalInventoryActionMissingError.conversationState
+        }
+        try await action(state.state)
+      case let .blueCatbirdChatDefsConversationRemovalTombstone(tombstone):
+        guard let action = actions.onConversationRemoval else {
+          throw MLSCanonicalInventoryActionMissingError.conversationRemoval
+        }
+        try await action(tombstone)
+      case let .blueCatbirdChatDefsConversationCloseTombstone(tombstone):
+        guard let action = actions.onConversationClose else {
+          throw MLSCanonicalInventoryActionMissingError.conversationClose
+        }
+        try await action(tombstone)
+      case .unexpected:
+        throw MLSCanonicalInventoryActionMissingError.unsupportedConversationItem
+      }
+    }
+
+    for welcome in snapshot.pendingWelcomeItems {
+      guard let action = actions.onPendingWelcome else {
+        throw MLSCanonicalInventoryActionMissingError.pendingWelcome
+      }
+      try await action(welcome)
+    }
+
+    for recovery in snapshot.leafRecoveryItems {
+      guard let action = actions.onLeafRecovery else {
+        throw MLSCanonicalInventoryActionMissingError.leafRecovery
+      }
+      switch recovery {
+      case .blueCatbirdChatDefsLeafRecoveryView,
+           .blueCatbirdChatDefsRecoveryWorkPendingView,
+           .blueCatbirdChatDefsRecoveryWorkCompletedByTransitionView,
+           .blueCatbirdChatDefsRecoveryWorkSupersededByTransitionView,
+           .blueCatbirdChatDefsRecoveryWorkSupersededByRevocationView:
+        try await action(recovery)
+      case .unexpected:
+        throw MLSCanonicalInventoryActionMissingError.unsupportedLeafRecoveryItem
+      }
     }
   }
 }

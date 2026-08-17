@@ -113,6 +113,180 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     }
   }
 
+  func testRepeatedInventoryContinuationCursorFailsClosed() async {
+    var calls = 0
+    do {
+      _ = try await MLSInventorySessionAssembler.assemble(
+        fetchConversations: { cursor in
+          calls += 1
+          if calls > 2 {
+            XCTFail("assembler must stop before a repeated cursor can spin")
+          }
+          return self.conversationPage(
+            cursor: cursor,
+            repeatedContinuation: true
+          )
+        },
+        fetchPendingWelcomes: { _, _ in
+          XCTFail("repeated conversation cursor must stop before welcome paging")
+          return self.welcomePage(cursor: nil)
+        },
+        fetchLeafRecoveryInbox: { _, _ in
+          XCTFail("repeated conversation cursor must stop before recovery paging")
+          return self.recoveryPage(cursor: nil)
+        }
+      )
+      XCTFail("repeated continuation cursor must throw")
+    } catch let error as MLSInventorySessionError {
+      guard case .repeatedContinuation(.conversations, "conversation-2") = error else {
+        return XCTFail("unexpected inventory error: \(error)")
+      }
+    } catch {
+      XCTFail("unexpected error: \(error)")
+    }
+    XCTAssertEqual(calls, 2)
+  }
+
+  func testInventoryReconcilerRoutesEveryFetchedItemBeforeInstallingFence() async throws {
+    let did = try DID(didString: "did:plc:inventory-reconcile-test")
+    let coordinate = makeCoordinate(conversationId: "conversation-1")
+    let metadata = BlueCatbirdChatDefs.MetadataSnapshot(
+      coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
+        conversationId: Bytes(data: Data([0x01])),
+        generation: 1,
+        groupId: Bytes(data: Data([0x02])),
+        epoch: 1,
+        groupContextHash: Bytes(data: Data([0x03])),
+        confirmationTag: Bytes(data: Data([0x04]))
+      ),
+      originTransitionId: "transition-1",
+      metadataVersion: 1,
+      nonce: Bytes(data: Data([0x05])),
+      ciphertext: Bytes(data: Data([0x06])),
+      ciphertextSha256: Bytes(data: Data([0x07])),
+      ciphertextSize: 1,
+      avatarBinding: nil,
+      authorProof: BlueCatbirdChatDefs.MetadataAuthorProof(
+        authorDid: did,
+        authorDeviceId: "device-1",
+        authorKeyId: "key-1",
+        signaturePublicKey: Bytes(data: Data([0x08])),
+        authGenerationAtOrigin: 1,
+        originTransitionId: "transition-1",
+        originSeq: 1,
+        roleAtOrigin: "admin",
+        deviceStatusAtOrigin: "active"
+      )
+    )
+    let state = BlueCatbirdChatDefs.ConversationState(
+      conversationKind: .value_group,
+      coordinates: coordinate,
+      cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
+      participants: [],
+      leaves: [],
+      metadataSnapshot: metadata,
+      snapshotSeq: 3
+    )
+    let removal = BlueCatbirdChatDefs.ConversationRemovalTombstone(
+      conversationId: "conversation-removed",
+      membershipIntervalId: "interval-1",
+      userDid: did,
+      deviceId: "device-1",
+      terminalSeq: 4,
+      removedAt: expiry
+    )
+    let close = BlueCatbirdChatDefs.ConversationCloseTombstone(
+      conversationId: "conversation-closed",
+      conversationKind: .value_group,
+      retired: coordinate,
+      closedByDid: did,
+      closedByDeviceId: "device-1",
+      terminalSeq: 5,
+      closedAt: expiry
+    )
+    let welcome = BlueCatbirdChatDefs.WelcomeView(
+      welcomeId: "welcome-1",
+      conversationId: "conversation-1",
+      transitionSeq: 6,
+      coordinates: coordinate,
+      status: .value_pending,
+      opaqueWelcome: Bytes(data: Data([0x09])),
+      sha256: Bytes(data: Data([0x0A])),
+      recipientDid: did,
+      recipientDeviceId: "device-1",
+      provenance: BlueCatbirdChatDefs.RecoveryWelcomeProvenance(
+        recoveryRequestId: "recovery-1",
+        keyPackageRef: Bytes(data: Data([0x0B]))
+      ),
+      expiresAt: expiry
+    )
+    let recoveryWork = BlueCatbirdChatDefs.RecoveryWorkPendingView(
+      recoveryWorkId: "recovery-work-1",
+      conversationId: "conversation-1",
+      recipientDid: did,
+      recipientDeviceId: "device-1",
+      sourceKind: .value_welcomeExpired,
+      sourceId: "welcome-1",
+      sourceCoordinate: coordinate,
+      status: "pending",
+      createdAt: expiry
+    )
+    let snapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-1",
+      snapshotExpiresAt: expiry.date,
+      conversationItems: [
+        .init(BlueCatbirdChatDefs.ConversationInventoryState(state: state)),
+        .init(removal),
+        .init(close),
+      ],
+      pendingWelcomeItems: [welcome],
+      leafRecoveryItems: [.init(recoveryWork)]
+    )
+
+    var actionsSeen: [String] = []
+    try await MLSCanonicalInventoryReconciler.reconcile(
+      snapshot,
+      actions: MLSCanonicalInventoryActionSet(
+        onConversationState: { _ in actionsSeen.append("conversation-state") },
+        onConversationRemoval: { _ in actionsSeen.append("conversation-removal") },
+        onConversationClose: { _ in actionsSeen.append("conversation-close") },
+        onPendingWelcome: { _ in actionsSeen.append("pending-welcome") },
+        onLeafRecovery: { _ in actionsSeen.append("leaf-recovery") }
+      )
+    )
+
+    XCTAssertEqual(
+      actionsSeen,
+      ["conversation-state", "conversation-removal", "conversation-close", "pending-welcome", "leaf-recovery"]
+    )
+  }
+
+  func testInventoryReconcilerRejectsUnknownLeafRecoveryItemWithoutInstallingFence() async {
+    let snapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-1",
+      snapshotExpiresAt: expiry.date,
+      conversationItems: [],
+      pendingWelcomeItems: [],
+      leafRecoveryItems: [.unexpected(.object([:]))]
+    )
+
+    do {
+      try await MLSCanonicalInventoryReconciler.reconcile(
+        snapshot,
+        actions: MLSCanonicalInventoryActionSet(onLeafRecovery: { _ in
+          XCTFail("unknown recovery item must not reach a concrete action")
+        })
+      )
+      XCTFail("unknown recovery item must fail closed before the snapshot fence is installed")
+    } catch let error as MLSCanonicalInventoryActionMissingError {
+      XCTAssertEqual(error, .unsupportedLeafRecoveryItem)
+    } catch {
+      XCTFail("unexpected inventory reconciliation error: \(error)")
+    }
+  }
+
   func testEveryGeneratedDurablePayloadDispatchesThroughTypedPath() async {
     let did = try! DID(didString: "did:plc:durable-event-test")
     let payloads: [BlueCatbirdChatDefs.ProtocolEventPayload] = [
@@ -155,6 +329,19 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     ]
 
     var dispatched = 0
+    let actions = MLSCanonicalDurableEventActions(
+      onConversationChanged: { _ in dispatched += 1 },
+      onConversationClosed: { _ in dispatched += 1 },
+      onMessageAvailable: { _, _, _ in dispatched += 1 },
+      onWelcomeAvailable: { _ in dispatched += 1 },
+      onWelcomeDisposition: { _ in dispatched += 1 },
+      onResetRequested: { _ in dispatched += 1 },
+      onLeafRecovery: { _ in dispatched += 1 },
+      onLeaveRequest: { _ in dispatched += 1 },
+      onAccessEnded: { _ in dispatched += 1 },
+      onWatermark: { _ in dispatched += 1 },
+      onTyping: { _ in dispatched += 1 }
+    )
     var savedCursors: [String] = []
     for (index, payload) in payloads.enumerated() {
       let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
@@ -167,8 +354,10 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
           )
         ),
         subscriptionKey: "conversation-1",
-        loadEntries: { _, _ in [] },
-        onDurableEvent: { _ in dispatched += 1 },
+        loadEntries: { conversationId, _ in
+          conversationId == "conversation-1" ? [self.makeApplicationEntry()] : []
+        },
+        onDurableEvent: { event in try await actions.dispatch(event) },
         saveCursor: { savedCursors.append($0) }
       )
 
@@ -177,6 +366,85 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
 
     XCTAssertEqual(dispatched, payloads.count)
     XCTAssertEqual(savedCursors, (1 ... payloads.count).map { "cursor-\($0)" })
+  }
+
+  func testManagerActionFactoriesReachEveryCanonicalDurableArm() async throws {
+    let did = try DID(didString: "did:plc:manager-action-test")
+    let message = try XCTUnwrap(
+      MLSCanonicalTransportAdapter.projectMessageView(from: makeApplicationEntry())
+    )
+    let typing = BlueCatbirdChatDefs.TypingEvent(
+      typingId: "typing-1",
+      conversationId: "conversation-1",
+      actorDid: did,
+      actorDeviceId: "device-1",
+      isTyping: true,
+      expiresAt: expiry
+    )
+    let events: [MLSCanonicalTransportAdapter.MLSCanonicalDurableEvent] = [
+      .typing(typing),
+      .messageAvailable(
+        .init(conversationId: "conversation-1", seq: message.seq),
+        cursor: "cursor-1",
+        messages: [message]
+      ),
+      .conversationChanged(.init(conversationId: "conversation-1")),
+      .conversationClosed(
+        .init(conversationId: "conversation-1", conversationKind: .value_group, terminalSeq: 8)
+      ),
+      .welcomeAvailable(.init(welcomeId: "welcome-1", conversationId: "conversation-1")),
+      .welcomeDisposition(.init(welcomeId: "welcome-1", status: .value_rejected)),
+      .resetRequested(.init(resetRequestId: "reset-1", conversationId: "conversation-1")),
+      .leafRecovery(
+        .init(recoveryRequestId: "recovery-1", conversationId: "conversation-1", status: .value_open)
+      ),
+      .leaveRequest(
+        .init(leaveRequestId: "leave-1", conversationId: "conversation-1", status: .value_pending)
+      ),
+      .accessEnded(
+        .init(
+          conversationId: "conversation-1",
+          membershipIntervalId: "interval-1",
+          userDid: did,
+          deviceId: "device-1",
+          terminalSeq: 10
+        )
+      ),
+      .watermark(.init(issuedAt: expiry)),
+    ]
+
+    var websocketDispatched = 0
+    let websocketHandler = MLSWebSocketManager.EventHandler(
+      onCanonicalDurableEvent: { _ in websocketDispatched += 1 }
+    )
+    let websocketActions = MLSWebSocketManager.canonicalDurableEventActions(for: websocketHandler)
+    for event in events {
+      try await websocketActions.dispatch(event)
+    }
+    XCTAssertEqual(websocketDispatched, events.count)
+
+    var sseDispatched = 0
+    let sseHandler = MLSEventStreamManager.EventHandler(
+      onCanonicalDurableEvent: { _ in sseDispatched += 1 }
+    )
+    let sseActions = MLSEventStreamManager.canonicalDurableEventActions(for: sseHandler)
+    for event in events {
+      try await sseActions.dispatch(event)
+    }
+    XCTAssertEqual(sseDispatched, events.count)
+
+    let missingActions = MLSWebSocketManager.canonicalDurableEventActions(
+      for: MLSWebSocketManager.EventHandler()
+    )
+    do {
+      try await missingActions.dispatch(.welcomeAvailable(.init(
+        welcomeId: "welcome-1",
+        conversationId: "conversation-1"
+      )))
+      XCTFail("a required canonical action must not be treated as a successful no-op")
+    } catch let error as MLSCanonicalActionMissingError {
+      XCTAssertEqual(error, .welcomeAvailable)
+    }
   }
 
   func testDurableHandlerFailureDoesNotAdvanceCursor() async {
@@ -205,6 +473,229 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertTrue(savedCursors.isEmpty)
   }
 
+  func testCanonicalStreamLoopStopsFailedStreamAndReplaysFromUnadvancedCursor() async throws {
+    let unknown = BlueCatbirdChatSubscribeEvents.Message.unexpected(.object([:]))
+    let valid = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
+      .init(
+        previousCursor: "cursor-0",
+        cursor: "cursor-1",
+        payload: .blueCatbirdChatDefsConversationChangedEvent(
+          .init(conversationId: "conversation-1")
+        ),
+        createdAt: expiry
+      )
+    )
+    let firstStream = AsyncThrowingStream<BlueCatbirdChatSubscribeEvents.Message, Error> {
+      continuation in
+      continuation.yield(unknown)
+      continuation.yield(valid)
+      continuation.finish()
+    }
+    var handled = 0
+    var savedCursors: [String] = []
+    let firstOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
+      firstStream,
+      shouldStop: { false },
+      handle: { message in
+        await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+          message,
+          subscriptionKey: "conversation-1",
+          expectedPreviousCursor: "cursor-0",
+          loadEntries: { _, _ in [] },
+          onDurableEvent: { _ in handled += 1 },
+          saveCursor: { savedCursors.append($0) }
+        )
+      }
+    )
+
+    guard case let .reconnect(_, eventCount: firstEventCount) = firstOutcome else {
+      return XCTFail("failed stream must terminate at the first reconnect request")
+    }
+    XCTAssertEqual(firstEventCount, 1)
+    XCTAssertEqual(handled, 0)
+    XCTAssertTrue(savedCursors.isEmpty)
+
+    let replayStream = AsyncThrowingStream<BlueCatbirdChatSubscribeEvents.Message, Error> {
+      continuation in
+      continuation.yield(valid)
+      continuation.finish()
+    }
+    let replayOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
+      replayStream,
+      shouldStop: { false },
+      handle: { message in
+        await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+          message,
+          subscriptionKey: "conversation-1",
+          expectedPreviousCursor: "cursor-0",
+          loadEntries: { _, _ in [] },
+          onDurableEvent: { _ in handled += 1 },
+          saveCursor: { savedCursors.append($0) }
+        )
+      }
+    )
+
+    guard case let .ended(eventCount: replayEventCount) = replayOutcome else {
+      return XCTFail("replayed stream must finish after the durable cursor advances")
+    }
+    XCTAssertEqual(replayEventCount, 1)
+    XCTAssertEqual(handled, 1)
+    XCTAssertEqual(savedCursors, ["cursor-1"])
+  }
+
+  func testDurableEnvelopePreviousCursorMustMatchFence() async {
+    let envelope = BlueCatbirdChatDefs.EventEnvelope(
+      previousCursor: "cursor-before-fence",
+      cursor: "cursor-1",
+      payload: .blueCatbirdChatDefsConversationChangedEvent(
+        .init(conversationId: "conversation-1")
+      ),
+      createdAt: expiry
+    )
+    var savedCursors: [String] = []
+
+    let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      .blueCatbirdChatDefsEventEnvelope(envelope),
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: "cursor-0",
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in XCTFail("fence mismatch must not dispatch") },
+      saveCursor: { cursor in
+        savedCursors.append(cursor)
+      }
+    )
+
+    guard case .reconnect(let error) = result else {
+      return XCTFail("previous cursor mismatch must reconnect")
+    }
+    XCTAssertTrue(error is MLSCanonicalCursorError)
+    XCTAssertTrue(savedCursors.isEmpty)
+  }
+
+  func testDurableCursorPersistenceFailureRequestsReconnect() async {
+    let envelope = BlueCatbirdChatDefs.EventEnvelope(
+      previousCursor: "cursor-0",
+      cursor: "cursor-1",
+      payload: .blueCatbirdChatDefsConversationChangedEvent(
+        .init(conversationId: "conversation-1")
+      ),
+      createdAt: expiry
+    )
+
+    let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      .blueCatbirdChatDefsEventEnvelope(envelope),
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: "cursor-0",
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in },
+      saveCursor: { _ in
+        throw DurableEventTestError.persistenceFailed
+      }
+    )
+
+    guard case .reconnect(let error) = result else {
+      return XCTFail("cursor persistence failure must reconnect")
+    }
+    XCTAssertEqual(error as? DurableEventTestError, .persistenceFailed)
+  }
+
+  @MainActor
+  func testCursorStoreFailureIsPropagatedBeforeInMemoryCommit() async {
+    let store = RecordingCursorStore(failure: .persistenceFailed)
+    var inMemoryCursors: [String] = []
+
+    do {
+      try await MLSCanonicalTransportAdapter.persistCanonicalCursor(
+        "cursor-1",
+        for: "conversation-1",
+        store: store
+      )
+      inMemoryCursors.append("cursor-1")
+      XCTFail("cursor-store failure must propagate before the in-memory fence changes")
+    } catch {
+      XCTAssertEqual(error as? DurableEventTestError, .persistenceFailed)
+    }
+    XCTAssertTrue(inMemoryCursors.isEmpty)
+    XCTAssertTrue(store.savedCursors.isEmpty)
+
+    store.failure = nil
+    try? await MLSCanonicalTransportAdapter.persistCanonicalCursor(
+      "cursor-1",
+      for: "conversation-1",
+      store: store
+    )
+    XCTAssertEqual(store.savedCursors, ["cursor-1"])
+  }
+
+  func testMessageAvailableMustProjectAdvertisedSequenceBeforeAdvance() async {
+    let envelope = BlueCatbirdChatDefs.EventEnvelope(
+      previousCursor: "cursor-0",
+      cursor: "cursor-1",
+      payload: .blueCatbirdChatDefsMessageAvailableEvent(
+        .init(conversationId: "conversation-1", seq: 4)
+      ),
+      createdAt: expiry
+    )
+    var savedCursors: [String] = []
+
+    let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      .blueCatbirdChatDefsEventEnvelope(envelope),
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: "cursor-0",
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { _ in XCTFail("unprojected messageAvailable must not dispatch") },
+      saveCursor: { savedCursors.append($0) }
+    )
+
+    guard case .reconnect(let error) = result else {
+      return XCTFail("missing advertised sequence must reconnect")
+    }
+    XCTAssertTrue(error is MLSCanonicalMessageAvailabilityError)
+    XCTAssertTrue(savedCursors.isEmpty)
+  }
+
+  func testMissingRequiredDurableActionRequestsReconnect() async {
+    let actions = MLSCanonicalDurableEventActions(
+      onConversationChanged: nil,
+      onConversationClosed: nil,
+      onMessageAvailable: nil,
+      onWelcomeAvailable: nil,
+      onWelcomeDisposition: nil,
+      onResetRequested: nil,
+      onLeafRecovery: nil,
+      onLeaveRequest: nil,
+      onAccessEnded: nil,
+      onWatermark: nil,
+      onTyping: nil
+    )
+    let envelope = BlueCatbirdChatDefs.EventEnvelope(
+      previousCursor: "cursor-0",
+      cursor: "cursor-1",
+      payload: .blueCatbirdChatDefsConversationChangedEvent(
+        .init(conversationId: "conversation-1")
+      ),
+      createdAt: expiry
+    )
+    var savedCursors: [String] = []
+
+    let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      .blueCatbirdChatDefsEventEnvelope(envelope),
+      subscriptionKey: "conversation-1",
+      expectedPreviousCursor: "cursor-0",
+      loadEntries: { _, _ in [] },
+      onDurableEvent: { event in
+        try await actions.dispatch(event)
+      },
+      saveCursor: { savedCursors.append($0) }
+    )
+
+    guard case .reconnect(let error) = result else {
+      return XCTFail("missing required action must reconnect")
+    }
+    XCTAssertTrue(error is MLSCanonicalActionMissingError)
+    XCTAssertTrue(savedCursors.isEmpty)
+  }
+
   func testUnknownDurablePayloadDoesNotAdvanceCursorAndRequestsReconnect() async {
     let envelope = BlueCatbirdChatDefs.EventEnvelope(
       previousCursor: "cursor-0",
@@ -226,6 +717,32 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       return XCTFail("unknown durable payload must request reconnect")
     }
     XCTAssertTrue(error is MLSUnsupportedDurableEventError)
+    XCTAssertTrue(savedCursors.isEmpty)
+  }
+
+  func testLegacyCompatibilityHandlerRejectsUnhandledDurableVariant() async {
+    let envelope = BlueCatbirdChatDefs.EventEnvelope(
+      previousCursor: "cursor-0",
+      cursor: "cursor-1",
+      payload: .blueCatbirdChatDefsConversationChangedEvent(
+        .init(conversationId: "conversation-1")
+      ),
+      createdAt: expiry
+    )
+    var savedCursors: [String] = []
+    var errors: [Error] = []
+
+    await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+      .blueCatbirdChatDefsEventEnvelope(envelope),
+      subscriptionKey: "conversation-1",
+      loadEntries: { _, _ in [] },
+      onMessage: { _ in XCTFail("unhandled durable variant must not reach legacy message callback") },
+      onError: { errors.append($0) },
+      saveCursor: { savedCursors.append($0) }
+    )
+
+    XCTAssertEqual(errors.count, 1)
+    XCTAssertTrue(errors[0] is MLSCanonicalActionMissingError)
     XCTAssertTrue(savedCursors.isEmpty)
   }
 
@@ -263,14 +780,17 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
   private func conversationPage(
     cursor: String?,
     session: String = "session-1",
-    omitContinuation: Bool = false
+    omitContinuation: Bool = false,
+    repeatedContinuation: Bool = false
   ) -> BlueCatbirdChatGetConversations.Output {
     BlueCatbirdChatGetConversations.Output(
       items: [],
       inventorySessionId: session,
       snapshotEventCursor: "event-1",
-      nextPageCursor: omitContinuation ? nil : (cursor == nil ? "conversation-2" : nil),
-      hasMore: cursor == nil,
+      nextPageCursor: omitContinuation
+        ? nil
+        : (repeatedContinuation ? "conversation-2" : (cursor == nil ? "conversation-2" : nil)),
+      hasMore: repeatedContinuation || cursor == nil,
       snapshotExpiresAt: expiry
     )
   }
@@ -302,8 +822,103 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       snapshotExpiresAt: expiry
     )
   }
+
+  private func makeCoordinate(conversationId: String) -> BlueCatbirdChatDefs.ConversationCoordinates {
+    BlueCatbirdChatDefs.ConversationCoordinates(
+      conversationId: conversationId,
+      generation: 1,
+      stateVersion: 1,
+      groupId: Bytes(data: Data([0x02])),
+      epoch: 1,
+      groupContextHash: Bytes(data: Data([0x03])),
+      confirmationTag: Bytes(data: Data([0x04])),
+      lifecycle: .value_active
+    )
+  }
+
+  private func makeApplicationEntry() -> BlueCatbirdChatDefs.ConversationEntry {
+    let did = try! DID(didString: "did:plc:durable-event-test")
+    let prior = BlueCatbirdChatDefs.MlsAadPriorContext(
+      conversationId: Bytes(data: Data([0x01])),
+      generation: 1,
+      stateVersion: 1,
+      groupId: Bytes(data: Data([0x02])),
+      epoch: 7,
+      groupContextHash: Bytes(data: Data([0x03])),
+      confirmationTag: Bytes(data: Data([0x04])),
+      lifecycle: "active"
+    )
+    let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
+      conversationId: "conversation-1",
+      generation: 1,
+      stateVersion: 1,
+      groupId: Bytes(data: Data([0x02])),
+      epoch: 7,
+      groupContextHash: Bytes(data: Data([0x03])),
+      confirmationTag: Bytes(data: Data([0x04])),
+      lifecycle: .value_active
+    )
+    let body = BlueCatbirdChatDefs.ApplicationSendBody(
+      signatureDomain: "blue.catbird.chat.application",
+      messageId: "message-1",
+      actorDid: did,
+      actorDeviceId: "device-1",
+      keyId: "key-1",
+      authGeneration: 1,
+      prior: coordinates,
+      aad: BlueCatbirdChatDefs.ApplicationAad(
+        protocolVersion: .value_1,
+        conversationId: Bytes(data: Data([0x01])),
+        generation: 1,
+        messageId: Bytes(data: Data([0x06])),
+        prior: prior
+      ),
+      applicationMessage: BlueCatbirdChatDefs.PrivateApplicationMessage(
+        framing: "mls",
+        contentType: "application/octet-stream",
+        bytes: Bytes(data: Data([0xAA, 0xBB])),
+        sha256: Bytes(data: Data([0x05]))
+      ),
+      blobBindings: [],
+      signedAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_000))
+    )
+    return .blueCatbirdChatDefsApplicationEntry(
+      BlueCatbirdChatDefs.ApplicationEntry(
+        entryId: "entry-1",
+        conversationId: "conversation-1",
+        seq: 4,
+        signedRequest: BlueCatbirdChatDefs.SignedApplicationSend(
+          body: .blueCatbirdChatDefsApplicationSendBody(body),
+          signature: Bytes(data: Data([0x07]))
+        ),
+        receivedAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_001))
+      )
+    )
+  }
 }
 
 private enum DurableEventTestError: Error, Equatable {
   case handlerFailed
+  case persistenceFailed
+}
+
+@MainActor
+private final class RecordingCursorStore: MLSEventCursorStore {
+  var failure: DurableEventTestError?
+  var savedCursors: [String] = []
+
+  init(failure: DurableEventTestError? = nil) {
+    self.failure = failure
+  }
+
+  func getCursor(for _: String, eventType _: String) throws -> String? {
+    savedCursors.last
+  }
+
+  func updateCursor(for _: String, cursor: String, eventType _: String) throws {
+    if let failure {
+      throw failure
+    }
+    savedCursors.append(cursor)
+  }
 }

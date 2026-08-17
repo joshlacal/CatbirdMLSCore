@@ -38,6 +38,19 @@ public actor MLSEventStreamManager {
     }
 
     public struct EventHandler {
+        /// Canonical inventory actions. Every item returned by the aggregate
+        /// must reach one of these concrete reconciliation closures before the
+        /// snapshot cursor is installed.
+        public var onCanonicalConversationInventoryState:
+            ((BlueCatbirdChatDefs.ConversationState) async throws -> Void)?
+        public var onCanonicalConversationRemovalTombstone:
+            ((BlueCatbirdChatDefs.ConversationRemovalTombstone) async throws -> Void)?
+        public var onCanonicalConversationCloseTombstone:
+            ((BlueCatbirdChatDefs.ConversationCloseTombstone) async throws -> Void)?
+        public var onCanonicalPendingWelcome:
+            ((BlueCatbirdChatDefs.WelcomeView) async throws -> Void)?
+        public var onCanonicalLeafRecovery:
+            ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)?
         /// Canonical clean-chat durable events. This is the typed reconciliation
         /// seam for events that have no legacy MLS-chat DTO equivalent.
         public var onCanonicalDurableEvent:
@@ -67,6 +80,11 @@ public actor MLSEventStreamManager {
         public init() {}
 
         public init(
+            onCanonicalConversationInventoryState: ((BlueCatbirdChatDefs.ConversationState) async throws -> Void)? = nil,
+            onCanonicalConversationRemovalTombstone: ((BlueCatbirdChatDefs.ConversationRemovalTombstone) async throws -> Void)? = nil,
+            onCanonicalConversationCloseTombstone: ((BlueCatbirdChatDefs.ConversationCloseTombstone) async throws -> Void)? = nil,
+            onCanonicalPendingWelcome: ((BlueCatbirdChatDefs.WelcomeView) async throws -> Void)? = nil,
+            onCanonicalLeafRecovery: ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)? = nil,
             onCanonicalDurableEvent: ((MLSCanonicalTransportAdapter.MLSCanonicalDurableEvent) async throws -> Void)? = nil,
             onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)? = nil,
             onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)? = nil,
@@ -85,6 +103,11 @@ public actor MLSEventStreamManager {
             onError: ((Error) async -> Void)? = nil,
             onReconnected: (() async -> Void)? = nil
         ) {
+            self.onCanonicalConversationInventoryState = onCanonicalConversationInventoryState
+            self.onCanonicalConversationRemovalTombstone = onCanonicalConversationRemovalTombstone
+            self.onCanonicalConversationCloseTombstone = onCanonicalConversationCloseTombstone
+            self.onCanonicalPendingWelcome = onCanonicalPendingWelcome
+            self.onCanonicalLeafRecovery = onCanonicalLeafRecovery
             self.onCanonicalDurableEvent = onCanonicalDurableEvent
             self.onMessage = onMessage
             self.onReaction = onReaction
@@ -295,6 +318,10 @@ public actor MLSEventStreamManager {
                 // session and an exact snapshot cursor in both ticket and
                 // upgrade. Legacy SSE has no equivalent cursor binding.
                 let inventory = try await apiClient.getCanonicalInventoryAggregateSnapshot(limit: 100)
+                guard let handler = eventHandlers[convoId] else {
+                    throw MLSCanonicalInventoryActionMissingError.conversationState
+                }
+                try await reconcileCanonicalInventory(inventory, with: handler)
                 let sessionCursor = inventory.snapshotEventCursor
                 let resumeCursor = MLSCanonicalTransportAdapter.reconciledResumeCursor(
                     savedCursor: latestSavedCursor,
@@ -318,8 +345,13 @@ public actor MLSEventStreamManager {
                     cursor: resumeCursor
                 )
                 if latestSavedCursor != resumeCursor {
-                    saveCursor(resumeCursor, for: convoId)
+                    try await saveCursor(resumeCursor, for: convoId)
                 }
+                // The snapshot fence is now the durable replay position. Keep
+                // the in-flight expectation aligned with the cursor persisted
+                // above; otherwise the first event after a reconnect would be
+                // compared with the stale pre-snapshot cursor.
+                latestSavedCursor = resumeCursor
 
                 connectionState[convoId] = .connected
                 print("[SSE] Connected to: \(convoId.prefix(12))... - entering event loop")
@@ -336,24 +368,44 @@ public actor MLSEventStreamManager {
                 // Process events from stream
                 print("[SSE] Starting event loop for: \(convoId.prefix(12))..., waiting for events...")
                 logger.info("📡 SSE: Starting event loop for convoId: \(convoId)")
-                var eventCount = 0
-                for try await output in eventStream {
-                    // Check for graceful shutdown signal
-                    if shouldStop[convoId] == true {
-                        logger.info("📡 SSE: Graceful shutdown requested for: \(convoId)")
-                        break
+                var reconnectRequested = false
+                let loopOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
+                    eventStream,
+                    shouldStop: { await self.shouldStop[convoId] == true },
+                    handle: { output in
+                        let result = await self.handleCanonicalEvent(
+                            output,
+                            for: convoId,
+                            expectedPreviousCursor: latestSavedCursor ?? resumeCursor
+                        )
+                        if case .handled = result {
+                            latestSavedCursor = await self.lastCursor[convoId] ?? latestSavedCursor
+                        }
+                        return result
                     }
-
-                    eventCount += 1
-                    print("[SSE] 📡 Event #\(eventCount) received for: \(convoId.prefix(12))...")
-                    logger.info("📡 SSE: Event #\(eventCount) received from stream for convoId: \(convoId)")
-                    await handleCanonicalEvent(output, for: convoId)
+                )
+                let eventCount: Int
+                switch loopOutcome {
+                case let .ended(count), let .stopped(count):
+                    eventCount = count
+                case let .reconnect(_, count):
+                    eventCount = count
+                    reconnectRequested = true
                 }
 
                 // Check if we're stopping gracefully
                 if shouldStop[convoId] == true {
                     logger.info("📡 SSE: Exiting loop due to graceful shutdown for: \(convoId)")
                     break
+                }
+
+                if reconnectRequested {
+                    reconnectAttempts += 1
+                    connectionState[convoId] = .reconnecting
+                    logger.info(
+                        "📡 SSE: Reconnecting immediately after canonical event failure for \(convoId) (attempt \(reconnectAttempts))"
+                    )
+                    continue
                 }
 
                 print("[SSE] Stream ended for: \(convoId.prefix(12))..., received \(eventCount) events, duration: \(Date().timeIntervalSince(connectionStartTime))s")
@@ -429,17 +481,19 @@ public actor MLSEventStreamManager {
     /// Dispatch one canonical event through the shared availability handler.
     private func handleCanonicalEvent(
         _ message: BlueCatbirdChatSubscribeEvents.Message,
-        for convoId: String
-    ) async {
+        for convoId: String,
+        expectedPreviousCursor: String
+    ) async -> MLSCanonicalTransportAdapter.MLSCanonicalStreamHandlingResult {
         guard let handler = eventHandlers[convoId] else {
             logger.warning("📡 SSE: No handler found for canonical stream \(convoId)")
-            return
+            return .reconnect(MLSCanonicalInventoryActionMissingError.conversationState)
         }
 
         let apiClient = self.apiClient
         let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
             message,
             subscriptionKey: convoId,
+            expectedPreviousCursor: expectedPreviousCursor,
             loadEntries: { conversationId, afterSeq in
                 try await apiClient.getCanonicalEntries(
                     conversationId: conversationId,
@@ -448,12 +502,59 @@ public actor MLSEventStreamManager {
                 ).entries
             },
             onDurableEvent: { event in
-                try await handler.onCanonicalDurableEvent?(event)
-                guard case let .messageAvailable(_, cursor, messages) = event else {
+                try await Self.canonicalDurableEventActions(for: handler).dispatch(event)
+            },
+            saveCursor: { cursor in
+                try await self.saveCursor(cursor, for: convoId)
+            }
+        )
+        if case let .reconnect(error) = result {
+            await handler.onError?(error)
+        }
+        return result
+    }
+
+    private func reconcileCanonicalInventory(
+        _ snapshot: MLSCanonicalInventorySnapshot,
+        with handler: EventHandler
+    ) async throws {
+        try await MLSCanonicalInventoryReconciler.reconcile(
+            snapshot,
+            actions: MLSCanonicalInventoryActionSet(
+                onConversationState: handler.onCanonicalConversationInventoryState,
+                onConversationRemoval: handler.onCanonicalConversationRemovalTombstone,
+                onConversationClose: handler.onCanonicalConversationCloseTombstone,
+                onPendingWelcome: handler.onCanonicalPendingWelcome,
+                onLeafRecovery: handler.onCanonicalLeafRecovery
+            )
+        )
+    }
+
+    /// Build the typed action table used by the stream loop. This is internal
+    /// so Core tests and future Core consumers can prove that every generated
+    /// arm has a reachable action; it deliberately does not fabricate legacy
+    /// DTOs for canonical events whose shapes do not match them.
+    internal static func canonicalDurableEventActions(
+        for handler: EventHandler
+    ) -> MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions {
+        let generic = handler.onCanonicalDurableEvent
+        return MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions(
+            onConversationChanged: generic.map { callback in
+                { event in try await callback(.conversationChanged(event)) }
+            },
+            onConversationClosed: generic.map { callback in
+                { event in try await callback(.conversationClosed(event)) }
+            },
+            onMessageAvailable: { available, cursor, messages in
+                if let generic {
+                    try await generic(.messageAvailable(available, cursor: cursor, messages: messages))
                     return
                 }
+                guard let onMessage = handler.onMessage else {
+                    throw MLSCanonicalActionMissingError.messageAvailable
+                }
                 for message in messages {
-                    await handler.onMessage?(
+                    await onMessage(
                         BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
                             cursor: cursor,
                             message: message,
@@ -463,33 +564,59 @@ public actor MLSEventStreamManager {
                     )
                 }
             },
-            saveCursor: { cursor in
-                self.saveCursor(cursor, for: convoId)
+            onWelcomeAvailable: generic.map { callback in
+                { event in try await callback(.welcomeAvailable(event)) }
+            },
+            onWelcomeDisposition: generic.map { callback in
+                { event in try await callback(.welcomeDisposition(event)) }
+            },
+            onResetRequested: generic.map { callback in
+                { event in try await callback(.resetRequested(event)) }
+            },
+            onLeafRecovery: generic.map { callback in
+                { event in try await callback(.leafRecovery(event)) }
+            },
+            onLeaveRequest: generic.map { callback in
+                { event in try await callback(.leaveRequest(event)) }
+            },
+            onAccessEnded: generic.map { callback in
+                { event in try await callback(.accessEnded(event)) }
+            },
+            onWatermark: generic.map { callback in
+                { event in try await callback(.watermark(event)) }
+            },
+            onTyping: { event in
+                if let generic {
+                    try await generic(.typing(event))
+                } else if let onTyping = handler.onTyping {
+                    guard let did = try? DID(didString: event.actorDid.description) else {
+                        throw MLSCanonicalTypingProjectionError.invalidIdentity
+                    }
+                    await onTyping(
+                        BlueCatbirdMlsChatSubscribeEvents.TypingEvent(
+                            cursor: event.typingId,
+                            convoId: String(describing: event.conversationId),
+                            did: did,
+                            isTyping: event.isTyping,
+                        )
+                    )
+                } else {
+                    throw MLSCanonicalActionMissingError.typing
+                }
             }
         )
-        if case let .reconnect(error) = result {
-            await handler.onError?(error)
-        }
     }
 
 
 
     /// Save cursor to both in-memory cache and persistent storage
-    private func saveCursor(_ cursor: String, for convoId: String) {
+    private func saveCursor(_ cursor: String, for convoId: String) async throws {
+        try await MLSCanonicalTransportAdapter.persistCanonicalCursor(
+            cursor,
+            for: convoId,
+            store: cursorStore
+        )
         lastCursor[convoId] = cursor
-
-        // Persist asynchronously to avoid blocking event processing
-        if let store = cursorStore {
-            Task {
-                do {
-                    try await MainActor.run {
-                        try store.updateCursor(for: convoId, cursor: cursor)
-                    }
-                } catch {
-                    logger.warning("⚠️ Failed to persist cursor for \(convoId): \(error.localizedDescription)")
-                }
-            }
-        }
     }
 }
 

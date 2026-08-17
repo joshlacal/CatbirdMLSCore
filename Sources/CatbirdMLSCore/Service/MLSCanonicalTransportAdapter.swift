@@ -161,6 +161,196 @@ public enum MLSCanonicalTransportAdapter {
     case watermark(BlueCatbirdChatDefs.WatermarkEvent)
   }
 
+  /// Strongly typed action table for the generated durable union. Stream
+  /// managers may adapt these actions to existing conversation, Welcome,
+  /// reset, recovery, leave, access, and watermark handlers. Missing actions
+  /// are failures, never successful no-ops.
+  public struct MLSCanonicalDurableEventActions {
+    public typealias ConversationChangedHandler =
+      (BlueCatbirdChatDefs.ConversationChangedEvent) async throws -> Void
+    public typealias ConversationClosedHandler =
+      (BlueCatbirdChatDefs.ConversationClosedEvent) async throws -> Void
+    public typealias MessageAvailableHandler =
+      (
+        BlueCatbirdChatDefs.MessageAvailableEvent,
+        String,
+        [BlueCatbirdMlsChatDefs.MessageView]
+      ) async throws -> Void
+    public typealias WelcomeAvailableHandler =
+      (BlueCatbirdChatDefs.WelcomeAvailableEvent) async throws -> Void
+    public typealias WelcomeDispositionHandler =
+      (BlueCatbirdChatDefs.WelcomeDispositionEvent) async throws -> Void
+    public typealias ResetRequestedHandler =
+      (BlueCatbirdChatDefs.ResetRequestedEvent) async throws -> Void
+    public typealias LeafRecoveryHandler =
+      (BlueCatbirdChatDefs.LeafRecoveryEvent) async throws -> Void
+    public typealias LeaveRequestHandler =
+      (BlueCatbirdChatDefs.LeaveRequestEvent) async throws -> Void
+    public typealias AccessEndedHandler =
+      (BlueCatbirdChatDefs.AccessEndedEvent) async throws -> Void
+    public typealias WatermarkHandler =
+      (BlueCatbirdChatDefs.WatermarkEvent) async throws -> Void
+    public typealias TypingHandler =
+      (BlueCatbirdChatDefs.TypingEvent) async throws -> Void
+
+    public var onConversationChanged: ConversationChangedHandler?
+    public var onConversationClosed: ConversationClosedHandler?
+    public var onMessageAvailable: MessageAvailableHandler?
+    public var onWelcomeAvailable: WelcomeAvailableHandler?
+    public var onWelcomeDisposition: WelcomeDispositionHandler?
+    public var onResetRequested: ResetRequestedHandler?
+    public var onLeafRecovery: LeafRecoveryHandler?
+    public var onLeaveRequest: LeaveRequestHandler?
+    public var onAccessEnded: AccessEndedHandler?
+    public var onWatermark: WatermarkHandler?
+    public var onTyping: TypingHandler?
+
+    public init(
+      onConversationChanged: ConversationChangedHandler? = nil,
+      onConversationClosed: ConversationClosedHandler? = nil,
+      onMessageAvailable: MessageAvailableHandler? = nil,
+      onWelcomeAvailable: WelcomeAvailableHandler? = nil,
+      onWelcomeDisposition: WelcomeDispositionHandler? = nil,
+      onResetRequested: ResetRequestedHandler? = nil,
+      onLeafRecovery: LeafRecoveryHandler? = nil,
+      onLeaveRequest: LeaveRequestHandler? = nil,
+      onAccessEnded: AccessEndedHandler? = nil,
+      onWatermark: WatermarkHandler? = nil,
+      onTyping: TypingHandler? = nil
+    ) {
+      self.onConversationChanged = onConversationChanged
+      self.onConversationClosed = onConversationClosed
+      self.onMessageAvailable = onMessageAvailable
+      self.onWelcomeAvailable = onWelcomeAvailable
+      self.onWelcomeDisposition = onWelcomeDisposition
+      self.onResetRequested = onResetRequested
+      self.onLeafRecovery = onLeafRecovery
+      self.onLeaveRequest = onLeaveRequest
+      self.onAccessEnded = onAccessEnded
+      self.onWatermark = onWatermark
+      self.onTyping = onTyping
+    }
+
+    internal func dispatch(_ event: MLSCanonicalDurableEvent) async throws {
+      switch event {
+      case let .typing(typing):
+        guard let onTyping else { throw MLSCanonicalActionMissingError.typing }
+        try await onTyping(typing)
+      case let .messageAvailable(available, cursor, messages):
+        guard let onMessageAvailable else {
+          throw MLSCanonicalActionMissingError.messageAvailable
+        }
+        try await onMessageAvailable(available, cursor, messages)
+      case let .conversationChanged(changed):
+        guard let onConversationChanged else {
+          throw MLSCanonicalActionMissingError.conversationChanged
+        }
+        try await onConversationChanged(changed)
+      case let .conversationClosed(closed):
+        guard let onConversationClosed else {
+          throw MLSCanonicalActionMissingError.conversationClosed
+        }
+        try await onConversationClosed(closed)
+      case let .welcomeAvailable(available):
+        guard let onWelcomeAvailable else {
+          throw MLSCanonicalActionMissingError.welcomeAvailable
+        }
+        try await onWelcomeAvailable(available)
+      case let .welcomeDisposition(disposition):
+        guard let onWelcomeDisposition else {
+          throw MLSCanonicalActionMissingError.welcomeDisposition
+        }
+        try await onWelcomeDisposition(disposition)
+      case let .resetRequested(reset):
+        guard let onResetRequested else {
+          throw MLSCanonicalActionMissingError.resetRequested
+        }
+        try await onResetRequested(reset)
+      case let .leafRecovery(recovery):
+        guard let onLeafRecovery else {
+          throw MLSCanonicalActionMissingError.leafRecovery
+        }
+        try await onLeafRecovery(recovery)
+      case let .leaveRequest(leave):
+        guard let onLeaveRequest else {
+          throw MLSCanonicalActionMissingError.leaveRequest
+        }
+        try await onLeaveRequest(leave)
+      case let .accessEnded(accessEnded):
+        guard let onAccessEnded else {
+          throw MLSCanonicalActionMissingError.accessEnded
+        }
+        try await onAccessEnded(accessEnded)
+      case let .watermark(watermark):
+        guard let onWatermark else {
+          throw MLSCanonicalActionMissingError.watermark
+        }
+        try await onWatermark(watermark)
+      }
+    }
+  }
+
+  internal enum MLSCanonicalActionMissingError: Error, LocalizedError, Equatable {
+    case typing
+    case messageAvailable
+    case conversationChanged
+    case conversationClosed
+    case welcomeAvailable
+    case welcomeDisposition
+    case resetRequested
+    case leafRecovery
+    case leaveRequest
+    case accessEnded
+    case watermark
+
+    internal var errorDescription: String? {
+      switch self {
+      case .typing: return "No canonical typing action is installed"
+      case .messageAvailable: return "No canonical messageAvailable action is installed"
+      case .conversationChanged: return "No canonical conversationChanged action is installed"
+      case .conversationClosed: return "No canonical conversationClosed action is installed"
+      case .welcomeAvailable: return "No canonical welcomeAvailable action is installed"
+      case .welcomeDisposition: return "No canonical welcomeDisposition action is installed"
+      case .resetRequested: return "No canonical resetRequested action is installed"
+      case .leafRecovery: return "No canonical leafRecovery action is installed"
+      case .leaveRequest: return "No canonical leaveRequest action is installed"
+      case .accessEnded: return "No canonical accessEnded action is installed"
+      case .watermark: return "No canonical watermark action is installed"
+      }
+    }
+  }
+
+  internal enum MLSCanonicalTypingProjectionError: Error, LocalizedError, Equatable {
+    case invalidIdentity
+
+    internal var errorDescription: String? {
+      "Canonical typing actor DID could not be projected to the legacy callback"
+    }
+  }
+
+  internal enum MLSCanonicalCursorError: Error, LocalizedError, Equatable {
+    case previousCursorMismatch(expected: String, actual: String)
+    case cursorDidNotAdvance(String)
+
+    internal var errorDescription: String? {
+      switch self {
+      case let .previousCursorMismatch(expected, actual):
+        return "Canonical event previous cursor \(actual) does not match expected fence \(expected)"
+      case let .cursorDidNotAdvance(cursor):
+        return "Canonical event cursor did not advance: \(cursor)"
+      }
+    }
+  }
+
+  internal struct MLSCanonicalMessageAvailabilityError: Error, LocalizedError, Equatable {
+    internal let conversationId: String
+    internal let sequence: Int
+
+    internal var errorDescription: String? {
+      "messageAvailable seq \(sequence) for \(conversationId) was not fetched and projected"
+    }
+  }
+
   internal struct MLSUnsupportedDurableEventError: Error, LocalizedError, Equatable {
     internal let typeIdentifier: String
 
@@ -188,6 +378,53 @@ public enum MLSCanonicalTransportAdapter {
     }
   }
 
+  /// Outcome of consuming one inner transport stream. Returning from this
+  /// helper releases the stream iterator before a manager starts its next
+  /// ticketed attempt, so a failed handler cannot leave a producer running
+  /// while a later cursor is persisted.
+  internal enum MLSCanonicalStreamLoopOutcome {
+    case ended(eventCount: Int)
+    case reconnect(Error, eventCount: Int)
+    case stopped(eventCount: Int)
+  }
+
+  internal static func consumeCanonicalStream(
+    _ stream: AsyncThrowingStream<BlueCatbirdChatSubscribeEvents.Message, Error>,
+    shouldStop: @escaping () async -> Bool,
+    handle: @escaping (BlueCatbirdChatSubscribeEvents.Message) async
+      -> MLSCanonicalStreamHandlingResult
+  ) async throws -> MLSCanonicalStreamLoopOutcome {
+    var eventCount = 0
+    for try await message in stream {
+      let stopRequested = await shouldStop()
+      if Task.isCancelled || stopRequested {
+        return .stopped(eventCount: eventCount)
+      }
+      eventCount += 1
+      let result = await handle(message)
+      if case let .reconnect(error) = result {
+        return .reconnect(error, eventCount: eventCount)
+      }
+    }
+    return .ended(eventCount: eventCount)
+  }
+
+  /// Persist a durable cursor before the manager updates its in-memory fence.
+  /// Keeping this ordering in one Core seam makes cursor-store failures
+  /// observable to the stream loop instead of turning them into background
+  /// best-effort writes.
+  internal static func persistCanonicalCursor(
+    _ cursor: String,
+    for conversationId: String,
+    store: MLSEventCursorStore?
+  ) async throws {
+    if let store {
+      try await MainActor.run {
+        try store.updateCursor(for: conversationId, cursor: cursor)
+      }
+    }
+  }
+
   /// Handle one generated durable envelope. The cursor is committed only once
   /// the typed handler (and any message-entry reconciliation) has succeeded.
   /// A handler failure or unknown payload requests reconnect and leaves the
@@ -196,9 +433,10 @@ public enum MLSCanonicalTransportAdapter {
   internal static func handleCanonicalStreamMessage(
     _ message: BlueCatbirdChatSubscribeEvents.Message,
     subscriptionKey: String,
+    expectedPreviousCursor: String? = nil,
     loadEntries: @escaping (String, Int) async throws -> [BlueCatbirdChatDefs.ConversationEntry],
     onDurableEvent: @escaping (MLSCanonicalDurableEvent) async throws -> Void,
-    saveCursor: @escaping (String) -> Void
+    saveCursor: @escaping (String) async throws -> Void
   ) async -> MLSCanonicalStreamHandlingResult {
     guard case let .blueCatbirdChatDefsEventEnvelope(envelope) = message else {
       if case let .blueCatbirdChatDefsTypingEvent(typing) = message {
@@ -214,12 +452,30 @@ public enum MLSCanonicalTransportAdapter {
       )
     }
 
+    if let expectedPreviousCursor,
+       envelope.previousCursor != expectedPreviousCursor
+    {
+      return .reconnect(
+        MLSCanonicalCursorError.previousCursorMismatch(
+          expected: expectedPreviousCursor,
+          actual: envelope.previousCursor
+        )
+      )
+    }
+    guard envelope.cursor != envelope.previousCursor else {
+      return .reconnect(MLSCanonicalCursorError.cursorDidNotAdvance(envelope.cursor))
+    }
+
     let event: MLSCanonicalDurableEvent
     switch envelope.payload {
     case let .blueCatbirdChatDefsMessageAvailableEvent(available):
       let conversationID = String(describing: available.conversationId)
       guard subscriptionKey == "__global__" || subscriptionKey == conversationID else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       do {
@@ -232,6 +488,14 @@ public enum MLSCanonicalTransportAdapter {
           }
           return message
         }
+        guard messages.contains(where: { $0.seq == available.seq }) else {
+          return .reconnect(
+            MLSCanonicalMessageAvailabilityError(
+              conversationId: conversationID,
+              sequence: available.seq
+            )
+          )
+        }
         event = .messageAvailable(available, cursor: envelope.cursor, messages: messages)
       } catch {
         return .reconnect(error)
@@ -241,7 +505,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: changed.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .conversationChanged(changed)
@@ -250,7 +518,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: closed.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .conversationClosed(closed)
@@ -259,7 +531,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: available.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .welcomeAvailable(available)
@@ -271,7 +547,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: reset.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .resetRequested(reset)
@@ -280,7 +560,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: recovery.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .leafRecovery(recovery)
@@ -289,7 +573,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: leave.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .leaveRequest(leave)
@@ -298,7 +586,11 @@ public enum MLSCanonicalTransportAdapter {
       guard subscriptionKey == "__global__"
         || String(describing: accessEnded.conversationId) == subscriptionKey
       else {
-        saveCursor(envelope.cursor)
+        do {
+          try await saveCursor(envelope.cursor)
+        } catch {
+          return .reconnect(error)
+        }
         return .handled
       }
       event = .accessEnded(accessEnded)
@@ -326,7 +618,11 @@ public enum MLSCanonicalTransportAdapter {
     } catch {
       return .reconnect(error)
     }
-    saveCursor(envelope.cursor)
+    do {
+      try await saveCursor(envelope.cursor)
+    } catch {
+      return .reconnect(error)
+    }
     return .handled
   }
 
@@ -339,28 +635,28 @@ public enum MLSCanonicalTransportAdapter {
     loadEntries: @escaping (String, Int) async throws -> [BlueCatbirdChatDefs.ConversationEntry],
     onMessage: @escaping (BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void,
     onError: @escaping (Error) async -> Void,
-    saveCursor: @escaping (String) -> Void
+    saveCursor: @escaping (String) async throws -> Void
   ) async {
     let result = await handleCanonicalStreamMessage(
       message,
       subscriptionKey: subscriptionKey,
       loadEntries: loadEntries,
       onDurableEvent: { event in
-        guard case let .messageAvailable(_, _, messages) = event,
-              case let .blueCatbirdChatDefsEventEnvelope(envelope) = message
-        else {
-          return
-        }
-        for message in messages {
-          await onMessage(
-            BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
-              cursor: envelope.cursor,
-              message: message,
-              ephemeral: nil,
-              epoch: message.epoch
-            )
-          )
-        }
+        let actions = MLSCanonicalDurableEventActions(
+          onMessageAvailable: { _, cursor, messages in
+            for message in messages {
+              await onMessage(
+                BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
+                  cursor: cursor,
+                  message: message,
+                  ephemeral: nil,
+                  epoch: message.epoch
+                )
+              )
+            }
+          }
+        )
+        try await actions.dispatch(event)
       },
       saveCursor: saveCursor
     )
@@ -374,3 +670,13 @@ public enum MLSCanonicalTransportAdapter {
 // tests while retaining the adapter's implementation-local declaration.
 internal typealias MLSUnsupportedDurableEventError =
   MLSCanonicalTransportAdapter.MLSUnsupportedDurableEventError
+internal typealias MLSCanonicalDurableEventActions =
+  MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions
+internal typealias MLSCanonicalActionMissingError =
+  MLSCanonicalTransportAdapter.MLSCanonicalActionMissingError
+internal typealias MLSCanonicalCursorError =
+  MLSCanonicalTransportAdapter.MLSCanonicalCursorError
+internal typealias MLSCanonicalMessageAvailabilityError =
+  MLSCanonicalTransportAdapter.MLSCanonicalMessageAvailabilityError
+internal typealias MLSCanonicalTypingProjectionError =
+  MLSCanonicalTransportAdapter.MLSCanonicalTypingProjectionError
