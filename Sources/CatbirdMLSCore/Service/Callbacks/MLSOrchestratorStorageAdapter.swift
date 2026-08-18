@@ -114,6 +114,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             conversation_id TEXT NOT NULL,
             user_did TEXT NOT NULL,
             epoch INTEGER NOT NULL,
+            sequencer_term INTEGER NOT NULL DEFAULT 0,
             commit_hash BLOB NOT NULL,
             sequencer_did TEXT NOT NULL,
             issued_at INTEGER NOT NULL,
@@ -479,6 +480,86 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  public func adoptResetPendingTarget(
+    conversationId: String,
+    expectedGeneration: Int32,
+    expectedOldTarget: String,
+    authoritativeNewTarget: String
+  ) throws -> Bool {
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET pendingNewGroupId = ?,
+              updatedAt = ?
+          WHERE conversationID = ?
+            AND pendingResetGeneration = ?
+            AND (pendingNewGroupId = ? OR pendingNewGroupId IS NULL)
+          """,
+        arguments: [authoritativeNewTarget, Date(), conversationId, Int64(expectedGeneration), expectedOldTarget]
+      )
+      return db.changesCount > 0
+    }
+  }
+
+  public func completeResetPending(
+    conversationId: String,
+    expectedGeneration: Int32,
+    expectedNewGroupIdHex: String,
+    landedEpoch: UInt64
+  ) throws -> Bool {
+    try dbPool.write { db in
+      guard let groupData = Data(hexString: expectedNewGroupIdHex) else {
+        return false
+      }
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET groupID = ?,
+              epoch = ?,
+              needsReset = 0,
+              needsRejoin = 0,
+              isUnrecoverable = 0,
+              pendingNewGroupId = NULL,
+              pendingResetGeneration = NULL,
+              updatedAt = ?
+          WHERE conversationID = ?
+            AND (pendingResetGeneration = ? OR pendingResetGeneration IS NULL)
+          """,
+        arguments: [groupData, Int64(landedEpoch), Date(), conversationId, Int64(expectedGeneration)]
+      )
+      return db.changesCount > 0
+    }
+  }
+
+  public func clearResetPendingForDelete(
+    conversationId: String,
+    expectedGeneration: Int32
+  ) throws -> Bool {
+    try dbPool.write { db in
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationModel
+          SET pendingNewGroupId = NULL,
+              pendingResetGeneration = NULL,
+              updatedAt = ?
+          WHERE conversationID = ?
+            AND (pendingResetGeneration = ? OR pendingResetGeneration IS NULL)
+          """,
+        arguments: [Date(), conversationId, Int64(expectedGeneration)]
+      )
+      return db.changesCount > 0
+    }
+  }
+
+  public func requestWelcomeReissue(
+    convoId: String,
+    recipientDeviceDid: String,
+    reason: String
+  ) throws {
+    logger.info("Welcome reissue requested for convo \(convoId), recipient \(recipientDeviceDid), reason: \(reason)")
+  }
+
   public func markNeedsRejoin(conversationId: String) throws {
     try dbPool.write { db in
       if let conversation = try MLSConversationModel
@@ -649,9 +730,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_sequencer_receipts
-            (conversation_id, user_did, epoch, commit_hash, sequencer_did, issued_at, signature)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+            (conversation_id, user_did, epoch, sequencer_term, commit_hash, sequencer_did, issued_at, signature)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(conversation_id, user_did, epoch) DO UPDATE SET
+            sequencer_term = excluded.sequencer_term,
             commit_hash = excluded.commit_hash,
             sequencer_did = excluded.sequencer_did,
             issued_at = excluded.issued_at,
@@ -661,6 +743,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           receipt.convoId,
           userDID,
           receipt.epoch,
+          Int64(receipt.sequencerTerm),
           receipt.commitHash,
           receipt.sequencerDid,
           receipt.issuedAt,
@@ -676,7 +759,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   ) throws -> [FfiSequencerReceipt] {
     try dbPool.read { db in
       var sql = """
-        SELECT conversation_id, epoch, commit_hash, sequencer_did, issued_at, signature
+        SELECT conversation_id, epoch, sequencer_term, commit_hash, sequencer_did, issued_at, signature
         FROM mls_orchestrator_sequencer_receipts
         WHERE conversation_id = ? AND user_did = ?
         """
@@ -687,9 +770,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       }
       sql += " ORDER BY epoch ASC"
       return try Row.fetchAll(db, sql: sql, arguments: arguments).map { row in
-        FfiSequencerReceipt(
+        let term: Int64 = (row["sequencer_term"] as Int64?) ?? 0
+        return FfiSequencerReceipt(
           convoId: row["conversation_id"],
           epoch: row["epoch"],
+          sequencerTerm: UInt64(term),
           commitHash: row["commit_hash"],
           sequencerDid: row["sequencer_did"],
           issuedAt: row["issued_at"],
