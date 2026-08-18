@@ -509,7 +509,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     landedEpoch: UInt64
   ) throws -> Bool {
     try dbPool.write { db in
-      guard let groupData = Data(hexString: expectedNewGroupIdHex) else {
+      guard let groupData = Data(hexEncoded: expectedNewGroupIdHex) else {
         return false
       }
       try db.execute(
