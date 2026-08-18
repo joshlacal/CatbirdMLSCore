@@ -17,8 +17,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
-        .package(path: "../Petrel"),
-        .package(path: "../PetrelCatbird")
+        .package(url: "https://github.com/joshlacal/Petrel.git", .upToNextMinor(from: "1.1.0")),
+        .package(url: "https://github.com/joshlacal/PetrelCatbird.git", .upToNextMinor(from: "1.1.0"))
     ],
     targets: [
         .target(
@@ -52,7 +52,8 @@ let package = Package(
         ),
         .binaryTarget(
             name: "CatbirdMLSFFI",
-            path: "Sources/CatbirdMLSFFI.xcframework"
+            url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/ffi-w4-f104b291/CatbirdMLSFFI.xcframework.zip",
+            checksum: "6ef184eadfcf561fcdb0c2cdd383134008ca999852f67177f742d3f0cef84f90"
         ),
         .testTarget(
             name: "CatbirdMLSCoreTests",
