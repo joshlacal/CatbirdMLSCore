@@ -720,6 +720,26 @@ public actor MLSDeviceManager {
     return deviceInfoByUser[normalizedUserDid] != nil
   }
 
+  /// Stable device scope for protected subscription failure records. This is
+  /// intentionally device-local: IDFV is preferred on iOS, while the existing
+  /// device-local keychain UUID is used on macOS and as the iOS fallback.
+  /// A missing identity is reported as nil so callers never persist an
+  /// unscoped terminal block.
+  internal static func currentDeviceScopeIdentifier() -> String? {
+    #if os(iOS)
+      if let idfv = UIDevice.current.identifierForVendor?.uuidString {
+        return "idfv:\(idfv.lowercased())"
+      }
+    #endif
+
+    do {
+      guard let uuid = try loadDeviceUUID() else { return nil }
+      return "keychain:\(uuid.lowercased())"
+    } catch {
+      return nil
+    }
+  }
+
   // MARK: - Client Identity Helpers
 
   /// Constructs an MLS client identity from user DID and device UUID.

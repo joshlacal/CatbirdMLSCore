@@ -672,7 +672,7 @@ extension MLSConversationManager {
     logger.debug("Processed Welcome message, group ID: \(groupId)")
 
     // Fetch conversation details from server
-    let conversations = try await apiClient.getConversations(limit: 100)
+    let conversations = try await apiClient.getCanonicalConversationViews(limit: 100)
     guard let convo = conversations.convos.first(where: { $0.groupId == groupId }) else {
       throw MLSConversationError.conversationNotFound
     }

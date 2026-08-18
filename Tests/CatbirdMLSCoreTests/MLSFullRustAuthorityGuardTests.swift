@@ -628,6 +628,7 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
       ],
       "public func sendMessage(": [
         "handleRustEngineEvents",
+        "rustGroupIdHex",
         "withRustAuthoritativeRuntime",
       ],
       "internal func processServerMessage(": [
@@ -732,6 +733,32 @@ final class MLSFullRustAuthorityGuardTests: XCTestCase {
         )
       }
     }
+  }
+
+  func testRustReactionTranslatesCanonicalConversationIDToCurrentHexGroupID() throws {
+    let source = try String(
+      contentsOf: sourceFileURL(relativePath: "Sources/CatbirdMLSCore/Service/MLSConversationManager+Messaging.swift"),
+      encoding: .utf8
+    )
+    let body = try XCTUnwrap(
+      extractFunctionBody(signature: "public func sendEncryptedReaction(", from: source)
+    )
+    let rustBranch = try XCTUnwrap(
+      extractConditionalBranchBody(matching: "if protocolAuthorityMode.usesRustForDecisions", from: body)
+    )
+
+    XCTAssertTrue(
+      rustBranch.contains("let groupIdHex = try rustGroupIdHex(for: convoId)"),
+      "Rust reaction sends must resolve the current canonical conversation projection"
+    )
+    XCTAssertTrue(
+      rustBranch.contains("conversationId: groupIdHex"),
+      "Rust reaction sends must pass the current hex MLS group ID to the orchestrator"
+    )
+    XCTAssertFalse(
+      rustBranch.contains("conversationId: convoId"),
+      "Canonical conversation UUIDs must not cross the Rust group-ID boundary"
+    )
   }
 
   private func makeManager(

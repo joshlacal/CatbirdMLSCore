@@ -141,13 +141,28 @@ extension MLSConversationManager {
     do {
       let context = try await MLSCoreContext.shared.getContext(for: userDid)
       let apiAdapter = MLSOrchestratorAPIAdapter(apiClient: apiClient)
-      return MLSOrchestratorRuntime(
+      let runtime = MLSOrchestratorRuntime(
         userDID: userDid,
         mode: protocolAuthorityMode,
         mlsContext: context,
         databasePool: databasePool,
         apiClient: apiAdapter
       )
+      // Keep canonical live mutations on the Rust signer seam. The weak
+      // capture avoids making the API client retain the orchestrator runtime;
+      // if the runtime disappears, signed requests fail closed rather than
+      // falling back to a legacy endpoint.
+      apiClient.configureCanonicalSignedRequestPreparer { [weak runtime] binding, operation, bodyJSON in
+        guard let runtime else {
+          throw MLSAPIClient.CanonicalLiveTransportError.signerUnavailable
+        }
+        return try runtime.prepareCleanChatSignedRequest(
+          binding: binding,
+          operation: operation,
+          bodyJson: bodyJSON
+        )
+      }
+      return runtime
     } catch {
       logger.error(
         "❌ [MLS-AUTHORITY] Failed to build Rust orchestrator runtime: \(error.localizedDescription, privacy: .public)"

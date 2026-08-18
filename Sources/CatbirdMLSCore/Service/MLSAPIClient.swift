@@ -49,6 +49,85 @@ private extension MLSCredentialBinding.KeyPackageBindingStatus {
 /// Properly configured with atproto-proxy header for MLS service routing
 @Observable
 public final class MLSAPIClient {
+    /// Nest-issued clean-chat authority. It is deliberately distinct from
+    /// Petrel's ordinary PDS session and is the only authority accepted by
+    /// canonical clean-chat transport.
+    public struct CleanChatTransportAuthority: Equatable, Sendable {
+      public let accessToken: String
+      public let dpopProof: String
+      public let dpopJkt: String
+      public let deviceId: String
+      public let authGeneration: Int64?
+
+      public init(
+        accessToken: String,
+        dpopProof: String,
+        dpopJkt: String,
+        deviceId: String,
+        authGeneration: Int64?
+      ) {
+        self.accessToken = accessToken
+        self.dpopProof = dpopProof
+        self.dpopJkt = dpopJkt
+        self.deviceId = deviceId
+        self.authGeneration = authGeneration
+      }
+    }
+
+    public enum CanonicalTransportAuthority: Equatable, Sendable {
+      case cleanChat(CleanChatTransportAuthority)
+      case pdsSession
+    }
+
+    /// Opaque wrapper around the generated FFI DTO. The generated DTO's
+    /// memberwise initializer is never an executable transport input.
+    public struct CanonicalPreparedRequest: @unchecked Sendable {
+      package let ffi: CleanChatPreparedRequestFfi
+      package init(ffi: CleanChatPreparedRequestFfi) {
+        self.ffi = ffi
+      }
+    }
+
+    public typealias CanonicalSignedRequestPreparer = @Sendable (
+      CleanChatSigningContextFfi,
+      CleanChatOperationFfi,
+      Data
+    ) throws -> CleanChatPreparedRequestFfi
+
+    public enum CanonicalLiveTransportError: Error, LocalizedError, Equatable {
+      case signerUnavailable
+      case cleanChatAuthorityRequired
+      case signedRequestContainedTransportCredentials
+      case invalidPreparedRequest
+      case invalidPath(String)
+
+      public var errorDescription: String? {
+        switch self {
+        case .signerUnavailable:
+          return "Clean-chat signer is unavailable; the mutation was not sent"
+        case .cleanChatAuthorityRequired:
+          return "Clean-chat authority is required; the PDS session was not sent"
+        case .signedRequestContainedTransportCredentials:
+          return "Signed clean-chat request contained caller-supplied transport credentials"
+        case .invalidPreparedRequest:
+          return "Prepared clean-chat request was not produced by Rust"
+        case let .invalidPath(path):
+          return "Invalid clean-chat request path: \(path)"
+        }
+      }
+
+      public var userActionCategory: MLSUserActionCategory {
+        switch self {
+        case .signerUnavailable, .cleanChatAuthorityRequired:
+          return .rebind
+        case .signedRequestContainedTransportCredentials, .invalidPreparedRequest:
+          return .reauthenticate
+        case .invalidPath:
+          return .retry
+        }
+      }
+    }
+
     private let logger = Logger(subsystem: "blue.catbird", category: "MLSAPIClient")
 
     // MARK: - Configuration
@@ -71,6 +150,16 @@ public final class MLSAPIClient {
     /// Reference count for temporary cache-bypass headers.
     private var forceRefreshHeaderCount = 0
     private let forceRefreshHeaderLock = NSLock()
+
+    /// Completion evidence for ticket minting. A ticket must be requested only
+    /// with the exact session/cursor returned by a completed three-domain
+    /// inventory; retaining this locally also prevents a conversation-only
+    /// caller from accidentally reaching the ticket endpoint.
+    private var completedInventorySessions: [String: MLSInventorySessionCompletion] = [:]
+    private let completedInventorySessionsLock = NSLock()
+
+    private var canonicalSignedRequestPreparer: CanonicalSignedRequestPreparer?
+    private let canonicalSignedRequestPreparerLock = NSLock()
 
     // MARK: - Initialization
 
@@ -150,11 +239,120 @@ public final class MLSAPIClient {
         mlsServiceDID = newEnvironment.serviceDID
         isHealthy = false
         lastHealthCheck = nil
+        clearCompletedInventorySessions()
 
         // Reconfigure with new service DID
         await configureMLSService()
 
         logger.info("Switched to environment: \(newEnvironment.description)")
+    }
+
+    /// Install the Rust-backed signed request seam before any canonical live
+    /// mutation is attempted. A missing seam fails closed; no legacy endpoint
+    /// is used as a fallback.
+    public func configureCanonicalSignedRequestPreparer(
+      _ preparer: CanonicalSignedRequestPreparer?
+    ) {
+      canonicalSignedRequestPreparerLock.lock()
+      canonicalSignedRequestPreparer = preparer
+      canonicalSignedRequestPreparerLock.unlock()
+    }
+
+    /// Compose a generated clean-chat input through the Rust signer. The input
+    /// remains the generated Petrel DTO's JSON, not a hand-maintained wire
+    /// schema. Transport execution is a separate step so callers can attach
+    /// only the current session credentials.
+    public func prepareCanonicalSignedRequest<Input: Encodable>(
+      operation: CleanChatOperationFfi,
+      binding: CleanChatSigningContextFfi,
+      input: Input
+    ) throws -> CanonicalPreparedRequest {
+      canonicalSignedRequestPreparerLock.lock()
+      let preparer = canonicalSignedRequestPreparer
+      canonicalSignedRequestPreparerLock.unlock()
+      guard let preparer else {
+        throw CanonicalLiveTransportError.signerUnavailable
+      }
+      let inputJSON = try JSONEncoder().encode(input)
+      let ffi = try preparer(binding, operation, inputJSON)
+      guard ffi.authorization == nil, ffi.dpop == nil else {
+        throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
+      }
+      return CanonicalPreparedRequest(ffi: ffi)
+    }
+
+    /// Execute only an opaque Rust-prepared request with Nest clean-chat
+    /// authority. This intentionally bypasses Petrel's PDS session pipeline.
+    public func executeCanonicalSignedRequest(
+      _ prepared: CanonicalPreparedRequest,
+      authority: CanonicalTransportAuthority
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+      guard case let .cleanChat(cleanAuthority) = authority else {
+        throw CanonicalLiveTransportError.cleanChatAuthorityRequired
+      }
+      let ffi = prepared.ffi
+      guard ffi.authorization == nil, ffi.dpop == nil,
+            let body = ffi.body
+      else {
+        throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
+      }
+      guard !cleanAuthority.accessToken.isEmpty,
+            !cleanAuthority.dpopProof.isEmpty,
+            !cleanAuthority.dpopJkt.isEmpty,
+            !cleanAuthority.deviceId.isEmpty
+      else {
+        throw CanonicalLiveTransportError.cleanChatAuthorityRequired
+      }
+      let endpoint: String
+      if ffi.path.hasPrefix("/xrpc/") {
+        endpoint = String(ffi.path.dropFirst("/xrpc/".count))
+      } else if ffi.path.hasPrefix("xrpc/") {
+        endpoint = String(ffi.path.dropFirst("xrpc/".count))
+      } else {
+        throw CanonicalLiveTransportError.invalidPath(ffi.path)
+      }
+      var request = try await client.networkService.createURLRequest(
+        endpoint: endpoint,
+        method: ffi.method,
+        headers: [
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Authorization": "DPoP \(cleanAuthority.accessToken)",
+          "DPoP": cleanAuthority.dpopProof,
+          "atproto-proxy": mlsServiceDID
+        ],
+        body: body,
+        queryItems: nil
+      )
+      request.setValue("DPoP \(cleanAuthority.accessToken)", forHTTPHeaderField: "Authorization")
+      request.setValue(cleanAuthority.dpopProof, forHTTPHeaderField: "DPoP")
+      request.setValue(mlsServiceDID, forHTTPHeaderField: "atproto-proxy")
+      let (data, response) = try await URLSession.shared.data(for: request)
+      guard let httpResponse = response as? HTTPURLResponse else {
+        throw MLSAPIError.invalidResponse(message: "Clean-chat response was not HTTP")
+      }
+      return (data, httpResponse)
+    }
+
+    public func executeCanonicalSignedRequest<Response: Decodable>(
+      _ prepared: CanonicalPreparedRequest,
+      authority: CanonicalTransportAuthority,
+      as responseType: Response.Type = Response.self
+    ) async throws -> Response {
+      let (data, response) = try await executeCanonicalSignedRequest(
+        prepared,
+        authority: authority
+      )
+      guard (200 ... 299).contains(response.statusCode) else {
+        let detail = String(data: data, encoding: .utf8)
+          ?? "Canonical clean-chat request failed"
+        throw MLSAPIError.httpError(statusCode: response.statusCode, message: detail)
+      }
+      return try MLSCanonicalTransportAdapter.decode(
+        data,
+        operation: prepared.ffi.operation,
+        as: responseType
+      )
     }
 
     // MARK: - Authentication Validation
@@ -264,6 +462,252 @@ public final class MLSAPIClient {
         }
         return output
     }
+
+    /// Read one page of device-addressed pending Welcomes from the retained
+    /// inventory session created by `getConversations`.
+    public func getCanonicalPendingWelcomes(
+        inventorySessionId: String,
+        limit: Int = 100,
+        cursor: String? = nil
+    ) async throws -> BlueCatbirdChatGetPendingWelcomes.Output {
+        let input = BlueCatbirdChatGetPendingWelcomes.Parameters(
+            inventorySessionId: inventorySessionId,
+            pageCursor: cursor,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getPendingWelcomes(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical pending Welcomes"
+            )
+        }
+        return output
+    }
+
+    /// Read one page of the exact-device leaf recovery inbox from the retained
+    /// inventory session created by `getConversations`.
+    public func getCanonicalLeafRecoveryInbox(
+        inventorySessionId: String,
+        limit: Int = 100,
+        cursor: String? = nil
+    ) async throws -> BlueCatbirdChatGetLeafRecoveryInbox.Output {
+        let input = BlueCatbirdChatGetLeafRecoveryInbox.Parameters(
+            inventorySessionId: inventorySessionId,
+            pageCursor: cursor,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getLeafRecoveryInbox(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical leaf recovery inbox"
+            )
+        }
+        return output
+    }
+    /// Read one canonical conversation state through Petrel's clean-chat
+    /// procedure. The canonical response is intentionally kept as generated
+    /// DTOs; callers must not project it back into a legacy route payload.
+    public func getCanonicalConversationState(
+        conversationId: String
+    ) async throws -> BlueCatbirdChatGetConversationState.Output {
+        let input = BlueCatbirdChatGetConversationState.Parameters(
+            conversationId: conversationId
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getConversationState(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical conversation state"
+            )
+        }
+        return output
+    }
+
+    /// Read canonical entries strictly after a global sequence position.
+    public func getCanonicalEntries(
+        conversationId: String,
+        afterSeq: Int,
+        limit: Int = 100
+    ) async throws -> BlueCatbirdChatGetEntries.Output {
+        let input = BlueCatbirdChatGetEntries.Parameters(
+            conversationId: conversationId,
+            afterSeq: afterSeq,
+            limit: limit
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getEntries(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to fetch canonical conversation entries"
+            )
+        }
+        return output
+    }
+    /// Compatibility projection for manager code that still consumes the legacy
+    /// view model. The read itself is always the canonical chat procedure.
+    public func getCanonicalConversationView(
+        conversationId: String
+    ) async throws -> BlueCatbirdMlsChatDefs.ConvoView? {
+        let output = try await getCanonicalConversationState(conversationId: conversationId)
+        return MLSCanonicalTransportAdapter.projectConversationView(from: output.state)
+    }
+
+    /// Read one canonical inventory page and project active state items for
+    /// compatibility callers. Pagination remains the canonical page cursor.
+    public func getCanonicalConversationViews(
+        limit: Int = 50,
+        cursor: String? = nil
+    ) async throws -> (convos: [BlueCatbirdMlsChatDefs.ConvoView], cursor: String?) {
+        let output = try await getCanonicalConversationInventory(limit: limit, cursor: cursor)
+        let views = output.items.compactMap { item -> BlueCatbirdMlsChatDefs.ConvoView? in
+            guard case let .blueCatbirdChatDefsConversationInventoryState(state) = item else {
+                return nil
+            }
+            return MLSCanonicalTransportAdapter.projectConversationView(from: state.state)
+        }
+        return (views, output.nextPageCursor)
+    }
+    /// Read canonical entries and project only valid application-send entries
+    /// into the manager's decryptable message view. Unknown body variants are
+    /// intentionally skipped rather than represented as empty ciphertext.
+    public func getCanonicalMessagePage(
+        conversationId: String,
+        afterSeq: Int,
+        limit: Int = 100,
+        messageType: BlueCatbirdMlsChatDefs.MessageViewMessageType? = nil
+    ) async throws -> (
+        messages: [BlueCatbirdMlsChatDefs.MessageView],
+        lastSeq: Int?,
+        gapInfo: BlueCatbirdMlsChatGetMessages.GapInfo?
+    ) {
+        let output = try await getCanonicalEntries(
+            conversationId: conversationId,
+            afterSeq: afterSeq,
+            limit: limit
+        )
+        let messages = output.entries.compactMap { entry -> BlueCatbirdMlsChatDefs.MessageView? in
+            guard let message = MLSCanonicalTransportAdapter.projectMessageView(
+                from: entry,
+                messageType: messageType
+            ) else {
+                return nil
+            }
+            return message
+        }
+        return (messages, output.nextAfterSeq, nil)
+    }
+
+    /// Mint a one-use ticket bound to the exact inventory snapshot cursor.
+    public func getCanonicalSubscriptionTicket(
+        inventorySessionId: String,
+        eventCursor: String
+    ) async throws -> BlueCatbirdChatGetSubscriptionTicket.Output {
+        let completion = completedInventorySession(for: inventorySessionId)
+        try MLSInventorySessionCompletion.requireTicketReady(
+            inventorySessionId: inventorySessionId,
+            eventCursor: eventCursor,
+            completion: completion
+        )
+        let input = BlueCatbirdChatGetSubscriptionTicket.Input(
+            inventorySessionId: inventorySessionId,
+            eventCursor: eventCursor
+        )
+        let (responseCode, output) = try await client.blue.catbird.chat.getSubscriptionTicket(input: input)
+        guard (200 ... 299).contains(responseCode), let output else {
+            throw MLSAPIError.httpError(
+                statusCode: responseCode,
+                message: "Failed to get canonical subscription ticket"
+            )
+        }
+        return output
+    }
+
+    /// Open the canonical ticketed stream. The cursor must be byte-identical
+    /// to the cursor used to mint the ticket.
+    public func subscribeCanonicalEvents(
+        ticket: String,
+        cursor: String
+    ) async throws -> AsyncThrowingStream<BlueCatbirdChatSubscribeEvents.Message, Error> {
+        try await client.blue.catbird.chat.subscribeEvents(ticket: ticket, cursor: cursor)
+    }
+
+    /// Fetch every page in all three inventory domains so the ticket barrier is
+    /// established for one coherent session before opening the event stream.
+    internal func getCanonicalInventoryAggregateSnapshot(
+        limit: Int = 100
+    ) async throws -> MLSCanonicalInventorySnapshot {
+        return try await MLSInventorySessionAssembler.assemble(
+            fetchConversations: { [self] cursor in
+                try await self.getCanonicalConversationInventory(limit: limit, cursor: cursor)
+            },
+            fetchPendingWelcomes: { [self] session, cursor in
+                try await self.getCanonicalPendingWelcomes(
+                    inventorySessionId: session,
+                    limit: limit,
+                    cursor: cursor
+                )
+            },
+            fetchLeafRecoveryInbox: { [self] session, cursor in
+                try await self.getCanonicalLeafRecoveryInbox(
+                    inventorySessionId: session,
+                    limit: limit,
+                    cursor: cursor
+                )
+            }
+        )
+    }
+
+    /// Install ticket evidence only after the caller has reconciled every
+    /// aggregate inventory item through its concrete Core actions. Fetching an
+    /// aggregate alone is intentionally insufficient to mint a ticket.
+    internal func recordCompletedCanonicalInventory(
+        _ snapshot: MLSCanonicalInventorySnapshot
+    ) {
+        rememberCompletedInventory(snapshot.completion)
+    }
+
+    /// Compatibility-facing conversation DTO. This method completes all three
+    /// reads for the returned snapshot, but it intentionally does not install
+    /// ticket evidence because it has no concrete reconciliation actions for
+    /// the retained Welcome/recovery/tombstone items. Stream managers must use
+    /// the aggregate API and reconcile before recording completion.
+    public func getCanonicalInventorySnapshot(
+        limit: Int = 100
+    ) async throws -> BlueCatbirdChatGetConversations.Output {
+        let snapshot = try await getCanonicalInventoryAggregateSnapshot(limit: limit)
+        return BlueCatbirdChatGetConversations.Output(
+            items: snapshot.conversationItems,
+            inventorySessionId: snapshot.inventorySessionId,
+            snapshotEventCursor: snapshot.snapshotEventCursor,
+            nextPageCursor: nil,
+            hasMore: false,
+            snapshotExpiresAt: ATProtocolDate(date: snapshot.snapshotExpiresAt)
+        )
+    }
+
+    private func rememberCompletedInventory(_ completion: MLSInventorySessionCompletion) {
+        completedInventorySessionsLock.lock()
+        completedInventorySessions[completion.inventorySessionId] = completion
+        completedInventorySessionsLock.unlock()
+    }
+
+    private func completedInventorySession(for inventorySessionId: String)
+        -> MLSInventorySessionCompletion?
+    {
+        completedInventorySessionsLock.lock()
+        let completion = completedInventorySessions[inventorySessionId]
+        completedInventorySessionsLock.unlock()
+        return completion
+    }
+
+    private func clearCompletedInventorySessions() {
+        completedInventorySessionsLock.lock()
+        completedInventorySessions.removeAll()
+        completedInventorySessionsLock.unlock()
+    }
+
 
     /// Get conversations for the authenticated user using Petrel client
     /// - Parameters:
@@ -1936,18 +2380,11 @@ public final class MLSAPIClient {
     /// - Parameter convoId: Conversation identifier
     /// - Returns: Current epoch number
     public func getEpoch(convoId: String) async throws -> Int {
-        logger.debug("Fetching epoch for conversation: \(convoId)")
-
-        let input = BlueCatbirdMlsChatGetGroupState.Parameters(convoId: convoId, include: "epoch")
-
-        let (responseCode, output) = try await client.blue.catbird.mlsChat.getGroupState(input: input)
-
-        guard responseCode == 200, let output = output else {
-            throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch epoch")
-        }
-
-        logger.debug("Current epoch for \(convoId): \(output.epoch ?? 0)")
-        return output.epoch ?? 0
+        logger.debug("Fetching canonical epoch for conversation: \(convoId)")
+        let output = try await getCanonicalConversationState(conversationId: convoId)
+        let epoch = output.state.coordinates.epoch
+        logger.debug("Current canonical epoch for \(convoId): \(epoch)")
+        return epoch
     }
 
     /// Get commit messages only (type: "commit") for pre-send sync and send recovery.
@@ -3514,6 +3951,7 @@ public final class MLSAPIClient {
 
     // sendEncryptedReadReceipt and sendEncryptedTypingIndicator have been removed
     // to reduce complexity. Only sendEncryptedReaction remains for control messages.
+
 }
 
 // MARK: - Error Types
@@ -3609,6 +4047,53 @@ public enum MLSAPIError: Error, LocalizedError {
             return true
         default:
             return false
+        }
+    }
+}
+
+/// Stable UI guidance for live clean-chat failures. These are categories, not
+/// automatic recovery authority: the host decides whether/when to retry,
+/// reauthenticate, rebind, rejoin, or show that access has ended.
+public enum MLSUserActionCategory: String, Codable, Equatable, Sendable {
+    case retry
+    case reauthenticate
+    case rebind
+    case rejoin
+    case accessEnded
+}
+
+public extension MLSAPIError {
+    var userActionCategory: MLSUserActionCategory {
+        switch self {
+        case .noAuthentication, .accountMismatch:
+            return .reauthenticate
+        case .rateLimited, .serverUnavailable:
+            return .retry
+        case let .httpError(statusCode, message):
+            let normalized = message.lowercased()
+            if statusCode == 401 || normalized.contains("authentication") || normalized.contains("session expired") {
+                return .reauthenticate
+            }
+            if normalized.contains("dpop") || normalized.contains("binding") || normalized.contains("device") || normalized.contains("generation") {
+                return .rebind
+            }
+            if statusCode == 409 || statusCode == 412 || statusCode == 423 || normalized.contains("stale") || normalized.contains("rejoin") {
+                return .rejoin
+            }
+            if statusCode == 410 || normalized.contains("access ended") || normalized.contains("revoked") || normalized.contains("not a member") {
+                return .accessEnded
+            }
+            if statusCode == 429 || statusCode >= 500 {
+                return .retry
+            }
+            return .retry
+        case .conversationNotFound, .notConversationMember, .notMember:
+            return .accessEnded
+        case .memberAlreadyExists, .memberBlocked, .mutualBlockDetected, .convoAlreadyExists,
+             .bootstrapTargetNotFound, .alreadyBootstrapped, .keyPackageNotFound,
+             .invalidCipherSuite, .tooManyMembers, .invalidBatchSize, .methodNotImplemented,
+             .messageTooLarge, .invalidResponse, .decodingError, .unknownError:
+            return .retry
         }
     }
 }

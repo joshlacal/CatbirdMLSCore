@@ -609,6 +609,12 @@ public final class MLSKeychainManager: @unchecked Sendable {
       query[kSecAttrSynchronizable as String] = synchronizable
     }
 
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
     if let accessGroup = accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
@@ -632,6 +638,12 @@ public final class MLSKeychainManager: @unchecked Sendable {
     if !skipDataProtection {
       query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
     }
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
 
     if let accessGroup = accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
@@ -658,6 +670,12 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrAccount as String: key,
       kSecAttrService as String: serviceName,
     ]
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
 
     if !skipDataProtection && synchronizable {
       query[kSecAttrSynchronizable as String] = true

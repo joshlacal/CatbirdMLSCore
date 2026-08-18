@@ -1990,7 +1990,7 @@ extension MLSConversationManager {
     do {
       logger.info(
         "📡 [fetchConversationForRejoin] Fetching from server for \(convoId.prefix(16))...")
-      let conversations = try await apiClient.getConversations(limit: 100)
+      let conversations = try await apiClient.getCanonicalConversationViews(limit: 100)
 
       if let match = conversations.convos.first(where: {
         MLSConversationIdentity.matches(

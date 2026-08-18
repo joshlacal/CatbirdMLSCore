@@ -40,6 +40,7 @@ build/
 
 # FFI Binary Framework (built by CI/CD, download from releases)
 Sources/CatbirdMLSFFI.xcframework/
+CatbirdMLSFFI.xcframework.zip
 .build-codex/
 
 .claude/

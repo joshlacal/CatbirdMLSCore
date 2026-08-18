@@ -459,6 +459,20 @@ public extension MLSConversationManager {
 
   // MARK: - Sending Messages
 
+  /// Resolve the MLS group id (hex) for a canonical conversation id (UUID).
+  ///
+  /// The Rust orchestrator hex-decodes the conversation id it is handed and
+  /// encrypts under that MLS group. The canonical projection exposes the UUID
+  /// `conversationId` and the hex `groupId` as separate fields, so the send
+  /// boundary must translate before handing the id to Rust — otherwise the
+  /// orchestrator fails with "Invalid hex group ID".
+  private func rustGroupIdHex(for convoId: String) throws -> String {
+    guard let convo = conversations[convoId], !convo.groupId.isEmpty else {
+      throw MLSConversationError.conversationNotFound
+    }
+    return convo.groupId
+  }
+
   /// Send a text message to a conversation
   /// - Parameters:
   ///   - convoId: The conversation group ID
@@ -475,9 +489,10 @@ public extension MLSConversationManager {
     try throwIfShuttingDown("sendMessage")
 
     if protocolAuthorityMode == .rustFull {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "sendMessage")
       let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
@@ -513,9 +528,10 @@ public extension MLSConversationManager {
     try await refreshDatabaseIfNeeded()
 
     if protocolAuthorityMode.usesRustForDecisions {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayload(conversationId: convoId, payload: payload)
+        try runtime.sendPayload(conversationId: groupIdHex, payload: payload)
       }
       let timestamp = ISO8601DateFormatter().date(from: ffiMessage.timestamp) ?? Date()
       return (
@@ -538,7 +554,7 @@ public extension MLSConversationManager {
       logger.warning("⚠️ Conversation \(convoId.prefix(16))... not found locally, attempting on-demand fetch")
 
       // Try to fetch this specific conversation from server
-      if let fetchedConvo = try? await apiClient.getConversation(convoId: convoId) {
+      if let fetchedConvo = try? await apiClient.getCanonicalConversationView(conversationId: convoId) {
         // Add to local state
         conversations[convoId] = fetchedConvo
 
@@ -876,9 +892,10 @@ public extension MLSConversationManager {
     }
 
     if protocolAuthorityMode.usesRustForDecisions {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendEncryptedReaction") { runtime in
         try runtime.sendReaction(
-          conversationId: convoId,
+          conversationId: groupIdHex,
           messageId: messageId,
           emoji: emoji,
           action: action
@@ -1041,8 +1058,9 @@ public extension MLSConversationManager {
     let payload = MLSMessagePayload.edit(targetMessageId: messageId, newText: newText)
 
     if protocolAuthorityMode == .rustFull {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "editMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "editMessage")
 
@@ -1195,8 +1213,9 @@ public extension MLSConversationManager {
     let payload = MLSMessagePayload.unsend(targetMessageId: messageId)
 
     if protocolAuthorityMode == .rustFull {
+      let groupIdHex = try rustGroupIdHex(for: convoId)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "unsendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: convoId, payload: payload)
+        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "unsendMessage")
 
@@ -2440,10 +2459,10 @@ public extension MLSConversationManager {
 
         // Fetch missing messages from server
         let sinceParam = max(0, Int(missingStart) - 1)
-        let (messages, _, _) = try await apiClient.getMessages(
-          convoId: conversationID,
-          limit: 50,
-          sinceSeq: sinceParam
+        let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+          conversationId: conversationID,
+          afterSeq: sinceParam,
+          limit: 50
         )
 
         // Filter to only the relevant range and sort by sequence
@@ -2646,10 +2665,10 @@ public extension MLSConversationManager {
       // Fetch missing messages
       // Note: getMessages expects 'sinceSeq', so to get 'startSeq', pass 'startSeq - 1'
       let sinceParam = max(0, startSeq - 1)
-      let (messages, _, _) = try await apiClient.getMessages(
-        convoId: conversationID,
-        limit: limit,
-        sinceSeq: sinceParam
+      let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+        conversationId: conversationID,
+        afterSeq: sinceParam,
+        limit: limit
       )
 
       let relevantMessages = messages.filter { Int($0.seq) <= endSeq }
@@ -4183,10 +4202,10 @@ public extension MLSConversationManager {
           logger.warning("⚠️ [CATCHUP] Session invalidated - aborting catchup")
           return
         }
-        let (messages, _, gapInfo) = try await apiClient.getMessages(
-          convoId: convo.conversationId,
-          limit: 100,
-          sinceSeq: sinceSeq
+        let (messages, _, gapInfo) = try await apiClient.getCanonicalMessagePage(
+          conversationId: convo.conversationId,
+          afterSeq: sinceSeq ?? 0,
+          limit: 100
         )
 
         guard !messages.isEmpty else { break }
@@ -4268,10 +4287,10 @@ public extension MLSConversationManager {
 
     for (startSeq, endSeq) in ranges {
       do {
-        let (messages, _, _) = try await apiClient.getMessages(
-          convoId: conversationID,
-          limit: (endSeq - startSeq) + 10,
-          sinceSeq: max(0, startSeq - 1)
+        let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+          conversationId: conversationID,
+          afterSeq: max(0, startSeq - 1),
+          limit: (endSeq - startSeq) + 10
         )
         if !messages.isEmpty {
           try await processMessagesInOrder(
@@ -4320,10 +4339,10 @@ public extension MLSConversationManager {
     do {
       // Fetch messages with lookback
       // This will return messages > lookbackSeq
-      let (messages, _, _) = try await apiClient.getMessages(
-        convoId: convo.conversationId,
-        limit: 100,
-        sinceSeq: lookbackSeq
+      let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+        conversationId: convo.conversationId,
+        afterSeq: lookbackSeq,
+        limit: 100
       )
 
       if !messages.isEmpty {
@@ -5372,7 +5391,7 @@ public extension MLSConversationManager {
           // → joinByExternalCommit → getGroupInfo → 410 again. Loops
           // until backoff. Admin reset path is the convergence step.
           do {
-            if let serverConvo = try await apiClient.getConversation(convoId: convoId) {
+            if let serverConvo = try await apiClient.getCanonicalConversationView(conversationId: convoId) {
               let serverGroupIdHex = serverConvo.groupId
               let serverGeneration = serverConvo.resetGeneration.map { Int64($0) }
               if !serverGroupIdHex.isEmpty
