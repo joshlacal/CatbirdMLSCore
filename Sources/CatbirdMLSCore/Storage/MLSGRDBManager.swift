@@ -96,6 +96,7 @@ public actor MLSGRDBManager {
   /// This is necessary because iOS can suspend us at any point after scenePhase changes
   /// and we MUST release SQLite file handles synchronously or face 0xdead10cc termination.
   private nonisolated(unsafe) static var emergencyDatabases: [String: DatabasePool] = [:]
+  private nonisolated(unsafe) static var emergencyLightweightQueues: [String: DatabaseQueue] = [:]
   private nonisolated(unsafe) static var emergencyDatabasesLock = NSLock()
 
   /// Flag indicating emergency close happened - actor cache is now stale
@@ -224,10 +225,24 @@ public actor MLSGRDBManager {
     }
     emergencyDatabases.removeAll()
 
+    for (userDID, queue) in emergencyLightweightQueues {
+      do {
+        try queue.close()
+        staticLogger.debug(
+          "✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB lightweight queue closed for \(userDID.prefix(20), privacy: .private)"
+        )
+      } catch {
+        staticLogger.warning(
+          "⚠️ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB lightweight queue close failed for \(userDID.prefix(20), privacy: .private): \(error)"
+        )
+      }
+    }
+    emergencyLightweightQueues.removeAll()
+
     // Mark actor cache as stale - must be cleared on next access
     emergencyCacheInvalidated = true
 
-    staticLogger.debug("✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] All GRDB database pools emergency closed")
+    staticLogger.debug("✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] All GRDB database pools and lightweight queues emergency closed")
   }
 
   /// Best-effort PASSIVE checkpoint on all registered pools WITHOUT closing them.
@@ -353,6 +368,23 @@ public actor MLSGRDBManager {
     emergencyDatabasesLock.lock()
     defer { emergencyDatabasesLock.unlock() }
     emergencyDatabases.removeValue(forKey: userDID)
+  }
+
+  /// Register a lightweight database queue for emergency close.
+  private nonisolated static func registerLightweightQueueForEmergencyClose(
+    _ queue: DatabaseQueue,
+    for userDID: String
+  ) {
+    emergencyDatabasesLock.lock()
+    defer { emergencyDatabasesLock.unlock() }
+    emergencyLightweightQueues[userDID] = queue
+  }
+
+  /// Unregister a lightweight database queue from emergency close.
+  private nonisolated static func unregisterLightweightQueueFromEmergencyClose(for userDID: String) {
+    emergencyDatabasesLock.lock()
+    defer { emergencyDatabasesLock.unlock() }
+    emergencyLightweightQueues.removeValue(forKey: userDID)
   }
 
   // MARK: - Properties
@@ -2077,9 +2109,11 @@ public actor MLSGRDBManager {
     } else {
       // Close any expired cached queue before creating a new one
       if let old = cachedLightweightQueues.removeValue(forKey: userDID) {
+        Self.unregisterLightweightQueueFromEmergencyClose(for: userDID)
         try? old.queue.close()
       }
       queue = try DatabaseQueue(path: dbPath.path, configuration: config)
+      Self.registerLightweightQueueForEmergencyClose(queue, for: userDID)
       logger.debug("   Created new lightweight queue (will cache for reuse)")
     }
 
@@ -2093,6 +2127,7 @@ public actor MLSGRDBManager {
       if let cached = cachedLightweightQueues[userDID],
          Date().timeIntervalSince(cached.lastUsed) >= ttl {
         cachedLightweightQueues.removeValue(forKey: userDID)
+        Self.unregisterLightweightQueueFromEmergencyClose(for: userDID)
         try? cached.queue.close()
         logger.debug("✅ [Lightweight] Evicted cached queue for: \(userDID.prefix(20), privacy: .private)")
       }
@@ -2213,6 +2248,16 @@ public actor MLSGRDBManager {
   public func stopPeriodicCheckpointing() {
     periodicCheckpointTask?.cancel()
     periodicCheckpointTask = nil
+    closeAllLightweightQueues()
+  }
+
+  /// Close and evict all cached lightweight queues immediately (e.g., during app suspension).
+  public func closeAllLightweightQueues() {
+    for (userDID, cached) in cachedLightweightQueues {
+      try? cached.queue.close()
+      Self.unregisterLightweightQueueFromEmergencyClose(for: userDID)
+    }
+    cachedLightweightQueues.removeAll()
   }
 
   public func resumePeriodicCheckpointing() {
@@ -2304,6 +2349,7 @@ public actor MLSGRDBManager {
 
     // Also close any cached lightweight queue to prevent stale SHM references
     if let cached = cachedLightweightQueues.removeValue(forKey: userDID) {
+      Self.unregisterLightweightQueueFromEmergencyClose(for: userDID)
       try? cached.queue.close()
     }
 
@@ -4449,11 +4495,12 @@ public actor MLSGRDBManager {
       // try db.execute(sql: "PRAGMA mmap_size = 268435456;")  // DISABLED - was 256MB
     }
 
-    // Create DatabasePool for concurrent reads
+    // Create DatabasePool with cross-process coordination for pool/file allocation only
+    let database: DatabasePool
     do {
-      return try coordinatedWrite(to: dbPath) {
+      database = try coordinatedWrite(to: dbPath) {
         do {
-          let database = try DatabasePool(path: dbPath.path, configuration: config)
+          let pool = try DatabasePool(path: dbPath.path, configuration: config)
 
           // Set file protection (iOS Data Protection)
           try setFileProtection(for: dbPath)
@@ -4461,10 +4508,7 @@ public actor MLSGRDBManager {
           // Exclude from backups
           try excludeFromBackup(dbPath)
 
-          // Run migrations
-          try runMigrations(database)
-
-          return database
+          return pool
         } catch let error as DatabaseError {
           if isHMACFailure(error) {
             logger.critical(
@@ -4474,6 +4518,18 @@ public actor MLSGRDBManager {
         }
       }
     } catch {
+      if isHMACFailure(error) {
+        throw error
+      }
+      throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
+    }
+
+    // Run migrations OUTSIDE NSFileCoordinator lock to prevent holding file coordination lock across DDL operations
+    do {
+      try runMigrations(database)
+      return database
+    } catch {
+      try? database.close()
       if isHMACFailure(error) {
         throw error
       }
