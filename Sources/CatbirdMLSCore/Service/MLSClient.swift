@@ -371,6 +371,12 @@ public actor MLSClient {
     logger.info("[E2E] Invalidated cached MLS clients and context for \(normalizedDID.prefix(20))...")
   }
 
+  /// Get the device manager for a specific user
+  public func getDeviceManager(for userDID: String) -> MLSDeviceManager? {
+    let normalizedDID = normalizeUserDID(userDID)
+    return deviceManagers[normalizedDID]
+  }
+
   /// Provide an app-level storage maintenance coordinator (optional).
   public func setStorageMaintenanceCoordinator(_ coordinator: MLSStorageMaintenanceCoordinating?) {
     storageMaintenanceCoordinator = coordinator

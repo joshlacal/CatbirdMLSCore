@@ -92,6 +92,13 @@ public final class MLSConversationManager {
         userDid
     }
 
+    /// Public accessor for device manager
+    public var deviceManager: MLSDeviceManager? {
+        get async {
+            await MLSClient.shared.getDeviceManager(for: userDid ?? "")
+        }
+    }
+
     /// Sync state protected by Mutex (Swift 6 Synchronization)
     /// Using Mutex<Bool> to atomically check-and-set sync status
     public let syncState = Mutex<Bool>(false)

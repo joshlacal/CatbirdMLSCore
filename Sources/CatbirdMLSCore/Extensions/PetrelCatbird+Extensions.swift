@@ -130,6 +130,7 @@ extension BlueCatbirdChatDefs.KeyPackageArtifact {
 
 extension BlueCatbirdChatDefs.ParticipantView {
     public var did: DID { userDid }
+    public var isAdmin: Bool { role == .value_admin }
 }
 
 extension BlueCatbirdChatDefs.ConversationState {
