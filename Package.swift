@@ -17,8 +17,8 @@ let ffiTarget: Target = useLocalBinary
     )
     : .binaryTarget(
         name: "CatbirdMLSFFI",
-        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.1.1/CatbirdMLSFFI.xcframework.zip",
-        checksum: "9525a866c95473cb11c2d3eac8b4a65536a7262c0da2913aae99103751a946a9"
+        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.1.2/CatbirdMLSFFI.xcframework.zip",
+        checksum: "72b0795607400e5522161d2b4499e2426dd83af77ed0059c3b4ced189cdc02fd"
     )
 
 let package = Package(
