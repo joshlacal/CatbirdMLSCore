@@ -190,15 +190,15 @@ final class MLSStorageSuspensionTests: XCTestCase {
 
   func testContextCreationFailsFastWhenSuspended() async throws {
     let userDID = "did:plc:context-suspended-\(UUID().uuidString)"
-    let coreContext = MLSCoreContext(databaseManager: manager)
+    let coreContext = MLSCoreContext.shared
 
-    MLSCoreContext.isSuspensionInProgress = true
+    MLSCoreContext.markSuspensionInProgress()
     defer {
-      MLSCoreContext.isSuspensionInProgress = false
+      MLSCoreContext.clearSuspensionFlag()
     }
 
     do {
-      _ = try await coreContext.getContext(for: userDID)
+      try await coreContext.ensureContext(for: userDID)
       XCTFail("Expected contextCreationBlocked error")
     } catch let error as MLSError {
       guard case .contextCreationBlocked = error else {

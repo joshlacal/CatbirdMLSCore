@@ -21,7 +21,7 @@ struct MLSPublicPDSReaderTests {
     #expect(comps.path == "/xrpc/com.atproto.repo.listRecords")
     let items = Dictionary(uniqueKeysWithValues: (comps.queryItems ?? []).map { ($0.name, $0.value) })
     #expect(items["repo"] == "did:plc:abc123")
-    #expect(items["collection"] == "blue.catbird.mlsChat.device")
+    #expect(items["collection"] == "blue.catbird.chat.device")
     #expect(items["limit"] == "50")
   }
 
@@ -39,15 +39,15 @@ struct MLSPublicPDSReaderTests {
     #expect(url.path == "/xrpc/com.atproto.repo.listRecords")
   }
 
-  // MARK: decodeDeviceSignatureKeys
+  // MARK: - decodeDeviceSignatureKeys
 
   @Test func decodesDeviceSignatureKeysFromListRecordsJSON() {
     // "AQID" base64 == bytes [0x01, 0x02, 0x03]
     let json = """
     {"records":[
-      {"uri":"at://did:plc:abc/blue.catbird.mlsChat.device/3k1",
+      {"uri":"at://did:plc:abc/blue.catbird.chat.device/3k1",
        "cid":"bafyreiabc",
-       "value":{"$type":"blue.catbird.mlsChat.device",
+       "value":{"$type":"blue.catbird.chat.device",
                 "mlsSignaturePublicKey":{"$bytes":"AQID"},
                 "algorithm":"ed25519",
                 "createdAt":"2026-06-27T00:00:00.000Z"}}
@@ -62,10 +62,10 @@ struct MLSPublicPDSReaderTests {
   @Test func skipsMalformedRecordsButKeepsValidOnes() {
     let json = """
     {"records":[
-      {"uri":"at://did:plc:abc/blue.catbird.mlsChat.device/bad",
+      {"uri":"at://did:plc:abc/blue.catbird.chat.device/bad",
        "value":{"$type":"app.bsky.feed.post","text":"not a device record"}},
-      {"uri":"at://did:plc:abc/blue.catbird.mlsChat.device/good",
-       "value":{"$type":"blue.catbird.mlsChat.device",
+      {"uri":"at://did:plc:abc/blue.catbird.chat.device/good",
+       "value":{"$type":"blue.catbird.chat.device",
                 "mlsSignaturePublicKey":{"$bytes":"BAUG"},
                 "algorithm":"ed25519",
                 "createdAt":"2026-06-27T00:00:00.000Z"}}

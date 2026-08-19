@@ -946,15 +946,14 @@ public actor MLSRecoveryManager {
       }
       Task {
         do {
-          let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
+          let result = try await apiClient.reportRecoveryFailure(
             convoId: convoId,
-            failureType: resolvedFailureType,  // Spec §8.6
-            failureMode: failureMode,  // ADR-008 D1
+            failureType: resolvedFailureType,
+            failureMode: failureMode,
             epochAuthenticator: authenticator
           )
-          let (code, output) = try await apiClient.client.blue.catbird.mlsChat.reportRecoveryFailure(input: input)
           self.logger.info(
-            "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) authenticator=\(authenticator != nil ? "present" : "nil") failureType=\(resolvedFailureType) failureMode=\(failureMode ?? "nil")"
+            "📡 [MLSRecoveryManager] Reported recovery failure for \(convoId.prefix(16)) — requested=\(result.requested) autoReset=\(result.autoResetTriggered) authenticator=\(authenticator != nil ? "present" : "nil") failureType=\(resolvedFailureType) failureMode=\(failureMode ?? "nil")"
           )
         } catch {
           // Swallowing this was masking §8.6 escalation failures. Keep the
@@ -1132,16 +1131,14 @@ public actor MLSRecoveryManager {
     }
     Task {
       do {
-        let input = BlueCatbirdMlsChatReportRecoveryFailure.Input(
+        let result = try await apiClient.reportRecoveryFailure(
           convoId: convoId,
           failureType: "bootstrap_commit_unbridgeable",
           failureMode: "group_state_unrecoverable",
           epochAuthenticator: authenticator
         )
-        let (code, output) = try await apiClient.client.blue.catbird.mlsChat
-          .reportRecoveryFailure(input: input)
         self.logger.info(
-          "📡 [MLSRecoveryManager] Reported unbridgeable epoch gap for \(convoId.prefix(16)) — code=\(code) recorded=\(output?.recorded ?? false) autoReset=\(output?.autoResetTriggered ?? false) reason=\(output?.reason ?? "nil")"
+          "📡 [MLSRecoveryManager] Reported unbridgeable epoch gap for \(convoId.prefix(16)) — requested=\(result.requested) autoReset=\(result.autoResetTriggered)"
         )
       } catch {
         self.logger.error(

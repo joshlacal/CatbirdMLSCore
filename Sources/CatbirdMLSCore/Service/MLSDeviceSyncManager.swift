@@ -8,9 +8,9 @@ import PetrelCatbird
 /// to all conversations the user is a member of.
 ///
 /// Flow:
-/// 1. New device registers via blue.catbird.mlsChat.registerDevice
+/// 1. New device registers via blue.catbird.chat.enrollDevice
 /// 2. Server creates pending_device_additions for each conversation
-/// 3. Server emits NewDeviceEvent via SSE to conversation members
+/// 3. Server emits ConversationChangedEvent via SSE to conversation members
 /// 4. Online members receive event and attempt to claim the pending addition
 /// 5. First claimer fetches key package and adds device via addMembers
 /// 6. Claimer marks addition complete, or device self-joins via external commit
@@ -94,40 +94,11 @@ public actor MLSDeviceSyncManager {
 
     // MARK: - SSE Event Handling
 
-    /// Handle a new device event received via SSE
-    /// This is called when another device in a conversation comes online
-    /// - Parameter event: The new device event from the SSE stream
-    public func handleNewDeviceEvent(_ event: BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async {
-        let pendingId = event.pendingAdditionId
-
-        logger.info("📱 [NewDeviceEvent] Received for convo=\(event.convoId), user=\(event.userDid), device=\(event.deviceId)")
-
-        // ═══════════════════════════════════════════════════════════════════
-        // PHASE 5: Skip pending additions for same-user devices
-        // ═══════════════════════════════════════════════════════════════════
-        // With External Commit as primary, same-user devices will self-join
-        // via External Commit when they sync. No need for "add device" flow.
-        // This eliminates the coordination complexity of pending additions.
-        // ═══════════════════════════════════════════════════════════════════
-        if let currentUser = currentUserDid, event.userDid.didString().lowercased() == currentUser.lowercased() {
-            logger.info("   ⏭️ [SKIP] Same-user device - will self-join via External Commit")
-            logger.debug("      Device \(event.deviceId) will External Commit when it syncs")
-            return  // Skip - device will join itself
-        }
-
-        // Skip if already processing or recently completed
-        if processingAdditions.contains(pendingId) {
-            logger.debug("   Already processing this pending addition")
-            return
-        }
-
-        if recentlyCompletedAdditions.contains(pendingId) {
-            logger.debug("   Recently completed this pending addition")
-            return
-        }
-
-        // Process the pending addition (only for OTHER users' devices now)
-        await processPendingAddition(pendingId: pendingId, convoId: event.convoId)
+    /// Handle a conversation changed event received via SSE
+    /// This is called when another device in a conversation comes online or state changes
+    /// - Parameter event: The conversation changed event from the SSE stream
+    public func handleConversationChangedEvent(_ event: BlueCatbirdChatDefs.ConversationChangedEvent) async {
+        logger.info("📱 [ConversationChangedEvent] Received for convo=\(event.conversationId)")
     }
 
     // MARK: - Pending Addition Processing
@@ -221,7 +192,7 @@ public actor MLSDeviceSyncManager {
                 return
             }
 
-            let keyPackageData = firstKP.keyPackage.data
+            let keyPackageData = firstKP.data
             logger.info("🔵 Adding device to conversation \(convoId)...")
 
             let addStart = Date()

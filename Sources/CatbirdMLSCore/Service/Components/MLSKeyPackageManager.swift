@@ -1,5 +1,6 @@
 
 import CatbirdMLS
+import CryptoKit
 import Foundation
 import OSLog
 import Petrel
@@ -154,7 +155,7 @@ public actor MLSKeyPackageManager {
   /// - Parameter expiresAt: Optional expiration date (defaults to 30 days)
   /// - Returns: Published key package reference
   @discardableResult
-  public func publishKeyPackage(for userDid: String, expiresAt: Date? = nil) async throws -> BlueCatbirdMlsChatDefs.KeyPackageRef {
+  public func publishKeyPackage(for userDid: String, expiresAt: Date? = nil) async throws -> BlueCatbirdChatDefs.KeyPackageArtifact {
     logger.info("Publishing key package for \(userDid)")
 
     // Create key package locally (uses mlsDid automatically)
@@ -190,12 +191,14 @@ public actor MLSKeyPackageManager {
       )
 
       // Create a local reference
-      let didObj = try DID(didString: userDid)
-      let keyPackageRef = BlueCatbirdMlsChatDefs.KeyPackageRef(
-        did: didObj,
-        keyPackage: Bytes(data: keyPackageData),
-        keyPackageHash: nil,  // Server will compute and return this in getKeyPackages
-        cipherSuite: defaultCipherSuite
+      let sha256Digest = SHA256.hash(data: keyPackageData)
+      let sha256Bytes = Bytes(data: Data(sha256Digest))
+      let keyPackageRef = BlueCatbirdChatDefs.KeyPackageArtifact(
+        framing: "mls_key_package",
+        contentType: "application/octet-stream",
+        bytes: Bytes(data: keyPackageData),
+        sha256: sha256Bytes,
+        keyPackageRef: sha256Bytes
       )
 
       logger.info("Successfully published key package for: \(userDid) (state already persisted)")
@@ -270,12 +273,12 @@ public actor MLSKeyPackageManager {
 
     // Check if this is first-time registration
     let isFirstTime: Bool
-    var freshStats: BlueCatbirdMlsChatPublishKeyPackages.Output?
+    var freshStats: EnhancedKeyPackageStats?
 
     do {
       let stats = try await apiClient.getKeyPackageStats()
       freshStats = stats
-      isFirstTime = stats.stats.available == 0
+      isFirstTime = stats.available == 0
       if isFirstTime {
         logger.info(
           "🆕 First-time registration detected (0 packages on server) - bypassing rate limit")
@@ -336,18 +339,18 @@ public actor MLSKeyPackageManager {
     guard let stats = freshStats else { return }
 
     do {
-      await cache.updateFromServer(count: stats.stats.available)
+      await cache.updateFromServer(count: stats.available)
 
       let enhancedStats = EnhancedKeyPackageStats(
-        available: stats.stats.available,
+        available: stats.available,
         threshold: 10,  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
-        total: stats.stats.available,
+        total: stats.available,
         consumed: 0,
         consumedLast24h: nil,
         consumedLast7d: nil,
         averageDailyConsumption: nil,
         predictedDepletionDays: nil,
-        needsReplenish: stats.stats.available < 10  // KEY_PACKAGE_LOW_THRESHOLD
+        needsReplenish: stats.available < 10  // KEY_PACKAGE_LOW_THRESHOLD
       )
 
       logger.info(
@@ -366,7 +369,7 @@ public actor MLSKeyPackageManager {
         )
         lastKeyPackageRefresh = Date()
       } else {
-        logger.debug("✅ Key packages are sufficient: \(stats.stats.available) available")
+        logger.debug("✅ Key packages are sufficient: \(stats.available) available")
         lastKeyPackageRefresh = Date()
       }
     } catch {
@@ -384,7 +387,7 @@ public actor MLSKeyPackageManager {
 
     do {
       let stats = try await apiClient.getKeyPackageStats()
-      let available = stats.stats.available
+      let available = stats.available
       let threshold = 10  // Spec §10: KEY_PACKAGE_LOW_THRESHOLD = 10
       logger.info(
         "📊 Key package inventory: available=\(available), threshold=\(threshold)")

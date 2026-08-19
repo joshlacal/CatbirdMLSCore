@@ -14685,7 +14685,7 @@ public protocol OrchestratorApiCallback: AnyObject {
      * Fetch encrypted envelopes for a conversation.
      *
      * `message_type` / `from_epoch` / `to_epoch` mirror the
-     * `blue.catbird.mlsChat.getMessages` lexicon params. Pass-through to the
+     * `blue.catbird.chat.getMessages` lexicon params. Pass-through to the
      * server URL — platform implementations should forward them untouched.
      * `from_epoch` and `to_epoch` are inclusive epoch bounds; supplying them
      * (especially with `message_type = Some("commit")`) keeps epoch catch-up
@@ -14697,7 +14697,7 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     /**
      * Publish multiple key packages in ONE request. The platform impl POSTs
-     * the whole array to `blue.catbird.mlsChat.publishKeyPackages` (server cap
+     * the whole array to `blue.catbird.chat.publishKeyPackages` (server cap
      * 100), collapsing a full replenishment refill into a single round-trip.
      */
     func publishKeyPackages(keyPackages: [Data], cipherSuite: String, expiresAt: String, deviceId: String?) throws
@@ -14721,7 +14721,7 @@ public protocol OrchestratorApiCallback: AnyObject {
     /**
      * Fetch a pending Welcome message for a conversation.
      *
-     * Platform impls should call the `blue.catbird.mlsChat.getGroupState`
+     * Platform impls should call the `blue.catbird.chat.getGroupState`
      * lexicon with `include: "welcome"` and return the raw Welcome bytes.
      *
      * If no Welcome is available for this device (consumed, expired, or
@@ -14735,7 +14735,7 @@ public protocol OrchestratorApiCallback: AnyObject {
     /**
      * Ask the server to reissue a Welcome for this device.
      *
-     * Platform impls should POST to `blue.catbird.mlsChat.reissueWelcome`
+     * Platform impls should POST to `blue.catbird.chat.reissueWelcome`
      * with the conversation id, the recipient device DID, and the reason
      * string (e.g. `"no_matching_key_package"`). The active inviter/admin
      * fulfills the request by resealing a Welcome to one of this device's
@@ -14751,7 +14751,7 @@ public protocol OrchestratorApiCallback: AnyObject {
     /**
      * Submit an External Commit to join/rejoin a conversation.
      *
-     * Platform impls should POST to `blue.catbird.mlsChat.commitGroupChange`
+     * Platform impls should POST to `blue.catbird.chat.commitGroupChange`
      * with `action = "externalCommit"`, the commit bytes, optional
      * post-commit GroupInfo, and the base64-encoded MLS confirmation tag
      * from the new local group state. Return the server's new epoch and
@@ -14770,7 +14770,7 @@ public protocol OrchestratorApiCallback: AnyObject {
      * Called by the orchestrator's `RecoveryTracker` when a conversation has
      * hit `MAX_REJOIN_ATTEMPTS` external-commit failures (S1.1 of the §8
      * recovery pyramid). The platform impl should POST to
-     * `blue.catbird.mlsChat.reportRecoveryFailure` so the server can
+     * `blue.catbird.chat.reportRecoveryFailure` so the server can
      * accumulate quorum reports and trigger an automatic group reset (S2)
      * per ADR-002 §6.
      *
@@ -14795,7 +14795,7 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     /**
      * Upload an encrypted group metadata blob via
-     * `blue.catbird.mlsChat.putGroupMetadataBlob`. `kind` is `"metadata"` or
+     * `blue.catbird.chat.putGroupMetadataBlob`. `kind` is `"metadata"` or
      * `"avatar"`; `metadata_version` is the monotonic counter from the
      * corresponding `MetadataReference`. Platform impls forward the args
      * untouched into the XRPC body.
@@ -14804,7 +14804,7 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     /**
      * Download an encrypted group metadata blob via
-     * `blue.catbird.mlsChat.getGroupMetadataBlob`. Returns the raw ciphertext
+     * `blue.catbird.chat.getGroupMetadataBlob`. Returns the raw ciphertext
      * (`nonce || ciphertext || tag`) for `blob_locator`. On `BlobNotFound`
      * (GC'd / never uploaded) return `ServerError { status: 404 }` so the
      * orchestrator can skip metadata hydration without treating it as fatal.
@@ -14813,7 +14813,7 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     /**
      * Submit a non-membership commit (e.g. a metadata update) via
-     * `blue.catbird.mlsChat.commitGroupChange`. Platform impls POST
+     * `blue.catbird.chat.commitGroupChange`. Platform impls POST
      * `{ convoId, action, commit }`; on success the server CAS-advances the
      * authoritative `current_epoch`. `action` is e.g. `"updateMetadata"`.
      * `confirmation_tag` is the optional base64 MLS confirmation tag.

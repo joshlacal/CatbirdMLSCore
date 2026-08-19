@@ -1421,7 +1421,7 @@ extension MLSConversationManager {
       let deviceInfo = await mlsClient.getDeviceInfo(for: userDid)
 
       let response = try await apiClient.getExpectedConversations(deviceId: deviceInfo?.mlsDid)
-      let expectedConvos = response.conversations
+      let expectedConvos = response
 
       logger.info("📋 Found \(expectedConvos.count) expected conversations")
 
@@ -1442,7 +1442,7 @@ extension MLSConversationManager {
       var convosNeedingRejoin = missingConvos
       convosNeedingRejoin.removeAll()
       for convo in missingConvos {
-        guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
+        let groupIdData = convo.groupId.data
         let exists = await mlsClient.groupExists(for: userDid, groupId: groupIdData)
         if exists {
           if (try? await mlsClient.getEpoch(for: userDid, groupId: groupIdData)) != nil {
@@ -1467,10 +1467,7 @@ extension MLSConversationManager {
               group.addTask { [weak self] in
                 guard let self = self, let userDid = self.userDid else { return }
 
-                guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-                  self.logger.warning("⚠️ Invalid groupId format for \(convo.conversationId) - skipping")
-                  return
-                }
+                let groupIdData = convo.groupId.data
 
                 let groupExists = await self.mlsClient.groupExists(for: userDid, groupId: groupIdData)
 
@@ -1533,12 +1530,7 @@ extension MLSConversationManager {
             break
           }
 
-          guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-            logger.warning("⚠️ Invalid groupId format for \(convo.conversationId) - skipping")
-            failureCount += 1
-            continue
-          }
-
+          let groupIdData = convo.groupId.data
           let groupExists = await mlsClient.groupExists(for: userDid, groupId: groupIdData)
 
           guard
@@ -1805,7 +1797,7 @@ extension MLSConversationManager {
   private func classifyWelcomeRejoinFailure(
     _ error: Error,
     label: String,
-    convo: BlueCatbirdMlsChatDefs.ConvoView
+    convo: BlueCatbirdChatDefs.ConversationState
   ) async -> WelcomeRejoinResult {
     if error is CancellationError {
       logger.info("📭 Welcome rejoin cancelled for \(label)")
@@ -1896,7 +1888,7 @@ extension MLSConversationManager {
   }
 
   private func classifyMissingWelcomeRecovery(
-    for convo: BlueCatbirdMlsChatDefs.ConvoView,
+    for convo: BlueCatbirdChatDefs.ConversationState,
     label: String,
     failure: WelcomeRecoveryFailure,
     fallbackReason: String
@@ -1929,7 +1921,7 @@ extension MLSConversationManager {
   /// Initialize group from Welcome with retry for transient auth errors (401)
   /// This handles the race condition during account switch where auth may not be fully established
   private func initializeGroupFromWelcomeWithRetry(
-    convo: BlueCatbirdMlsChatDefs.ConvoView,
+    convo: BlueCatbirdChatDefs.ConversationState,
     maxAttempts: Int = 3,
     baseDelayMs: UInt64 = 500
   ) async throws {
@@ -1964,50 +1956,21 @@ extension MLSConversationManager {
     throw lastError ?? MLSConversationError.welcomeFetchFailed
   }
 
-  internal func fetchConversationForRejoin(convoId: String) async -> BlueCatbirdMlsChatDefs.ConvoView? {
+  internal func fetchConversationForRejoin(convoId: String) async -> BlueCatbirdChatDefs.ConversationState? {
     // 1. Try in-memory first (fastest)
     if let convo = conversations[convoId] {
       return convo
     }
 
-    // 2. Try local database
-    do {
-      if let localConvo = try await database.read({ db in
-        try MLSConversationModel
-          .filter(MLSConversationModel.Columns.conversationID == convoId)
-          .fetchOne(db)?
-          .asConvoView()
-      }) {
-        return localConvo
-      }
-    } catch {
-      logger.warning("⚠️ Database lookup failed for \(convoId): \(error.localizedDescription)")
-    }
-
-    // 3. CRITICAL: Fallback to server fetch for newly added conversations
-    // This bridges the gap between 'ExpectedConversation' (lite) and 'ConvoView' (full)
-    // Without this, Welcome processing fails for new joins and falls back to External Commit
+    // 2. Server fetch for conversation state
     do {
       logger.info(
         "📡 [fetchConversationForRejoin] Fetching from server for \(convoId.prefix(16))...")
-      let conversations = try await apiClient.getCanonicalConversationViews(limit: 100)
-
-      if let match = conversations.convos.first(where: {
-        MLSConversationIdentity.matches(
-          requestedId: convoId,
-          conversationId: $0.conversationId,
-          groupId: $0.groupId
-        )
-      }) {
-        // Cache it so we don't fetch again immediately
-        self.conversations[convoId] = match
-        logger.info("✅ [fetchConversationForRejoin] Found conversation on server, cached locally")
-        return match
-      } else {
-        logger.warning(
-          "⚠️ [fetchConversationForRejoin] Conversation \(convoId.prefix(16))... not found in server list"
-        )
-      }
+      let output = try await apiClient.getCanonicalConversationState(conversationId: convoId)
+      let state = output.state
+      self.conversations[convoId] = state
+      logger.info("✅ [fetchConversationForRejoin] Found conversation on server, cached locally")
+      return state
     } catch {
       logger.error(
         "❌ [fetchConversationForRejoin] Server fetch failed: \(error.localizedDescription)")

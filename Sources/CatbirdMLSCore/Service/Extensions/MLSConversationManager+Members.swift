@@ -214,7 +214,7 @@ public extension MLSConversationManager {
     userDid: String,
     groupIdData: Data,
     groupState: MLSGroupState,
-    convo: BlueCatbirdMlsChatDefs.ConvoView,
+    convo: BlueCatbirdChatDefs.ConversationState,
     keyPackagesArray: [Data],
     keyPackagesWithHashes: [KeyPackageWithHash]
   ) async throws {
@@ -277,10 +277,16 @@ public extension MLSConversationManager {
       )
       let welcomeData = addResult.welcomeData
 
-      // Build key package hash entries for server lifecycle tracking
-      let keyPackageHashEntries: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry] =
+      // Build key package artifacts for server lifecycle tracking
+      let keyPackageArtifacts: [BlueCatbirdChatDefs.KeyPackageArtifact] =
         keyPackagesWithHashes.map { kp in
-          BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry(did: kp.did, hash: kp.hash)
+          BlueCatbirdChatDefs.KeyPackageArtifact(
+            framing: "direct",
+            contentType: "application/octet-stream",
+            bytes: Bytes(data: kp.data),
+            sha256: Bytes(data: kp.hash.data(using: .utf8) ?? Data()),
+            keyPackageRef: Bytes(data: kp.hash.data(using: .utf8) ?? Data())
+          )
         }
 
       // PHASE 3 FIX: Protect blob upload + server send + merge from cancellation
@@ -340,7 +346,7 @@ public extension MLSConversationManager {
             commit: addResult.commitData,
             welcomeMessage: welcomeData,
             groupInfo: postCommitGroupInfo,
-            keyPackageHashes: keyPackageHashEntries
+            keyPackageHashes: keyPackageArtifacts
           )
         } catch let apiError as MLSAPIError {
           // A server rejection means the commit never took effect remotely —
@@ -826,18 +832,8 @@ public extension MLSConversationManager {
     convoId: String,
     groupId: String
   ) async throws {
-    let (convos, _) = try await apiClient.getCanonicalConversationViews(limit: 100)
-
-    guard let updatedConvo = convos.first(where: { $0.groupId == groupId }) else {
-      logger.warning(
-        "⚠️ [MLSConversationManager.refreshConversationSnapshotAfterAdminRoleChange] Conversation refresh missing for \(convoId)"
-      )
-      return
-    }
-
-    try await persistMembersToDatabase([updatedConvo])
-    conversations[convoId] = updatedConvo
-    notifyObservers(.conversationJoined(updatedConvo))
+    let output = try await apiClient.getCanonicalConversationState(conversationId: convoId)
+    notifyObservers(.conversationJoined(output.state))
   }
 
 }

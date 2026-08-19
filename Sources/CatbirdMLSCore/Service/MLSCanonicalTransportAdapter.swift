@@ -38,93 +38,6 @@ public enum MLSCanonicalTransportAdapter {
   public static func decodeBlob(_ response: Data) throws -> Data {
     try decodeCleanChatBlob(responseBytes: response)
   }
-  /// Project canonical conversation state into the compatibility view used by
-  /// existing manager orchestration. The source remains the generated
-  /// clean-chat DTO; no legacy endpoint is consulted.
-  public static func projectConversationView(
-    from state: BlueCatbirdChatDefs.ConversationState
-  ) -> BlueCatbirdMlsChatDefs.ConvoView? {
-    let creatorString = state.metadataSnapshot.authorProof.authorDid.description
-    guard let creator = try? DID(didString: creatorString) else {
-      return nil
-    }
-    let joinedAt = ATProtocolDate(date: .distantPast)
-    let members = state.participants.compactMap { participant -> BlueCatbirdMlsChatDefs.MemberView? in
-      guard let did = try? DID(didString: participant.userDid.description) else {
-        return nil
-      }
-      return BlueCatbirdMlsChatDefs.MemberView(
-        did: did,
-        userDid: did,
-        deviceId: nil,
-        deviceName: nil,
-        joinedAt: joinedAt,
-        isAdmin: participant.userDid.description == creatorString,
-        isModerator: nil,
-        promotedAt: nil,
-        promotedBy: nil,
-        leafIndex: nil,
-        credential: nil
-      )
-    }
-    return BlueCatbirdMlsChatDefs.ConvoView(
-      conversationId: state.coordinates.conversationId.description,
-      groupId: state.coordinates.groupId.data.hexEncodedString(),
-      creator: creator,
-      members: members,
-      epoch: state.coordinates.epoch,
-      cipherSuite: state.cipherSuite.rawValue,
-      createdAt: joinedAt,
-      lastMessageAt: nil,
-      confirmationTag: state.coordinates.confirmationTag,
-      resetGeneration: state.coordinates.generation,
-      sequencerDid: nil
-    )
-  }
-
-  /// Project one canonical entry into a compatibility message view without
-  /// changing its semantic type. A requested type is a filter, never a relabel.
-  public static func projectMessageView(
-    from entry: BlueCatbirdChatDefs.ConversationEntry,
-    messageType: BlueCatbirdMlsChatDefs.MessageViewMessageType? = nil
-  ) -> BlueCatbirdMlsChatDefs.MessageView? {
-    switch entry {
-    case let .blueCatbirdChatDefsApplicationEntry(application):
-      guard messageType == nil || messageType == .value_app,
-            case let .blueCatbirdChatDefsApplicationSendBody(body) = application.signedRequest.body
-      else {
-        return nil
-      }
-      return BlueCatbirdMlsChatDefs.MessageView(
-        id: String(describing: application.entryId),
-        convoId: String(describing: application.conversationId),
-        ciphertext: body.applicationMessage.bytes,
-        epoch: body.prior.epoch,
-        seq: application.seq,
-        createdAt: ATProtocolDate(date: application.receivedAt.date),
-        messageType: .value_app
-      )
-
-    case let .blueCatbirdChatDefsCommitEntry(commit):
-      guard messageType == nil || messageType == .value_commit,
-            case let .blueCatbirdChatDefsCommitTransitionBody(body) = commit.signedRequest.body
-      else {
-        return nil
-      }
-      return BlueCatbirdMlsChatDefs.MessageView(
-        id: String(describing: commit.entryId),
-        convoId: String(describing: commit.conversationId),
-        ciphertext: body.commit.bytes,
-        epoch: body.prior.epoch,
-        seq: commit.seq,
-        createdAt: ATProtocolDate(date: commit.receivedAt.date),
-        messageType: .value_commit
-      )
-
-    default:
-      return nil
-    }
-  }
 
   /// The inventory snapshot is the ticket's cursor fence. A persisted event
   /// cursor may be older than that fence after reconnect; explicitly reconcile
@@ -148,7 +61,7 @@ public enum MLSCanonicalTransportAdapter {
     case messageAvailable(
       BlueCatbirdChatDefs.MessageAvailableEvent,
       cursor: String,
-      messages: [BlueCatbirdMlsChatDefs.MessageView]
+      messages: [BlueCatbirdChatDefs.ConversationEntry]
     )
     case conversationChanged(BlueCatbirdChatDefs.ConversationChangedEvent)
     case conversationClosed(BlueCatbirdChatDefs.ConversationClosedEvent)
@@ -174,7 +87,7 @@ public enum MLSCanonicalTransportAdapter {
       (
         BlueCatbirdChatDefs.MessageAvailableEvent,
         String,
-        [BlueCatbirdMlsChatDefs.MessageView]
+        [BlueCatbirdChatDefs.ConversationEntry]
       ) async throws -> Void
     public typealias WelcomeAvailableHandler =
       (BlueCatbirdChatDefs.WelcomeAvailableEvent) async throws -> Void
@@ -600,15 +513,10 @@ public enum MLSCanonicalTransportAdapter {
       }
       do {
         let entries = try await loadEntries(conversationID, max(0, available.seq - 1))
-        let messages = entries.compactMap { entry -> BlueCatbirdMlsChatDefs.MessageView? in
-          guard let message = projectMessageView(from: entry),
-                message.convoId == conversationID
-          else {
-            return nil
-          }
-          return message
+        let messages = entries.filter { entry in
+          entry.conversationIdString == conversationID
         }
-        guard messages.contains(where: { $0.seq == available.seq }) else {
+        guard messages.contains(where: { $0.sequenceNumber == available.seq }) else {
           return .reconnect(
             MLSCanonicalMessageAvailabilityError(
               conversationId: conversationID,
@@ -745,43 +653,46 @@ public enum MLSCanonicalTransportAdapter {
     }
     return .handled
   }
+}
 
-  /// Shared canonical stream-handler seam used by both WebSocket and SSE.
-  /// This compatibility overload accepts a throwing message reconciliation
-  /// action; canonical durable messages never use a fire-and-forget callback.
-  internal static func handleCanonicalStreamMessage(
-    _ message: BlueCatbirdChatSubscribeEvents.Message,
-    subscriptionKey: String,
-    loadEntries: @escaping (String, Int) async throws -> [BlueCatbirdChatDefs.ConversationEntry],
-    onMessage: @escaping (BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async throws -> Void,
-    onError: @escaping (Error) async -> Void,
-    saveCursor: @escaping (String) async throws -> Void
-  ) async {
-    let result = await handleCanonicalStreamMessage(
-      message,
-      subscriptionKey: subscriptionKey,
-      loadEntries: loadEntries,
-      onDurableEvent: { event in
-        let actions = MLSCanonicalDurableEventActions(
-          onMessageAvailable: { _, cursor, messages in
-            for message in messages {
-              try await onMessage(
-                BlueCatbirdMlsChatSubscribeEvents.MessageEvent(
-                  cursor: cursor,
-                  message: message,
-                  ephemeral: nil,
-                  epoch: message.epoch
-                )
-              )
-            }
-          }
-        )
-        try await actions.dispatch(event)
-      },
-      saveCursor: saveCursor
-    )
-    if case let .reconnect(error) = result {
-      await onError(error)
+extension BlueCatbirdChatDefs.ConversationEntry {
+  public var conversationIdString: String {
+    switch self {
+    case .blueCatbirdChatDefsApplicationEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsCommitEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsPolicyEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsMetadataEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsCreationEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsParticipantAcceptanceEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsConversationCloseEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsResetRequestEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsResetActivationEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsLeafRecoveryFulfillmentEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsLeaveRequestEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsZeroLeafLeaveEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsLeaveCancellationEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(let e): return String(describing: e.conversationId)
+    case .unexpected: return ""
+    }
+  }
+
+  public var sequenceNumber: Int {
+    switch self {
+    case .blueCatbirdChatDefsApplicationEntry(let e): return e.seq
+    case .blueCatbirdChatDefsCommitEntry(let e): return e.seq
+    case .blueCatbirdChatDefsPolicyEntry(let e): return e.seq
+    case .blueCatbirdChatDefsMetadataEntry(let e): return e.seq
+    case .blueCatbirdChatDefsCreationEntry(let e): return e.seq
+    case .blueCatbirdChatDefsParticipantAcceptanceEntry(let e): return e.seq
+    case .blueCatbirdChatDefsConversationCloseEntry(let e): return e.seq
+    case .blueCatbirdChatDefsResetRequestEntry(let e): return e.seq
+    case .blueCatbirdChatDefsResetActivationEntry(let e): return e.seq
+    case .blueCatbirdChatDefsLeafRecoveryFulfillmentEntry(let e): return e.seq
+    case .blueCatbirdChatDefsLeaveRequestEntry(let e): return e.seq
+    case .blueCatbirdChatDefsZeroLeafLeaveEntry(let e): return e.seq
+    case .blueCatbirdChatDefsLeaveCancellationEntry(let e): return e.seq
+    case .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(let e): return e.seq
+    case .unexpected: return 0
     }
   }
 }

@@ -1493,9 +1493,7 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
 
   func testManagerActionFactoriesReachEveryCanonicalDurableArm() async throws {
     let did = try DID(didString: "did:plc:manager-action-test")
-    let message = try XCTUnwrap(
-      MLSCanonicalTransportAdapter.projectMessageView(from: makeApplicationEntry())
-    )
+    let entry = makeApplicationEntry()
     let typing = BlueCatbirdChatDefs.TypingEvent(
       typingId: "typing-1",
       conversationId: "conversation-1",
@@ -1507,9 +1505,9 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     let events: [MLSCanonicalTransportAdapter.MLSCanonicalDurableEvent] = [
       .typing(typing),
       .messageAvailable(
-        .init(conversationId: "conversation-1", seq: message.seq),
+        .init(conversationId: "conversation-1", seq: entry.sequenceNumber),
         cursor: "cursor-1",
-        messages: [message]
+        messages: [entry]
       ),
       .conversationChanged(.init(conversationId: "conversation-1")),
       .conversationClosed(
@@ -1597,15 +1595,13 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
 
     var legacyMessageFallbackCalled = false
     let missingMessageActions = MLSWebSocketManager.canonicalDurableEventActions(
-      for: MLSWebSocketManager.EventHandler(
-        onMessage: { _ in legacyMessageFallbackCalled = true }
-      )
+      for: MLSWebSocketManager.EventHandler()
     )
     do {
       try await missingMessageActions.dispatch(.messageAvailable(
-        .init(conversationId: "conversation-1", seq: message.seq),
+        .init(conversationId: "conversation-1", seq: entry.sequenceNumber),
         cursor: "cursor-1",
-        messages: [message]
+        messages: [entry]
       ))
       XCTFail("canonical message handling must require a throwing typed action")
     } catch let error as MLSCanonicalActionMissingError {
@@ -1897,19 +1893,25 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       createdAt: expiry
     )
     var savedCursors: [String] = []
-    var errors: [Error] = []
+    var eventReceived = false
 
-    await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+    let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
       .blueCatbirdChatDefsEventEnvelope(envelope),
       subscriptionKey: "conversation-1",
       loadEntries: { _, _ in [] },
-      onMessage: { _ in XCTFail("unhandled durable variant must not reach legacy message callback") },
-      onError: { errors.append($0) },
+      onDurableEvent: { _ in
+        eventReceived = true
+        throw MLSCanonicalActionMissingError.conversationChanged
+      },
       saveCursor: { savedCursors.append($0) }
     )
 
-    XCTAssertEqual(errors.count, 1)
-    XCTAssertTrue(errors[0] is MLSCanonicalActionMissingError)
+    XCTAssertTrue(eventReceived)
+    if case let .reconnect(error) = result {
+      XCTAssertTrue(error is MLSCanonicalActionMissingError)
+    } else {
+      XCTFail("expected reconnect on unhandled error")
+    }
     XCTAssertTrue(savedCursors.isEmpty)
   }
 

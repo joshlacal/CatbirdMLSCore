@@ -4,8 +4,8 @@ import PetrelCatbird
 
 /// State change events
 public enum MLSStateEvent {
-  case conversationCreated(BlueCatbirdMlsChatDefs.ConvoView)
-  case conversationJoined(BlueCatbirdMlsChatDefs.ConvoView)
+  case conversationCreated(BlueCatbirdChatDefs.ConversationState)
+  case conversationJoined(BlueCatbirdChatDefs.ConversationState)
   case conversationLeft(String)
   case conversationRequestAccepted(String)  // convoId - chat request was accepted
   case membersAdded(String, [DID])
@@ -30,9 +30,9 @@ public enum MLSStateEvent {
   public var description: String {
     switch self {
     case .conversationCreated(let convo):
-      return "Conversation created: \(convo.conversationId)"
+      return "Conversation created: \(convo.coordinates.conversationId)"
     case .conversationJoined(let convo):
-      return "Conversation joined: \(convo.conversationId)"
+      return "Conversation joined: \(convo.coordinates.conversationId)"
     case .conversationLeft(let id):
       return "Conversation left: \(id)"
     case .conversationRequestAccepted(let id):
@@ -58,7 +58,9 @@ public enum MLSStateEvent {
     case .reactionReceived(let convoId, let messageId, let emoji, let senderDID, let action):
       return "Reaction \(action) in \(convoId): \(emoji) on \(messageId) by \(senderDID)"
     case .groupReset(let convoId, let newGroupId, let resetGeneration, let resetBy, let reason):
-      return "Group reset in \(convoId): newGroup=\(newGroupId), gen=\(resetGeneration), by=\(resetBy)\(reason.map { ": \($0)" } ?? "")"
+      let byStr = resetBy?.description ?? "nil"
+      let reasonStr = reason.map { ": \($0)" } ?? ""
+      return "Group reset in \(convoId): newGroup=\(newGroupId), gen=\(resetGeneration), by=\(byStr)\(reasonStr)"
     case .messageEdited(let conversationID, let messageID):
       return "Message edited in \(conversationID): \(messageID)"
     case .messageUnsent(let conversationID, let messageID):

@@ -2,125 +2,87 @@ import XCTest
 @testable import CatbirdMLSCore
 
 final class MLSChatEndpointCatalogTests: XCTestCase {
-  func testEveryLegacyTransportRouteHasAnExplicitCanonicalDisposition() {
-    let routes = Set(MLSChatEndpointCatalog.routes.map(\.legacy))
-    let expectedLegacyLexicons = Set([
-      "beginDeviceAuthBinding", "beginTransitionAttestation", "bootstrapResetGroup",
-      "checkBlocks", "commitGroupChange", "completeDeviceAuthBinding", "createConvo",
-      "deleteBlob", "device", "finalizeGroupChange", "getBlob", "getBlobUsage",
-      "getBlockStatus", "getConvoSettings", "getConvos", "getGroupMetadataBlob",
-      "getGroupState", "getKeyPackageStatus", "getKeyPackages", "getMessages",
-      "getPendingDevices", "getSubscriptionTicket", "invalidateKeyPackage", "leaveConvo",
-      "listDevices", "optIn", "policy", "publishKeyPackages", "putGroupMetadataBlob",
-      "reconcileKeyPackages", "registerDevice", "reissueWelcome", "reissueWelcomeRespond",
-      "removeDevice", "reportRecoveryFailure", "reportSpam", "requestFailover", "resetGroup",
-      "sendMessage", "subscribeEvents", "updateConvo", "updateCursor", "uploadBlob"
-    ].map { "blue.catbird.mlsChat.\($0)" })
+  func testCanonicalCatalogContainsAllCleanChatEndpoints() {
+    let routes = Set(MLSChatEndpointCatalog.routes.map(\.canonical))
+    let expectedCanonicalEndpoints = Set([
+      "acceptConversation", "acknowledgeWelcome", "activateReset",
+      "cancelLeafRecovery", "cancelLeave", "closeConversation",
+      "createConversation", "deleteBlob", "enrollDevice",
+      "getBlob", "getBlobUsage", "getConversationState",
+      "getConversations", "getDevices", "getEntries",
+      "getLeafRecoveryInbox", "getOwnDevices", "getPendingWelcomes",
+      "getSubscriptionTicket", "prepareBlobUpload", "publishTyping",
+      "rebindDeviceAuthentication", "rejectWelcome", "replenishKeyPackages",
+      "requestLeafRecovery", "requestLeave", "requestReset",
+      "revokeDevice", "sendMessage", "submitTransition",
+      "subscribeEvents", "uploadBlob"
+    ].map { "blue.catbird.chat.\($0)" })
 
-    XCTAssertTrue(expectedLegacyLexicons.isSubset(of: routes))
-    XCTAssertEqual(expectedLegacyLexicons.count, 43)
-    XCTAssertEqual(
-      routes.subtracting(expectedLegacyLexicons),
-      [
-        "blue.catbird.mlsChat.blockChatSender",
-        "blue.catbird.mlsChat.declaration",
-        "blue.catbird.mlsChat.getKeyPackageStats",
-        "blue.catbird.mlsChat.message"
-      ]
-    )
-    XCTAssertEqual(
-      MLSChatEndpointCatalog.excludedLegacyGeneratedTypes,
-      ["blue.catbird.mlsChat.defs"]
-    )
-    XCTAssertTrue(routes.contains("blue.catbird.mlsChat.sendMessage"))
-    XCTAssertTrue(routes.contains("blue.catbird.mlsChat.commitGroupChange"))
-    XCTAssertTrue(routes.contains("blue.catbird.mlsChat.device"))
+    XCTAssertEqual(routes, expectedCanonicalEndpoints)
+    XCTAssertEqual(MLSChatEndpointCatalog.canonicalNamespace, "blue.catbird.chat")
 
     for route in MLSChatEndpointCatalog.routes {
-      if let canonical = route.canonical {
-        XCTAssertTrue(
-          canonical.hasPrefix("blue.catbird.chat."),
-          "canonical route escaped clean-chat namespace: \(canonical)"
-        )
-      }
-    }
-  }
-
-  func testDirectCompatibilityRoutesUseCanonicalGeneratedNames() {
-    let direct = Dictionary(
-      uniqueKeysWithValues: MLSChatEndpointCatalog.routes.compactMap { route in
-        route.disposition == .direct ? (route.legacy, route.canonical) : nil
-      }
-    )
-
-    XCTAssertEqual(
-      direct["blue.catbird.mlsChat.getBlob"],
-      "blue.catbird.chat.getBlob"
-    )
-    XCTAssertNil(direct["blue.catbird.mlsChat.getSubscriptionTicket"])
-    XCTAssertNil(direct["blue.catbird.mlsChat.subscribeEvents"])
-  }
-
-  func testSignedMutationRoutesAreNotPretendedToBeWireCompatible() {
-    let signed = MLSChatEndpointCatalog.routes.filter {
-      $0.disposition == .signedAdapterRequired
-    }
-
-    XCTAssertTrue(signed.contains { $0.legacy.hasSuffix(".sendMessage") })
-    XCTAssertTrue(signed.contains { $0.legacy.hasSuffix(".commitGroupChange") })
-    XCTAssertTrue(signed.contains { $0.legacy.hasSuffix(".registerDevice") })
-    XCTAssertTrue(signed.allSatisfy(\.requiresSignedRequest))
-  }
-
-  func testUploadAndWelcomeResponseMappingsPreserveDistinctCanonicalSemantics() {
-    let upload = try! XCTUnwrap(
-      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.uploadBlob")
-    )
-    XCTAssertEqual(upload.canonical, "blue.catbird.chat.uploadBlob")
-    XCTAssertEqual(upload.disposition, .adapterBlocked)
-    XCTAssertFalse(upload.requiresSignedRequest)
-
-    let welcomeResponse = try! XCTUnwrap(
-      MLSChatEndpointCatalog.route(
-        forLegacyEndpoint: "blue.catbird.mlsChat.reissueWelcomeRespond"
+      XCTAssertTrue(
+        route.canonical.hasPrefix("blue.catbird.chat."),
+        "canonical route escaped clean-chat namespace: \(route.canonical)"
       )
-    )
-    XCTAssertNil(welcomeResponse.canonical)
-    XCTAssertEqual(welcomeResponse.disposition, .adapterBlocked)
+    }
   }
 
-  func testReadAndTicketAdaptersUseTransportAuthOnly() {
-    let unsignedLegacyNames = [
-      "getConvos", "getMessages", "getGroupState", "getBlobUsage",
-      "getSubscriptionTicket", "subscribeEvents", "listDevices", "getPendingDevices",
-      "getGroupMetadataBlob"
+  func testCanonicalRouteLookup() {
+    let sendMessageRoute = try! XCTUnwrap(
+      MLSChatEndpointCatalog.route(forEndpoint: "sendMessage")
+    )
+    XCTAssertEqual(sendMessageRoute.canonical, "blue.catbird.chat.sendMessage")
+    XCTAssertTrue(sendMessageRoute.requiresSignedRequest)
+
+    let fullLookup = try! XCTUnwrap(
+      MLSChatEndpointCatalog.route(forEndpoint: "blue.catbird.chat.sendMessage")
+    )
+    XCTAssertEqual(fullLookup, sendMessageRoute)
+
+    let getEntriesRoute = try! XCTUnwrap(
+      MLSChatEndpointCatalog.route(forEndpoint: "getEntries")
+    )
+    XCTAssertEqual(getEntriesRoute.canonical, "blue.catbird.chat.getEntries")
+    XCTAssertFalse(getEntriesRoute.requiresSignedRequest)
+  }
+
+  func testSignedMutationRoutesRequireSignedRequest() {
+    let signedEndpoints = [
+      "sendMessage", "submitTransition", "createConversation",
+      "closeConversation", "acceptConversation", "requestLeave",
+      "cancelLeave", "enrollDevice", "revokeDevice",
+      "rebindDeviceAuthentication", "replenishKeyPackages",
+      "requestLeafRecovery", "cancelLeafRecovery", "requestReset",
+      "activateReset", "acknowledgeWelcome", "rejectWelcome",
+      "deleteBlob"
     ]
 
-    for legacyName in unsignedLegacyNames {
+    for name in signedEndpoints {
       let route = try! XCTUnwrap(
-        MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.\(legacyName)")
+        MLSChatEndpointCatalog.route(forEndpoint: name),
+        "missing route for \(name)"
       )
-      XCTAssertFalse(route.requiresSignedRequest, "\(legacyName) is a DPoP transport-auth read")
+      XCTAssertTrue(route.requiresSignedRequest, "\(name) should require signed request")
     }
-
-    let recovery = try! XCTUnwrap(
-      MLSChatEndpointCatalog.route(
-        forLegacyEndpoint: "blue.catbird.mlsChat.reportRecoveryFailure"
-      )
-    )
-    XCTAssertTrue(recovery.requiresSignedRequest)
   }
 
-  func testRecoveryAndRecordRoutesRemainExplicitlyBlockedUntilAdaptersExist() {
-    let blocked = MLSChatEndpointCatalog.routes.filter {
-      $0.disposition == .adapterBlocked
-    }
+  func testReadAndTicketRoutesDoNotRequireSignedRequest() {
+    let readEndpoints = [
+      "getConversations", "getConversationState", "getEntries",
+      "getPendingWelcomes", "getLeafRecoveryInbox", "getDevices",
+      "getOwnDevices", "getBlobUsage", "getBlob",
+      "prepareBlobUpload", "uploadBlob", "publishTyping",
+      "getSubscriptionTicket", "subscribeEvents"
+    ]
 
-    XCTAssertTrue(blocked.contains { $0.legacy.hasSuffix(".reportRecoveryFailure") })
-    XCTAssertTrue(blocked.contains { $0.legacy.hasSuffix(".device") })
-    let recovery = try! XCTUnwrap(
-      blocked.first { $0.legacy.hasSuffix(".reportRecoveryFailure") }
-    )
-    XCTAssertTrue(recovery.requiresSignedRequest)
+    for name in readEndpoints {
+      let route = try! XCTUnwrap(
+        MLSChatEndpointCatalog.route(forEndpoint: name),
+        "missing route for \(name)"
+      )
+      XCTAssertFalse(route.requiresSignedRequest, "\(name) should not require signed request")
+    }
   }
 }

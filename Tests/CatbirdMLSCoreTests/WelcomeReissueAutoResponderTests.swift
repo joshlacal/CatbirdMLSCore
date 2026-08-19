@@ -126,12 +126,10 @@ final class WelcomeReissueAutoResponderTests: XCTestCase {
         )
     }
 
-    private func makeEvent(requestID: String) -> BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent {
-        BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent(
-            cursor: "cursor-\(requestID)",
+    private func makeEvent(requestID: String) -> MLSConversationManager.MLSWelcomeReissueRequestedEvent {
+        MLSConversationManager.MLSWelcomeReissueRequestedEvent(
             convoId: "convo-\(requestID)",
             recipientDeviceDid: "did:plc:recipient#device",
-            requestedAt: ATProtocolDate(date: Date()),
             requestId: requestID
         )
     }

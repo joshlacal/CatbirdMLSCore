@@ -3916,20 +3916,20 @@ public actor MLSClient {
     // SQLite storage is automatic - no need to manually load/hydrate
 
     // Query server bundle inventory
-    var serverStats: BlueCatbirdMlsChatPublishKeyPackages.Output
+    var serverStats: EnhancedKeyPackageStats
     do {
       let oldStats = try await apiClient.getKeyPackageStats()
       serverStats = oldStats
       logger.info("📍 [Reconciliation] Server bundle status:")
-      logger.info("   - Available: \(serverStats.stats.available)")
-      logger.info("   - Published: \(serverStats.stats.published)")
+      logger.info("   - Available: \(serverStats.available)")
+      logger.info("   - Total: \(serverStats.total)")
     } catch {
       logger.error(
         "❌ [Reconciliation] Failed to query server inventory: \(error.localizedDescription)")
       throw error
     }
 
-    var desyncDetected = localCount != serverStats.stats.available
+    var desyncDetected = localCount != serverStats.available
 
     if desyncDetected {
       logger.error("🚨 [Reconciliation] KEY PACKAGE DESYNC DETECTED!")

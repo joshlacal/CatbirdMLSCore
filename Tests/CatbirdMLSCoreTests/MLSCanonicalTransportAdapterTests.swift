@@ -67,19 +67,19 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
   }
   func testCanonicalReadAndTicketRoutesStayOnGeneratedChatNamespace() {
     XCTAssertEqual(
-      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getConvos")?.canonical,
+      MLSChatEndpointCatalog.route(forEndpoint: "getConversations")?.canonical,
       "blue.catbird.chat.getConversations"
     )
     XCTAssertEqual(
-      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getMessages")?.canonical,
+      MLSChatEndpointCatalog.route(forEndpoint: "getEntries")?.canonical,
       "blue.catbird.chat.getEntries"
     )
     XCTAssertEqual(
-      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.getSubscriptionTicket")?.canonical,
+      MLSChatEndpointCatalog.route(forEndpoint: "getSubscriptionTicket")?.canonical,
       "blue.catbird.chat.getSubscriptionTicket"
     )
     XCTAssertEqual(
-      MLSChatEndpointCatalog.route(forLegacyEndpoint: "blue.catbird.mlsChat.subscribeEvents")?.canonical,
+      MLSChatEndpointCatalog.route(forEndpoint: "subscribeEvents")?.canonical,
       "blue.catbird.chat.subscribeEvents"
     )
   }
@@ -109,9 +109,9 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       createdAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_000))
     )
     let entry = makeApplicationEntry()
-    var dispatched: [BlueCatbirdMlsChatDefs.MessageView] = []
     var savedCursors: [String] = []
     var loadedAfterSeq: Int?
+    var dispatched: [MLSCanonicalTransportAdapter.MLSCanonicalDurableEvent] = []
 
     await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
       .blueCatbirdChatDefsEventEnvelope(
@@ -129,11 +129,8 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
         XCTFail("filtered availability must not fetch entries")
         return []
       },
-      onMessage: { _ in
+      onDurableEvent: { _ in
         XCTFail("filtered availability must not dispatch")
-      },
-      onError: { error in
-        XCTFail("unexpected filtered-event error: \(error)")
       },
       saveCursor: { cursor in
         savedCursors.append(cursor)
@@ -150,11 +147,8 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
           .unexpected(.object([:]))
         ]
       },
-      onMessage: { event in
-        dispatched.append(event.message)
-      },
-      onError: { error in
-        XCTFail("unexpected stream handler error: \(error)")
+      onDurableEvent: { event in
+        dispatched.append(event)
       },
       saveCursor: { cursor in
         savedCursors.append(cursor)
@@ -163,10 +157,14 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
 
     XCTAssertEqual(loadedAfterSeq, 3)
     XCTAssertEqual(dispatched.count, 1)
-    XCTAssertEqual(dispatched.first?.messageType, .value_app)
+    if case let .messageAvailable(available, cursor, messages) = dispatched.first {
+      XCTAssertEqual(available.seq, 4)
+      XCTAssertEqual(cursor, "cursor-1")
+      XCTAssertEqual(messages.count, 1)
+    } else {
+      XCTFail("Expected messageAvailable event")
+    }
     XCTAssertEqual(savedCursors, ["cursor-mismatch", "cursor-1"])
-
-
   }
 
   func testCanonicalReadRoundTripDecodesGeneratedInventory() throws {
@@ -274,20 +272,19 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
         receivedAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_001))
       )
     )
-    let projected = MLSCanonicalTransportAdapter.projectMessageView(from: entry)
-    XCTAssertEqual(projected?.id, "entry-1")
-    XCTAssertEqual(projected?.convoId, "convo-1")
-    XCTAssertEqual(projected?.ciphertext, Bytes(data: Data([0xAA, 0xBB])))
-    XCTAssertEqual(projected?.seq, 4)
-    XCTAssertEqual(projected?.messageType, .value_app)
-    XCTAssertNil(
-      MLSCanonicalTransportAdapter.projectMessageView(from: entry, messageType: .value_commit),
-      "an application entry must not be relabeled as a commit"
-    )
+    XCTAssertTrue(entry.isApplication)
+    XCTAssertFalse(entry.isCommit)
+    XCTAssertEqual(entry.entryID, "entry-1")
+    XCTAssertEqual(entry.conversationIdString, "convo-1")
+    XCTAssertEqual(entry.applicationEntry?.ciphertext, Data([0xAA, 0xBB]))
+    XCTAssertEqual(entry.sequenceNumber, 4)
   }
   func testUnexpectedCanonicalEntryDoesNotProjectAsCiphertext() {
     let entry = BlueCatbirdChatDefs.ConversationEntry.unexpected(.object([:]))
-    XCTAssertNil(MLSCanonicalTransportAdapter.projectMessageView(from: entry))
+    XCTAssertFalse(entry.isApplication)
+    XCTAssertFalse(entry.isCommit)
+    XCTAssertNil(entry.applicationEntry)
+    XCTAssertNil(entry.commitEntry)
   }
   func testCanonicalCommitEntryProjectsRealCommitBytesAndType() throws {
     let did = try DID(didString: "did:plc:abc123")
@@ -383,19 +380,11 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       )
     )
 
-    let projected = MLSCanonicalTransportAdapter.projectMessageView(from: entry)
-    XCTAssertEqual(
-      projected?.messageType,
-      BlueCatbirdMlsChatDefs.MessageViewMessageType.value_commit
-    )
-    XCTAssertEqual(projected?.ciphertext, Bytes(data: Data([0xCC, 0xDD])))
-    XCTAssertNil(
-      MLSCanonicalTransportAdapter.projectMessageView(from: entry, messageType: .value_app)
-    )
-    XCTAssertEqual(
-      MLSCanonicalTransportAdapter.projectMessageView(from: entry, messageType: .value_commit)?.messageType,
-      .value_commit
-    )
+    XCTAssertTrue(entry.isCommit)
+    XCTAssertFalse(entry.isApplication)
+    XCTAssertEqual(entry.commitEntry?.commitData, Data([0xCC, 0xDD]))
+    XCTAssertEqual(entry.entryID, "commit-entry-1")
+    XCTAssertEqual(entry.sequenceNumber, 5)
   }
 
 

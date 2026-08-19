@@ -66,7 +66,7 @@ extension MLSConversationManager {
     name: String,
     description: String? = nil,
     avatarUrl: String? = nil
-  ) async throws -> BlueCatbirdMlsChatDefs.ConvoView {
+  ) async throws -> BlueCatbirdChatDefs.ConversationState {
     logger.info(
       "🔵 [MLSConversationManager.createGroup] START - name: '\(name)', initialMembers: \(initialMembers?.count ?? 0)"
     )
@@ -109,7 +109,7 @@ extension MLSConversationManager {
       )
       notifyObservers(.conversationCreated(result.conversation))
       logger.info(
-        "✅ [MLSConversationManager.createGroup] rustFull complete - convoId: \(result.conversation.conversationId), epoch: \(result.conversation.epoch)"
+        "✅ [MLSConversationManager.createGroup] rustFull complete - convoId: \(result.conversation.coordinates.conversationId), epoch: \(result.conversation.coordinates.epoch)"
       )
       return result.conversation
     }
@@ -341,7 +341,7 @@ extension MLSConversationManager {
     conversations[groupIdHex] = convo
 
     // ⭐ CRITICAL FIX: Verify epoch from FFI instead of trusting server's response
-    let serverEpoch = UInt64(convo.epoch)
+    let serverEpoch = UInt64(convo.coordinates.epoch)
     let ffiEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupId)
 
     if serverEpoch != ffiEpoch {
@@ -355,7 +355,7 @@ extension MLSConversationManager {
       groupId: groupIdHex,
       convoId: groupIdHex,
       epoch: ffiEpoch,  // Use FFI epoch, not server epoch
-      members: Set(convo.members.map { $0.did.description })
+      members: Set(convo.participants.map { $0.userDid.description })
     )
 
     // Persist MLS state to SQLCipher immediately after group creation
@@ -365,7 +365,7 @@ extension MLSConversationManager {
       logger.error("⚠️ Failed to persist MLS state: \(error.localizedDescription)")
     }
 
-    func finalizeCreatedConversation() async throws -> BlueCatbirdMlsChatDefs.ConvoView {
+    func finalizeCreatedConversation() async throws -> BlueCatbirdChatDefs.ConversationState {
       // Mark conversation as active AFTER server sync completes
       conversationStates[groupIdHex] = .active
       logger.info("✅ Conversation '\(groupIdHex)' marked as ACTIVE - ready for messaging")
@@ -419,7 +419,7 @@ extension MLSConversationManager {
       }
 
       logger.info(
-        "✅ [MLSConversationManager.createGroup] COMPLETE - convoId: \(groupIdHex), epoch: \(convo.epoch)"
+        "✅ [MLSConversationManager.createGroup] COMPLETE - convoId: \(groupIdHex), epoch: \(convo.coordinates.epoch)"
       )
       return convo
     }
@@ -649,7 +649,7 @@ extension MLSConversationManager {
   /// Join an existing group using a Welcome message
   /// - Parameter welcomeMessage: Base64-encoded Welcome message
   /// - Returns: Joined conversation view
-  public func joinGroup(welcomeMessage: String) async throws -> BlueCatbirdMlsChatDefs.ConvoView {
+  public func joinGroup(welcomeMessage: String) async throws -> BlueCatbirdChatDefs.ConversationState {
     logger.info("Joining group from Welcome message")
     try throwIfShuttingDown("joinGroup")
     try assertSwiftProtocolMutationAllowed("joinGroup(welcomeMessage:)")
@@ -672,20 +672,19 @@ extension MLSConversationManager {
     logger.debug("Processed Welcome message, group ID: \(groupId)")
 
     // Fetch conversation details from server
-    let conversations = try await apiClient.getCanonicalConversationViews(limit: 100)
-    guard let convo = conversations.convos.first(where: { $0.groupId == groupId }) else {
-      throw MLSConversationError.conversationNotFound
-    }
+    let output = try await apiClient.getCanonicalConversationState(conversationId: groupId)
+    let convo = output.state
+    let convoId = convo.coordinates.conversationId.description
 
     // Store conversation state
-    self.conversations[convo.conversationId] = convo
+    self.conversations[convoId] = convo
 
     // ⭐ CRITICAL FIX: Verify epoch from FFI instead of trusting server's response
     guard let groupIdData = Data(hexEncoded: groupId) else {
       throw MLSConversationError.invalidGroupId
     }
 
-    let serverEpoch = UInt64(convo.epoch)
+    let serverEpoch = UInt64(convo.coordinates.epoch)
     let ffiEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
 
     if serverEpoch != ffiEpoch {
@@ -697,14 +696,14 @@ extension MLSConversationManager {
 
     groupStates[groupId] = MLSGroupState(
       groupId: groupId,
-      convoId: convo.conversationId,
+      convoId: convoId,
       epoch: ffiEpoch,  // Use FFI epoch, not server epoch
-      members: Set(convo.members.map { $0.did.description })
+      members: Set(convo.participants.map { $0.userDid.description })
     )
 
     // Insert history boundary marker so the UI shows "You joined this conversation"
     await insertHistoryBoundaryMarker(
-      conversationId: convo.conversationId,
+      conversationId: convoId,
       senderDID: userDid,
       epoch: ffiEpoch,
       contentKey: "history_boundary.new_member"
@@ -713,7 +712,7 @@ extension MLSConversationManager {
     // Notify observers
     notifyObservers(.conversationJoined(convo))
 
-    logger.info("Successfully joined conversation: \(convo.conversationId)")
+    logger.info("Successfully joined conversation: \(convoId)")
     return convo
   }
 
@@ -903,10 +902,14 @@ extension MLSConversationManager {
     }
 
     // Try to get conversation from memory first, or look up from database
-    let convo: BlueCatbirdMlsChatDefs.ConvoView
+    let convo: BlueCatbirdChatDefs.ConversationState?
     if let memoryConvo = conversations[convoId] {
       convo = memoryConvo
     } else {
+      convo = nil
+    }
+
+    if convo == nil {
       // Conversation not in memory - check database for zombie/orphan conversations
       let dbConvo = try await database.read { db in
         try MLSConversationModel
@@ -931,20 +934,23 @@ extension MLSConversationManager {
       }
     }
 
+    let convoState = convo!
+    let groupIdHex = convoState.coordinates.groupId.data.hexEncodedString()
+
     // GHOST GUARD: the conversation is in memory but its local MLS group may be
     // absent (group init failed during sync). The server-leave path below would
     // throw on the resulting non-200 and leave the convo permanently undeletable,
     // so when the local group is missing we tear it down locally — reusing the same
     // existence signal `forceDeleteConversationLocally` already trusts. A best-effort
     // server leave still removes us if we ARE a live member; its failure is ignored.
-    if let groupIdData = Data(hexEncoded: convo.groupId) {
+    if let groupIdData = Data(hexEncoded: groupIdHex) {
       let groupExists = await mlsClient.groupExists(for: userDid, groupId: groupIdData)
       if !groupExists {
         logger.warning(
           "⚠️ [leaveConversation] Local MLS group absent for \(convoId.prefix(16))... — treating as ghost; best-effort server leave then force delete locally"
         )
         _ = try? await apiClient.leaveConversation(convoId: convoId)
-        await forceDeleteConversationLocally(convoId: convoId, groupId: convo.groupId)
+        await forceDeleteConversationLocally(convoId: convoId, groupId: groupIdHex)
         notifyObservers(.conversationLeft(convoId))
         logger.info(
           "✅ [leaveConversation] Cleaned up ghost conversation: \(convoId.prefix(16))...")
@@ -959,7 +965,7 @@ extension MLSConversationManager {
       // CRITICAL: Force delete local state after successful server leave
       // This bypasses the conservative reconciliation logic that would otherwise
       // preserve the conversation if the MLS group still exists locally.
-      await forceDeleteConversationLocally(convoId: convoId, groupId: convo.groupId)
+      await forceDeleteConversationLocally(convoId: convoId, groupId: groupIdHex)
 
       // Notify observers
       notifyObservers(.conversationLeft(convoId))
@@ -974,7 +980,7 @@ extension MLSConversationManager {
         logger.warning(
           "⚠️ [leaveConversation] Server returned \(code) - user already removed, cleaning up locally"
         )
-        await forceDeleteConversationLocally(convoId: convoId, groupId: convo.groupId)
+        await forceDeleteConversationLocally(convoId: convoId, groupId: groupIdHex)
         notifyObservers(.conversationLeft(convoId))
         logger.info(
           "✅ [leaveConversation] Cleaned up stale conversation after server \(code): \(convoId.prefix(16))..."
@@ -995,7 +1001,7 @@ extension MLSConversationManager {
         logger.warning(
           "⚠️ [leaveConversation] Server returned \(statusCode) (MLSAPIError) - treating as already removed, cleaning up locally"
         )
-        await forceDeleteConversationLocally(convoId: convoId, groupId: convo.groupId)
+        await forceDeleteConversationLocally(convoId: convoId, groupId: groupIdHex)
         notifyObservers(.conversationLeft(convoId))
         logger.info(
           "✅ [leaveConversation] Cleaned up stale conversation after server \(statusCode): \(convoId.prefix(16))..."
@@ -1088,22 +1094,28 @@ extension MLSConversationManager {
   }
 
   internal func applyRustConversationSnapshot(
-    _ convo: BlueCatbirdMlsChatDefs.ConvoView,
+    _ convo: BlueCatbirdChatDefs.ConversationState,
     metadata: MLSConversationSnapshotMetadata? = nil,
     titleOverride: String? = nil
   ) async throws {
-    conversations[convo.conversationId] = convo
-    conversationStates[convo.conversationId] = .active
-    groupStates[convo.groupId] = MLSGroupState(
-      groupId: convo.groupId,
-      convoId: convo.conversationId,
-      epoch: UInt64(clamping: convo.epoch),
-      members: Set(convo.members.map { $0.userDid.description }),
-      knownServerEpoch: UInt64(clamping: convo.epoch)
+    let convoId = convo.coordinates.conversationId.description
+    let groupIdHex = convo.coordinates.groupId.data.hexEncodedString()
+    conversations[convoId] = convo
+    conversationStates[convoId] = .active
+    groupStates[groupIdHex] = MLSGroupState(
+      groupId: groupIdHex,
+      convoId: convoId,
+      epoch: UInt64(clamping: convo.coordinates.epoch),
+      members: Set(convo.participants.map { $0.userDid.description }),
+      knownServerEpoch: UInt64(clamping: convo.coordinates.epoch)
     )
 
-    try await persistConversationsToDatabase([convo])
-    try await persistMembersToDatabase([convo])
+    if let userDid = userDid {
+      let model = MLSConversationModel(state: convo, currentUserDID: userDid)
+      try await database.write { db in
+        try model.save(db)
+      }
+    }
 
     let metadataTitle = metadata?.title ?? MLSConversationSnapshotMetadata.nonEmpty(titleOverride)
     let metadataDescription = metadata?.description
@@ -1116,7 +1128,7 @@ extension MLSConversationManager {
             SET title = COALESCE(?, title), description = COALESCE(?, description), avatarURL = COALESCE(?, avatarURL), updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?
             """,
-          arguments: [metadataTitle, metadataDescription, metadataAvatarURL, Date(), convo.conversationId, userDid]
+          arguments: [metadataTitle, metadataDescription, metadataAvatarURL, Date(), convoId, userDid]
         )
       }
     }
@@ -1403,31 +1415,15 @@ extension MLSConversationManager {
     }
 
     // 3. POST commitGroupChange.
-    let input = BlueCatbirdMlsChatCommitGroupChange.Input(
-      convoId: conversationId,
-      action: "updateMetadata",
-      commit: Bytes(data: result.commitBytes)
-    )
-
-    let responseCode: Int
-    let output: BlueCatbirdMlsChatCommitGroupChange.Output?
     do {
-      (responseCode, output) = try await apiClient.client.blue.catbird.mlsChat.commitGroupChange(
-        input: input
+      try await apiClient.commitGroupChange(
+        convoId: conversationId,
+        action: "updateMetadata",
+        commit: result.commitBytes
       )
     } catch {
       try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
       throw error
-    }
-
-    guard responseCode == 200, output != nil else {
-      logger.error(
-        "❌ [updateGroupMetadataEncrypted] Server rejected commit: HTTP \(responseCode)"
-      )
-      try? await mlsClient.clearPendingCommit(for: userDid, groupId: groupIdData)
-      throw MLSConversationError.operationFailed(
-        "Server rejected metadata update commit (HTTP \(responseCode))"
-      )
     }
 
     // 4. Merge locally — advances epoch, applies the new

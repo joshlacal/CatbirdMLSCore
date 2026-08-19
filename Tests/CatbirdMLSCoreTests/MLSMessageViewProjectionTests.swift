@@ -16,7 +16,7 @@ final class MLSMessageViewProjectionTests: XCTestCase {
     for payload in payloads {
       XCTAssertEqual(
         try MLSMessageViewProjection.viewType(for: payload),
-        .value_app,
+        "application",
         "\(payload.messageType.rawValue) must use the generated app discriminator"
       )
     }
@@ -38,7 +38,7 @@ final class MLSMessageViewProjectionTests: XCTestCase {
   }
 
   func testOptionalViewDiscriminatorDefaultsToApplicationForLegacyMissingField() {
-    XCTAssertEqual(MLSMessageViewProjection.rawType(nil), "app")
-    XCTAssertEqual(MLSMessageViewProjection.rawType(.value_commit), "commit")
+    XCTAssertEqual(MLSMessageViewProjection.rawType(nil), "application")
+    XCTAssertEqual(MLSMessageViewProjection.rawType("commit"), "commit")
   }
 }

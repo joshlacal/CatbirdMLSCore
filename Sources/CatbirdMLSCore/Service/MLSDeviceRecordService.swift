@@ -8,8 +8,8 @@ internal actor MLSDeviceRecordService {
   private let atProtoClient: ATProtoClient
   private let mlsClient: MLSClient
 
-  private static let deviceCollection = "blue.catbird.mlsChat.device"
-  private static let policyCollection = "blue.catbird.mlsChat.policy"
+  private static let deviceCollection = "blue.catbird.chat.device"
+  private static let policyCollection = "blue.catbird.chat.policy"
 
   private var deviceKeyCache: [String: (keys: Set<String>, fetchedAt: Date)] = [:]
   private let cacheTTL: TimeInterval = 5 * 60
@@ -44,10 +44,9 @@ internal actor MLSDeviceRecordService {
       )
     }
 
-    // One-time cleanup of legacy declaration chain records
+    // One-time cleanup of legacy keychain keys
     let cleanupKey = "mls.device.legacy.cleanup.\(normalized)"
     if !UserDefaults.standard.bool(forKey: cleanupKey) {
-      await cleanupLegacyDeclarationRecords(userDid: normalized)
       cleanupLegacyKeychainKeys(userDid: normalized)
       UserDefaults.standard.set(true, forKey: cleanupKey)
     }
@@ -145,7 +144,7 @@ internal actor MLSDeviceRecordService {
     let collection = try NSID(nsidString: Self.policyCollection)
     let rkey = try RecordKey(keyString: "self")
 
-    let record = BlueCatbirdMlsChatPolicy(
+    let record = MLSChatPolicyRecord(
       whoCanMessageMe: whoCanMessageMe?.rawValue,
       allowFollowersBypass: allowFollowersBypass,
       allowFollowingBypass: allowFollowingBypass,
@@ -191,45 +190,6 @@ internal actor MLSDeviceRecordService {
   }
 
   // MARK: - Legacy Cleanup
-
-  /// Clean up legacy declaration chain records from the repo.
-  /// Called once after migration to device records.
-  private func cleanupLegacyDeclarationRecords(userDid: String) async {
-    let normalized = userDid.lowercased()
-    guard let did = try? DID(didString: normalized) else { return }
-    let legacyCollection = "blue.catbird.mlsChat.declaration"
-    guard let collection = try? NSID(nsidString: legacyCollection) else { return }
-
-    do {
-      let input = ComAtprotoRepoListRecords.Parameters(
-        repo: .did(did),
-        collection: collection,
-        limit: 100,
-        cursor: nil,
-        reverse: false
-      )
-      let (code, data) = try await atProtoClient.com.atproto.repo.listRecords(input: input)
-      guard (200...299).contains(code), let data else { return }
-
-      for record in data.records {
-        guard let rkey = record.uri.recordKey else { continue }
-        let deleteInput = ComAtprotoRepoDeleteRecord.Input(
-          repo: .did(did),
-          collection: collection,
-          rkey: try RecordKey(keyString: rkey)
-        )
-        let (deleteCode, _) = try await atProtoClient.com.atproto.repo.deleteRecord(
-          input: deleteInput
-        )
-        if (200...299).contains(deleteCode) {
-          logger.debug("Cleaned up legacy declaration record: \(rkey)")
-        }
-      }
-      logger.info("Legacy declaration record cleanup complete")
-    } catch {
-      logger.warning("Legacy declaration cleanup failed (non-fatal): \(error.localizedDescription)")
-    }
-  }
 
   /// Clean up legacy declaration Keychain keys.
   private nonisolated func cleanupLegacyKeychainKeys(userDid: String) {
@@ -307,7 +267,7 @@ internal actor MLSDeviceRecordService {
   ) async throws {
     let collection = try NSID(nsidString: Self.deviceCollection)
 
-    let record = BlueCatbirdMlsChatDevice(
+    let record = MLSDeviceRecord(
       mlsSignaturePublicKey: Bytes(data: signaturePublicKey),
       algorithm: algorithm,
       createdAt: ATProtocolDate(date: Date())
@@ -329,10 +289,10 @@ internal actor MLSDeviceRecordService {
     logger.info("Published device record")
   }
 
-  private func decodeDeviceRecord(from value: ATProtocolValueContainer) -> BlueCatbirdMlsChatDevice? {
+  private func decodeDeviceRecord(from value: ATProtocolValueContainer) -> MLSDeviceRecord? {
     switch value {
     case .knownType(let typed):
-      return typed as? BlueCatbirdMlsChatDevice
+      return typed as? MLSDeviceRecord
     case .unknownType(_, let nested):
       return decodeDeviceRecord(from: nested)
     default:
@@ -340,10 +300,10 @@ internal actor MLSDeviceRecordService {
     }
   }
 
-  private func decodePolicyRecord(from value: ATProtocolValueContainer) -> BlueCatbirdMlsChatPolicy? {
+  private func decodePolicyRecord(from value: ATProtocolValueContainer) -> MLSChatPolicyRecord? {
     switch value {
     case .knownType(let typed):
-      return typed as? BlueCatbirdMlsChatPolicy
+      return typed as? MLSChatPolicyRecord
     case .unknownType(_, let nested):
       return decodePolicyRecord(from: nested)
     default:

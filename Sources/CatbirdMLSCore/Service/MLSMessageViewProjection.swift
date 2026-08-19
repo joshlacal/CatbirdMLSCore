@@ -8,17 +8,17 @@ import PetrelCatbird
 public enum MLSMessageViewProjection {
   public static func viewType(
     for payload: MLSMessagePayload
-  ) throws -> BlueCatbirdMlsChatDefs.MessageViewMessageType {
+  ) throws -> String {
     guard payload.messageType != .unknown else {
       throw MLSMessageViewProjectionError.unsupportedPayloadType(payload.messageType)
     }
-    return .value_app
+    return "application"
   }
 
   public static func rawType(
-    _ type: BlueCatbirdMlsChatDefs.MessageViewMessageType?
+    _ type: String?
   ) -> String {
-    type?.rawValue ?? BlueCatbirdMlsChatDefs.MessageViewMessageType.value_app.rawValue
+    type ?? "application"
   }
 }
 

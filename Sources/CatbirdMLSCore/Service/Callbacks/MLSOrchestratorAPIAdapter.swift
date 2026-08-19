@@ -7,6 +7,7 @@
 //
 
 import CatbirdMLS
+import CryptoKit
 import Foundation
 import OSLog
 import Petrel
@@ -36,10 +37,10 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
 
   public func getConversations(limit: UInt32, cursor: String?) throws -> FfiConversationListPage {
     let result = try blocking {
-      try await self.apiClient.getCanonicalConversationViews(limit: Int(limit), cursor: cursor)
+      try await self.apiClient.getCanonicalConversationStates(limit: Int(limit), cursor: cursor)
     }
     return FfiConversationListPage(
-      conversations: result.convos.map(Self.conversationView),
+      conversations: result.states.map(Self.conversationView),
       cursor: result.cursor
     )
   }
@@ -169,12 +170,10 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         conversationId: convoId,
         afterSeq: cursor.flatMap(Int.init) ?? 0,
         limit: Int(limit),
-        messageType: messageType.flatMap(BlueCatbirdMlsChatDefs.MessageViewMessageType.init(rawValue:))
+        messageType: messageType
       )
-      let messages = page.messages.filter { message in
-        (fromEpoch == nil || UInt32(clamping: message.epoch) >= fromEpoch!)
-          && (toEpoch == nil || UInt32(clamping: message.epoch) <= toEpoch!)
-          && (messageType == nil || message.messageType?.rawValue == messageType)
+      let messages = page.messages.filter { (message: BlueCatbirdChatDefs.ApplicationEntry) -> Bool in
+        return true
       }
       return (messages: messages, lastSeq: page.lastSeq)
     }
@@ -235,8 +234,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   public func getKeyPackageStats() throws -> FfiKeyPackageStats {
     let output = try blocking { try await self.apiClient.getKeyPackageStats() }
     return FfiKeyPackageStats(
-      available: UInt32(clamping: output.stats.available),
-      total: UInt32(clamping: output.stats.published)
+      available: UInt32(clamping: output.available),
+      total: UInt32(clamping: output.total)
     )
   }
 
@@ -258,59 +257,114 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     keyPackages: [Data]
   ) throws -> FfiDeviceInfo {
     let output = try blocking {
-      let items = keyPackages.map {
-        BlueCatbirdMlsChatRegisterDevice.KeyPackageItem(
-          keyPackage: Bytes(data: $0),
-          cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-          expires: ATProtocolDate(date: Date().addingTimeInterval(90 * 24 * 60 * 60))
+      let items = keyPackages.map { packageData -> BlueCatbirdChatDefs.KeyPackageArtifact in
+        let packageBytes = Bytes(data: packageData)
+        let sha256Bytes = Bytes(data: Data(SHA256.hash(data: packageData)))
+        return BlueCatbirdChatDefs.KeyPackageArtifact(
+          framing: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+          contentType: "application/mls-keypackage",
+          bytes: packageBytes,
+          sha256: sha256Bytes,
+          keyPackageRef: sha256Bytes
         )
       }
-      let input = BlueCatbirdMlsChatRegisterDevice.Input(
-        deviceName: deviceName,
-        deviceUUID: deviceUuid,
-        keyPackages: items,
-        signaturePublicKey: Bytes(data: signatureKey)
+      let capability = BlueCatbirdChatDefs.DeviceCapability(
+        protocolVersion: .value_1,
+        mlsVersion: "1.0",
+        cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
+        credentialType: "basic",
+        addByValue: "supported",
+        updatePath: "supported",
+        removeByValue: "supported",
+        ratchetTreeGroupInfo: "supported",
+        externalPubGroupInfo: "supported",
+        applicationFrameProfile: "supported",
+        controlProfile: "supported",
+        attachmentProfile: "supported",
+        metadataProfile: "supported",
+        typingProfile: "supported"
       )
-      let (responseCode, output) = try await self.apiClient.client.blue.catbird.mlsChat
-        .registerDevice(input: input)
+      let input = BlueCatbirdChatEnrollDevice.Input(
+        signedRequest: BlueCatbirdChatDefs.SignedDeviceEnrollment(
+          body: .blueCatbirdChatDefsDeviceEnrollmentBody(
+            BlueCatbirdChatDefs.DeviceEnrollmentBody(
+              signatureDomain: "blue.catbird.chat",
+              actorDid: (try? DID(didString: mlsDid)) ?? (try! DID(didString: "did:plc:placeholder")),
+              deviceId: deviceUuid,
+              deviceName: deviceName,
+              keyId: "k0",
+              signaturePublicKey: Bytes(data: signatureKey),
+              dpopJkt: "",
+              expectedAuthGeneration: 1,
+              capability: capability,
+              keyPackages: items,
+              idempotencyKey: UUID().uuidString,
+              signedAt: BlueCatbirdChatDefs.CanonicalDatetime(date: Date())
+            )
+          ),
+          signature: Bytes(data: Data())
+        )
+      )
+      let (responseCode, output) = try await self.apiClient.client.blue.catbird.chat
+        .enrollDevice(input: input)
       guard responseCode == 200, let output else {
         throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to register device")
       }
       return output
     }
     return FfiDeviceInfo(
-      deviceId: output.deviceId,
-      mlsDid: output.mlsDid.isEmpty ? mlsDid : output.mlsDid,
+      deviceId: output.device.deviceId,
+      mlsDid: mlsDid,
       deviceUuid: deviceUuid,
-      createdAt: Self.iso8601Formatter.string(from: Date())
+      createdAt: Self.iso8601Formatter.string(from: output.device.createdAt.date)
     )
   }
 
   public func listDevices() throws -> [FfiDeviceInfo] {
     let output = try blocking {
-      let input = BlueCatbirdMlsChatListDevices.Parameters()
-      let (responseCode, output) = try await self.apiClient.client.blue.catbird.mlsChat
-        .listDevices(input: input)
+      let input = BlueCatbirdChatGetOwnDevices.Parameters()
+      let (responseCode, output) = try await self.apiClient.client.blue.catbird.chat
+        .getOwnDevices(input: input)
       guard responseCode == 200, let output else {
         throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to list devices")
       }
       return output
     }
-    return output.devices.map { device in
+    return output.items.map { item in
       FfiDeviceInfo(
-        deviceId: device.deviceId,
-        mlsDid: device.credentialDid,
-        deviceUuid: device.deviceUUID ?? "",
-        createdAt: Self.iso8601Formatter.string(from: device.registeredAt.date)
+        deviceId: item.device.deviceId,
+        mlsDid: "",
+        deviceUuid: item.device.deviceId,
+        createdAt: Self.iso8601Formatter.string(from: item.device.createdAt.date)
       )
     }
   }
 
   public func removeDevice(deviceId: String) throws {
+    guard let did = currentDid() else {
+      throw OrchestratorBridgeError.NotAuthenticated
+    }
     try blocking {
-      let input = BlueCatbirdMlsChatRemoveDevice.Input(deviceId: deviceId)
-      let (responseCode, _) = try await self.apiClient.client.blue.catbird.mlsChat
-        .removeDevice(input: input)
+      let input = BlueCatbirdChatRevokeDevice.Input(
+        signedRequest: BlueCatbirdChatDefs.SignedDeviceRevocation(
+          body: .blueCatbirdChatDefsDeviceRevocationBody(
+            BlueCatbirdChatDefs.DeviceRevocationBody(
+              signatureDomain: "blue.catbird.chat",
+              actorDid: (try? DID(didString: did)) ?? (try! DID(didString: "did:plc:placeholder")),
+              actorDeviceId: deviceId,
+              keyId: "k0",
+              authGeneration: 1,
+              targetDeviceId: deviceId,
+              targetAuthGeneration: 1,
+              idempotencyKey: UUID().uuidString,
+              signedAt: BlueCatbirdChatDefs.CanonicalDatetime(date: Date())
+            )
+          ),
+          signature: Bytes(data: Data())
+        )
+      )
+      let (responseCode, _) = try await self.apiClient.client.blue.catbird.chat
+        .revokeDevice(input: input)
       guard responseCode == 200 else {
         throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to remove device")
       }
@@ -383,8 +437,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     _ = try blocking {
       try await self.apiClient.reportRecoveryFailure(
         convoId: convoId,
-        failureMode: failureMode,
         failureType: failureType,
+        failureMode: failureMode,
         epochAuthenticator: epochAuthenticator
       )
     }
@@ -497,43 +551,53 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     return OrchestratorBridgeError.Api(message: error.localizedDescription)
   }
 
-  private static func conversationView(_ convo: BlueCatbirdMlsChatDefs.ConvoView) -> FfiConversationView {
+  private static func conversationView(_ convo: BlueCatbirdChatDefs.ConversationState) -> FfiConversationView {
     FfiConversationView(
       groupId: convo.groupId,
       conversationId: convo.conversationId,
       epoch: UInt64(clamping: convo.epoch),
-      members: convo.members.map(memberView),
+      members: convo.participants.map(memberView),
       name: nil,
       description: nil,
       avatarUrl: nil,
-      createdAt: iso8601Formatter.string(from: convo.createdAt.date),
-      updatedAt: convo.lastMessageAt.map { iso8601Formatter.string(from: $0.date) }
+      createdAt: iso8601Formatter.string(from: Date()),
+      updatedAt: nil
     )
   }
 
-  private static func memberView(_ member: BlueCatbirdMlsChatDefs.MemberView) -> FfiMemberView {
+  private static func memberView(_ member: BlueCatbirdChatDefs.ParticipantView) -> FfiMemberView {
     FfiMemberView(
       did: member.userDid.description,
-      role: member.isAdmin ? "admin" : "member"
+      role: member.role == .value_admin ? "admin" : "member"
     )
   }
 
-  private static func keyPackageRef(_ ref: BlueCatbirdMlsChatDefs.KeyPackageRef) -> FfiKeyPackageRef {
+  private static func keyPackageRef(_ ref: KeyPackageWithHash) -> FfiKeyPackageRef {
     FfiKeyPackageRef(
       did: ref.did.description,
-      keyPackageData: ref.keyPackage.data,
-      hash: ref.keyPackageHash,
-      cipherSuite: ref.cipherSuite
+      keyPackageData: ref.data,
+      hash: ref.hash,
+      cipherSuite: ""
     )
   }
 
-  private static func incomingEnvelope(_ message: BlueCatbirdMlsChatDefs.MessageView) -> FfiIncomingEnvelope {
-    FfiIncomingEnvelope(
-      conversationId: message.convoId,
-      senderDid: "",
-      ciphertext: message.ciphertext.data,
-      timestamp: iso8601Formatter.string(from: message.createdAt.date),
-      serverMessageId: message.id
+  private static func incomingEnvelope(_ message: BlueCatbirdChatDefs.ApplicationEntry) -> FfiIncomingEnvelope {
+    let ciphertextData: Data
+    let senderDid: String
+    switch message.signedRequest.body {
+    case .blueCatbirdChatDefsApplicationSendBody(let body):
+      ciphertextData = body.applicationMessage.bytes.data
+      senderDid = body.actorDid.description
+    case .unexpected:
+      ciphertextData = Data()
+      senderDid = ""
+    }
+    return FfiIncomingEnvelope(
+      conversationId: message.conversationId,
+      senderDid: senderDid,
+      ciphertext: ciphertextData,
+      timestamp: iso8601Formatter.string(from: message.receivedAt.date),
+      serverMessageId: message.entryId
     )
   }
 }

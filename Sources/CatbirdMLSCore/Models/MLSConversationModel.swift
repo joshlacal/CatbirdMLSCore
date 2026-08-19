@@ -7,6 +7,8 @@
 
 import Foundation
 import GRDB
+import Petrel
+import PetrelCatbird
 
 public enum MLSJoinMethod: String, Codable, Sendable {
   case welcome
@@ -62,6 +64,7 @@ public struct MLSConversationModel: Codable, Sendable, Hashable, Identifiable {
   public let pendingResetGeneration: Int64?
 
   public var id: String { conversationID }
+  public var conversationId: String { conversationID }
 
   /// Whether this conversation is pending user acceptance (inbound chat request)
   public var isPendingRequest: Bool { requestState == .pendingInbound }
@@ -673,4 +676,53 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
     case pendingNewGroupId
     case pendingResetGeneration
   }
+
+  public func asConversationState() -> BlueCatbirdChatDefs.ConversationState {
+    return BlueCatbirdChatDefs.ConversationState(
+      conversationKind: .value_group,
+      coordinates: BlueCatbirdChatDefs.ConversationCoordinates(
+        conversationId: conversationID,
+        generation: Int(pendingResetGeneration ?? 1),
+        stateVersion: 1,
+        groupId: Bytes(data: groupID),
+        epoch: Int(epoch),
+        groupContextHash: Bytes(data: Data()),
+        confirmationTag: Bytes(data: Data()),
+        lifecycle: .value_active
+      ),
+      cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
+      participants: [],
+      leaves: [],
+      metadataSnapshot: BlueCatbirdChatDefs.MetadataSnapshot(
+        coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
+          conversationId: Bytes(data: Data(conversationID.utf8)),
+          generation: Int(pendingResetGeneration ?? 1),
+          groupId: Bytes(data: groupID),
+          epoch: Int(epoch),
+          groupContextHash: Bytes(data: Data()),
+          confirmationTag: Bytes(data: Data())
+        ),
+        originTransitionId: conversationID,
+        metadataVersion: 1,
+        nonce: Bytes(data: Data()),
+        ciphertext: Bytes(data: Data()),
+        ciphertextSha256: Bytes(data: Data()),
+        ciphertextSize: 0,
+        avatarBinding: nil,
+        authorProof: BlueCatbirdChatDefs.MetadataAuthorProof(
+          authorDid: (try? DID(didString: currentUserDID)) ?? (try! DID(didString: "did:key:zUnknown")),
+          authorDeviceId: "primary",
+          authorKeyId: "key-1",
+          signaturePublicKey: Bytes(data: Data()),
+          authGenerationAtOrigin: 1,
+          originTransitionId: conversationID,
+          originSeq: 1,
+          roleAtOrigin: "admin",
+          deviceStatusAtOrigin: "active"
+        )
+      ),
+      snapshotSeq: 1
+    )
+  }
 }
+

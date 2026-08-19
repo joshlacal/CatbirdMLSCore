@@ -254,7 +254,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
         isSent: true
       ).insert(db)
     }
-    manager.conversations[conversationID] = try XCTUnwrap(model.asConvoView())
+    manager.conversations[conversationID] = model.asConversationState()
   }
 
   private func fetchConversation(

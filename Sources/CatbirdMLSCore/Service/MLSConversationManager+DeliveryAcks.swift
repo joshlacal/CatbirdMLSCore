@@ -105,7 +105,8 @@ extension MLSConversationManager {
     try throwIfShuttingDown("sendDeliveryAck")
 
     guard let convo = conversations[conversationId] else { return }
-    guard let groupIdData = Data(hexEncoded: convo.groupId) else { return }
+    let groupIdData = convo.coordinates.groupId.data
+    let groupIdHex = groupIdData.hexEncodedString()
 
     try await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
       try throwIfShuttingDown("sendDeliveryAck-queued")
@@ -113,11 +114,11 @@ extension MLSConversationManager {
       let payload = MLSMessagePayload.deliveryAck(messageId: messageId)
       let payloadData = try payload.encodeToJSON()
 
-      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+      let result = try await groupOperationCoordinator.withExclusiveLock(groupId: groupIdHex) { [self] in
         let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
         let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
         let tagB64 = tagData?.base64EncodedString()
-        let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+        let ciphertext = try await encryptMessageImpl(groupId: groupIdHex, plaintext: payloadData)
         let paddedSize = ciphertext.count
         let localMsgId = UUID().uuidString
 
@@ -135,15 +136,11 @@ extension MLSConversationManager {
         // Pre-cache BEFORE network send to avoid CannotDecryptOwnMessage race.
         try throwIfShuttingDown("sendDeliveryAck-preCache")
         try await cacheControlMessageEnvelope(
-          message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId,
-            convoId: conversationId,
-            ciphertext: Bytes(data: ciphertext),
-            epoch: Int(localEpoch),
-            seq: optimisticSeq,
-            createdAt: ATProtocolDate(date: Date()),
-            messageType: try MLSMessageViewProjection.viewType(for: payload)
-          ),
+          messageID: localMsgId,
+          conversationID: conversationId,
+          epoch: Int64(localEpoch),
+          seq: Int64(optimisticSeq),
+          timestamp: Date(),
           payload: payload,
           senderDID: userDid,
           currentUserDID: userDid,
@@ -245,7 +242,8 @@ extension MLSConversationManager {
     }
 
     guard let userDid = userDid, let convo = conversations[conversationId] else { return }
-    guard let groupIdData = Data(hexEncoded: convo.groupId) else { return }
+    let groupIdData = convo.coordinates.groupId.data
+    let groupIdHex = groupIdData.hexEncodedString()
 
     do {
       try await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
@@ -258,11 +256,11 @@ extension MLSConversationManager {
         )
         let payloadData = try payload.encodeToJSON()
 
-        let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        let result = try await groupOperationCoordinator.withExclusiveLock(groupId: groupIdHex) { [self] in
           let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
           let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
           let tagB64 = tagData?.base64EncodedString()
-          let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+          let ciphertext = try await encryptMessageImpl(groupId: groupIdHex, plaintext: payloadData)
           let paddedSize = ciphertext.count
           let localMsgId = UUID().uuidString
 
@@ -279,15 +277,11 @@ extension MLSConversationManager {
 
           try throwIfShuttingDown("sendRecoveryRequest-preCache")
           try await cacheControlMessageEnvelope(
-            message: BlueCatbirdMlsChatDefs.MessageView(
-              id: localMsgId,
-              convoId: conversationId,
-              ciphertext: Bytes(data: ciphertext),
-              epoch: Int(localEpoch),
-              seq: optimisticSeq,
-              createdAt: ATProtocolDate(date: Date()),
-              messageType: try MLSMessageViewProjection.viewType(for: payload)
-            ),
+            messageID: localMsgId,
+            conversationID: conversationId,
+            epoch: Int64(localEpoch),
+            seq: Int64(optimisticSeq),
+            timestamp: Date(),
             payload: payload,
             senderDID: userDid,
             currentUserDID: userDid,
@@ -405,9 +399,9 @@ extension MLSConversationManager {
     })) != nil
     guard !alreadyRecovered else { return }
 
-    guard let convo = conversations[conversationId],
-          let groupIdData = Data(hexEncoded: convo.groupId)
-    else { return }
+    guard let convo = conversations[conversationId] else { return }
+    let groupIdData = convo.coordinates.groupId.data
+    let groupIdHex = groupIdData.hexEncodedString()
 
     do {
       try await sendQueueCoordinator.enqueueSend(conversationID: conversationId) { [self] in
@@ -419,11 +413,11 @@ extension MLSConversationManager {
         )
         let payloadData = try recoveryPayload.encodeToJSON()
 
-        let result = try await groupOperationCoordinator.withExclusiveLock(groupId: convo.groupId) { [self] in
+        let result = try await groupOperationCoordinator.withExclusiveLock(groupId: groupIdHex) { [self] in
           let localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
           let tagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
           let tagB64 = tagData?.base64EncodedString()
-          let ciphertext = try await encryptMessageImpl(groupId: convo.groupId, plaintext: payloadData)
+          let ciphertext = try await encryptMessageImpl(groupId: groupIdHex, plaintext: payloadData)
           let paddedSize = ciphertext.count
           let localMsgId = UUID().uuidString
 
@@ -440,15 +434,11 @@ extension MLSConversationManager {
 
           try throwIfShuttingDown("handleRecoveryRequest-preCache")
           try await cacheControlMessageEnvelope(
-            message: BlueCatbirdMlsChatDefs.MessageView(
-              id: localMsgId,
-              convoId: conversationId,
-              ciphertext: Bytes(data: ciphertext),
-              epoch: Int(localEpoch),
-              seq: optimisticSeq,
-              createdAt: ATProtocolDate(date: Date()),
-              messageType: try MLSMessageViewProjection.viewType(for: recoveryPayload)
-            ),
+            messageID: localMsgId,
+            conversationID: conversationId,
+            epoch: Int64(localEpoch),
+            seq: Int64(optimisticSeq),
+            timestamp: Date(),
             payload: recoveryPayload,
             senderDID: userDid,
             currentUserDID: userDid,

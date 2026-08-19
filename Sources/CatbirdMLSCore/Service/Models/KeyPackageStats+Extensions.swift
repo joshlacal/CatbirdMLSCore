@@ -8,7 +8,7 @@
 import Foundation
 
 /// Enhanced key package statistics from server
-/// This extends the basic stats returned by blue.catbird.mlsChat.getKeyPackageStats
+/// This extends the basic stats returned by blue.catbird.chat.replenishKeyPackages
 public struct EnhancedKeyPackageStats: Codable, Sendable {
   /// Current number of available (unconsumed) packages
   public let available: Int
@@ -142,4 +142,10 @@ public enum ReplenishmentPriority: String, Sendable {
   case high = "high"          // < threshold or will deplete in < 3 days
   case normal = "normal"      // Preventive replenishment
   case low = "low"            // Optional optimization
+}
+
+extension EnhancedKeyPackageStats {
+  public var stats: EnhancedKeyPackageStats { self }
+  public var published: Int { total }
+  public var expired: Int { 0 }
 }

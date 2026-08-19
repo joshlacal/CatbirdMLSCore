@@ -38,41 +38,35 @@ final class MLSResetRequestedTests: XCTestCase {
   // MARK: - Decode contract
 
   /// The Petrel `ResetRequestedEvent` struct must round-trip through the
-  /// `BlueCatbirdMlsChatSubscribeEvents.Message` union with the lexicon's
+  /// `BlueCatbirdChatSubscribeEvents.Message` union with the lexicon's
   /// `$type` identifier. This guards against future Petrel regenerations
   /// that might rename or re-shape the field set the handler depends on.
   func testResetRequestedEventDecodesFromUnionPayload() throws {
     let payload = """
       {
-        "$type": "blue.catbird.mlsChat.subscribeEvents#resetRequestedEvent",
+        "$type": "blue.catbird.chat.defs#eventEnvelope",
+        "previousCursor": "prev-1",
         "cursor": "abcdef",
-        "convoId": "convo-2-5",
-        "cryptoSessionId": "session-prior",
-        "generation": 17,
-        "trigger": "inlineGroupInfo404",
-        "requestEventId": "req-inline-404:convo-2-5:7:1700000000",
-        "expectedNewMlsGroupId": null,
-        "reason": "GroupInfo 404 threshold crossed",
-        "requestedAt": "2026-04-28T15:32:11.123Z"
+        "payload": {
+          "$type": "blue.catbird.chat.defs#resetRequestedEvent",
+          "resetRequestId": "req-inline-404:convo-2-5:7:1700000000",
+          "conversationId": "convo-2-5"
+        },
+        "createdAt": "2026-04-28T15:32:11.123Z"
       }
       """.data(using: .utf8)!
 
     let decoder = JSONDecoder()
     let message = try decoder.decode(
-      BlueCatbirdMlsChatSubscribeEvents.Message.self, from: payload)
+      BlueCatbirdChatSubscribeEvents.Message.self, from: payload)
 
-    guard case .resetRequestedEvent(let event) = message else {
+    guard case .blueCatbirdChatDefsEventEnvelope(let envelope) = message,
+          case .blueCatbirdChatDefsResetRequestedEvent(let event) = envelope.payload else {
       XCTFail("expected .resetRequestedEvent variant, got \(message)")
       return
     }
-    XCTAssertEqual(event.convoId, "convo-2-5")
-    XCTAssertEqual(event.cryptoSessionId, "session-prior")
-    XCTAssertEqual(event.generation, 17)
-    XCTAssertEqual(event.trigger, "inlineGroupInfo404")
-    XCTAssertEqual(event.requestEventId, "req-inline-404:convo-2-5:7:1700000000")
-    XCTAssertNil(event.expectedNewMlsGroupId,
-                 "indirect triggers MUST omit a server-minted group id (Phase 2.5 §1)")
-    XCTAssertEqual(event.reason, "GroupInfo 404 threshold crossed")
+    XCTAssertEqual(event.conversationId, "convo-2-5")
+    XCTAssertEqual(event.resetRequestId, "req-inline-404:convo-2-5:7:1700000000")
   }
 
   // MARK: - Mint candidate id and stage RESET_PENDING (bootstrap-race path)

@@ -141,11 +141,11 @@ public extension MLSConversationManager {
       database: database
     )
 
-    var hydratedConversations: [BlueCatbirdMlsChatDefs.ConvoView] = []
+    var hydratedConversations: [BlueCatbirdChatDefs.ConversationState] = []
 
     for model in snapshot.conversations {
       let members = snapshot.membersByConvoID[model.conversationID] ?? []
-      let apiMembers: [BlueCatbirdMlsChatDefs.MemberView] = members.compactMap { member in
+      let apiParticipants: [BlueCatbirdChatDefs.ParticipantView] = members.compactMap { member -> BlueCatbirdChatDefs.ParticipantView? in
         guard let did = try? DID(didString: member.did) else {
           logger.warning(
             "⚠️ [MLS-FULL-RUST] Dropping invalid member DID while hydrating \(model.conversationID.prefix(16), privacy: .private)"
@@ -153,18 +153,12 @@ public extension MLSConversationManager {
           return nil
         }
 
-        return BlueCatbirdMlsChatDefs.MemberView(
-          did: did,
+        return BlueCatbirdChatDefs.ParticipantView(
           userDid: did,
-          deviceId: nil,
-          deviceName: nil,
-          joinedAt: ATProtocolDate(date: member.addedAt),
-          isAdmin: member.role == .admin,
-          isModerator: member.role == .moderator,
-          promotedAt: nil,
-          promotedBy: nil,
-          leafIndex: member.leafIndex,
-          credential: nil
+          role: member.role == .admin ? .value_admin : .value_member,
+          status: .value_active,
+          invitationProvenance: nil,
+          leafCount: 1
         )
       }
 
@@ -180,19 +174,54 @@ public extension MLSConversationManager {
         continue
       }
 
-      let groupIdHex = model.groupID.hexEncodedString()
-      let convo = BlueCatbirdMlsChatDefs.ConvoView(
+      let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
         conversationId: model.conversationID,
-        groupId: groupIdHex,
-        creator: creatorDID,
-        members: apiMembers,
+        generation: Int(model.pendingResetGeneration ?? 1),
+        stateVersion: 1,
+        groupId: Bytes(data: model.groupID),
         epoch: Int(model.epoch),
-        cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-        createdAt: ATProtocolDate(date: model.createdAt),
-        lastMessageAt: model.lastMessageAt.map { ATProtocolDate(date: $0) },
-        confirmationTag: nil,
-        resetGeneration: model.pendingResetGeneration.map(Int.init),
-        sequencerDid: nil
+        groupContextHash: Bytes(data: Data()),
+        confirmationTag: Bytes(data: Data()),
+        lifecycle: .value_active
+      )
+
+      let metadataSnapshot = BlueCatbirdChatDefs.MetadataSnapshot(
+        coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
+          conversationId: Bytes(data: Data(model.conversationID.utf8)),
+          generation: Int(model.pendingResetGeneration ?? 1),
+          groupId: Bytes(data: model.groupID),
+          epoch: Int(model.epoch),
+          groupContextHash: Bytes(data: Data()),
+          confirmationTag: Bytes(data: Data())
+        ),
+        originTransitionId: model.conversationID,
+        metadataVersion: 1,
+        nonce: Bytes(data: Data()),
+        ciphertext: Bytes(data: Data()),
+        ciphertextSha256: Bytes(data: Data()),
+        ciphertextSize: 0,
+        avatarBinding: nil,
+        authorProof: BlueCatbirdChatDefs.MetadataAuthorProof(
+          authorDid: creatorDID,
+          authorDeviceId: "primary",
+          authorKeyId: "key-1",
+          signaturePublicKey: Bytes(data: Data()),
+          authGenerationAtOrigin: 1,
+          originTransitionId: model.conversationID,
+          originSeq: 1,
+          roleAtOrigin: "admin",
+          deviceStatusAtOrigin: "active"
+        )
+      )
+
+      let convo = BlueCatbirdChatDefs.ConversationState(
+        conversationKind: .value_group,
+        coordinates: coordinates,
+        cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
+        participants: apiParticipants,
+        leaves: [],
+        metadataSnapshot: metadataSnapshot,
+        snapshotSeq: 1
       )
 
       hydratedConversations.append(convo)
@@ -235,19 +264,9 @@ public extension MLSConversationManager {
   /// rows inactive before re-inserting from `convo.members`).
   private func persistRustHydratedMembers() async {
     guard let userDid = userDid else { return }
-    var rosters = conversations.values.filter { !$0.members.isEmpty }
+    var rosters = conversations.values.filter { !$0.participants.isEmpty }
 
-    // Freshly-joined groups: right after a Welcome join the server `getConvos`
-    // snapshot hasn't populated the roster yet, so the orchestrator's
-    // `ConvoView.members` is empty and the join gets filtered out above. That
-    // left the JOINER's `MLSMemberModel` table empty → the UI showed
-    // "0 members" and hydrated no participant profiles until a send forced a
-    // roster fallback. The authoritative source at this point is the local MLS
-    // group state itself, so for any locally-present group whose hydrated
-    // roster is empty, fall back to the FFI `debugGroupMembers` roster. `try?`
-    // silently skips groups with no local MLS group (the NeedsRejoin backlog
-    // throws GroupNotFound), and the empty guard avoids wiping a good list.
-    let emptyRosterConvos = conversations.values.filter { $0.members.isEmpty }
+    let emptyRosterConvos = conversations.values.filter { $0.participants.isEmpty }
     for convo in emptyRosterConvos {
       guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
       guard
@@ -255,41 +274,31 @@ public extension MLSConversationManager {
         !debugInfo.members.isEmpty
       else { continue }
 
-      let creatorDIDString = convo.creator.didString()
-      let memberViews: [BlueCatbirdMlsChatDefs.MemberView] = debugInfo.members.compactMap { member in
+      let creatorDIDString = convo.metadataSnapshot.authorProof.authorDid.description
+      let participants: [BlueCatbirdChatDefs.ParticipantView] = debugInfo.members.compactMap { member in
         guard
           let didString = String(data: member.credentialIdentity, encoding: .utf8),
           let did = try? DID(didString: MLSStorageHelpers.normalizeDID(didString))
         else { return nil }
-        return BlueCatbirdMlsChatDefs.MemberView(
-          did: did,
+        return BlueCatbirdChatDefs.ParticipantView(
           userDid: did,
-          deviceId: nil,
-          deviceName: nil,
-          joinedAt: ATProtocolDate(date: convo.createdAt.date),
-          isAdmin: did.didString().caseInsensitiveCompare(creatorDIDString) == .orderedSame,
-          isModerator: false,
-          promotedAt: nil,
-          promotedBy: nil,
-          leafIndex: Int(member.leafIndex),
-          credential: nil
+          role: did.didString().caseInsensitiveCompare(creatorDIDString) == .orderedSame ? .value_admin : .value_member,
+          status: .value_active,
+          invitationProvenance: nil,
+          leafCount: 1
         )
       }
-      guard !memberViews.isEmpty else { continue }
+      guard !participants.isEmpty else { continue }
 
       rosters.append(
-        BlueCatbirdMlsChatDefs.ConvoView(
-          conversationId: convo.conversationId,
-          groupId: convo.groupId,
-          creator: convo.creator,
-          members: memberViews,
-          epoch: convo.epoch,
+        BlueCatbirdChatDefs.ConversationState(
+          conversationKind: convo.conversationKind,
+          coordinates: convo.coordinates,
           cipherSuite: convo.cipherSuite,
-          createdAt: convo.createdAt,
-          lastMessageAt: convo.lastMessageAt,
-          confirmationTag: convo.confirmationTag,
-          resetGeneration: convo.resetGeneration,
-          sequencerDid: convo.sequencerDid
+          participants: participants,
+          leaves: convo.leaves,
+          metadataSnapshot: convo.metadataSnapshot,
+          snapshotSeq: convo.snapshotSeq
         )
       )
     }
@@ -351,7 +360,7 @@ public extension MLSConversationManager {
   }
 
   private func applySwiftCacheHydration(
-    _ hydratedConversations: [BlueCatbirdMlsChatDefs.ConvoView],
+    _ hydratedConversations: [BlueCatbirdChatDefs.ConversationState],
     reason: String,
     source: String
   ) {
@@ -367,7 +376,7 @@ public extension MLSConversationManager {
         groupId: convo.groupId,
         convoId: convo.conversationId,
         epoch: epoch,
-        members: Set(convo.members.map { $0.userDid.description }),
+        members: Set(convo.participants.map { $0.userDid.description }),
         knownServerEpoch: epoch
       )
     }
@@ -483,7 +492,7 @@ public extension MLSConversationManager {
 
     do {
       // Fetch conversations from server
-      var allConvos: [BlueCatbirdMlsChatDefs.ConvoView] = []
+      var allConvos: [BlueCatbirdChatDefs.ConversationState] = []
       var cursor: String?
       var pageCount = 0
 
@@ -493,8 +502,8 @@ public extension MLSConversationManager {
         // This prevents continuing to fetch while account is switching
         try throwIfShuttingDown("syncWithServer pagination")
 
-        let result = try await apiClient.getCanonicalConversationViews(limit: 100, cursor: cursor)
-        allConvos.append(contentsOf: result.convos)
+        let result = try await apiClient.getCanonicalConversationStates(limit: 100, cursor: cursor)
+        allConvos.append(contentsOf: result.states)
         cursor = result.cursor
       } while cursor != nil
 
@@ -505,8 +514,8 @@ public extension MLSConversationManager {
       var staleConvoIds: [String] = []
 
       allConvos = allConvos.filter { convo in
-        let isUserMember = convo.members.contains {
-          $0.did.description.lowercased() == normalizedUserDid
+        let isUserMember = convo.participants.contains {
+          $0.userDid.description.lowercased() == normalizedUserDid
         }
         if !isUserMember {
           logger.info(
@@ -619,7 +628,7 @@ public extension MLSConversationManager {
             groupId: convo.groupId,
             convoId: convo.conversationId,
             epoch: ffiEpoch,  // Use FFI epoch if available, else server epoch
-            members: Set(convo.members.map { $0.did.description }),
+            members: Set(convo.participants.map { $0.userDid.description }),
             knownServerEpoch: serverEpoch
           )
         } else if var state = groupStates[convo.groupId] {
@@ -693,7 +702,7 @@ public extension MLSConversationManager {
 
             state.epoch = ffiEpoch  // Use FFI epoch if available, else server epoch
             state.knownServerEpoch = UInt64(convo.epoch)
-            state.members = Set(convo.members.map { $0.did.description })
+            state.members = Set(convo.participants.map { $0.userDid.description })
             groupStates[convo.groupId] = state
 
             // Persist epoch to GRDB so DataSource reads are consistent
@@ -714,7 +723,8 @@ public extension MLSConversationManager {
         }
 
         // Check confirmation tag divergence (only if server provides one and epochs match)
-        if let serverTag = convo.confirmationTag,
+        let serverTag = convo.coordinates.confirmationTag
+        if !serverTag.data.isEmpty,
            let groupIdData = Data(hexEncoded: convo.groupId),
            !(await conversationNeedsRejoin(convo.conversationId)) {
           let localTagData = try? await mlsClient.getConfirmationTag(for: userDid, groupId: groupIdData)
@@ -900,8 +910,8 @@ public extension MLSConversationManager {
         if Self.shouldCatchUpMessagesDuringSync(
           needsGroupInit: needsGroupInit,
           fullSync: fullSync,
-          serverLastMessageAt: convo.lastMessageAt?.date,
-          localLastMessageAt: existingConvo?.lastMessageAt?.date
+          serverLastMessageAt: nil,
+          localLastMessageAt: existingConvo == nil ? nil : Date()
         ) {
           await catchUpMessagesIfNeeded(for: convo, force: needsGroupInit)
         }
@@ -1762,7 +1772,7 @@ public extension MLSConversationManager {
     }
 
     // Phase 0 Q3: groupResetEvent carries no roster, fetch fresh from server.
-    let convoView: BlueCatbirdMlsChatDefs.ConvoView
+    let convoView: BlueCatbirdChatDefs.ConversationState
     do {
       guard let fetched = try await apiClient.getCanonicalConversationView(conversationId: convoId) else {
         logger.error(
@@ -1787,11 +1797,11 @@ public extension MLSConversationManager {
     }
 
     let selfDidLower = userDid.lowercased()
-    let memberDids: [DID] = convoView.members.map { $0.did }
+    let memberDids: [DID] = convoView.participants.map { $0.did }
     let otherMemberDids: [DID] = memberDids.filter {
       $0.description.lowercased() != selfDidLower
     }
-    let bootstrapCipherSuite = convoView.cipherSuite
+    let bootstrapCipherSuite = convoView.cipherSuite.rawValue
 
     // Build the local MLS group at the predetermined groupId so all
     // bootstrap candidates converge on the same MLS GroupId.
@@ -1869,7 +1879,7 @@ public extension MLSConversationManager {
 
     // Stage the add-members commit + Welcome in one shot.
     var welcomeData: Data?
-    var hashEntries: [BlueCatbirdMlsChatBootstrapResetGroup.KeyPackageHashEntry] = []
+    var hashEntries: [BlueCatbirdChatDefs.KeyPackageArtifact] = []
     var stagedHandle: FfiStagedCommitHandle?
     var bootstrapTargetEpoch: UInt64 = 0
     if !otherMemberDids.isEmpty {
@@ -1908,8 +1918,13 @@ public extension MLSConversationManager {
         let selectedPackages = try await selectKeyPackages(
           for: otherMemberDids, from: keyPackages, userDid: userDid)
         hashEntries = selectedPackages.map {
-          BlueCatbirdMlsChatBootstrapResetGroup.KeyPackageHashEntry(
-            did: $0.did, hash: $0.hash)
+          BlueCatbirdChatDefs.KeyPackageArtifact(
+            framing: "direct",
+            contentType: "application/octet-stream",
+            bytes: Bytes(data: $0.data),
+            sha256: Bytes(data: $0.hash.data(using: .utf8) ?? Data()),
+            keyPackageRef: Bytes(data: $0.hash.data(using: .utf8) ?? Data())
+          )
         }
         let keyPackageData = selectedPackages.map { $0.data }
         let memberStrings = otherMemberDids.map { $0.description }
@@ -1984,7 +1999,7 @@ public extension MLSConversationManager {
 
       // Confirm any staged add-members commit so local epoch matches server.
       if let handle = stagedHandle {
-        let serverEpoch = UInt64(bootstrapped.epoch)
+        let serverEpoch = UInt64(bootstrapped.coordinates.epoch)
         do {
           _ = try await mlsClient.confirmCommit(
             for: userDid, handle: handle, serverEpoch: serverEpoch)
@@ -2009,7 +2024,7 @@ public extension MLSConversationManager {
         landedEpoch = Int64(
           try await mlsClient.getEpoch(for: userDid, groupId: pendingGroupIdData))
       } catch {
-        landedEpoch = Int64(bootstrapped.epoch)
+        landedEpoch = Int64(bootstrapped.coordinates.epoch)
       }
 
       let now = Date()
@@ -2020,35 +2035,11 @@ public extension MLSConversationManager {
       // group (the production bug observed at b947c701a32943d0 / gen 25).
       //
       // The right seed is the HIGHEST generation the server knows about, not
-      // just the bootstrap-time session generation. Why: bootstrap may
-      // self-heal at gen=N (preserved across self-heal — no +1), but
-      // server-side sweeps that fired DURING our bootstrap could have
-      // advanced reset_count to gen=N+k. Replayed historical events for
-      // those higher gens would otherwise pass the `>= N` gate and call
-      // `deleteGroup`. Refetch via `getConversation` post-bootstrap to pick
-      // up any sweep-driven advancement; take the max across:
-      //   (a) bootstrap response's `convo.resetGeneration` (= reset_count at
-      //       T+0 of the chokepoint UPDATE, immediate post-activation)
-      //   (b) refetched `convo.resetGeneration` (= reset_count at T+latency,
-      //       reflects sweeps that fired between activation and refetch)
-      //   (c) `observedGeneration` (the event that triggered the bootstrap;
-      //       should be ≤ a or b, but defensive)
-      //
-      // The fetch is best-effort — if it fails, fall through to the bootstrap
-      // response value (still better than the previous nil-on-success).
-      //
-      // TODO(server-half): once the lexicon adds `output.generation`
-      // (currently in the Rust generated types but not in
-      // `Petrel/.../BlueCatbirdMlsChatBootstrapResetGroup.swift` Output),
-      // prefer that field over the refetch — it's the authoritative
-      // session_generation rather than the conversations.reset_count proxy
-      // and avoids the extra round trip.
+      // just the bootstrap-time session generation.
       let refetchedGeneration: Int64? = await {
         do {
-          if let refetched = try await apiClient.getCanonicalConversationView(conversationId: convoId),
-             let serverGen = refetched.resetGeneration
-          {
-            return Int64(serverGen)
+          if let refetched = try await apiClient.getCanonicalConversationView(conversationId: convoId) {
+            return Int64(refetched.coordinates.generation)
           }
         } catch {
           logger.warning(
@@ -2059,7 +2050,7 @@ public extension MLSConversationManager {
       }()
       let seededGeneration: Int64? = {
         let candidates: [Int64?] = [
-          bootstrapped.resetGeneration.map(Int64.init),
+          Int64(bootstrapped.coordinates.generation),
           refetchedGeneration,
           observedGeneration,
         ]
@@ -2097,10 +2088,12 @@ public extension MLSConversationManager {
         }
 
         removeCachedGroupState(conversationID: convoId, groupID: pendingGroupIdData)
-        conversations[convoId] = bootstrapped
+        if let state = try? await apiClient.getCanonicalConversationState(conversationId: convoId).state {
+          conversations[convoId] = state
+        }
 
         logger.warning(
-          "✅ [BOOTSTRAP] Won race for \(convoId.prefix(16)) → newGroupId=\(pendingNewGroupIdHex.prefix(16)), epoch=\(landedEpoch), seededGen=\(seededGeneration.map(String.init) ?? "nil") (serverGen=\(bootstrapped.resetGeneration.map(String.init) ?? "nil"), observedGen=\(observedGeneration.map(String.init) ?? "nil"))"
+          "✅ [BOOTSTRAP] Won race for \(convoId.prefix(16)) → newGroupId=\(pendingNewGroupIdHex.prefix(16)), epoch=\(landedEpoch), seededGen=\(seededGeneration.map(String.init) ?? "nil") (serverGen=\(bootstrapped.coordinates.generation), observedGen=\(observedGeneration.map(String.init) ?? "nil"))"
         )
         await bootstrapMetadataAfterJoin(
           groupIdHex: pendingNewGroupIdHex,
@@ -2198,7 +2191,7 @@ public extension MLSConversationManager {
           logger.warning(
             "🏆 [BOOTSTRAP] 409 with no Welcome for us → tentatively WE WON (lost-response recovery) for \(convoId.prefix(16)); verifying"
           )
-          let serverConvo: BlueCatbirdMlsChatDefs.ConvoView?
+          let serverConvo: BlueCatbirdChatDefs.ConversationState?
           do {
             serverConvo = try await apiClient.getCanonicalConversationView(conversationId: convoId)
           } catch {
@@ -2210,7 +2203,7 @@ public extension MLSConversationManager {
           // the sibling won and we must take the loser path (regardless
           // of welcome presence — server B may not have inserted one yet).
           if let serverConvo {
-            let serverGroupIdHex = serverConvo.groupId
+            let serverGroupIdHex = serverConvo.coordinates.groupId.data.hexEncodedString()
             if !serverGroupIdHex.isEmpty
               && serverGroupIdHex.lowercased() != pendingNewGroupIdHex.lowercased()
             {
@@ -2338,10 +2331,8 @@ public extension MLSConversationManager {
           // the 200 path above for the rationale.
           let refetchedGeneration409: Int64? = await {
             do {
-              if let refetched = try await apiClient.getCanonicalConversationView(conversationId: convoId),
-                 let serverGen = refetched.resetGeneration
-              {
-                return Int64(serverGen)
+              if let refetched = try await apiClient.getCanonicalConversationView(conversationId: convoId) {
+                return Int64(refetched.resetGeneration)
               }
             } catch {
               logger.warning(
@@ -2352,7 +2343,7 @@ public extension MLSConversationManager {
           }()
           let seededGeneration409: Int64? = {
             let candidates: [Int64?] = [
-              serverConvo?.resetGeneration.map(Int64.init),
+              serverConvo.map { Int64($0.resetGeneration) },
               refetchedGeneration409,
               observedGeneration,
             ]
@@ -2388,7 +2379,7 @@ public extension MLSConversationManager {
               }
             }
             removeCachedGroupState(conversationID: convoId, groupID: pendingGroupIdData)
-            if let serverConvo {
+            if let serverConvo = try? await apiClient.getCanonicalConversationState(conversationId: convoId).state {
               conversations[convoId] = serverConvo
             }
             logger.warning(
@@ -2498,7 +2489,7 @@ public extension MLSConversationManager {
     return false
   }
 
-  internal func persistConversationsToDatabase(_ convos: [BlueCatbirdMlsChatDefs.ConvoView]) async throws {
+  internal func persistConversationsToDatabase(_ convos: [BlueCatbirdChatDefs.ConversationState]) async throws {
     guard let userDid = userDid else {
       logger.error("Cannot persist conversations - no user DID")
       return
@@ -2521,7 +2512,7 @@ public extension MLSConversationManager {
         trustCheckResults[convo.conversationId] = existingConvo!.requestState
       } else {
         // New conversation - determine initial request state
-        let creatorDid = convo.creator.description
+        let creatorDid = convo.metadataSnapshot.authorProof.authorDid.description
         let isCreator = creatorDid.lowercased() == userDid.lowercased()
 
         if isCreator {
@@ -2552,10 +2543,7 @@ public extension MLSConversationManager {
 
     try await database.write { db in
       for convo in convos {
-        guard let groupIdData = Data(hexEncoded: convo.groupId) else {
-          self.logger.error("Invalid group ID format for conversation \(convo.conversationId)")
-          continue
-        }
+        let groupIdData = convo.coordinates.groupId.data
 
         // Prefer MLS-encrypted metadata over server plaintext metadata, but
         // never blank an existing stable-row title just because a rotated
@@ -2580,27 +2568,16 @@ public extension MLSConversationManager {
           existingTitle: existing?.title
         )
 
-        // For lastMessageAt, prefer the most recent value between server and local
-        let serverLastMessage = convo.lastMessageAt?.date
-        let mergedLastMessage: Date? = {
-          switch (existing?.lastMessageAt, serverLastMessage) {
-          case let (local?, server?): return max(local, server)
-          case let (local?, nil): return local
-          case let (nil, server?): return server
-          case (nil, nil): return nil
-          }
-        }()
-
         let model = MLSConversationModel.mergedServerSnapshot(
           conversationID: convo.conversationId,
           currentUserDID: userDid,
           groupID: groupIdData,
           epoch: Int64(convo.epoch),
-          createdAt: convo.createdAt.date,
+          createdAt: existing?.createdAt ?? Date(),
           updatedAt: Date(),
           title: title,
           existing: existing,
-          lastMessageAt: mergedLastMessage,
+          lastMessageAt: existing?.lastMessageAt,
           requestState: requestState
         )
 
@@ -2616,7 +2593,7 @@ public extension MLSConversationManager {
     }
   }
 
-  internal func persistMembersToDatabase(_ convos: [BlueCatbirdMlsChatDefs.ConvoView]) async throws {
+  internal func persistMembersToDatabase(_ convos: [BlueCatbirdChatDefs.ConversationState]) async throws {
     guard let userDid = userDid else {
       logger.error("Cannot persist members - no user DID")
       return
@@ -2634,12 +2611,12 @@ public extension MLSConversationManager {
           arguments: [Date(), Date(), convo.conversationId, normalizedUserDid]
         )
 
-        for (index, apiMember) in convo.members.enumerated() {
-          let memberID = "\(convo.conversationId)_\(apiMember.did.description)"
-          let normalizedDid = MLSStorageHelpers.normalizeDID(apiMember.did.description)
+        for (index, apiMember) in convo.participants.enumerated() {
+          let memberID = "\(convo.conversationId)_\(apiMember.userDid.description)"
+          let normalizedDid = MLSStorageHelpers.normalizeDID(apiMember.userDid.description)
           let normalizedUserDid = MLSStorageHelpers.normalizeDID(userDid)
           let now = Date()
-          let role = apiMember.isAdmin ? "admin" : "member"
+          let role = apiMember.role == .value_admin ? "admin" : "member"
 
           // UPSERT: insert new members, but preserve existing profile fields
           // (handle, displayName, avatarURL) that the profile enricher populated.

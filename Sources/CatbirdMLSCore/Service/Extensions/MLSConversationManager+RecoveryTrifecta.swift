@@ -112,12 +112,12 @@ extension MLSConversationManager {
     do {
       let output = try await apiClient.reportRecoveryFailure(
         convoId: convoId,
-        failureMode: "group_state_unrecoverable",
         failureType: "trifecta_external_commit_409",
+        failureMode: "group_state_unrecoverable",
         epochAuthenticator: epochAuthenticatorHex
       )
       logger.info(
-        "✅ [D1-TRIFECTA] Mode B report dispatched for \(convoId.prefix(16)) — recorded=\(output.recorded), autoReset=\(output.autoResetTriggered), reason=\(output.reason ?? "nil")"
+        "✅ [D1-TRIFECTA] Mode B report dispatched for \(convoId.prefix(16)) — requested=\(output.requested), autoReset=\(output.autoResetTriggered), newGroupId=\(output.newGroupId ?? "nil")"
       )
       if epochAuthenticatorHex == nil {
         logger.warning(

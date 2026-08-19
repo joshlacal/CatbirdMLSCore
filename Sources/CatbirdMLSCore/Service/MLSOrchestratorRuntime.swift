@@ -63,7 +63,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     self.credentialAdapter = credentialAdapter
     self.eventCallback = eventCallback
     let capabilities = SecurityStorageCapabilities(
-      version: 1,
+      version: 3,
       resetState: true,
       quarantine: true,
       pendingMessageProtection: true,
@@ -123,7 +123,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.syncWithServer(fullSync: fullSync)
   }
 
-  public func listConversations() throws -> [BlueCatbirdMlsChatDefs.ConvoView] {
+  public func listConversations() throws -> [BlueCatbirdChatDefs.ConversationState] {
     try bridge.listConversations(userDid: userDID).map { conversation in
       try decodeConversationSnapshot(conversation, fallbackUserDID: userDID)
     }
@@ -450,7 +450,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 }
 
 public struct MLSCreateConversationResult: Sendable {
-  public let conversation: BlueCatbirdMlsChatDefs.ConvoView
+  public let conversation: BlueCatbirdChatDefs.ConversationState
   public let metadata: MLSConversationSnapshotMetadata
 
   init(ffiResult result: FfiCreateConversationResult, userDID: String) throws {
@@ -459,7 +459,7 @@ public struct MLSCreateConversationResult: Sendable {
   }
 
   public init(
-    conversation: BlueCatbirdMlsChatDefs.ConvoView,
+    conversation: BlueCatbirdChatDefs.ConversationState,
     metadata: MLSConversationSnapshotMetadata = MLSConversationSnapshotMetadata()
   ) {
     self.conversation = conversation
@@ -468,7 +468,7 @@ public struct MLSCreateConversationResult: Sendable {
 }
 
 public struct MLSGroupMutationResult: Sendable {
-  public let conversation: BlueCatbirdMlsChatDefs.ConvoView
+  public let conversation: BlueCatbirdChatDefs.ConversationState
   public let metadata: MLSConversationSnapshotMetadata
 
   init(ffiResult result: FfiGroupMutationResult, userDID: String) throws {
@@ -477,7 +477,7 @@ public struct MLSGroupMutationResult: Sendable {
   }
 
   public init(
-    conversation: BlueCatbirdMlsChatDefs.ConvoView,
+    conversation: BlueCatbirdChatDefs.ConversationState,
     metadata: MLSConversationSnapshotMetadata = MLSConversationSnapshotMetadata()
   ) {
     self.conversation = conversation
@@ -622,41 +622,69 @@ public struct MLSDebugWipeLocalGroupResult: Equatable, Sendable {
 private func decodeConversationSnapshot(
   _ ffiConversation: FfiConversationView,
   fallbackUserDID: String
-) throws -> BlueCatbirdMlsChatDefs.ConvoView {
-  let createdAtDate = parseFFIISO8601Date(ffiConversation.createdAt) ?? Date()
-  let joinedAt = ATProtocolDate(date: createdAtDate)
+) throws -> BlueCatbirdChatDefs.ConversationState {
   let creatorDIDString =
     ffiConversation.members.first(where: { $0.role.lowercased() == "admin" })?.did ?? fallbackUserDID
-  let creatorDID = try DID(didString: creatorDIDString)
-  let members: [BlueCatbirdMlsChatDefs.MemberView] = try ffiConversation.members.map { member in
-    let did = try DID(didString: member.did)
-    return BlueCatbirdMlsChatDefs.MemberView(
-      did: did,
+  let creatorDID = (try? DID(didString: creatorDIDString)) ?? (try! DID(didString: "did:plc:unknown"))
+  let participants: [BlueCatbirdChatDefs.ParticipantView] = ffiConversation.members.compactMap { member in
+    guard let did = try? DID(didString: member.did) else { return nil }
+    return BlueCatbirdChatDefs.ParticipantView(
       userDid: did,
-      deviceId: nil,
-      deviceName: nil,
-      joinedAt: joinedAt,
-      isAdmin: member.role.lowercased() == "admin",
-      isModerator: nil,
-      promotedAt: nil,
-      promotedBy: nil,
-      leafIndex: nil,
-      credential: nil
+      role: member.role.lowercased() == "admin" ? .value_admin : .value_member,
+      status: .value_active,
+      invitationProvenance: nil,
+      leafCount: 1
     )
   }
 
-  return BlueCatbirdMlsChatDefs.ConvoView(
+  let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
     conversationId: ffiConversation.conversationId,
-    groupId: ffiConversation.groupId,
-    creator: creatorDID,
-    members: members,
+    generation: 1,
+    stateVersion: 1,
+    groupId: Bytes(data: Data(hexEncoded: ffiConversation.groupId) ?? Data()),
     epoch: Int(ffiConversation.epoch),
-    cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-    createdAt: ATProtocolDate(date: createdAtDate),
-    lastMessageAt: parseFFIISO8601Date(ffiConversation.updatedAt).map(ATProtocolDate.init(date:)),
-    confirmationTag: nil,
-    resetGeneration: nil,
-    sequencerDid: nil
+    groupContextHash: Bytes(data: Data()),
+    confirmationTag: Bytes(data: Data()),
+    lifecycle: .value_active
+  )
+
+  let metadataSnapshot = BlueCatbirdChatDefs.MetadataSnapshot(
+    coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
+      conversationId: Bytes(data: Data(ffiConversation.conversationId.utf8)),
+      generation: 1,
+      groupId: Bytes(data: Data(hexEncoded: ffiConversation.groupId) ?? Data()),
+      epoch: Int(ffiConversation.epoch),
+      groupContextHash: Bytes(data: Data()),
+      confirmationTag: Bytes(data: Data())
+    ),
+    originTransitionId: ffiConversation.conversationId,
+    metadataVersion: 1,
+    nonce: Bytes(data: Data()),
+    ciphertext: Bytes(data: Data()),
+    ciphertextSha256: Bytes(data: Data()),
+    ciphertextSize: 0,
+    avatarBinding: nil,
+    authorProof: BlueCatbirdChatDefs.MetadataAuthorProof(
+      authorDid: creatorDID,
+      authorDeviceId: "primary",
+      authorKeyId: "key-1",
+      signaturePublicKey: Bytes(data: Data()),
+      authGenerationAtOrigin: 1,
+      originTransitionId: ffiConversation.conversationId,
+      originSeq: 1,
+      roleAtOrigin: "admin",
+      deviceStatusAtOrigin: "active"
+    )
+  )
+
+  return BlueCatbirdChatDefs.ConversationState(
+    conversationKind: .value_group,
+    coordinates: coordinates,
+    cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
+    participants: participants,
+    leaves: [],
+    metadataSnapshot: metadataSnapshot,
+    snapshotSeq: 1
   )
 }
 

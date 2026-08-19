@@ -1,4 +1,5 @@
 import CatbirdMLS
+import CryptoKit
 import Foundation
 import GRDB
 import Petrel
@@ -54,8 +55,19 @@ extension MLSConversationManager {
         mode == .rustFull ? .rustRuntime : .swiftResponder
     }
 
+    public struct MLSWelcomeReissueRequestedEvent: Sendable {
+        public let convoId: String
+        public let recipientDeviceDid: String
+        public let requestId: String
+        public init(convoId: String, recipientDeviceDid: String, requestId: String) {
+            self.convoId = convoId
+            self.recipientDeviceDid = recipientDeviceDid
+            self.requestId = requestId
+        }
+    }
+
     public func handleWelcomeReissueRequested(
-        event: BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent
+        event: MLSWelcomeReissueRequestedEvent
     ) async {
         let shouldRespond = welcomeReissueResponseState.withLock { handled in
             if handled.contains(event.requestId) {
@@ -203,11 +215,16 @@ extension MLSConversationManager {
         }
 
         let keyPackageData = selectedPackages.map(\.data)
-        let keyPackageHashes: [BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry] =
+        let keyPackageArtifacts: [BlueCatbirdChatDefs.KeyPackageArtifact] =
             selectedPackages.map { package in
-                BlueCatbirdMlsChatCommitGroupChange.KeyPackageHashEntry(
-                    did: package.did,
-                    hash: package.hash
+                let packageBytes = Bytes(data: package.data)
+                let sha256Bytes = Bytes(data: Data(SHA256.hash(data: package.data)))
+                return BlueCatbirdChatDefs.KeyPackageArtifact(
+                    framing: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+                    contentType: "application/mls-keypackage",
+                    bytes: packageBytes,
+                    sha256: sha256Bytes,
+                    keyPackageRef: sha256Bytes
                 )
             }
 
@@ -242,7 +259,7 @@ extension MLSConversationManager {
                     commit: plan.commitBytes,
                     welcomeMessage: welcomeData,
                     groupInfo: postCommitGroupInfo,
-                    keyPackageHashes: keyPackageHashes,
+                    keyPackageHashes: keyPackageArtifacts,
                     idempotencyKey: requestId
                 )
 
@@ -349,27 +366,24 @@ extension MLSConversationManager {
     }
 
     func decideWelcomeRecovery(
-        for convo: BlueCatbirdMlsChatDefs.ConvoView,
+        for convo: BlueCatbirdChatDefs.ConversationState,
         failure: WelcomeRecoveryFailure,
         externalCommitAlreadyFailed: Bool = false
     ) async -> WelcomeRecoveryDecision {
         let priorAttempts = await storedWelcomeReissueAttempts(convoId: convo.conversationId)
-        let hasAdmin = convo.members.contains { $0.isAdmin }
+        let hasAdmin = convo.participants.contains { $0.role == .value_admin }
         let currentUserDid = userDid.map { Self.userDid(fromDeviceQualifiedDid: $0.lowercased()) }
         let serverListsCurrentUserAsMember = currentUserDid.map { normalizedUserDid in
-            convo.members.contains { member in
+            convo.participants.contains { member in
                 let memberUserDid = Self.userDid(
-                    fromDeviceQualifiedDid: member.userDid.didString().lowercased()
+                    fromDeviceQualifiedDid: member.userDid.description.lowercased()
                 )
-                let memberDid = Self.userDid(
-                    fromDeviceQualifiedDid: member.did.description.lowercased()
-                )
-                return memberUserDid == normalizedUserDid || memberDid == normalizedUserDid
+                return memberUserDid == normalizedUserDid
             }
         } ?? false
         let lastSeenEpoch = UInt64(max(convo.epoch, 0))
         logger.info(
-            "🧭 [WELCOME-RECOVERY] Decision context for \(convo.conversationId.prefix(16)): failure=\(failure.reason), priorAttempts=\(priorAttempts), serverListsCurrentUserAsMember=\(serverListsCurrentUserAsMember), hasAdmin=\(hasAdmin), memberCount=\(convo.members.count), epoch=\(lastSeenEpoch)"
+            "🧭 [WELCOME-RECOVERY] Decision context for \(convo.conversationId.prefix(16)): failure=\(failure.reason), priorAttempts=\(priorAttempts), serverListsCurrentUserAsMember=\(serverListsCurrentUserAsMember), hasAdmin=\(hasAdmin), memberCount=\(convo.participants.count), epoch=\(lastSeenEpoch)"
         )
 
         return WelcomeRecoveryPolicy.decide(
@@ -384,7 +398,7 @@ extension MLSConversationManager {
     }
 
     func requestWelcomeReissueAndWait(
-        convo: BlueCatbirdMlsChatDefs.ConvoView,
+        convo: BlueCatbirdChatDefs.ConversationState,
         reason: String,
         nextAttempt: Int
     ) async throws {

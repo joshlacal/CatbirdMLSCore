@@ -9,8 +9,8 @@ extension MLSConversationManager {
         return views.map { convo in
             var seen = Set<String>()
             var ordered: [String] = []
-            for member in convo.members {
-                let did = member.userDid.didString()
+            for member in convo.participants {
+                let did = member.userDid.description
                 if seen.insert(did).inserted {
                     ordered.append(did)
                 }

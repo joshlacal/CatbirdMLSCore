@@ -91,14 +91,16 @@ final class MLSFullRustMessagingTests: XCTestCase {
       bridge: bridge
     )
 
-    let message = BlueCatbirdMlsChatDefs.MessageView(
-      id: "msg-1",
+    let message = BlueCatbirdChatDefs.ApplicationEntry(
       convoId: "convo-incoming",
+      id: "msg-1",
+      senderDid: try DID(didString: "did:plc:testuser"),
+      senderDeviceDid: "did:plc:testuser#device",
+      senderSeq: 1,
       ciphertext: Bytes(data: Data([0x01, 0x02, 0x03])),
       epoch: 7,
       seq: 44,
-      createdAt: ATProtocolDate(date: Date()),
-      messageType: .value_app
+      createdAt: ATProtocolDate(date: Date())
     )
 
     let outcome = try await manager.processServerMessage(message, source: "unit-test")
@@ -127,14 +129,16 @@ final class MLSFullRustMessagingTests: XCTestCase {
       bridge: bridge
     )
 
-    let message = BlueCatbirdMlsChatDefs.MessageView(
-      id: "msg-1",
+    let message = BlueCatbirdChatDefs.ApplicationEntry(
       convoId: "convo-incoming",
+      id: "msg-1",
+      senderDid: try DID(didString: "did:plc:testuser"),
+      senderDeviceDid: "did:plc:testuser#device",
+      senderSeq: 1,
       ciphertext: Bytes(data: Data([0x01, 0x02, 0x03])),
       epoch: 7,
       seq: 44,
-      createdAt: ATProtocolDate(date: Date()),
-      messageType: .value_app
+      createdAt: ATProtocolDate(date: Date())
     )
 
     _ = try await manager.processServerMessage(message, source: "unit-test")
@@ -186,13 +190,11 @@ final class MLSFullRustMessagingTests: XCTestCase {
       bridge: bridge
     )
 
-    let event = BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent(
-      cursor: "cursor-1",
+    let event = MLSConversationManager.MLSGroupResetEvent(
       convoId: "convo-reset",
       newGroupId: "00112233445566778899aabbccddeeff",
       resetGeneration: 3,
-      resetBy: try DID(didString: "did:plc:resetter"),
-      cipherSuite: nil,
+      resetBy: "did:plc:resetter",
       reason: "unit-test"
     )
 
@@ -218,16 +220,13 @@ final class MLSFullRustMessagingTests: XCTestCase {
       bridge: bridge
     )
 
-    let event = BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent(
-      cursor: "cursor-2",
+    let event = MLSConversationManager.MLSResetRequestedEvent(
       convoId: "convo-reset-requested",
-      cryptoSessionId: "session-prior",
       generation: 4,
       trigger: "inlineGroupInfo404",
       requestEventId: "request-event-1",
-      expectedNewMlsGroupId: "00112233445566778899aabbccddeeff",
-      reason: "unit-test",
-      requestedAt: nil
+      cryptoSessionId: "session-prior",
+      expectedNewMlsGroupId: "00112233445566778899aabbccddeeff"
     )
 
     await manager.handleResetRequested(event: event)
@@ -327,7 +326,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
     try await manager.database.write { db in
       try model.insert(db)
     }
-    manager.conversations[conversationID] = try XCTUnwrap(model.asConvoView())
+    manager.conversations[conversationID] = model.asConversationState()
   }
 
   private func seedGroupState(

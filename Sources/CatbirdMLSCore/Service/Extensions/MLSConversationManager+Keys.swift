@@ -12,7 +12,7 @@ public extension MLSConversationManager {
   /// - Parameter expiresAt: Optional expiration date (defaults to 30 days)
   /// - Returns: Published key package reference
   @discardableResult
-  public func publishKeyPackage(expiresAt: Date? = nil) async throws -> BlueCatbirdMlsChatDefs.KeyPackageRef {
+  public func publishKeyPackage(expiresAt: Date? = nil) async throws -> BlueCatbirdChatDefs.KeyPackageArtifact {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }

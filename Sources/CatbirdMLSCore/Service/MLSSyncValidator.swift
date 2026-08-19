@@ -60,9 +60,9 @@ public final class MLSSyncValidator {
         lastValidation = Date()
 
         do {
-            // Use listDevices to check device validity
-            let input = BlueCatbirdMlsChatListDevices.Parameters()
-            let (responseCode, output) = try await client.blue.catbird.mlsChat.listDevices(input: input)
+            // Use getOwnDevices to check device validity
+            let input = BlueCatbirdChatGetOwnDevices.Parameters()
+            let (responseCode, output) = try await client.blue.catbird.chat.getOwnDevices(input: input)
 
             guard responseCode == 200, let output = output else {
                 logger.error("Validation failed with HTTP \(responseCode)")
@@ -70,10 +70,10 @@ public final class MLSSyncValidator {
             }
 
             // Derive validation from device list
-            let devices = output.devices
+            let devices = output.items.map { $0.device }
             let hasDevices = !devices.isEmpty
-            let totalKeyPackages = devices.reduce(0) { $0 + $1.keyPackageCount }
-            let lowPackageDevices = devices.filter { $0.keyPackageCount < 20 }
+            let totalKeyPackages = devices.reduce(0) { $0 + $1.availablePackageCount }
+            let lowPackageDevices = devices.filter { $0.availablePackageCount < 20 }
 
             if hasDevices && lowPackageDevices.isEmpty {
                 logger.info("✅ Device state is valid")
@@ -83,7 +83,7 @@ public final class MLSSyncValidator {
             } else {
                 logger.warning("⚠️ Device state validation: low key packages detected")
                 for device in lowPackageDevices {
-                    logger.warning("   Device \(device.deviceId): \(device.keyPackageCount) key packages")
+                    logger.warning("   Device \(device.deviceId): \(device.availablePackageCount) key packages")
                 }
             }
 
@@ -92,7 +92,7 @@ public final class MLSSyncValidator {
 
             // Trigger automatic recovery if enabled and safe
             if (!hasDevices || !lowPackageDevices.isEmpty) && autoRecoveryEnabled {
-                await performRecoveryActions(devices: output)
+                await performRecoveryActions(devices: devices)
             }
 
         } catch {
@@ -101,22 +101,22 @@ public final class MLSSyncValidator {
     }
 
     /// Perform automatic recovery actions based on validation results
-    private func performRecoveryActions(devices: BlueCatbirdMlsChatListDevices.Output) async {
+    private func performRecoveryActions(devices: [BlueCatbirdChatDefs.DeviceView]) async {
         logger.info("Performing automatic recovery actions")
 
         // 1. Replenish key packages if below threshold
-        let lowPackageDevices = devices.devices.filter { $0.keyPackageCount < 20 }
+        let lowPackageDevices = devices.filter { $0.availablePackageCount < 20 }
         if !lowPackageDevices.isEmpty {
             logger.info("🔑 Key package inventory low - need replenishment")
             for device in lowPackageDevices {
-                logger.info("   Device \(device.deviceId): \(device.keyPackageCount) available, target: 20")
+                logger.info("   Device \(device.deviceId): \(device.availablePackageCount) available, target: 20")
             }
             // Note: Key package replenishment is handled by MLSKeyPackageMonitor
             // We just log the recommendation here
         }
 
         // 2. Log device health recommendations
-        if devices.devices.isEmpty {
+        if devices.isEmpty {
             logger.warning("⚠️ No devices registered - device registration required")
         }
     }

@@ -245,7 +245,7 @@ public extension MLSConversationManager {
   }
 
   private func finishSuccessfulMessageProcessing(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     userDid: String
   ) async throws {
     // FIX D: Clear any persistent decryption failure tracking on success
@@ -291,7 +291,7 @@ public extension MLSConversationManager {
   }
 
   private func persistProcessedPayload(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     payload: MLSMessagePayload,
     senderID: String,
     processingError: String?,
@@ -414,7 +414,7 @@ public extension MLSConversationManager {
 
       for commit in commits.sorted(by: { $0.seq < $1.seq }) {
         do {
-          let commitData = commit.ciphertext.data
+          let commitData = commit.ciphertext
           // Task #46: explicit stage + merge. processMessage stages an incoming
           // commit; we must call mergeIncomingCommit to advance the epoch.
           let processed = try await mlsClient.processMessage(
@@ -554,7 +554,7 @@ public extension MLSConversationManager {
       logger.warning("⚠️ Conversation \(convoId.prefix(16))... not found locally, attempting on-demand fetch")
 
       // Try to fetch this specific conversation from server
-      if let fetchedConvo = try? await apiClient.getCanonicalConversationView(conversationId: convoId) {
+      if let fetchedConvo = try? await apiClient.getCanonicalConversationState(conversationId: convoId).state {
         // Add to local state
         conversations[convoId] = fetchedConvo
 
@@ -688,15 +688,11 @@ public extension MLSConversationManager {
         do {
           // Use shared helper with retry logic (3 attempts)
           try await cacheControlMessageEnvelope(
-            message: BlueCatbirdMlsChatDefs.MessageView(
-              id: localMsgId,
-              convoId: convoId,
-              ciphertext: Bytes(data: paddedCiphertext),
-              epoch: Int(localEpoch),
-              seq: optimisticSeq,
-              createdAt: ATProtocolDate(date: Date()),
-              messageType: try MLSMessageViewProjection.viewType(for: payload)
-            ),
+            messageID: localMsgId,
+            conversationID: convoId,
+            epoch: Int64(localEpoch),
+            seq: Int64(optimisticSeq),
+            timestamp: Date(),
             payload: payload,
             senderDID: userDid,
             currentUserDID: userDid,
@@ -741,7 +737,7 @@ public extension MLSConversationManager {
               }
               for commit in commits.sorted(by: { $0.seq < $1.seq }) {
                 do {
-                  let commitData = commit.ciphertext.data
+                  let commitData = commit.ciphertext
                   // Task #46: explicit stage + merge after processMessage.
                   let processed = try await mlsClient.processMessage(
                     for: userDid,
@@ -954,20 +950,16 @@ public extension MLSConversationManager {
         // Must succeed or we abort to avoid "CannotDecryptOwnMessage" later
         try throwIfShuttingDown("sendEncryptedReaction-preCache")
         try await cacheControlMessageEnvelope(
-          message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId,
-            convoId: convoId,
-            ciphertext: Bytes(data: paddedCiphertext),
-            epoch: Int(localEpoch),
-            seq: optimisticSeq,
-            createdAt: ATProtocolDate(date: Date()),
-            messageType: try MLSMessageViewProjection.viewType(for: payload)
-        ),
-        payload: payload,
-        senderDID: userDid,
-        currentUserDID: userDid,
-        processingState: MLSMessageProcessingState.pendingSelfSend
-      )
+          messageID: localMsgId,
+          conversationID: convoId,
+          epoch: Int64(localEpoch),
+          seq: Int64(optimisticSeq),
+          timestamp: Date(),
+          payload: payload,
+          senderDID: userDid,
+          currentUserDID: userDid,
+          processingState: MLSMessageProcessingState.pendingSelfSend
+        )
 
         // Send
         let sendResult = try await apiClient.sendMessage(
@@ -1117,15 +1109,11 @@ public extension MLSConversationManager {
 
         try throwIfShuttingDown("editMessage-preCache")
         try await cacheControlMessageEnvelope(
-          message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId,
-            convoId: convoId,
-            ciphertext: Bytes(data: paddedCiphertext),
-            epoch: Int(localEpoch),
-            seq: optimisticSeq,
-            createdAt: ATProtocolDate(date: Date()),
-            messageType: try MLSMessageViewProjection.viewType(for: payload)
-          ),
+          messageID: localMsgId,
+          conversationID: convoId,
+          epoch: Int64(localEpoch),
+          seq: Int64(optimisticSeq),
+          timestamp: Date(),
           payload: payload,
           senderDID: userDid,
           currentUserDID: userDid,
@@ -1266,15 +1254,11 @@ public extension MLSConversationManager {
 
         try throwIfShuttingDown("unsendMessage-preCache")
         try await cacheControlMessageEnvelope(
-          message: BlueCatbirdMlsChatDefs.MessageView(
-            id: localMsgId,
-            convoId: convoId,
-            ciphertext: Bytes(data: paddedCiphertext),
-            epoch: Int(localEpoch),
-            seq: optimisticSeq,
-            createdAt: ATProtocolDate(date: Date()),
-            messageType: try MLSMessageViewProjection.viewType(for: payload)
-          ),
+          messageID: localMsgId,
+          conversationID: convoId,
+          epoch: Int64(localEpoch),
+          seq: Int64(optimisticSeq),
+          timestamp: Date(),
           payload: payload,
           senderDID: userDid,
           currentUserDID: userDid,
@@ -1490,7 +1474,7 @@ public extension MLSConversationManager {
   /// - Parameter message: Encrypted message view
   /// - Returns: Decrypted message payload with text and optional embed
   public func decryptMessage(
-    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    _ message: BlueCatbirdChatDefs.ApplicationEntry,
     source: String = "unknown"
   ) async throws -> DecryptedMLSMessage
   {
@@ -1499,7 +1483,16 @@ public extension MLSConversationManager {
     let outcome = try await processServerMessage(message, source: source)
     switch outcome {
     case .application(let payload, let senderDID):
-      return DecryptedMLSMessage(messageView: message, payload: payload, senderDID: senderDID)
+      return DecryptedMLSMessage(
+        id: message.id,
+        convoId: message.convoId,
+        text: payload.text ?? "",
+        senderDID: senderDID,
+        createdAt: message.createdAt.date,
+        embed: payload.embed,
+        epoch: message.epoch,
+        seq: message.seq
+      )
     case .nonApplication:
       throw MLSConversationError.invalidMessage
     case .controlMessage:
@@ -1509,7 +1502,7 @@ public extension MLSConversationManager {
 
   /// Process a single server message through UniFFI and return application payloads when available
   internal func processServerMessage(
-    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    _ message: BlueCatbirdChatDefs.ApplicationEntry,
     source: String = "unknown"
   ) async throws -> MessageProcessingOutcome
   {
@@ -1538,7 +1531,7 @@ public extension MLSConversationManager {
   }
 
   private func processServerMessageLegacy(
-    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    _ message: BlueCatbirdChatDefs.ApplicationEntry,
     source: String = "unknown"
   ) async throws -> MessageProcessingOutcome
   {
@@ -1593,7 +1586,7 @@ public extension MLSConversationManager {
     )
 
     // 🔍 DEBUG: Log decision for all messages
-    logger.info("🔍 [PROCESS-DECISION] msg=\(message.id.prefix(16)) seq=\(message.seq) type=\(MLSMessageViewProjection.rawType(message.messageType)) epoch=\(message.epoch) decision=\(String(describing: decision))")
+    logger.info("🔍 [PROCESS-DECISION] msg=\(message.id.prefix(16)) seq=\(message.seq) type=application epoch=\(message.epoch) decision=\(String(describing: decision))")
 
     switch decision {
     case .alreadyProcessed:
@@ -2107,7 +2100,7 @@ public extension MLSConversationManager {
   }
 
   private func processServerMessageWithRustAuthority(
-    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    _ message: BlueCatbirdChatDefs.ApplicationEntry,
     source: String,
     userDid: String,
     attemptID: String
@@ -2121,7 +2114,7 @@ public extension MLSConversationManager {
         let envelope = FfiIncomingEnvelope(
           conversationId: message.convoId,
           senderDid: "",
-          ciphertext: message.ciphertext.data,
+          ciphertext: message.ciphertext,
           timestamp: ISO8601DateFormatter().string(from: message.createdAt.date),
           serverMessageId: message.id
         )
@@ -2146,7 +2139,7 @@ public extension MLSConversationManager {
   }
 
   private func processServerMessageWithFullRust(
-    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    _ message: BlueCatbirdChatDefs.ApplicationEntry,
     source: String,
     userDid: String,
     attemptID: String
@@ -2161,7 +2154,7 @@ public extension MLSConversationManager {
         let envelope = FfiIncomingEnvelope(
           conversationId: message.convoId,
           senderDid: "",
-          ciphertext: message.ciphertext.data,
+          ciphertext: message.ciphertext,
           timestamp: ISO8601DateFormatter().string(from: message.createdAt.date),
           serverMessageId: message.id
         )
@@ -2260,7 +2253,7 @@ public extension MLSConversationManager {
 
   private func handleRustAuthoritativePayloadSideEffects(
     _ outcome: MessageProcessingOutcome,
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     userDid: String
   ) async throws {
     guard case .application(let payload, let senderDID) = outcome else { return }
@@ -2459,7 +2452,7 @@ public extension MLSConversationManager {
 
         // Fetch missing messages from server
         let sinceParam = max(0, Int(missingStart) - 1)
-        let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+        let (messages, _) = try await apiClient.getCanonicalMessagePage(
           conversationId: conversationID,
           afterSeq: sinceParam,
           limit: 50
@@ -2551,8 +2544,8 @@ public extension MLSConversationManager {
         // Truly already-applied commits are caught by the epoch <= currentEpoch
         // check above.
 
-        // Get commit data (MessageView.ciphertext is non-optional Bytes)
-        let commitData = commit.ciphertext.data
+        // Get commit data
+        let commitData = commit.ciphertext
         guard !commitData.isEmpty else {
           logger.warning("⚠️ [EPOCH-RECOVERY] Commit data empty for epoch=\(commit.epoch)")
           break  // Can't skip — sequential processing required
@@ -2665,7 +2658,7 @@ public extension MLSConversationManager {
       // Fetch missing messages
       // Note: getMessages expects 'sinceSeq', so to get 'startSeq', pass 'startSeq - 1'
       let sinceParam = max(0, startSeq - 1)
-      let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+      let (messages, _) = try await apiClient.getCanonicalMessagePage(
         conversationId: conversationID,
         afterSeq: sinceParam,
         limit: limit
@@ -2773,7 +2766,7 @@ public extension MLSConversationManager {
   }
 
   private func processServerMessageLocked(
-    _ message: BlueCatbirdMlsChatDefs.MessageView,
+    _ message: BlueCatbirdChatDefs.ApplicationEntry,
     context: ProcessingContext,
     gapFillDepth: Int = 0
   ) async throws -> MessageProcessingOutcome
@@ -2860,7 +2853,7 @@ public extension MLSConversationManager {
 
     // Padding is stripped by catbird-mls decrypt_message/process_message internally.
     // Pass the raw ciphertext from the server directly.
-    let ciphertextData = message.ciphertext.data
+    let ciphertextData = message.ciphertext
 
     // ═══════════════════════════════════════════════════════════════════════════
     // CRITICAL FIX: Check self-sent message cache BEFORE epoch check
@@ -2930,8 +2923,7 @@ public extension MLSConversationManager {
       ) {
         logger.info("🔍 [CACHE-LOOKUP] Found cached message \(message.id.prefix(16)) - processingError=\(cachedMessage.processingError ?? "nil"), payloadExpired=\(cachedMessage.payloadExpired), hasPayload=\(cachedMessage.parsedPayload != nil)")
         if let processingError = cachedMessage.processingError {
-          let normalizedType = MLSMessageViewProjection.rawType(message.messageType).lowercased()
-          let isApplication = normalizedType == "app" || normalizedType == "application"
+          let isApplication = true
           let shouldShowCachedAppPlaceholder =
             isApplication
             && processingError == "Message from old epoch"
@@ -3502,7 +3494,7 @@ public extension MLSConversationManager {
   }
 
   private func saveErrorPlaceholder(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     error: String,
     validationReason: String?,
     context: ProcessingContext? = nil
@@ -3511,8 +3503,7 @@ public extension MLSConversationManager {
       throw MLSConversationError.noAuthentication
     }
 
-      let normalizedType = MLSMessageViewProjection.rawType(message.messageType).lowercased()
-    let isApplication = normalizedType == "app" || normalizedType == "application"
+    let isApplication = true
     let placeholderPayload = placeholderPayload(for: message, text: "⚠️ Message unavailable")
     try await persistPlaceholderPayload(
       message: message,
@@ -3536,7 +3527,7 @@ public extension MLSConversationManager {
   /// from the actor's mutable state (current group epoch, local device
   /// DID) and the message metadata.
   ///
-  /// `MessageView` does not carry a sender DID (sender is extracted from
+  /// `ApplicationEntry` does not carry a sender DID (sender is extracted from
   /// MLS AAD after a successful decrypt). For wrong-epoch / failed-
   /// decrypt sites, the caller passes `senderDeviceDid: nil` and the
   /// adapter wires an empty string so the policy's own-message rule
@@ -3551,7 +3542,7 @@ public extension MLSConversationManager {
   /// Future work (Phase E.iOS): extend `SkipReason` with `awaitingReissue`
   /// / `surrenderedAtRecipient` and wire them through here.
   internal func decidePersistAction(
-    for message: BlueCatbirdMlsChatDefs.MessageView,
+    for message: BlueCatbirdChatDefs.ApplicationEntry,
     decryptSucceeded: Bool,
     isCommit: Bool,
     senderDeviceDid: String? = nil,
@@ -3583,18 +3574,14 @@ public extension MLSConversationManager {
   }
 
   private func placeholderPayload(
-    for message: BlueCatbirdMlsChatDefs.MessageView,
+    for message: BlueCatbirdChatDefs.ApplicationEntry,
     text: String
   ) -> MLSMessagePayload {
-    let normalizedType = MLSMessageViewProjection.rawType(message.messageType).lowercased()
-    if normalizedType == "app" || normalizedType == "application" {
-      return MLSMessagePayload.text(text, embed: nil)
-    }
-    return MLSMessagePayload.typing(isTyping: false)
+    return MLSMessagePayload.text(text, embed: nil)
   }
 
   private func persistPlaceholderPayload(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     payload: MLSMessagePayload,
     senderID: String,
     processingError: String?,
@@ -3626,7 +3613,7 @@ public extension MLSConversationManager {
   ///
   /// Falls back to error placeholder only if no pending send is found.
   private func recoverSelfSentMessage(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     context: ProcessingContext?,
     source: String
   ) async throws -> MessageProcessingOutcome {
@@ -3671,11 +3658,7 @@ public extension MLSConversationManager {
 
       clearSelfDecryptFailures(conversationID: message.convoId)
 
-    let normalizedType = MLSMessageViewProjection.rawType(message.messageType).lowercased()
-      if normalizedType == "app" || normalizedType == "application" {
-        return .application(payload: cachedPayload, sender: userDid)
-      }
-      return .nonApplication
+      return .application(payload: cachedPayload, sender: userDid)
     }
 
     // Fallback: no pending send found — save error placeholder to advance sequence
@@ -3691,7 +3674,7 @@ public extension MLSConversationManager {
 
   /// Process messages in sequential order
   public func processMessagesInOrder(
-    messages: [BlueCatbirdMlsChatDefs.MessageView],
+    messages: [BlueCatbirdChatDefs.ApplicationEntry],
     conversationID: String,
     source: String = "sync"
   ) async throws -> [MLSMessagePayload] {
@@ -3724,17 +3707,17 @@ public extension MLSConversationManager {
     //     epoch-0 messages from a brand-new group.
     //   - `message.epoch < joinEpoch` — strictly older than the epoch at which
     //     this device became a member of the current cryptographic history.
-    // Note: MessageView from the server does NOT carry a resetGeneration field
+    // Note: ApplicationEntry from the server does NOT carry a resetGeneration field
     // (only the conversation row does), so we fall back to the epoch-only
     // check per the conservative threshold described in the fix spec.
-    let filteredMessages: [BlueCatbirdMlsChatDefs.MessageView]
+    let filteredMessages: [BlueCatbirdChatDefs.ApplicationEntry]
     do {
       if let convo = try await storage.fetchConversation(
         conversationID: conversationID, currentUserDID: userDid, database: database),
          convo.joinEpoch > 0
       {
         let joinEpoch = convo.joinEpoch
-        var kept: [BlueCatbirdMlsChatDefs.MessageView] = []
+        var kept: [BlueCatbirdChatDefs.ApplicationEntry] = []
         kept.reserveCapacity(messages.count)
         var droppedIDs: [String] = []
         for message in messages {
@@ -3764,7 +3747,7 @@ public extension MLSConversationManager {
       return []
     }
 
-    var messagesByEpoch: [Int: [BlueCatbirdMlsChatDefs.MessageView]] = [:]
+    var messagesByEpoch: [Int: [BlueCatbirdChatDefs.ApplicationEntry]] = [:]
     for message in filteredMessages {
       messagesByEpoch[message.epoch, default: []].append(message)
     }
@@ -3799,30 +3782,11 @@ public extension MLSConversationManager {
         localEpoch = try await mlsClient.getEpoch(for: userDid, groupId: groupIdData)
       } catch {}
 
-      // FIX B: ALWAYS process commits before application messages within each epoch.
-      // This ensures the epoch is advanced before we try to decrypt application messages.
-      // Previously we only did this when needCommitsFirst was true, but that led to
-      // desync when commits arrived out-of-order within the same batch.
       let _ = localEpoch < UInt64(epoch) // Keep for logging/diagnostics only
 
-      let (appMessages, commitMessages) = epochMessages.reduce(
-        into: (app: [BlueCatbirdMlsChatDefs.MessageView](), commit: [BlueCatbirdMlsChatDefs.MessageView]())
-      ) { result, msg in
-        let msgType = MLSMessageViewProjection.rawType(msg.messageType).lowercased()
-        if msgType == "app" || msgType == "application" {
-          result.app.append(msg)
-        } else {
-          result.commit.append(msg)
-        }
-      }
+      let sortedBatch = epochMessages.sorted(by: { $0.seq < $1.seq })
 
-      // ALWAYS process commits first, then application messages
-      // This is critical for epoch advancement before decryption
-      let firstBatch = commitMessages.sorted(by: { $0.seq < $1.seq })
-      let secondBatch = appMessages.sorted(by: { $0.seq < $1.seq })
-      let firstBatchIsApps = false // Commits are always first now
-
-      for message in firstBatch {
+      for message in sortedBatch {
         // Check ordering decision (pass epoch info for epoch-aware ordering)
         let decision = try await messageOrderingCoordinator.shouldProcessMessage(
           messageID: message.id,
@@ -3852,60 +3816,7 @@ public extension MLSConversationManager {
             source: source
           )
 
-          if case .success(let outcome) = result, firstBatchIsApps, case .application(let payload, _) = outcome {
-            processedPayloads.append(payload)
-          }
-
-          // Record message as processed
-          if case .success = result {
-            _ = await withAdvisoryLockBestEffort(for: userDid) {
-              try await self.messageOrderingCoordinator.recordMessageProcessed(
-                messageID: message.id,
-                conversationID: conversationID,
-                sequenceNumber: Int64(message.seq),
-                currentUserDID: userDid,
-                database: self.database
-              )
-            }
-          }
-
-          if await shouldSkipProcessingForRejoin(conversationID: conversationID, source: source) {
-            return processedPayloads
-          }
-        }
-      }
-
-      for message in secondBatch {
-        // Check ordering decision (pass epoch info for epoch-aware ordering)
-        let decision = try await messageOrderingCoordinator.shouldProcessMessage(
-          messageID: message.id,
-          conversationID: conversationID,
-          sequenceNumber: Int64(message.seq),
-          messageEpoch: Int64(message.epoch),
-          localEpoch: Int64(localEpoch),
-          currentUserDID: userDid,
-          database: database
-        )
-
-        switch decision {
-        case .alreadyProcessed:
-          logger.debug("[SEQ-ORDER] Skipping already-processed message \(message.id) seq=\(message.seq)")
-          continue
-
-        case .buffer, .bufferForFutureEpoch:
-          // In sync context, we have all messages - process in order anyway
-          logger.debug("[SEQ-ORDER] Message \(message.id) seq=\(message.seq) would buffer, but processing in sync context")
-          fallthrough
-
-        case .processNow, .forceProcess:
-          let result = await processMessageWithRecovery(
-            message: message,
-            conversationID: conversationID,
-            epoch: epoch,
-            source: source
-          )
-
-          if case .success(let outcome) = result, !firstBatchIsApps, case .application(let payload, _) = outcome {
+          if case .success(let outcome) = result, case .application(let payload, _) = outcome {
             processedPayloads.append(payload)
           }
 
@@ -3950,7 +3861,7 @@ public extension MLSConversationManager {
   }
 
   internal func processMessageWithRecovery(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     conversationID: String,
     epoch: Int,
     source: String = "sync",
@@ -4148,7 +4059,7 @@ public extension MLSConversationManager {
   }
 
 
-  internal func catchUpMessagesIfNeeded(for convo: BlueCatbirdMlsChatDefs.ConvoView, force: Bool = false)
+  internal func catchUpMessagesIfNeeded(for convo: BlueCatbirdChatDefs.ConversationState, force: Bool = false)
     async
   {
     // CRITICAL: Capture session generation at start
@@ -4202,17 +4113,13 @@ public extension MLSConversationManager {
           logger.warning("⚠️ [CATCHUP] Session invalidated - aborting catchup")
           return
         }
-        let (messages, _, gapInfo) = try await apiClient.getCanonicalMessagePage(
+        let (messages, _) = try await apiClient.getCanonicalMessagePage(
           conversationId: convo.conversationId,
           afterSeq: sinceSeq ?? 0,
           limit: 100
         )
 
         guard !messages.isEmpty else { break }
-
-        if let gaps = gapInfo, gaps.hasGaps {
-          await fillGaps(conversationID: convo.conversationId, missingSeqs: gaps.missingSeqs)
-        }
 
         let _ = try await processMessagesInOrder(
           messages: messages,
@@ -4287,7 +4194,7 @@ public extension MLSConversationManager {
 
     for (startSeq, endSeq) in ranges {
       do {
-        let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+        let (messages, _) = try await apiClient.getCanonicalMessagePage(
           conversationId: conversationID,
           afterSeq: max(0, startSeq - 1),
           limit: (endSeq - startSeq) + 10
@@ -4305,7 +4212,7 @@ public extension MLSConversationManager {
 
   /// Fetch messages with lookback to find missing parents for orphans
   /// This re-fetches the last 50 messages to catch any that were skipped/gapped
-  internal func fetchMissingMessagesWithLookback(for convo: BlueCatbirdMlsChatDefs.ConvoView) async {
+  internal func fetchMissingMessagesWithLookback(for convo: BlueCatbirdChatDefs.ConversationState) async {
     // CRITICAL FIX: Validate this manager is still for the active user
     // This catches zombie tasks from previous account contexts before they process data
     do {
@@ -4339,7 +4246,7 @@ public extension MLSConversationManager {
     do {
       // Fetch messages with lookback
       // This will return messages > lookbackSeq
-      let (messages, _, _) = try await apiClient.getCanonicalMessagePage(
+      let (messages, _) = try await apiClient.getCanonicalMessagePage(
         conversationId: convo.conversationId,
         afterSeq: lookbackSeq,
         limit: 100
@@ -4388,14 +4295,14 @@ public extension MLSConversationManager {
     return ranges
   }
 
-  /// Deserialize a buffered MessageView from JSON
-  private func deserializeMessageView(_ json: Data) -> BlueCatbirdMlsChatDefs.MessageView? {
+  /// Deserialize a buffered ApplicationEntry from JSON
+  private func deserializeMessageView(_ json: Data) -> BlueCatbirdChatDefs.ApplicationEntry? {
     do {
       let decoder = JSONDecoder()
       decoder.dateDecodingStrategy = .iso8601
-      return try decoder.decode(BlueCatbirdMlsChatDefs.MessageView.self, from: json)
+      return try decoder.decode(BlueCatbirdChatDefs.ApplicationEntry.self, from: json)
     } catch {
-      logger.error("[SEQ-ORDER] Failed to deserialize MessageView: \(error.localizedDescription)")
+      logger.error("[SEQ-ORDER] Failed to deserialize ApplicationEntry: \(error.localizedDescription)")
       return nil
     }
   }
@@ -4508,7 +4415,11 @@ public extension MLSConversationManager {
 
 
   internal func cacheControlMessageEnvelope(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    messageID: String,
+    conversationID: String,
+    epoch: Int64,
+    seq: Int64,
+    timestamp: Date = Date(),
     payload: MLSMessagePayload,
     senderDID: String,
     currentUserDID: String,
@@ -4524,14 +4435,14 @@ public extension MLSConversationManager {
         _ = try await withDatabaseRecovery(currentUserDID: currentUserDID) { db in
             try await self.storage.savePayloadForMessage(
               context: mlsContext,
-              messageID: message.id,
-              conversationID: message.convoId,
+              messageID: messageID,
+              conversationID: conversationID,
               payload: payload,
               senderID: senderDID,
               currentUserDID: currentUserDID,
-              epoch: Int64(message.epoch),
-              sequenceNumber: Int64(message.seq),
-              timestamp: message.createdAt.date,
+              epoch: epoch,
+              sequenceNumber: seq,
+              timestamp: timestamp,
               database: db,
               processingState: processingState
           )
@@ -4539,7 +4450,7 @@ public extension MLSConversationManager {
         // Success
         return
       } catch {
-        logger.warning("⚠️ Failed to cache control message \(message.id) (attempt \(attempt)/3): \(error.localizedDescription)")
+        logger.warning("⚠️ Failed to cache control message \(messageID) (attempt \(attempt)/3): \(error.localizedDescription)")
         if attempt == 3 {
            logger.error("❌ CRITICAL: Could not cache message locally. Aborting send to prevent state corruption.")
            throw error
@@ -5076,18 +4987,24 @@ public extension MLSConversationManager {
     }
 
     // Update conversation epoch
-    let updatedConvo = BlueCatbirdMlsChatDefs.ConvoView(
-      conversationId: convo.conversationId,
-      groupId: convo.groupId,
-      creator: convo.creator,
-      members: convo.members,
+    let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
+      conversationId: convo.coordinates.conversationId,
+      generation: convo.coordinates.generation,
+      stateVersion: convo.coordinates.stateVersion,
+      groupId: convo.coordinates.groupId,
       epoch: epochInt,
+      groupContextHash: convo.coordinates.groupContextHash,
+      confirmationTag: convo.coordinates.confirmationTag,
+      lifecycle: convo.coordinates.lifecycle
+    )
+    let updatedConvo = BlueCatbirdChatDefs.ConversationState(
+      conversationKind: convo.conversationKind,
+      coordinates: coordinates,
       cipherSuite: convo.cipherSuite,
-      createdAt: convo.createdAt,
-      lastMessageAt: convo.lastMessageAt,
-      confirmationTag: convo.confirmationTag,
-      resetGeneration: convo.resetGeneration,
-      sequencerDid: convo.sequencerDid
+      participants: convo.participants,
+      leaves: convo.leaves,
+      metadataSnapshot: convo.metadataSnapshot,
+      snapshotSeq: convo.snapshotSeq
     )
     conversations[convoId] = updatedConvo
 
@@ -5190,7 +5107,7 @@ public extension MLSConversationManager {
     )
 
     // Fetch missing commits
-    let commits: [BlueCatbirdMlsChatDefs.MessageView]
+    let commits: [BlueCatbirdChatDefs.CommitEntry]
     do {
       commits = try await apiClient.getCommits(
         convoId: convoId,
@@ -5208,8 +5125,8 @@ public extension MLSConversationManager {
       do {
         logger.debug("Processing commit for epoch \(commit.epoch)")
 
-        // Get commit ciphertext data (MessageView.ciphertext is non-optional)
-        let commitData = commit.ciphertext.data
+        // Get commit ciphertext data
+        let commitData = commit.ciphertext
 
         // Process commit through MLS crypto layer
         // This will update the group state internally
@@ -5393,7 +5310,7 @@ public extension MLSConversationManager {
           do {
             if let serverConvo = try await apiClient.getCanonicalConversationView(conversationId: convoId) {
               let serverGroupIdHex = serverConvo.groupId
-              let serverGeneration = serverConvo.resetGeneration.map { Int64($0) }
+              let serverGeneration = Int64(serverConvo.resetGeneration)
               if !serverGroupIdHex.isEmpty
                 && serverGroupIdHex.lowercased() != groupId.lowercased()
               {
@@ -5404,7 +5321,7 @@ public extension MLSConversationManager {
                     pendingResetGeneration: serverGeneration
                   )
                   logger.warning(
-                    "🛡️ [CLIENT G] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration.map(String.init) ?? "nil")"
+                    "🛡️ [CLIENT G] Staged recipient rejoin for \(convoId.prefix(16)) → newGroupId=\(serverGroupIdHex.prefix(16)) gen=\(serverGeneration)"
                   )
                 } catch {
                   logger.error(
@@ -6784,7 +6701,7 @@ public extension MLSConversationManager {
   private func ensureGroupInitializedLegacy(
     for convoId: String,
     userDid: String,
-    convo: BlueCatbirdMlsChatDefs.ConvoView,
+    convo: BlueCatbirdChatDefs.ConversationState,
     groupIdData: Data
   ) async throws {
     // Check if group already exists locally
@@ -6810,7 +6727,9 @@ public extension MLSConversationManager {
     }
 
     // ⭐ CRITICAL FIX: Check if we are the creator before trying to join via Welcome
-    let isCreator = convo.creator.description.lowercased() == userDid.lowercased()
+    let isCreator = convo.participants.contains {
+      $0.userDid.description.lowercased() == userDid.lowercased() && $0.role == .value_admin
+    }
 
     if isCreator {
       logger.warning(
@@ -6932,7 +6851,7 @@ public extension MLSConversationManager {
   }
 
   /// Initialize a group from a Welcome message fetched from the server
-  internal func initializeGroupFromWelcome(convo: BlueCatbirdMlsChatDefs.ConvoView) async throws {
+  internal func initializeGroupFromWelcome(convo: BlueCatbirdChatDefs.ConversationState) async throws {
     // ═══════════════════════════════════════════════════════════════════
     // PHASE 6: Welcome is for Other Users Only
     // ═══════════════════════════════════════════════════════════════════
@@ -7082,7 +7001,7 @@ public extension MLSConversationManager {
           userDID: userDid,
           conversationID: convo.conversationId,
           groupID: groupIdHex,
-          senderDID: convo.members.first(where: { $0.did.description.lowercased() != userDid.lowercased() })?.did.description,
+          senderDID: convo.participants.first(where: { $0.userDid.description.lowercased() != userDid.lowercased() })?.userDid.description,
           database: database
         )
         logger.info("✅ [FK-FIX] Ensured conversation record exists after Welcome processing")
@@ -7556,7 +7475,7 @@ public extension MLSConversationManager {
     userDid: String
   ) async -> (groupIdHex: String, observedGeneration: Int64?)? {
     if let convo = conversations[convoId], !convo.groupId.isEmpty {
-      return (convo.groupId, convo.resetGeneration.map { Int64($0) })
+      return (convo.groupId, Int64(convo.coordinates.generation))
     }
 
     do {
@@ -7584,7 +7503,7 @@ public extension MLSConversationManager {
   ///   - groupIdHex: The hex-encoded group ID from join operation
   ///   - userDid: The current user's DID
   internal func updateGroupStateAfterJoin(
-    convo: BlueCatbirdMlsChatDefs.ConvoView,
+    convo: BlueCatbirdChatDefs.ConversationState,
     groupIdHex: String,
     userDid: String
   ) async throws {
@@ -7715,7 +7634,7 @@ public extension MLSConversationManager {
   /// accidentally from our own inventory (which would indicate a bug or server desync).
   internal func selectKeyPackages(
     for members: [DID],
-    from pool: [BlueCatbirdMlsChatDefs.KeyPackageRef],
+    from pool: [KeyPackageWithHash],
     userDid: String
   ) async throws -> [KeyPackageWithHash] {
     logger.debug(
@@ -7740,19 +7659,6 @@ public extension MLSConversationManager {
     var skippedCount = 0
     var packagesPerMember: [String: Int] = [:]
 
-    // 🔐 MULTI-DEVICE SUPPORT: Select ALL key packages (one per device)
-    // ═══════════════════════════════════════════════════════════════════════════
-    // CRITICAL FIX (2026-01): Use keyPackageHash for deduplication, NOT credential identity
-    // ═══════════════════════════════════════════════════════════════════════════
-    //
-    // The MLS credential identity is now the BARE DID (e.g., "did:plc:abc123") for all
-    // key packages from a user. Multi-device is tracked server-side via device_id column.
-    //
-    // Each device has a UNIQUE key package hash (cryptographically derived from the
-    // device's key material). So we deduplicate by HASH, not credential identity.
-    // This ensures we select one key package per device, enabling multi-device Welcome.
-    //
-    // ═══════════════════════════════════════════════════════════════════════════
     for member in members {
       let didKey = member.description
       guard let options = packagesByDid[didKey], !options.isEmpty else {
@@ -7762,16 +7668,13 @@ public extension MLSConversationManager {
 
       logger.debug("   Processing \(didKey): \(options.count) candidates available")
 
-      // 🔑 CRITICAL: Use keyPackageHash as unique identifier (one per device)
-      // Each device generates key packages with unique cryptographic hashes.
-      // Deduplicating by hash ensures exactly one package per device.
-      var packagesByHash: [String: (candidate: BlueCatbirdMlsChatDefs.KeyPackageRef, decoded: Data, hash: String)] = [:]
+      var packagesByHash: [String: (candidate: KeyPackageWithHash, decoded: Data, hash: String)] = [:]
       var invalidPackages = 0
       var deviceRecordDeniedCount = 0
       var lastDeviceRecordDeniedReason: String?
 
       for candidate in options {
-        let decoded = candidate.keyPackage.data
+        let decoded = candidate.data
         guard !decoded.isEmpty else {
           logger.error("❌ Empty key package for \(candidate.did)")
           skippedCount += 1
@@ -7779,68 +7682,7 @@ public extension MLSConversationManager {
           continue
         }
 
-        // 🔬 [KP-DIAG] B14a: Capture KP wire-format header before FFI extract.
-        // The Rust extractor (mls_extract_key_package_signature_public_key) has been
-        // observed to fail with SerializationError on specific production KPs. Logging
-        // size + first/last bytes lets us identify the wire format from iPhone logs
-        // without needing to dump and decode the full KP. Diagnostic-only — preserves
-        // existing error semantics by rethrowing.
-        logger.info(
-          "🔬 [KP-DIAG] Verifying KP for \(didKey.prefix(30))…: size=\(decoded.count), prefix=\(decoded.prefix(32).map { String(format: "%02x", $0) }.joined()), suffix=\(decoded.suffix(16).map { String(format: "%02x", $0) }.joined())"
-        )
-        let decision: MLSDeviceVerificationDecision
-        do {
-          decision = try await deviceRecordService.verifyKeyPackageAuthorization(
-            localAccountDid: userDid,
-            targetDid: didKey,
-            keyPackageData: decoded
-          )
-        } catch {
-          logger.error(
-            "🔬 [KP-DIAG] Verify FAILED for \(didKey.prefix(30))…: \(error.localizedDescription) | size=\(decoded.count), prefix=\(decoded.prefix(32).map { String(format: "%02x", $0) }.joined()), suffix=\(decoded.suffix(16).map { String(format: "%02x", $0) }.joined())"
-          )
-          throw error
-        }
-        if let warning = decision.warning {
-          logger.info("⚠️ [DeviceRecord] \(warning)")
-        }
-        guard decision.allowed else {
-          let reason = decision.failureReason ?? "device record verification denied package"
-          logger.warning(
-            "⚠️ [DeviceRecord] Rejected key package for \(didKey.prefix(30))...: \(reason)")
-          deviceRecordDeniedCount += 1
-          lastDeviceRecordDeniedReason = reason
-          skippedCount += 1
-          continue
-        }
-
-        // Prefer server-provided hash for consistency, compute locally if unavailable
-        let hash: String
-        if let serverHash = candidate.keyPackageHash {
-          hash = serverHash
-          logger.debug("   Using server-provided hash: \(hash.prefix(16))...")
-        } else {
-          hash = try await computeKeyPackageReference(for: decoded, userDid: userDid)
-          logger.debug("   Computed local hash (server didn't provide): \(hash.prefix(16))...")
-        }
-
-        // ✅ PRE-FLIGHT: Verify hash consistency when both server and local hashes exist
-        if let serverHash = candidate.keyPackageHash {
-          let localHash = try await computeKeyPackageReference(for: decoded, userDid: userDid)
-          if serverHash != localHash {
-            logger.error("🚨 HASH MISMATCH DETECTED!")
-            logger.error("   Server hash: \(serverHash.prefix(32))...")
-            logger.error("   Local hash:  \(localHash.prefix(32))...")
-            logger.error("   Member DID:  \(didKey.prefix(30))...")
-            logger.error("   Package size: \(decoded.count) bytes")
-            logger.error("   This indicates server-client hash computation divergence")
-            logger.error("   Skipping this package to prevent Welcome message failure")
-            skippedCount += 1
-            invalidPackages += 1
-            continue
-          }
-          logger.debug("   ✅ Hash verified: server and local match (\(serverHash.prefix(16))...)")
-        }
+        let hash = candidate.hash
 
         // Check if already exhausted
         let isExhausted = await keyPackageManager.isKeyPackageExhausted(hash: hash, for: didKey)
@@ -7860,7 +7702,6 @@ public extension MLSConversationManager {
           packagesByHash[hash] = (candidate, decoded, hash)
           logger.debug("   Found package for device (hash: \(hash.prefix(16))...)")
         }
-        // If hash already exists, it's a duplicate - skip silently
       }
 
       // Log multi-device results
@@ -8002,11 +7843,15 @@ public extension MLSConversationManager {
 
     let selectedPackages = try await selectKeyPackages(
       for: members, from: keyPackages, userDid: userDid)
-    let hashEntries: [BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry] = selectedPackages.map {
+    let hashEntries: [BlueCatbirdChatDefs.KeyPackageArtifact] = selectedPackages.map {
       package in
-      BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry(
-        did: package.did,
-        hash: package.hash
+      let hashData = Data(hexEncoded: package.hash) ?? Data(package.hash.utf8)
+      return BlueCatbirdChatDefs.KeyPackageArtifact(
+        framing: "inline",
+        contentType: "application/octet-stream",
+        bytes: Bytes(data: package.data),
+        sha256: Bytes(data: hashData),
+        keyPackageRef: Bytes(data: hashData)
       )
     }
     let keyPackageData = selectedPackages.map { $0.data }

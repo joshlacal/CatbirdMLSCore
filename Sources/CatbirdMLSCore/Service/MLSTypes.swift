@@ -121,7 +121,7 @@ public struct PreparedInitialMembers {
   public let commitData: Data
   public let welcomeData: Data
   public let postCommitGroupInfo: Data?
-  public let hashEntries: [BlueCatbirdMlsChatCreateConvo.KeyPackageHashEntry]
+  public let hashEntries: [BlueCatbirdChatDefs.KeyPackageArtifact]
   public let selectedPackages: [KeyPackageWithHash]  // Track for rollback on failure
   /// Task #44/#62: handle to the staged sender-side commit. Set when the
   /// commit was created via the new three-phase API (`stageCommit`). The
@@ -136,7 +136,7 @@ public struct PreparedInitialMembers {
 
 /// Result returned after successfully creating a conversation on the server
 public struct ServerConversationCreationResult {
-  public let convo: BlueCatbirdMlsChatDefs.ConvoView
+  public let convo: BlueCatbirdChatDefs.ConversationState
   public let commitData: Data?
   public let welcomeData: Data?
   /// Task #44/#62: forwarded from `PreparedInitialMembers` so the outer
@@ -203,10 +203,168 @@ public struct MessageReorderState {
 
 /// A message waiting in the reorder buffer
 public struct BufferedMessage {
-  public let message: BlueCatbirdMlsChatDefs.MessageView
+  public let message: BlueCatbirdChatDefs.ApplicationEntry
   public let receivedAt: Date
 
   public var seq: Int64 { Int64(message.seq) }
+}
+
+/// Public ATProto record for blue.catbird.chat.device
+public struct MLSDeviceRecord: ATProtocolCodable, ATProtocolValue {
+  public static let typeIdentifier = "blue.catbird.chat.device"
+  public let mlsSignaturePublicKey: Bytes
+  public let algorithm: String
+  public let createdAt: ATProtocolDate
+
+  public init(mlsSignaturePublicKey: Bytes, algorithm: String, createdAt: ATProtocolDate) {
+    self.mlsSignaturePublicKey = mlsSignaturePublicKey
+    self.algorithm = algorithm
+    self.createdAt = createdAt
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.mlsSignaturePublicKey = try container.decode(Bytes.self, forKey: .mlsSignaturePublicKey)
+    self.algorithm = try container.decode(String.self, forKey: .algorithm)
+    self.createdAt = try container.decode(ATProtocolDate.self, forKey: .createdAt)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(Self.typeIdentifier, forKey: .typeIdentifier)
+    try container.encode(mlsSignaturePublicKey, forKey: .mlsSignaturePublicKey)
+    try container.encode(algorithm, forKey: .algorithm)
+    try container.encode(createdAt, forKey: .createdAt)
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    hasher.combine(mlsSignaturePublicKey)
+    hasher.combine(algorithm)
+    hasher.combine(createdAt)
+  }
+
+  public func isEqual(to other: any ATProtocolValue) -> Bool {
+    guard let other = other as? Self else { return false }
+    return mlsSignaturePublicKey == other.mlsSignaturePublicKey &&
+      algorithm == other.algorithm &&
+      createdAt == other.createdAt
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.isEqual(to: rhs)
+  }
+
+  public func toCBORValue() throws -> Any {
+    var map = OrderedCBORMap()
+    map = map.adding(key: "$type", value: Self.typeIdentifier)
+    let pubKeyVal = try mlsSignaturePublicKey.toCBORValue()
+    map = map.adding(key: "mlsSignaturePublicKey", value: pubKeyVal)
+    let algVal = try algorithm.toCBORValue()
+    map = map.adding(key: "algorithm", value: algVal)
+    let createdVal = try createdAt.toCBORValue()
+    map = map.adding(key: "createdAt", value: createdVal)
+    return map
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case typeIdentifier = "$type"
+    case mlsSignaturePublicKey
+    case algorithm
+    case createdAt
+  }
+}
+
+/// Public ATProto record for blue.catbird.chat.policy
+public struct MLSChatPolicyRecord: ATProtocolCodable, ATProtocolValue {
+  public static let typeIdentifier = "blue.catbird.chat.policy"
+  public let whoCanMessageMe: String?
+  public let allowFollowersBypass: Bool?
+  public let allowFollowingBypass: Bool?
+  public let autoExpireDays: Int?
+  public let createdAt: ATProtocolDate
+
+  public init(
+    whoCanMessageMe: String? = nil,
+    allowFollowersBypass: Bool? = nil,
+    allowFollowingBypass: Bool? = nil,
+    autoExpireDays: Int? = nil,
+    createdAt: ATProtocolDate = ATProtocolDate(date: Date())
+  ) {
+    self.whoCanMessageMe = whoCanMessageMe
+    self.allowFollowersBypass = allowFollowersBypass
+    self.allowFollowingBypass = allowFollowingBypass
+    self.autoExpireDays = autoExpireDays
+    self.createdAt = createdAt
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.whoCanMessageMe = try container.decodeIfPresent(String.self, forKey: .whoCanMessageMe)
+    self.allowFollowersBypass = try container.decodeIfPresent(Bool.self, forKey: .allowFollowersBypass)
+    self.allowFollowingBypass = try container.decodeIfPresent(Bool.self, forKey: .allowFollowingBypass)
+    self.autoExpireDays = try container.decodeIfPresent(Int.self, forKey: .autoExpireDays)
+    self.createdAt = try container.decode(ATProtocolDate.self, forKey: .createdAt)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(Self.typeIdentifier, forKey: .typeIdentifier)
+    try container.encodeIfPresent(whoCanMessageMe, forKey: .whoCanMessageMe)
+    try container.encodeIfPresent(allowFollowersBypass, forKey: .allowFollowersBypass)
+    try container.encodeIfPresent(allowFollowingBypass, forKey: .allowFollowingBypass)
+    try container.encodeIfPresent(autoExpireDays, forKey: .autoExpireDays)
+    try container.encode(createdAt, forKey: .createdAt)
+  }
+
+  public func hash(into hasher: inout Hasher) {
+    hasher.combine(whoCanMessageMe)
+    hasher.combine(allowFollowersBypass)
+    hasher.combine(allowFollowingBypass)
+    hasher.combine(autoExpireDays)
+    hasher.combine(createdAt)
+  }
+
+  public func isEqual(to other: any ATProtocolValue) -> Bool {
+    guard let other = other as? Self else { return false }
+    return whoCanMessageMe == other.whoCanMessageMe &&
+      allowFollowersBypass == other.allowFollowersBypass &&
+      allowFollowingBypass == other.allowFollowingBypass &&
+      autoExpireDays == other.autoExpireDays &&
+      createdAt == other.createdAt
+  }
+
+  public static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.isEqual(to: rhs)
+  }
+
+  public func toCBORValue() throws -> Any {
+    var map = OrderedCBORMap()
+    map = map.adding(key: "$type", value: Self.typeIdentifier)
+    if let whoCanMessageMe {
+      map = map.adding(key: "whoCanMessageMe", value: try whoCanMessageMe.toCBORValue())
+    }
+    if let allowFollowersBypass {
+      map = map.adding(key: "allowFollowersBypass", value: try allowFollowersBypass.toCBORValue())
+    }
+    if let allowFollowingBypass {
+      map = map.adding(key: "allowFollowingBypass", value: try allowFollowingBypass.toCBORValue())
+    }
+    if let autoExpireDays {
+      map = map.adding(key: "autoExpireDays", value: try autoExpireDays.toCBORValue())
+    }
+    let createdVal = try createdAt.toCBORValue()
+    map = map.adding(key: "createdAt", value: createdVal)
+    return map
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case typeIdentifier = "$type"
+    case whoCanMessageMe
+    case allowFollowersBypass
+    case allowFollowingBypass
+    case autoExpireDays
+    case createdAt
+  }
 }
 
 /// Membership action types

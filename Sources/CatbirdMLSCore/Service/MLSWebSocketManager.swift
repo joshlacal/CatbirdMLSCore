@@ -93,29 +93,9 @@ public actor MLSWebSocketManager {
         /// becoming successful no-ops.
         public var onCanonicalDurableEventActions:
             MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions?
-        public var onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)?
-        public var onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)?
-        public var onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)?
-        public var onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)?
-        public var onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)?
-        public var onGroupInfoRefreshRequested:
-            ((BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void)?
-        public var onReadditionRequested:
-            ((BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void)?
-        public var onWelcomeReissueRequested:
-            ((BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent) async -> Void)?
         public var onMembershipChanged: ((String, DID, MembershipAction) async -> Void)?
         public var onKickedFromConversation: ((String, DID, String?) async -> Void)?
         public var onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)?
-        public var onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)?
-        public var onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)?
-        /// Phase 2.5 indirect-trigger reset request from the DS — server has NOT
-        /// minted a new group id and is asking subscribed clients to elect a
-        /// first responder via `bootstrapResetGroup` / `commitGroupChange`.
-        /// Mirrors `onGroupReset` shape; see
-        /// `docs/plans/phase-2-5-indirect-funneling.md` §3.
-        public var onResetRequested:
-            ((BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent) async -> Void)?
         public var onError: ((Error) async -> Void)?
         public var onReconnected: (() async -> Void)?
 
@@ -128,28 +108,9 @@ public actor MLSWebSocketManager {
             onCanonicalPendingWelcome: ((BlueCatbirdChatDefs.WelcomeView) async throws -> Void)? = nil,
             onCanonicalLeafRecovery: ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)? = nil,
             onCanonicalDurableEventActions: MLSCanonicalTransportAdapter.MLSCanonicalDurableEventActions? = nil,
-            onMessage: ((BlueCatbirdMlsChatSubscribeEvents.MessageEvent) async -> Void)? = nil,
-            onReaction: ((BlueCatbirdMlsChatSubscribeEvents.ReactionEvent) async -> Void)? = nil,
-            onTyping: ((BlueCatbirdMlsChatSubscribeEvents.TypingEvent) async -> Void)? = nil,
-            onInfo: ((BlueCatbirdMlsChatSubscribeEvents.InfoEvent) async -> Void)? = nil,
-            onNewDevice: ((BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async -> Void)? = nil,
-            onGroupInfoRefreshRequested: (
-                (BlueCatbirdMlsChatSubscribeEvents.GroupInfoRefreshRequestedEvent) async -> Void
-            )? = nil,
-            onReadditionRequested: (
-                (BlueCatbirdMlsChatSubscribeEvents.ReadditionRequestedEvent) async -> Void
-            )? = nil,
-            onWelcomeReissueRequested: (
-                (BlueCatbirdMlsChatSubscribeEvents.WelcomeReissueRequestedEvent) async -> Void
-            )? = nil,
             onMembershipChanged: ((String, DID, MembershipAction) async -> Void)? = nil,
             onKickedFromConversation: ((String, DID, String?) async -> Void)? = nil,
             onConversationNeedsRecovery: ((String, RecoveryReason) async -> Void)? = nil,
-            onTreeChanged: ((BlueCatbirdMlsChatSubscribeEvents.TreeChanged) async -> Void)? = nil,
-            onGroupReset: ((BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent) async -> Void)? = nil,
-            onResetRequested: (
-                (BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent) async -> Void
-            )? = nil,
             onError: ((Error) async -> Void)? = nil,
             onReconnected: (() async -> Void)? = nil
         ) {
@@ -159,20 +120,9 @@ public actor MLSWebSocketManager {
             self.onCanonicalPendingWelcome = onCanonicalPendingWelcome
             self.onCanonicalLeafRecovery = onCanonicalLeafRecovery
             self.onCanonicalDurableEventActions = onCanonicalDurableEventActions
-            self.onMessage = onMessage
-            self.onReaction = onReaction
-            self.onTyping = onTyping
-            self.onInfo = onInfo
-            self.onNewDevice = onNewDevice
-            self.onGroupInfoRefreshRequested = onGroupInfoRefreshRequested
-            self.onReadditionRequested = onReadditionRequested
-            self.onWelcomeReissueRequested = onWelcomeReissueRequested
             self.onMembershipChanged = onMembershipChanged
             self.onKickedFromConversation = onKickedFromConversation
             self.onConversationNeedsRecovery = onConversationNeedsRecovery
-            self.onTreeChanged = onTreeChanged
-            self.onGroupReset = onGroupReset
-            self.onResetRequested = onResetRequested
             self.onError = onError
             self.onReconnected = onReconnected
         }

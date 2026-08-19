@@ -3,7 +3,7 @@ import OSLog
 import Petrel
 import PetrelCatbird
 
-/// Reads PUBLIC `blue.catbird.mlsChat.device` records directly from a DID's hosting PDS.
+/// Reads PUBLIC `blue.catbird.chat.device` records directly from a DID's hosting PDS.
 ///
 /// W6 root cause: foreign-repo reads (another member's device records) were issued through the
 /// BFF (nest) via `com.atproto.repo.listRecords`. Nest's XRPC proxy only routes
@@ -13,11 +13,11 @@ import PetrelCatbird
 ///
 /// Device records are public, so the correct fix is to resolve the target's real PDS
 /// (plc.directory / `.well-known/did.json`, independent of nest) and read its records
-/// unauthenticated. `BlueCatbirdMlsChatDevice` (and its `Bytes`/`ATProtocolDate` fields) decode
+/// unauthenticated. `MLSDeviceRecord` (and its `Bytes`/`ATProtocolDate` fields) decode
 /// from a `listRecords` `value` object with a vanilla `JSONDecoder`, so no decoder registry is
 /// needed.
 enum MLSPublicPDSReader {
-  static let deviceCollection = "blue.catbird.mlsChat.device"
+  static let deviceCollection = "blue.catbird.chat.device"
 
   private static let logger = Logger(subsystem: "blue.catbird", category: "MLSPublicPDSReader")
 
@@ -90,7 +90,7 @@ enum MLSPublicPDSReader {
   }
 
   private struct RecordItem: Decodable {
-    let value: BlueCatbirdMlsChatDevice?
+    let value: MLSDeviceRecord?
 
     enum CodingKeys: String, CodingKey { case value }
 
@@ -98,7 +98,7 @@ enum MLSPublicPDSReader {
       let container = try decoder.container(keyedBy: CodingKeys.self)
       // Lenient: a `value` that isn't a device record decodes to nil instead of throwing,
       // so one foreign/legacy record can't poison the whole batch.
-      value = try? container.decode(BlueCatbirdMlsChatDevice.self, forKey: .value)
+      value = try? container.decode(MLSDeviceRecord.self, forKey: .value)
     }
   }
 }

@@ -66,7 +66,7 @@ public final class MLSConversationManager {
 
     /// Active conversations indexed by conversation ID
     /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
-    public let conversations = ObservableMutexDictionary<String, BlueCatbirdMlsChatDefs.ConvoView>()
+    public let conversations = ObservableMutexDictionary<String, BlueCatbirdChatDefs.ConversationState>()
 
     /// MLS group states indexed by group ID
     /// Uses thread-safe ObservableMutexDictionary to prevent crashes from concurrent access
@@ -900,7 +900,7 @@ public final class MLSConversationManager {
 
     /// Handle SSE new device event by forwarding to the device sync manager
     /// This provides the real-time path for multi-device sync instead of relying on polling
-    public func handleNewDeviceSSEEvent(_ event: BlueCatbirdMlsChatSubscribeEvents.NewDeviceEvent) async {
+    public func handleNewDeviceSSEEvent(_ event: BlueCatbirdChatDefs.ConversationChangedEvent) async {
         guard let currentUserDid = userDid else {
             logger.warning("⚠️ [handleNewDeviceSSEEvent] No user DID available")
             return
@@ -918,9 +918,9 @@ public final class MLSConversationManager {
             return
         }
         logger.info(
-            "📱 [handleNewDeviceSSEEvent] Forwarding new device event to sync manager - user: \(event.userDid), device: \(event.deviceId)"
+            "📱 [handleNewDeviceSSEEvent] Forwarding new device event to sync manager - convo: \(event.conversationId)"
         )
-        await deviceSyncManager.handleNewDeviceEvent(event)
+        await deviceSyncManager.handleConversationChangedEvent(event)
     }
 
     /// Request active members to publish fresh GroupInfo for a conversation
@@ -939,24 +939,13 @@ public final class MLSConversationManager {
         }
 
         do {
-            let input = BlueCatbirdMlsChatCommitGroupChange.Input(
-                convoId: convoId,
-                action: "refreshGroupInfo"
-            )
-            let (responseCode, output) = try await apiClient.client.blue.catbird.mlsChat.commitGroupChange(
-                input: input
-            )
-
-            if responseCode == 200, let output = output {
-                if output.success {
-                    logger.info(
-                        "✅ [groupInfoRefresh] Request sent via commitGroupChange"
-                    )
-                } else {
-                    logger.warning("⚠️ [groupInfoRefresh] No active members to notify for \(convoId)")
-                }
+            let (success, _) = try await apiClient.groupInfoRefresh(convoId: convoId)
+            if success {
+                logger.info(
+                    "✅ [groupInfoRefresh] Request sent"
+                )
             } else {
-                logger.warning("⚠️ [groupInfoRefresh] Server returned \(responseCode) for \(convoId)")
+                logger.warning("⚠️ [groupInfoRefresh] No active members to notify for \(convoId)")
             }
         } catch {
             logger.error("❌ [groupInfoRefresh] Failed: \(error.localizedDescription)")
@@ -1087,6 +1076,21 @@ public final class MLSConversationManager {
         return json
     }
 
+    public struct MLSGroupResetEvent: Sendable {
+        public let convoId: String
+        public let newGroupId: String
+        public let resetGeneration: Int64
+        public let resetBy: String?
+        public let reason: String?
+        public init(convoId: String, newGroupId: String, resetGeneration: Int64, resetBy: String? = nil, reason: String? = nil) {
+            self.convoId = convoId
+            self.newGroupId = newGroupId
+            self.resetGeneration = resetGeneration
+            self.resetBy = resetBy
+            self.reason = reason
+        }
+    }
+
     /// Handle a group reset event from the SSE/WebSocket stream.
     ///
     /// When an admin resets a conversation's MLS group, the conversation identity (`convoId`)
@@ -1098,7 +1102,7 @@ public final class MLSConversationManager {
     /// - Parameters:
     ///   - event: The GroupResetEvent containing reset details
     public func handleGroupReset(
-        event: BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent
+        event: MLSGroupResetEvent
     ) async {
         let convoId = event.convoId
         let newGroupId = event.newGroupId
@@ -1146,8 +1150,8 @@ public final class MLSConversationManager {
                     resetNotification: RustEngineResetNotification(
                         convoId: convoId,
                         newGroupId: newGroupId,
-                        resetGeneration: event.resetGeneration,
-                        resetBy: event.resetBy,
+                        resetGeneration: Int(event.resetGeneration),
+                        resetBy: event.resetBy.flatMap { try? DID(didString: $0) },
                         reason: event.reason
                     )
                 )
@@ -1174,7 +1178,7 @@ public final class MLSConversationManager {
     }
 
     private func handleGroupResetLegacy(
-        event: BlueCatbirdMlsChatSubscribeEvents.GroupResetEvent
+        event: MLSGroupResetEvent
     ) async {
         let convoId = event.convoId
         let newGroupId = event.newGroupId
@@ -1226,12 +1230,12 @@ public final class MLSConversationManager {
                     Task {
                         try? await self.syncWithServer(fullSync: false)
                     }
-                    if let resetBy = event.resetBy {
+                    if let resetBy = event.resetBy, let resetByDid = try? DID(didString: resetBy) {
                         notifyObservers(.groupReset(
                             convoId: convoId,
                             newGroupId: newGroupId,
-                            resetGeneration: event.resetGeneration,
-                            resetBy: resetBy,
+                            resetGeneration: Int(event.resetGeneration),
+                            resetBy: resetByDid,
                             reason: event.reason
                         ))
                     }
@@ -1371,12 +1375,12 @@ public final class MLSConversationManager {
         }
 
         // 5. Notify observers
-        if let resetBy = event.resetBy {
+        if let resetBy = event.resetBy, let resetByDid = try? DID(didString: resetBy) {
             notifyObservers(.groupReset(
                 convoId: convoId,
                 newGroupId: newGroupId,
-                resetGeneration: event.resetGeneration,
-                resetBy: resetBy,
+                resetGeneration: Int(event.resetGeneration),
+                resetBy: resetByDid,
                 reason: event.reason
             ))
         }
@@ -1437,8 +1441,25 @@ public final class MLSConversationManager {
     /// - Parameters:
     ///   - event: The `ResetRequestedEvent` carrying convo id, prior crypto
     ///     session id, generation, trigger, and dedup id.
+    public struct MLSResetRequestedEvent: Sendable {
+        public let convoId: String
+        public let generation: Int64
+        public let trigger: String
+        public let requestEventId: String
+        public let cryptoSessionId: String
+        public let expectedNewMlsGroupId: String?
+        public init(convoId: String, generation: Int64, trigger: String = "admin", requestEventId: String = "", cryptoSessionId: String = "", expectedNewMlsGroupId: String? = nil) {
+            self.convoId = convoId
+            self.generation = generation
+            self.trigger = trigger
+            self.requestEventId = requestEventId
+            self.cryptoSessionId = cryptoSessionId
+            self.expectedNewMlsGroupId = expectedNewMlsGroupId
+        }
+    }
+
     public func handleResetRequested(
-        event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
+        event: MLSResetRequestedEvent
     ) async {
         let convoId = event.convoId
         let generation = event.generation
@@ -1511,7 +1532,7 @@ public final class MLSConversationManager {
     }
 
     private func handleResetRequestedLegacy(
-        event: BlueCatbirdMlsChatSubscribeEvents.ResetRequestedEvent
+        event: MLSResetRequestedEvent
     ) async {
         let convoId = event.convoId
         let generation = event.generation
@@ -1918,7 +1939,7 @@ public final class MLSConversationManager {
         guard let userDid = userDid else { return false }
 
         if let convo = conversations[convoId],
-           convo.members.contains(where: { $0.did.description == userDid && $0.isAdmin })
+           convo.participants.contains(where: { $0.userDid.description == userDid && $0.role == .value_admin })
         {
             return true
         }
@@ -1944,7 +1965,7 @@ public final class MLSConversationManager {
         guard let userDid = userDid else { return false }
 
         if conversations.values.contains(where: { convo in
-            convo.members.contains { $0.did.description == userDid && $0.isAdmin }
+            convo.participants.contains { $0.userDid.description == userDid && $0.role == .value_admin }
         }) {
             return true
         }

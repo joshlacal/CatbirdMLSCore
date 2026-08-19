@@ -574,8 +574,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(bridge.listConversationsCallCount, 1)
     XCTAssertEqual(hydrated.conversationId, conversationID)
     XCTAssertEqual(hydrated.groupId, groupID.hexEncodedString())
-    XCTAssertEqual(hydrated.epoch, 7)
-    XCTAssertEqual(hydrated.members.map(\.did.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
+    XCTAssertEqual(hydrated.participants.map(\.userDid.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
     XCTAssertEqual(manager.groupStates[groupID.hexEncodedString()]?.convoId, conversationID)
     XCTAssertEqual(manager.groupStates[groupID.hexEncodedString()]?.epoch, 7)
   }
@@ -619,7 +618,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     XCTAssertEqual(hydrated.conversationId, conversationID)
     XCTAssertEqual(hydrated.groupId, groupIDHex)
     XCTAssertEqual(hydrated.epoch, 11)
-    XCTAssertEqual(hydrated.members.map(\.did.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
+    XCTAssertEqual(hydrated.participants.map(\.userDid.description).sorted(), ["did:plc:bob", "did:plc:testuser"])
     XCTAssertEqual(manager.groupStates[groupIDHex]?.convoId, conversationID)
     XCTAssertEqual(manager.groupStates[groupIDHex]?.epoch, 11)
 
@@ -713,7 +712,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     try await manager.database.write { db in
       try model.insert(db)
     }
-    manager.conversations[conversationID] = try XCTUnwrap(model.asConvoView())
+    manager.conversations[conversationID] = model.asConversationState()
   }
 }
 

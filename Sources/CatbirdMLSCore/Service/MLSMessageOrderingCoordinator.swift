@@ -275,15 +275,15 @@ public actor MLSMessageOrderingCoordinator {
 
   /// Buffer a message for later processing
   public func bufferMessage(
-    message: BlueCatbirdMlsChatDefs.MessageView,
+    message: BlueCatbirdChatDefs.ApplicationEntry,
     currentUserDID: String,
     source: String,  // "sse", "nse", "sync"
     database: MLSDatabase
   ) async throws {
 
-    logger.info("[SEQ-ORDER] Buffering message \(message.id.prefix(16)) seq=\(message.seq) from \(source)")
+    logger.info("[SEQ-ORDER] Buffering message \(message.entryId.prefix(16)) seq=\(message.seq) from \(source)")
 
-    // 1. Serialize the MessageView to JSON
+    // 1. Serialize the ApplicationEntry to JSON
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
 
@@ -291,17 +291,25 @@ public actor MLSMessageOrderingCoordinator {
     do {
       messageViewJSON = try encoder.encode(message)
     } catch {
-      logger.error("[SEQ-ORDER] Failed to serialize MessageView \(message.id.prefix(16)): \(error.localizedDescription)")
+      logger.error("[SEQ-ORDER] Failed to serialize ApplicationEntry \(message.entryId.prefix(16)): \(error.localizedDescription)")
       throw error
+    }
+
+    let epochVal: Int64
+    switch message.signedRequest.body {
+    case .blueCatbirdChatDefsApplicationSendBody(let body):
+      epochVal = Int64(body.prior.epoch)
+    case .unexpected:
+      epochVal = 0
     }
 
     // 2. Create pending message model
     let pending = MLSPendingMessageModel(
-      messageID: message.id,
+      messageID: message.entryId,
       currentUserDID: currentUserDID,
-      conversationID: message.convoId,
+      conversationID: message.conversationId,
       sequenceNumber: Int64(message.seq),
-      epoch: Int64(message.epoch),
+      epoch: epochVal,
       messageViewJSON: messageViewJSON,
       receivedAt: Date(),
       processAttempts: 0,
@@ -311,7 +319,7 @@ public actor MLSMessageOrderingCoordinator {
     // 3. Store in database
     try await storage.bufferPendingMessage(pending, database: database)
 
-    logger.debug("[SEQ-ORDER] Successfully buffered message \(message.id.prefix(16)) seq=\(message.seq) (\(messageViewJSON.count) bytes)")
+    logger.debug("[SEQ-ORDER] Successfully buffered message \(message.entryId.prefix(16)) seq=\(message.seq) (\(messageViewJSON.count) bytes)")
   }
 
   /// Force-flush all buffered messages for a conversation (timeout scenario)

@@ -386,7 +386,7 @@ public actor MLSDeviceManager {
     logger.info("   MLS credential identity (bare DID): \(mlsCredentialIdentity)")
 
     let keyPackageCount = 25  // Capped to stay under server 2–4 MB body limit (~3.7 KB each)
-    var keyPackageItems: [BlueCatbirdMlsChatRegisterDevice.KeyPackageItem] = []
+    var keyPackageItems: [BlueCatbirdChatDefs.KeyPackageArtifact] = []
 
     // Use new batch API for atomic creation under single lock
     let keyPackages = try await mlsClient.batchCreateKeyPackageResults(
@@ -398,9 +398,6 @@ public actor MLSDeviceManager {
       keyPackageSignatureKeys: keyPackages.map { $0.signaturePublicKey },
       fallbackSignaturePublicKey: signaturePublicKey
     )
-
-    // Convert to API format
-    let expirationDate = Date().addingTimeInterval(90 * 24 * 60 * 60)
 
     for package in keyPackages {
       let packageData = package.keyPackageData
@@ -420,10 +417,14 @@ public actor MLSDeviceManager {
         continue
       }
 
-      let keyPackageItem = BlueCatbirdMlsChatRegisterDevice.KeyPackageItem(
-        keyPackage: Bytes(data: packageData),
-        cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-        expires: ATProtocolDate(date: expirationDate)
+      let packageBytes = Bytes(data: packageData)
+      let sha256Bytes = Bytes(data: Data(SHA256.hash(data: packageData)))
+      let keyPackageItem = BlueCatbirdChatDefs.KeyPackageArtifact(
+        framing: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+        contentType: "application/mls-keypackage",
+        bytes: packageBytes,
+        sha256: sha256Bytes,
+        keyPackageRef: sha256Bytes
       )
       keyPackageItems.append(keyPackageItem)
     }
@@ -446,11 +447,43 @@ public actor MLSDeviceManager {
     logger.info(
       "📡 Registering device with server (including \(keyPackageItems.count) key packages)...")
 
-    let input = BlueCatbirdMlsChatRegisterDevice.Input(
-      deviceName: deviceName,
-      deviceUUID: deviceUUID,  // Persistent UUID for re-registration detection
-      keyPackages: keyPackageItems,  // Include all created key packages
-      signaturePublicKey: Bytes(data: registrationSignaturePublicKey)
+    let capability = BlueCatbirdChatDefs.DeviceCapability(
+      protocolVersion: .value_1,
+      mlsVersion: "1.0",
+      cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
+      credentialType: "basic",
+      addByValue: "supported",
+      updatePath: "supported",
+      removeByValue: "supported",
+      ratchetTreeGroupInfo: "supported",
+      externalPubGroupInfo: "supported",
+      applicationFrameProfile: "supported",
+      controlProfile: "supported",
+      attachmentProfile: "supported",
+      metadataProfile: "supported",
+      typingProfile: "supported"
+    )
+
+    let input = BlueCatbirdChatEnrollDevice.Input(
+      signedRequest: BlueCatbirdChatDefs.SignedDeviceEnrollment(
+        body: .blueCatbirdChatDefsDeviceEnrollmentBody(
+          BlueCatbirdChatDefs.DeviceEnrollmentBody(
+            signatureDomain: "blue.catbird.chat",
+            actorDid: (try? DID(didString: normalizedUserDid)) ?? (try! DID(didString: "did:plc:placeholder")),
+            deviceId: deviceUUID,
+            deviceName: deviceName,
+            keyId: "k0",
+            signaturePublicKey: Bytes(data: registrationSignaturePublicKey),
+            dpopJkt: "",
+            expectedAuthGeneration: 1,
+            capability: capability,
+            keyPackages: keyPackageItems,
+            idempotencyKey: UUID().uuidString,
+            signedAt: BlueCatbirdChatDefs.CanonicalDatetime(date: Date())
+          )
+        ),
+        signature: Bytes(data: Data())
+      )
     )
 
     let maxRetries = 3
@@ -458,57 +491,26 @@ public actor MLSDeviceManager {
 
     for attempt in 1...maxRetries {
       do {
-        logger.info("📡 Attempting server registration (attempt \(attempt)/\(maxRetries))...")
-
-        let (responseCode, output) = try await apiClient.blue.catbird.mlsChat.registerDevice(
-          input: input)
+        logger.info("📡 Sending registration request (attempt \(attempt)/\(maxRetries))...")
+        let (responseCode, output) = try await apiClient.blue.catbird.chat.enrollDevice(input: input)
 
         guard responseCode == 200, let output = output else {
-          let errorMsg = "HTTP \(responseCode)"
-          logger.error("❌ Registration failed: \(errorMsg)")
-          if let output = output {
-            logger.error("   Response: \(String(describing: output))")
-          }
-
-          if attempt < maxRetries {
-            let delay = Double(attempt * 2)  // Exponential backoff: 2s, 4s, 6s
-            logger.info("⏳ Retrying in \(delay)s...")
-            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            continue
-          } else {
-            throw MLSError.deviceRegistrationFailed
-          }
+          logger.error("❌ Registration failed with HTTP \(responseCode)")
+          throw MLSError.operationFailed
         }
 
-        // ✅ Registration Success! Device registered with key packages
-        let userDeviceInfo = UserDeviceInfo(
-          deviceId: output.deviceId,
-          mlsDid: output.mlsDid,
-          deviceUUID: deviceUUID
-        )
-
-        // Save device info now that registration succeeded
-        deviceInfoByUser[normalizedUserDid] = userDeviceInfo
-        saveDeviceInfoStorage()
-        UserDefaults.standard.set(Self.currentCipherSuiteVersion, forKey: Self.cipherSuiteVersionKey)
-
-        logger.info(
-          "✅ Device registration complete - Device registered for user \(normalizedUserDid.prefix(20)):"
-        )
-        logger.info("   deviceId: \(output.deviceId)")
-        logger.info("   mlsDid: \(output.mlsDid) (metadata only)")
+        logger.info("✅ Device registered successfully on server:")
+        logger.info("   deviceId: \(output.device.deviceId)")
         logger.info("   keyPackages: \(keyPackageItems.count) uploaded")
-        logger.info("   autoJoinedConvos: \(output.autoJoinedConvos.count)")
-        logger.info("   welcomeMessages: \(output.welcomeMessages?.count ?? 0)")
 
         do {
           try await publishLastResortKeyPackage(
             userDid: normalizedUserDid,
             credentialIdentity: mlsCredentialIdentity,
-            deviceId: output.deviceId,
-            expiresAt: expirationDate
+            deviceId: output.device.deviceId,
+            expiresAt: Date().addingTimeInterval(30 * 24 * 3600)
           )
-          logger.info("✅ Published reusable last-resort key package for device \(output.deviceId)")
+          logger.info("✅ Published reusable last-resort key package for device \(output.device.deviceId)")
         } catch {
           logger.error("❌ Failed to publish last-resort key package: \(error.localizedDescription)")
           logger.error("   Device registration succeeded, but fallback key-package availability is degraded")
@@ -517,7 +519,7 @@ public actor MLSDeviceManager {
         // ✅ CRITICAL: Call optIn to record that user has opted into MLS chat
         // This is required for other users to see this user as "available" for group invites
         do {
-          let (optedIn, optedInAt) = try await mlsAPIClient.optIn(deviceId: output.deviceId)
+          let (optedIn, optedInAt) = try await mlsAPIClient.optIn(deviceId: output.device.deviceId)
           logger.info("✅ Opt-in recorded: optedIn=\(optedIn), optedInAt=\(optedInAt)")
         } catch {
           logger.error("❌ Failed to record opt-in status: \(error.localizedDescription)")
@@ -525,24 +527,7 @@ public actor MLSDeviceManager {
           // Don't fail registration - device is registered, just opt-in status is missing
         }
 
-        // Successfully registered - process welcome messages and return
-        if let welcomeMessages = output.welcomeMessages, !welcomeMessages.isEmpty {
-          logger.info(
-            "Processing \(welcomeMessages.count) welcome messages for auto-joined conversations...")
-          // Note: Welcome messages from device registration are auto-join invitations
-          // from existing conversations. These should be processed to join the groups,
-          // but MLSDeviceManager doesn't have access to MLSConversationManager.
-          //
-          // Options for implementation:
-          // 1. Return welcome messages to caller (MLSConversationManager.ensureKeyPackagesAvailable)
-          // 2. Emit a notification that MLSConversationManager observes
-          // 3. Store pending welcomes in GRDB for later processing
-          //
-          // For now, MLSConversationManager.syncWithServer() handles fetching
-          // conversations and processing welcomes via separate API calls.
-        }
-
-        return output.mlsDid  // Exit function on success
+        return normalizedUserDid  // Exit function on success
       } catch {
         lastError = error
         logger.error("❌ Registration attempt \(attempt) failed: \(error.localizedDescription)")
@@ -604,20 +589,32 @@ public actor MLSDeviceManager {
     logger.info(
       "🗑️ Deleting device \(deviceInfo.deviceId) for user \(normalizedUserDid.prefix(20))...")
 
-    // deleteDevice was retired server-side; removeDevice is the replacement
-    // with the same input/output shape.
-    let input = BlueCatbirdMlsChatRemoveDevice.Input(
-      deviceId: deviceInfo.deviceId
+    let input = BlueCatbirdChatRevokeDevice.Input(
+      signedRequest: BlueCatbirdChatDefs.SignedDeviceRevocation(
+        body: .blueCatbirdChatDefsDeviceRevocationBody(
+          BlueCatbirdChatDefs.DeviceRevocationBody(
+            signatureDomain: "blue.catbird.chat",
+            actorDid: (try? DID(didString: normalizedUserDid)) ?? (try! DID(didString: "did:plc:placeholder")),
+            actorDeviceId: deviceInfo.deviceId,
+            keyId: "k0",
+            authGeneration: 1,
+            targetDeviceId: deviceInfo.deviceId,
+            targetAuthGeneration: 1,
+            idempotencyKey: UUID().uuidString,
+            signedAt: BlueCatbirdChatDefs.CanonicalDatetime(date: Date())
+          )
+        ),
+        signature: Bytes(data: Data())
+      )
     )
-    let (responseCode, output) = try await apiClient.blue.catbird.mlsChat.removeDevice(input: input)
+    let (responseCode, output) = try await apiClient.blue.catbird.chat.revokeDevice(input: input)
 
     guard responseCode == 200, let output = output else {
       logger.error("❌ Failed to delete device: HTTP \(responseCode)")
       throw MLSError.operationFailed
     }
 
-    logger.info("✅ Device deleted successfully")
-    logger.info("   - Deleted: \(output.deleted), keyPackagesDeleted: \(output.keyPackagesDeleted ?? 0)")
+    logger.info("✅ Device deleted successfully: \(output.device.deviceId)")
 
     return 0
   }
