@@ -1,7 +1,22 @@
 // swift-tools-version: 6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
+import Foundation
 import PackageDescription
+
+let useLocalBinary = FileManager.default.fileExists(atPath: "Sources/CatbirdMLSFFI.xcframework")
+    || ProcessInfo.processInfo.environment["CATBIRD_USE_LOCAL_FFI"] == "1"
+
+let ffiTarget: Target = useLocalBinary
+    ? .binaryTarget(
+        name: "CatbirdMLSFFI",
+        path: "Sources/CatbirdMLSFFI.xcframework"
+    )
+    : .binaryTarget(
+        name: "CatbirdMLSFFI",
+        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.1.1/CatbirdMLSFFI.xcframework.zip",
+        checksum: "9525a866c95473cb11c2d3eac8b4a65536a7262c0da2913aae99103751a946a9"
+    )
 
 let package = Package(
     name: "CatbirdMLSCore",
@@ -50,11 +65,7 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
-        .binaryTarget(
-            name: "CatbirdMLSFFI",
-            url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.1.1/CatbirdMLSFFI.xcframework.zip",
-            checksum: "9525a866c95473cb11c2d3eac8b4a65536a7262c0da2913aae99103751a946a9"
-        ),
+        ffiTarget,
         .testTarget(
             name: "CatbirdMLSCoreTests",
             dependencies: ["CatbirdMLSCore"]

@@ -22,8 +22,16 @@ echo "📦 Downloading ${ASSET} from ${BASE_URL}"
 
 cd "$(dirname "$0")/.."
 
-curl -fL --retry 3 -O "${BASE_URL}/${ASSET}"
-curl -fL --retry 3 -O "${BASE_URL}/${ASSET}.sha256"
+if ! curl -fL --retry 3 -O "${BASE_URL}/${ASSET}" 2>/dev/null; then
+    echo "⚠️  Failed to download from ${BASE_URL}, falling back to release v1.1.1"
+    BASE_URL="https://github.com/${REPO}/releases/download/v1.1.1"
+    curl -fL --retry 3 -O "${BASE_URL}/${ASSET}"
+fi
+
+if ! curl -fL --retry 3 -O "${BASE_URL}/${ASSET}.sha256" 2>/dev/null; then
+    echo "⚠️  Fetching sha256 checksum from release v1.1.1"
+    curl -fL --retry 3 -O "https://github.com/${REPO}/releases/download/v1.1.1/${ASSET}.sha256"
+fi
 
 echo "🔐 Verifying checksum..."
 shasum -a 256 -c "${ASSET}.sha256"

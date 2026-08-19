@@ -621,6 +621,30 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     let status = SecItemAdd(query as CFDictionary, nil)
 
+    if status == errSecDuplicateItem {
+      var updateQuery: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrAccount as String: key,
+        kSecAttrService as String: serviceName,
+      ]
+      #if os(macOS) || targetEnvironment(macCatalyst)
+      if !skipDataProtection {
+        updateQuery[kSecUseDataProtectionKeychain as String] = true
+      }
+      #endif
+      if let accessGroup = accessGroup {
+        updateQuery[kSecAttrAccessGroup as String] = accessGroup
+      }
+      let updateAttributes: [String: Any] = [
+        kSecValueData as String: data
+      ]
+      let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
+      guard updateStatus == errSecSuccess else {
+        throw KeychainError.storeFailed(updateStatus)
+      }
+      return
+    }
+
     guard status == errSecSuccess else {
       throw KeychainError.storeFailed(status)
     }
@@ -677,8 +701,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if !skipDataProtection && synchronizable {
-      query[kSecAttrSynchronizable as String] = true
+    if !skipDataProtection {
+      query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
     }
 
     if let accessGroup = accessGroup {
