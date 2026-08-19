@@ -485,11 +485,24 @@ public actor MLSCoreContext {
     // Create keychain access bridge
     let keychainBridge = MLSKeychainAccessBridge()
 
+    // CRITICAL: Re-check suspension & cancellation right before opening Rust FFI / SQLCipher
+    if Self.isSuspensionInProgress || Task.isCancelled {
+      logger.warning("🚫 [0xdead10cc-FIX] getContext aborted right before MlsContext init - suspension or cancellation")
+      throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
+    }
+
     let newContext = try MlsContext(
       storagePath: storagePath,
       encryptionKey: encryptionKey,
       keychain: keychainBridge
     )
+
+    // If suspension or cancellation intervened while MlsContext was constructing, immediately close it
+    if Self.isSuspensionInProgress || Task.isCancelled {
+      logger.warning("🚫 [0xdead10cc-FIX] Closing freshly created MlsContext due to suspension during init")
+      try? newContext.flushAndPrepareClose()
+      throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
+    }
     
     // Set up external join authorizer
     // This allows the application to validate external join requests

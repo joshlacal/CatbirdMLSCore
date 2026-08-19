@@ -176,4 +176,35 @@ final class MLSStorageSuspensionTests: XCTestCase {
 
     try await manager.deleteDatabase(for: userDID)
   }
+
+  func testStopAndResumePeriodicCheckpointing() async throws {
+    let userDID = "did:plc:periodic-checkpoint-stop-resume-\(UUID().uuidString)"
+    await manager.setActiveUser(userDID)
+    _ = try await manager.getDatabasePool(for: userDID)
+
+    await manager.stopPeriodicCheckpointing()
+    await manager.resumePeriodicCheckpointing()
+
+    try await manager.deleteDatabase(for: userDID)
+  }
+
+  func testContextCreationFailsFastWhenSuspended() async throws {
+    let userDID = "did:plc:context-suspended-\(UUID().uuidString)"
+    let coreContext = MLSCoreContext(databaseManager: manager)
+
+    MLSCoreContext.isSuspensionInProgress = true
+    defer {
+      MLSCoreContext.isSuspensionInProgress = false
+    }
+
+    do {
+      _ = try await coreContext.getContext(for: userDID)
+      XCTFail("Expected contextCreationBlocked error")
+    } catch let error as MLSError {
+      guard case .contextCreationBlocked = error else {
+        XCTFail("Unexpected error: \(error)")
+        return
+      }
+    }
+  }
 }
