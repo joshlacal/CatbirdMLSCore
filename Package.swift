@@ -4,7 +4,10 @@
 import Foundation
 import PackageDescription
 
-let useLocalBinary = FileManager.default.fileExists(atPath: "Sources/CatbirdMLSFFI.xcframework")
+let packageDir = URL(fileURLWithPath: #file).deletingLastPathComponent().path
+let localFrameworkPath = "\(packageDir)/Sources/CatbirdMLSFFI.xcframework"
+let useLocalBinary = FileManager.default.fileExists(atPath: localFrameworkPath)
+    || FileManager.default.fileExists(atPath: "Sources/CatbirdMLSFFI.xcframework")
     || ProcessInfo.processInfo.environment["CATBIRD_USE_LOCAL_FFI"] == "1"
 
 let ffiTarget: Target = useLocalBinary
