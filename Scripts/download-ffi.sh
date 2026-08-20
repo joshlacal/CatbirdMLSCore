@@ -22,19 +22,16 @@ echo "📦 Downloading ${ASSET} from ${BASE_URL}"
 
 cd "$(dirname "$0")/.."
 
-if ! curl -fL --retry 3 -O "${BASE_URL}/${ASSET}" 2>/dev/null; then
-    echo "⚠️  Failed to download from ${BASE_URL}, falling back to release v1.1.1"
-    BASE_URL="https://github.com/${REPO}/releases/download/v1.1.1"
-    curl -fL --retry 3 -O "${BASE_URL}/${ASSET}"
-fi
+curl -fL --retry 3 -O "${BASE_URL}/${ASSET}"
 
-if ! curl -fL --retry 3 -O "${BASE_URL}/${ASSET}.sha256" 2>/dev/null; then
-    echo "⚠️  Fetching sha256 checksum from release v1.1.1"
-    curl -fL --retry 3 -O "https://github.com/${REPO}/releases/download/v1.1.1/${ASSET}.sha256"
+# Checksum must come from the same release as the zip. Releases built before the
+# build-ffi workflow started uploading it have no .sha256 asset.
+if curl -fL --retry 3 -O "${BASE_URL}/${ASSET}.sha256" 2>/dev/null; then
+    echo "🔐 Verifying checksum..."
+    shasum -a 256 -c "${ASSET}.sha256"
+else
+    echo "⚠️  No ${ASSET}.sha256 published for this release; skipping verification"
 fi
-
-echo "🔐 Verifying checksum..."
-shasum -a 256 -c "${ASSET}.sha256"
 
 echo "📂 Extracting to Sources/CatbirdMLSFFI.xcframework..."
 rm -rf Sources/CatbirdMLSFFI.xcframework
@@ -42,7 +39,7 @@ rm -rf Sources/CatbirdMLSFFI.xcframework
 # CatbirdMLSFFI.xcframework/ itself.
 unzip -q "${ASSET}" -d Sources/
 
-rm "${ASSET}" "${ASSET}.sha256"
+rm -f "${ASSET}" "${ASSET}.sha256"
 
 [[ -d Sources/CatbirdMLSFFI.xcframework ]] || { echo "❌ extraction produced no Sources/CatbirdMLSFFI.xcframework"; exit 1; }
 echo "✅ Sources/CatbirdMLSFFI.xcframework ready"

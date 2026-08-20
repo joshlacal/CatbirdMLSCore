@@ -474,7 +474,6 @@ public actor MLSDeviceManager {
             deviceName: deviceName,
             keyId: "k0",
             signaturePublicKey: Bytes(data: registrationSignaturePublicKey),
-            dpopJkt: "",
             expectedAuthGeneration: 0,
             capability: capability,
             keyPackages: keyPackageItems,

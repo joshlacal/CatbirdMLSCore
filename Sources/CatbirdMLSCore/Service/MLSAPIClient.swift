@@ -12,7 +12,7 @@ public enum MLSEnvironment {
     public var serviceDID: String {
         switch self {
         case .production:
-            return "did:web:mlschat.catbird.blue#atproto_mls"
+            return "did:web:chat.catbird.blue#atproto_mls"
         case let .custom(did):
             return did
         }
@@ -21,7 +21,7 @@ public enum MLSEnvironment {
     public var description: String {
         switch self {
         case .production:
-            return "Production (mlschat.catbird.blue)"
+            return "Production (chat.catbird.blue)"
         case let .custom(did):
             return "Custom (\(did))"
         }
@@ -270,9 +270,6 @@ public final class MLSAPIClient {
       }
       let inputJSON = try JSONEncoder().encode(input)
       let ffi = try preparer(binding, operation, inputJSON)
-      guard ffi.authorization == nil, ffi.dpop == nil else {
-        throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
-      }
       return CanonicalPreparedRequest(ffi: ffi)
     }
 
@@ -286,9 +283,7 @@ public final class MLSAPIClient {
         throw CanonicalLiveTransportError.cleanChatAuthorityRequired
       }
       let ffi = prepared.ffi
-      guard ffi.authorization == nil, ffi.dpop == nil,
-            let body = ffi.body
-      else {
+      guard let body = ffi.body else {
         throw CanonicalLiveTransportError.signedRequestContainedTransportCredentials
       }
       guard !cleanAuthority.accessToken.isEmpty,
@@ -350,6 +345,67 @@ public final class MLSAPIClient {
       )
     }
 
+    /// Submit a Rust-prepared generic XRPC request through Petrel's authenticated account PDS path.
+    /// Includes the `atproto-proxy: did:web:chat.catbird.blue#atproto_mls` header and returns
+    /// raw HTTP status and body bytes without error-throwing for non-2xx responses.
+    public func submitPreparedRequest(
+        method: String,
+        nsid: String,
+        body: Data?,
+        query: Data?
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+        var endpoint = nsid.hasPrefix("/") ? String(nsid.dropFirst()) : nsid
+        if endpoint.hasPrefix("xrpc/") {
+            endpoint = String(endpoint.dropFirst(5))
+        }
+
+        var queryString: String? = nil
+        if let qIndex = endpoint.firstIndex(of: "?") {
+            queryString = String(endpoint[endpoint.index(after: qIndex)...])
+            endpoint = String(endpoint[..<qIndex])
+        }
+
+        if let query = query, !query.isEmpty, let qStr = String(data: query, encoding: .utf8) {
+            if let existing = queryString, !existing.isEmpty {
+                queryString = "\(existing)&\(qStr)"
+            } else {
+                queryString = qStr
+            }
+        }
+
+        var queryItems: [URLQueryItem]? = nil
+        if let queryString = queryString, !queryString.isEmpty {
+            var dummyComponents = URLComponents()
+            dummyComponents.percentEncodedQuery = queryString
+            queryItems = dummyComponents.queryItems
+        }
+
+        var headers: [String: String] = [
+            "Accept": "*/*"
+        ]
+        if body != nil {
+            headers["Content-Type"] = "application/json"
+        }
+
+        let request = try await client.networkService.createURLRequest(
+            endpoint: endpoint,
+            method: method,
+            headers: headers,
+            body: body,
+            queryItems: queryItems
+        )
+
+        let proxyHeaders = ["atproto-proxy": mlsServiceDID]
+        let (data, httpResponse) = try await client.networkService
+            .performRequestReturningHTTPErrorResponses(
+                request,
+                skipTokenRefresh: false,
+                additionalHeaders: proxyHeaders
+            )
+
+        return (data, httpResponse)
+    }
+
     // MARK: - Authentication Validation
 
     /// Get the currently authenticated user's DID from the ATProto client
@@ -363,6 +419,15 @@ public final class MLSAPIClient {
             logger.warning("⚠️ Failed to fetch authenticated user DID: \(error.localizedDescription)")
             return nil
         }
+    }
+    private func requireActorDeviceId() async throws -> String {
+        guard let actorDid = await authenticatedUserDID(), !actorDid.isEmpty else {
+            throw MLSAPIError.noAuthentication
+        }
+        guard let deviceId = try? MLSOrchestratorCredentialAdapter().getDeviceUuid(userDid: actorDid), !deviceId.isEmpty else {
+            throw MLSAPIError.invalidResponse(message: "Enrolled device ID not found for actor \(actorDid)")
+        }
+        return deviceId
     }
 
     /// Verify that the ATProto client is authenticated as the expected user
@@ -444,6 +509,7 @@ public final class MLSAPIClient {
         cursor: String? = nil
     ) async throws -> BlueCatbirdChatGetConversations.Output {
         let input = BlueCatbirdChatGetConversations.Parameters(
+            actorDeviceId: try await requireActorDeviceId(),
             pageCursor: cursor,
             limit: limit
         )
@@ -466,6 +532,7 @@ public final class MLSAPIClient {
         cursor: String? = nil
     ) async throws -> BlueCatbirdChatGetPendingWelcomes.Output {
         let input = BlueCatbirdChatGetPendingWelcomes.Parameters(
+            actorDeviceId: try await requireActorDeviceId(),
             inventorySessionId: inventorySessionId,
             pageCursor: cursor,
             limit: limit
@@ -488,6 +555,7 @@ public final class MLSAPIClient {
         cursor: String? = nil
     ) async throws -> BlueCatbirdChatGetLeafRecoveryInbox.Output {
         let input = BlueCatbirdChatGetLeafRecoveryInbox.Parameters(
+            actorDeviceId: try await requireActorDeviceId(),
             inventorySessionId: inventorySessionId,
             pageCursor: cursor,
             limit: limit
@@ -508,6 +576,7 @@ public final class MLSAPIClient {
         conversationId: String
     ) async throws -> BlueCatbirdChatGetConversationState.Output {
         let input = BlueCatbirdChatGetConversationState.Parameters(
+            actorDeviceId: try await requireActorDeviceId(),
             conversationId: conversationId
         )
         let (responseCode, output) = try await client.blue.catbird.chat.getConversationState(input: input)
@@ -527,6 +596,7 @@ public final class MLSAPIClient {
         limit: Int = 100
     ) async throws -> BlueCatbirdChatGetEntries.Output {
         let input = BlueCatbirdChatGetEntries.Parameters(
+            actorDeviceId: try await requireActorDeviceId(),
             conversationId: conversationId,
             afterSeq: afterSeq,
             limit: limit
@@ -599,6 +669,7 @@ public final class MLSAPIClient {
             completion: completion
         )
         let input = BlueCatbirdChatGetSubscriptionTicket.Input(
+            actorDeviceId: try await requireActorDeviceId(),
             inventorySessionId: inventorySessionId,
             eventCursor: eventCursor
         )
@@ -850,7 +921,7 @@ public final class MLSAPIClient {
         logger.info(
             "🌐 [MLSAPIClient.createConversation] START - groupId: \(groupId.prefix(16))..., members: \(initialMembers?.count ?? 0), idempotencyKey: \(idemKey)"
         )
-        throw MLSAPIError.protocolUpgradeRequired(operation: "createConversation")
+        throw MLSAPIError.invalidResponse(message: "createConversation is Rust-authoritative and must be executed through MLSOrchestratorRuntime")
     }
 
     /// Complete a post-auto-reset conversation by populating its emptied MLS state.
@@ -888,7 +959,7 @@ public final class MLSAPIClient {
         logger.info(
             "🌐 [MLSAPIClient.reportRecoveryFailure] START - convoId: \(convoId.prefix(16))..., failureMode: \(failureMode ?? "nil")"
         )
-        throw MLSAPIError.protocolUpgradeRequired(operation: "reportRecoveryFailure")
+        throw MLSAPIError.invalidResponse(message: "reportRecoveryFailure is Rust-authoritative and must be executed through MLSOrchestratorRuntime.reportUnrecoverableLocal")
     }
 
     public static func isGroupResetResponse(_ error: Error) -> Bool {
@@ -1127,7 +1198,6 @@ public final class MLSAPIClient {
                         actorDeviceId: deviceId ?? "device-0",
                         keyId: "k0",
                         authGeneration: 1,
-                        dpopJkt: "dpop-jkt",
                         signaturePublicKey: Bytes(data: Data()),
                         keyPackages: items,
                         idempotencyKey: UUID().uuidString,
@@ -1149,6 +1219,7 @@ public final class MLSAPIClient {
 
     /// Get key packages for one or more DIDs using Petrel client
     public func getKeyPackages(
+        actorDeviceId: String? = nil,
         dids: [DID],
         cipherSuite: String? = nil,
         forceRefresh: Bool = false
@@ -1156,7 +1227,13 @@ public final class MLSAPIClient {
         logger.info(
             "🌐 [MLSAPIClient.getKeyPackages] START - dids: \(dids.count), cipherSuite: \(cipherSuite ?? "omitted"), forceRefresh: \(forceRefresh)"
         )
-        let input = BlueCatbirdChatGetDevices.Parameters(userDids: dids)
+        let resolvedDeviceId: String
+        if let actorDeviceId = actorDeviceId, !actorDeviceId.isEmpty {
+            resolvedDeviceId = actorDeviceId
+        } else {
+            resolvedDeviceId = try await requireActorDeviceId()
+        }
+        let input = BlueCatbirdChatGetDevices.Parameters(actorDeviceId: resolvedDeviceId, userDids: dids)
         let (responseCode, output) = try await client.blue.catbird.chat.getDevices(input: input)
         guard responseCode == 200, let output = output else {
             throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch key packages")

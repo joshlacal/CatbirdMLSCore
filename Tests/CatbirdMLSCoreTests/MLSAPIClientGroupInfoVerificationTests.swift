@@ -45,8 +45,7 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
 
     XCTAssertTrue(MLSAPIClient.isGroupResetResponse(error))
   }
-
-  func testCreateConversationFailsClosedWithProtocolUpgradeRequired() async {
+  func testCreateConversationFailsClosedWhenCalledDirectly() async {
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let client = await MLSAPIClient(client: atProtoClient)
     do {
@@ -54,34 +53,30 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
         groupId: "018f3f6a7b2c4d918a5e0f123456789a",
         cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519"
       )
-      XCTFail("createConversation must fail closed with protocolUpgradeRequired")
+      XCTFail("createConversation must fail closed when called directly on MLSAPIClient")
     } catch let error as MLSAPIError {
-      guard case let .protocolUpgradeRequired(op) = error else {
-        XCTFail("Expected .protocolUpgradeRequired, got \(error)")
+      guard case let .invalidResponse(msg) = error else {
+        XCTFail("Expected .invalidResponse, got \(error)")
         return
       }
-      XCTAssertEqual(op, "createConversation")
-      XCTAssertEqual(error.userActionCategory, .rebind)
-      XCTAssertTrue(error.localizedDescription.contains("protocol upgrade"))
+      XCTAssertTrue(msg.contains("Rust-authoritative"))
     } catch {
       XCTFail("Expected MLSAPIError, got \(error)")
     }
   }
 
-  func testReportRecoveryFailureFailsClosedWithProtocolUpgradeRequired() async {
+  func testReportRecoveryFailureFailsClosedWhenCalledDirectly() async {
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let client = await MLSAPIClient(client: atProtoClient)
     do {
       _ = try await client.reportRecoveryFailure(convoId: "convo-123")
-      XCTFail("reportRecoveryFailure must fail closed with protocolUpgradeRequired")
+      XCTFail("reportRecoveryFailure must fail closed when called directly on MLSAPIClient")
     } catch let error as MLSAPIError {
-      guard case let .protocolUpgradeRequired(op) = error else {
-        XCTFail("Expected .protocolUpgradeRequired, got \(error)")
+      guard case let .invalidResponse(msg) = error else {
+        XCTFail("Expected .invalidResponse, got \(error)")
         return
       }
-      XCTAssertEqual(op, "reportRecoveryFailure")
-      XCTAssertEqual(error.userActionCategory, .rebind)
-      XCTAssertTrue(error.localizedDescription.contains("protocol upgrade"))
+      XCTAssertTrue(msg.contains("Rust-authoritative"))
     } catch {
       XCTFail("Expected MLSAPIError, got \(error)")
     }

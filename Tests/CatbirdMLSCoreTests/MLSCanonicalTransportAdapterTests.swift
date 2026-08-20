@@ -22,9 +22,6 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     // into the transport seam.
     let input = BlueCatbirdChatGetBlob.Output(data: Data([0x01]))
     let auth = CleanChatAuthContextFfi(
-      authorization: "Bearer test",
-      dpopProof: "proof",
-      dpopJkt: "jkt",
       deviceId: "00000000-0000-4000-8000-000000000001",
       authGeneration: 1
     )
@@ -49,8 +46,6 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       operation: .sendMessage,
       method: "POST",
       path: "/xrpc/blue.catbird.chat.sendMessage",
-      authorization: nil,
-      dpop: nil,
       body: Data("{}".utf8)
     )
     let prepared = MLSAPIClient.CanonicalPreparedRequest(ffi: request)
@@ -189,13 +184,11 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
 
   func testTicketPreparationBindsCanonicalTicketOperationAndBody() throws {
     let input = BlueCatbirdChatGetSubscriptionTicket.Input(
+      actorDeviceId: "00000000-0000-4000-8000-000000000001",
       inventorySessionId: "inventory-session",
       eventCursor: "event-cursor"
     )
     let auth = CleanChatAuthContextFfi(
-      authorization: "Bearer test",
-      dpopProof: "proof",
-      dpopJkt: String(repeating: "A", count: 43),
       deviceId: "00000000-0000-4000-8000-000000000001",
       authGeneration: 1
     )
@@ -204,7 +197,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       operation: .getSubscriptionTicket,
       input: input
     )
-    XCTAssertEqual(prepared.operation, .getSubscriptionTicket)
+    XCTAssertEqual(prepared.operation, CleanChatOperationFfi.getSubscriptionTicket)
     XCTAssertEqual(prepared.method, "POST")
     XCTAssertEqual(prepared.path, "/xrpc/blue.catbird.chat.getSubscriptionTicket")
     XCTAssertEqual(
