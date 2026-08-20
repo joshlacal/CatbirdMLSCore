@@ -327,6 +327,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.listDevices().map(MLSRegisteredDeviceInfo.init(ffiDeviceInfo:))
   }
 
+  public func removeDevice(deviceId: String) throws {
+    try bridge.removeDevice(deviceId: deviceId)
+  }
+
   public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo? {
     // The credential store holds the SERVER-MINTED device id (the delivery
     // service mints its own id and stores `device_uuid` as NULL), and
@@ -422,6 +426,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     MLSLeaveConversationResult(
       ffiResult: try bridge.leaveConversation(conversationId: conversationId)
     )
+  }
+
+  public func reportUnrecoverableLocal(conversationId: String, reason: String) throws {
+    try bridge.reportUnrecoverableLocal(convoId: conversationId, reason: reason)
   }
 
   public func recordShadowDecisionMismatch(

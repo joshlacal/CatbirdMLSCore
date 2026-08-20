@@ -35,6 +35,32 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     try? blocking { await self.apiClient.authenticatedUserDID() }
   }
 
+  public func submitPreparedRequest(
+    method: String,
+    nsid: String,
+    body: Data?,
+    query: Data?
+  ) throws -> FfiGatewayResponse {
+    let result = try blocking {
+      let (data, httpResponse) = try await self.apiClient.submitPreparedRequest(
+        method: method,
+        nsid: nsid,
+        body: body,
+        query: query
+      )
+      return FfiGatewayResponse(
+        status: UInt16(httpResponse.statusCode),
+        contentType: httpResponse.value(forHTTPHeaderField: "Content-Type"),
+        body: data
+      )
+    }
+    return result
+  }
+
+  public func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair] {
+    return []
+  }
+
   public func getConversations(limit: UInt32, cursor: String?) throws -> FfiConversationListPage {
     let result = try blocking {
       try await self.apiClient.getCanonicalConversationStates(limit: Int(limit), cursor: cursor)
@@ -42,118 +68,6 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     return FfiConversationListPage(
       conversations: result.states.map(Self.conversationView),
       cursor: result.cursor
-    )
-  }
-
-  public func createConversation(
-    groupId: String,
-    initialMembers: [String]?,
-    metadataName _: String?,
-    metadataDescription _: String?,
-    commitData: Data?,
-    welcomeData: Data?
-  ) throws -> FfiCreateConversationResult {
-    let members = try initialMembers?.map { try DID(didString: $0) }
-    let convo = try blocking {
-      try await self.apiClient.createConversation(
-        groupId: groupId,
-        cipherSuite: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-        initialMembers: members,
-        welcomeMessage: welcomeData,
-        groupInfo: commitData
-      )
-    }
-    return FfiCreateConversationResult(
-      conversation: Self.conversationView(convo),
-      commitData: commitData,
-      welcomeData: welcomeData
-    )
-  }
-
-  public func leaveConversation(convoId: String) throws {
-    _ = try blocking { try await self.apiClient.leaveConversation(convoId: convoId) }
-  }
-
-  public func addMembers(
-    convoId: String,
-    memberDids: [String],
-    commitData: Data,
-    welcomeData: Data?
-  ) throws -> FfiAddMembersResult {
-    let dids = try memberDids.map { try DID(didString: $0) }
-    let result = try blocking {
-      try await self.apiClient.addMembers(
-        convoId: convoId,
-        didList: dids,
-        commit: commitData,
-        welcomeMessage: welcomeData
-      )
-    }
-    return FfiAddMembersResult(
-      success: result.success,
-      newEpoch: UInt64(clamping: result.newEpoch),
-      receipt: nil
-    )
-  }
-
-  public func addMembersWithIdempotency(
-    convoId: String,
-    memberDids: [String],
-    commitData: Data,
-    welcomeData: Data?,
-    idempotencyKey: String
-  ) throws -> FfiAddMembersResult {
-    let dids = try memberDids.map { try DID(didString: $0) }
-    let result = try blocking {
-      try await self.apiClient.addMembers(
-        convoId: convoId,
-        didList: dids,
-        commit: commitData,
-        welcomeMessage: welcomeData,
-        idempotencyKey: idempotencyKey
-      )
-    }
-    return FfiAddMembersResult(
-      success: result.success,
-      newEpoch: UInt64(clamping: result.newEpoch),
-      receipt: nil
-    )
-  }
-
-  public func removeMembers(convoId: String, memberDids: [String], commitData: Data) throws {
-    for memberDid in memberDids {
-      let did = try DID(didString: memberDid)
-      _ = try blocking {
-        try await self.apiClient.removeMember(
-          convoId: convoId,
-          targetDid: did,
-          commit: commitData.base64EncodedString()
-        )
-      }
-    }
-  }
-
-  public func sendMessage(
-    convoId: String, ciphertext: Data, epoch: UInt64, msgId: String
-  ) throws -> FfiSendMessageResponse {
-    guard let didString = currentDid() else {
-      throw OrchestratorBridgeError.NotAuthenticated
-    }
-    let did = try DID(didString: didString)
-    let result = try blocking {
-      try await self.apiClient.sendMessage(
-        convoId: convoId,
-        msgId: msgId,
-        ciphertext: ciphertext,
-        epoch: Int(clamping: epoch),
-        paddedSize: ciphertext.count,
-        senderDid: did
-      )
-    }
-    return FfiSendMessageResponse(
-      messageId: result.messageId,
-      seq: UInt64(clamping: result.sequenceNumber),
-      epoch: UInt64(clamping: result.epoch)
     )
   }
 
@@ -172,10 +86,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         limit: Int(limit),
         messageType: messageType
       )
-      let messages = page.messages.filter { (message: BlueCatbirdChatDefs.ApplicationEntry) -> Bool in
-        return true
-      }
-      return (messages: messages, lastSeq: page.lastSeq)
+      return (messages: page.messages, lastSeq: page.lastSeq)
     }
     return FfiMessagesPage(
       envelopes: result.messages.map(Self.incomingEnvelope),
@@ -183,50 +94,10 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     )
   }
 
-  public func publishKeyPackage(
-    keyPackage: Data,
-    cipherSuite: String,
-    expiresAt: String,
-    deviceId: String?
-  ) throws {
-    let expires = Self.iso8601Formatter.date(from: expiresAt).map(ATProtocolDate.init(date:))
-    try blocking {
-      // Pure relay: Rust owns the device identity and hands us the deviceId to
-      // scope this publish. The server rejects an unscoped publish (403) for a
-      // fresh device, so forward whatever Rust resolved — no Swift identity logic.
-      try await self.apiClient.publishKeyPackage(
-        keyPackage: keyPackage,
-        cipherSuite: cipherSuite,
-        expiresAt: expires,
-        deviceId: deviceId
-      )
-    }
-  }
-
-  public func publishKeyPackages(
-    keyPackages: [Data],
-    cipherSuite: String,
-    expiresAt: String,
-    deviceId: String?
-  ) throws {
-    let expires = Self.iso8601Formatter.date(from: expiresAt).map(ATProtocolDate.init(date:))
-    try blocking {
-      // Batched relay: the Rust orchestrator generates the whole replenishment
-      // batch and hands it over in one call so we POST it as a single request
-      // (server cap 100). Same device-scoping rules as the single publish.
-      try await self.apiClient.publishKeyPackages(
-        keyPackages: keyPackages,
-        cipherSuite: cipherSuite,
-        expiresAt: expires,
-        deviceId: deviceId
-      )
-    }
-  }
-
-  public func getKeyPackages(actorDeviceId _: String, dids: [String]) throws -> [FfiKeyPackageRef] {
+  public func getKeyPackages(actorDeviceId: String, dids: [String]) throws -> [FfiKeyPackageRef] {
     let didObjects = try dids.map { try DID(didString: $0) }
     let result = try blocking {
-      try await self.apiClient.getKeyPackages(dids: didObjects, forceRefresh: true)
+      try await self.apiClient.getKeyPackages(actorDeviceId: actorDeviceId, dids: didObjects, forceRefresh: true)
     }
     return result.keyPackages.map(Self.keyPackageRef)
   }
@@ -249,81 +120,9 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     )
   }
 
-  public func registerDevice(
-    deviceUuid: String,
-    deviceName: String,
-    mlsDid: String,
-    signatureKey: Data,
-    keyPackages: [Data],
-    preparedRequestBody: Data
-  ) throws -> FfiDeviceInfo {
+  public func listDevices(actorDeviceId: String) throws -> [FfiDeviceInfo] {
     let output = try blocking {
-      let items = keyPackages.map { packageData -> BlueCatbirdChatDefs.KeyPackageArtifact in
-        let packageBytes = Bytes(data: packageData)
-        let sha256Bytes = Bytes(data: Data(SHA256.hash(data: packageData)))
-        return BlueCatbirdChatDefs.KeyPackageArtifact(
-          framing: "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
-          contentType: "application/mls-keypackage",
-          bytes: packageBytes,
-          sha256: sha256Bytes,
-          keyPackageRef: sha256Bytes
-        )
-      }
-      let capability = BlueCatbirdChatDefs.DeviceCapability(
-        protocolVersion: .value_1,
-        mlsVersion: "1.0",
-        cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
-        credentialType: "basic",
-        addByValue: "supported",
-        updatePath: "supported",
-        removeByValue: "supported",
-        ratchetTreeGroupInfo: "supported",
-        externalPubGroupInfo: "supported",
-        applicationFrameProfile: "supported",
-        controlProfile: "supported",
-        attachmentProfile: "supported",
-        metadataProfile: "supported",
-        typingProfile: "supported"
-      )
-      let input = BlueCatbirdChatEnrollDevice.Input(
-        signedRequest: BlueCatbirdChatDefs.SignedDeviceEnrollment(
-          body: .blueCatbirdChatDefsDeviceEnrollmentBody(
-            BlueCatbirdChatDefs.DeviceEnrollmentBody(
-              signatureDomain: "blue.catbird.chat",
-              actorDid: (try? DID(didString: mlsDid)) ?? (try! DID(didString: "did:plc:placeholder")),
-              deviceId: deviceUuid,
-              deviceName: deviceName,
-              keyId: "k0",
-              signaturePublicKey: Bytes(data: signatureKey),
-              dpopJkt: "",
-              expectedAuthGeneration: 0,
-              capability: capability,
-              keyPackages: items,
-              idempotencyKey: UUID().uuidString,
-              signedAt: BlueCatbirdChatDefs.CanonicalDatetime(date: Date())
-            )
-          ),
-          signature: Bytes(data: Data())
-        )
-      )
-      let (responseCode, output) = try await self.apiClient.client.blue.catbird.chat
-        .enrollDevice(input: input)
-      guard responseCode == 200, let output else {
-        throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to register device")
-      }
-      return output
-    }
-    return FfiDeviceInfo(
-      deviceId: output.device.deviceId,
-      mlsDid: mlsDid,
-      deviceUuid: deviceUuid,
-      createdAt: Self.iso8601Formatter.string(from: output.device.createdAt.date)
-    )
-  }
-
-  public func listDevices(actorDeviceId _: String) throws -> [FfiDeviceInfo] {
-    let output = try blocking {
-      let input = BlueCatbirdChatGetOwnDevices.Parameters()
+      let input = BlueCatbirdChatGetOwnDevices.Parameters(actorDeviceId: actorDeviceId)
       let (responseCode, output) = try await self.apiClient.client.blue.catbird.chat
         .getOwnDevices(input: input)
       guard responseCode == 200, let output else {
@@ -336,49 +135,13 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         deviceId: item.device.deviceId,
         mlsDid: "",
         deviceUuid: item.device.deviceId,
-        createdAt: Self.iso8601Formatter.string(from: item.device.createdAt.date)
-      )
-    }
-  }
-
-  public func removeDevice(deviceId: String) throws {
-    guard let did = currentDid() else {
-      throw OrchestratorBridgeError.NotAuthenticated
-    }
-    try blocking {
-      let input = BlueCatbirdChatRevokeDevice.Input(
-        signedRequest: BlueCatbirdChatDefs.SignedDeviceRevocation(
-          body: .blueCatbirdChatDefsDeviceRevocationBody(
-            BlueCatbirdChatDefs.DeviceRevocationBody(
-              signatureDomain: "blue.catbird.chat",
-              actorDid: (try? DID(didString: did)) ?? (try! DID(didString: "did:plc:placeholder")),
-              actorDeviceId: deviceId,
-              keyId: "k0",
-              authGeneration: 1,
-              targetDeviceId: deviceId,
-              targetAuthGeneration: 1,
-              idempotencyKey: UUID().uuidString,
-              signedAt: BlueCatbirdChatDefs.CanonicalDatetime(date: Date())
-            )
-          ),
-          signature: Bytes(data: Data())
-        )
-      )
-      let (responseCode, _) = try await self.apiClient.client.blue.catbird.chat
-        .revokeDevice(input: input)
-      guard responseCode == 200 else {
-        throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to remove device")
-      }
-    }
-  }
-
-  public func publishGroupInfo(convoId: String, groupInfo: Data) throws {
-    try blocking {
-      try await self.apiClient.updateGroupInfo(
-        convoId: convoId,
-        groupInfo: groupInfo,
-        epoch: 0,
-        verifyUpload: false
+        createdAt: Self.iso8601Formatter.string(from: item.device.createdAt.date),
+        keyId: nil,
+        signaturePublicKey: nil,
+        authGeneration: nil,
+        status: nil,
+        availablePackageCount: nil,
+        reservedPackageCount: nil
       )
     }
   }
@@ -394,79 +157,6 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     try blocking { try await self.apiClient.getWelcome(convoId: convoId) }
   }
 
-  public func requestWelcomeReissue(
-    convoId: String,
-    recipientDeviceDid: String,
-    reason: String
-  ) throws {
-    _ = try blocking {
-      try await self.apiClient.requestWelcomeReissue(
-        convoId: convoId,
-        recipientDeviceDid: recipientDeviceDid,
-        reason: reason
-      )
-    }
-  }
-
-  public func processExternalCommit(
-    convoId: String,
-    commitData: Data,
-    groupInfo: Data?,
-    confirmationTag: String?
-  ) throws -> FfiProcessExternalCommitResult {
-    let result = try blocking {
-      try await self.apiClient.processExternalCommit(
-        convoId: convoId,
-        externalCommit: commitData,
-        groupInfo: groupInfo,
-        confirmationTag: confirmationTag
-      )
-    }
-    return FfiProcessExternalCommitResult(
-      epoch: UInt64(clamping: result.newEpoch),
-      rejoinedAt: Self.iso8601Formatter.string(from: Date()),
-      receipt: nil
-    )
-  }
-
-  public func reportRecoveryFailure(
-    convoId: String,
-    failureType: String,
-    epochAuthenticator: String?,
-    failureMode: String?
-  ) throws {
-    _ = try blocking {
-      try await self.apiClient.reportRecoveryFailure(
-        convoId: convoId,
-        failureType: failureType,
-        failureMode: failureMode,
-        epochAuthenticator: epochAuthenticator
-      )
-    }
-  }
-
-  public func putGroupMetadataBlob(
-    convoId: String,
-    groupIdHex: String,
-    blobLocator: String,
-    ciphertext: Data,
-    kind: String,
-    metadataVersion: UInt64,
-    resetGeneration: Int32?
-  ) throws {
-    _ = try blocking {
-      try await self.apiClient.putGroupMetadataBlob(
-        blobLocator: blobLocator,
-        groupId: groupIdHex,
-        conversationId: convoId,
-        resetGeneration: resetGeneration.map { Int($0) },
-        metadataVersion: metadataVersion,
-        kind: kind,
-        encryptedBlob: ciphertext
-      )
-    }
-  }
-
   public func getGroupMetadataBlob(
     convoId: String,
     groupIdHex: String,
@@ -478,22 +168,6 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         groupId: groupIdHex,
         conversationId: convoId,
         kind: "metadata"
-      )
-    }
-  }
-
-  public func commitGroupChange(
-    convoId: String,
-    commitData: Data,
-    action: String,
-    confirmationTag: String?
-  ) throws {
-    _ = try blocking {
-      try await self.apiClient.commitGroupChange(
-        convoId: convoId,
-        action: action,
-        commit: commitData,
-        confirmationTag: confirmationTag
       )
     }
   }

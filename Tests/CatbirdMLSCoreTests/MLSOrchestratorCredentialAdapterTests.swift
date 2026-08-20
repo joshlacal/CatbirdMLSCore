@@ -58,7 +58,6 @@ final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
     XCTAssertTrue(publicKey.isValidSignature(authority.signature, for: transcript))
     XCTAssertNotEqual(authority.signature, privateKey.rawRepresentation)
     XCTAssertEqual(authority.deviceId, "device-1")
-    XCTAssertEqual(authority.dpopJkt, "jkt-1")
     XCTAssertEqual(authority.authGeneration, 3)
   }
 

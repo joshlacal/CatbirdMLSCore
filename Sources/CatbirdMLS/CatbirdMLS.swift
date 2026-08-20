@@ -921,6 +921,8 @@ public protocol MlsContextProtocol: AnyObject {
      */
     func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult
 
+    func addMembersWithAad(groupId: Data, keyPackages: [KeyPackageData], aad: Data?) throws -> AddMembersResult
+
     /**
      * Add members to a group AND re-seal the group metadata at the post-add
      * epoch so the newly-added member can decrypt it.
@@ -1189,6 +1191,7 @@ public protocol MlsContextProtocol: AnyObject {
     func epochAuthenticator(groupId: Data) throws -> Data
 
     /**
+     * Get the SHA-256 hash of the TLS-serialized GroupContext.
      * Manually export epoch secret for a group
      * Call this after creating the conversation record in SQLCipher to ensure
      * the foreign key constraint is satisfied when storing the epoch secret
@@ -1216,6 +1219,16 @@ public protocol MlsContextProtocol: AnyObject {
      * to survive app deletion/reinstall.
      */
     func exportIdentityKey(identity: String) throws -> Data
+
+    /**
+     * Export the canonical metadata encryption key (MEK) for a specific epoch.
+     */
+    func exportMetadataKey(groupId: Data, epoch: UInt64) throws -> Data
+
+    /**
+     * Export the canonical metadata encryption key (MEK) from a pending staged commit.
+     */
+    func exportMetadataKeyFromPending(groupId: Data, targetEpoch: UInt64) throws -> Data
 
     func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret
 
@@ -1256,7 +1269,7 @@ public protocol MlsContextProtocol: AnyObject {
 
     /**
      * Get the MLS confirmation tag for a group.
-     * Returns the TLS-serialized confirmation tag bytes from storage.
+     * Returns the exact 32-byte confirmation tag bytes from storage.
      */
     func getConfirmationTag(groupId: Data) throws -> Data
 
@@ -1270,6 +1283,11 @@ public protocol MlsContextProtocol: AnyObject {
     func getCurrentMetadata(groupId: Data) throws -> CurrentMetadataInfo?
 
     func getEpoch(groupId: Data) throws -> UInt64
+
+    /**
+     * Get the SHA-256 MLS GroupContext hash for a group.
+     */
+    func getGroupContextHash(groupId: Data) throws -> Data
 
     /**
      * 🔍 DIAGNOSTIC: Get detailed debug state for a group
@@ -1328,6 +1346,8 @@ public protocol MlsContextProtocol: AnyObject {
      * - Returns: true if group exists, false otherwise
      */
     func groupExists(groupId: Data) -> Bool
+
+    func identityPublicKey(identity: String) throws -> Data
 
     /**
      * Import a group's state from persistent storage
@@ -1832,6 +1852,15 @@ open class MlsContext:
             )
     }
 
+    open func addMembersWithAad(groupId: Data, keyPackages: [KeyPackageData], aad: Data?) throws -> AddMembersResult {
+        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_add_members_with_aad(self.uniffiClonePointer(),
+                                                                         FfiConverterData.lower(groupId),
+                                                                         FfiConverterSequenceTypeKeyPackageData.lower(keyPackages),
+                                                                         FfiConverterOptionData.lower(aad), $0)
+        })
+    }
+
     /**
      * Add members to a group AND re-seal the group metadata at the post-add
      * epoch so the newly-added member can decrypt it.
@@ -2310,6 +2339,7 @@ open class MlsContext:
     }
 
     /**
+     * Get the SHA-256 hash of the TLS-serialized GroupContext.
      * Manually export epoch secret for a group
      * Call this after creating the conversation record in SQLCipher to ensure
      * the foreign key constraint is satisfied when storing the epoch secret
@@ -2356,6 +2386,28 @@ open class MlsContext:
         return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_mlscontext_export_identity_key(self.uniffiClonePointer(),
                                                                         FfiConverterString.lower(identity), $0)
+        })
+    }
+
+    /**
+     * Export the canonical metadata encryption key (MEK) for a specific epoch.
+     */
+    open func exportMetadataKey(groupId: Data, epoch: UInt64) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_export_metadata_key(self.uniffiClonePointer(),
+                                                                        FfiConverterData.lower(groupId),
+                                                                        FfiConverterUInt64.lower(epoch), $0)
+        })
+    }
+
+    /**
+     * Export the canonical metadata encryption key (MEK) from a pending staged commit.
+     */
+    open func exportMetadataKeyFromPending(groupId: Data, targetEpoch: UInt64) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_export_metadata_key_from_pending(self.uniffiClonePointer(),
+                                                                                     FfiConverterData.lower(groupId),
+                                                                                     FfiConverterUInt64.lower(targetEpoch), $0)
         })
     }
 
@@ -2420,7 +2472,7 @@ open class MlsContext:
 
     /**
      * Get the MLS confirmation tag for a group.
-     * Returns the TLS-serialized confirmation tag bytes from storage.
+     * Returns the exact 32-byte confirmation tag bytes from storage.
      */
     open func getConfirmationTag(groupId: Data) throws -> Data {
         return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
@@ -2447,6 +2499,16 @@ open class MlsContext:
         return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_mlscontext_get_epoch(self.uniffiClonePointer(),
                                                               FfiConverterData.lower(groupId), $0)
+        })
+    }
+
+    /**
+     * Get the SHA-256 MLS GroupContext hash for a group.
+     */
+    open func getGroupContextHash(groupId: Data) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_get_group_context_hash(self.uniffiClonePointer(),
+                                                                           FfiConverterData.lower(groupId), $0)
         })
     }
 
@@ -2534,6 +2596,13 @@ open class MlsContext:
         return try! FfiConverterBool.lift(try! rustCall {
             uniffi_catbird_mls_fn_method_mlscontext_group_exists(self.uniffiClonePointer(),
                                                                  FfiConverterData.lower(groupId), $0)
+        })
+    }
+
+    open func identityPublicKey(identity: String) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_identity_public_key(self.uniffiClonePointer(),
+                                                                        FfiConverterString.lower(identity), $0)
         })
     }
 
@@ -4570,49 +4639,22 @@ public func FfiConverterTypeOrchestratorBridge_lower(_ value: OrchestratorBridge
 public struct AddMembersResult {
     public var commitData: Data
     public var welcomeData: Data
-    /**
-     * Re-sealed group metadata for the post-add epoch. Present only when the
-     * caller supplied current metadata content (via `add_members_with_metadata`).
-     * The caller MUST upload this blob via `putGroupMetadataBlob(locator, version)`
-     * when (or before) submitting the commit, so newly-added members can decrypt
-     * metadata at their join epoch.
-     */
     public var metadataBlobLocator: String?
-    /**
-     * See `metadata_blob_locator`. The encrypted `GroupMetadataV1` blob
-     * (`nonce || ciphertext || tag`) sealed at the post-add epoch.
-     */
     public var metadataBlobCiphertext: Data?
-    /**
-     * See `metadata_blob_locator`. The metadata version embedded in the
-     * committed `MetadataReference`; pass it to `putGroupMetadataBlob`.
-     */
     public var metadataVersion: UInt64?
+    public var nextConfirmationTag: Data?
+    public var nextGroupContextHash: Data?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(commitData: Data, welcomeData: Data,
-                /* 
-                    * Re-sealed group metadata for the post-add epoch. Present only when the
-                    * caller supplied current metadata content (via `add_members_with_metadata`).
-                    * The caller MUST upload this blob via `putGroupMetadataBlob(locator, version)`
-                    * when (or before) submitting the commit, so newly-added members can decrypt
-                    * metadata at their join epoch.
-                    */ metadataBlobLocator: String?,
-                /* 
-                    * See `metadata_blob_locator`. The encrypted `GroupMetadataV1` blob
-                    * (`nonce || ciphertext || tag`) sealed at the post-add epoch.
-                    */ metadataBlobCiphertext: Data?,
-                /* 
-                    * See `metadata_blob_locator`. The metadata version embedded in the
-                    * committed `MetadataReference`; pass it to `putGroupMetadataBlob`.
-                    */ metadataVersion: UInt64?)
-    {
+    public init(commitData: Data, welcomeData: Data, metadataBlobLocator: String?, metadataBlobCiphertext: Data?, metadataVersion: UInt64?, nextConfirmationTag: Data?, nextGroupContextHash: Data?) {
         self.commitData = commitData
         self.welcomeData = welcomeData
         self.metadataBlobLocator = metadataBlobLocator
         self.metadataBlobCiphertext = metadataBlobCiphertext
         self.metadataVersion = metadataVersion
+        self.nextConfirmationTag = nextConfirmationTag
+        self.nextGroupContextHash = nextGroupContextHash
     }
 }
 
@@ -4633,6 +4675,12 @@ extension AddMembersResult: Equatable, Hashable {
         if lhs.metadataVersion != rhs.metadataVersion {
             return false
         }
+        if lhs.nextConfirmationTag != rhs.nextConfirmationTag {
+            return false
+        }
+        if lhs.nextGroupContextHash != rhs.nextGroupContextHash {
+            return false
+        }
         return true
     }
 
@@ -4642,6 +4690,8 @@ extension AddMembersResult: Equatable, Hashable {
         hasher.combine(metadataBlobLocator)
         hasher.combine(metadataBlobCiphertext)
         hasher.combine(metadataVersion)
+        hasher.combine(nextConfirmationTag)
+        hasher.combine(nextGroupContextHash)
     }
 }
 
@@ -4656,7 +4706,9 @@ public struct FfiConverterTypeAddMembersResult: FfiConverterRustBuffer {
                 welcomeData: FfiConverterData.read(from: &buf),
                 metadataBlobLocator: FfiConverterOptionString.read(from: &buf),
                 metadataBlobCiphertext: FfiConverterOptionData.read(from: &buf),
-                metadataVersion: FfiConverterOptionUInt64.read(from: &buf)
+                metadataVersion: FfiConverterOptionUInt64.read(from: &buf),
+                nextConfirmationTag: FfiConverterOptionData.read(from: &buf),
+                nextGroupContextHash: FfiConverterOptionData.read(from: &buf)
             )
     }
 
@@ -4666,6 +4718,8 @@ public struct FfiConverterTypeAddMembersResult: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.metadataBlobLocator, into: &buf)
         FfiConverterOptionData.write(value.metadataBlobCiphertext, into: &buf)
         FfiConverterOptionUInt64.write(value.metadataVersion, into: &buf)
+        FfiConverterOptionData.write(value.nextConfirmationTag, into: &buf)
+        FfiConverterOptionData.write(value.nextGroupContextHash, into: &buf)
     }
 }
 
@@ -4964,9 +5018,13 @@ public struct ChatV2EndpointError {
      */
     public var requiresStateResync: Bool
     /**
-     * Whether the device's authentication must be repaired first.
+     * Whether the PDS account session requires login.
      */
     public var requiresReauthentication: Bool
+    /**
+     * Whether automatic MLS device enrollment or binding repair is required.
+     */
+    public var requiresDeviceRecovery: Bool
     /**
      * Whether no automatic action can advance this attempt.
      */
@@ -5001,8 +5059,11 @@ public struct ChatV2EndpointError {
             * Whether local state must be refetched and the request rebuilt.
             */ requiresStateResync: Bool,
         /* 
-            * Whether the device's authentication must be repaired first.
+            * Whether the PDS account session requires login.
             */ requiresReauthentication: Bool,
+        /* 
+            * Whether automatic MLS device enrollment or binding repair is required.
+            */ requiresDeviceRecovery: Bool,
         /* 
             * Whether no automatic action can advance this attempt.
             */ isTerminalForRequest: Bool
@@ -5015,6 +5076,7 @@ public struct ChatV2EndpointError {
         self.isRetryableAfterBackoff = isRetryableAfterBackoff
         self.requiresStateResync = requiresStateResync
         self.requiresReauthentication = requiresReauthentication
+        self.requiresDeviceRecovery = requiresDeviceRecovery
         self.isTerminalForRequest = isTerminalForRequest
     }
 }
@@ -5045,6 +5107,9 @@ extension ChatV2EndpointError: Equatable, Hashable {
         if lhs.requiresReauthentication != rhs.requiresReauthentication {
             return false
         }
+        if lhs.requiresDeviceRecovery != rhs.requiresDeviceRecovery {
+            return false
+        }
         if lhs.isTerminalForRequest != rhs.isTerminalForRequest {
             return false
         }
@@ -5060,6 +5125,7 @@ extension ChatV2EndpointError: Equatable, Hashable {
         hasher.combine(isRetryableAfterBackoff)
         hasher.combine(requiresStateResync)
         hasher.combine(requiresReauthentication)
+        hasher.combine(requiresDeviceRecovery)
         hasher.combine(isTerminalForRequest)
     }
 }
@@ -5079,6 +5145,7 @@ public struct FfiConverterTypeChatV2EndpointError: FfiConverterRustBuffer {
                 isRetryableAfterBackoff: FfiConverterBool.read(from: &buf),
                 requiresStateResync: FfiConverterBool.read(from: &buf),
                 requiresReauthentication: FfiConverterBool.read(from: &buf),
+                requiresDeviceRecovery: FfiConverterBool.read(from: &buf),
                 isTerminalForRequest: FfiConverterBool.read(from: &buf)
             )
     }
@@ -5092,6 +5159,7 @@ public struct FfiConverterTypeChatV2EndpointError: FfiConverterRustBuffer {
         FfiConverterBool.write(value.isRetryableAfterBackoff, into: &buf)
         FfiConverterBool.write(value.requiresStateResync, into: &buf)
         FfiConverterBool.write(value.requiresReauthentication, into: &buf)
+        FfiConverterBool.write(value.requiresDeviceRecovery, into: &buf)
         FfiConverterBool.write(value.isTerminalForRequest, into: &buf)
     }
 }
@@ -5400,22 +5468,16 @@ public func FfiConverterTypeChatV2Status_lower(_ value: ChatV2Status) -> RustBuf
 }
 
 /**
- * UniFFI-safe authenticated transport context. Token/proof contents remain
- * opaque to Rust; the device/JKT/generation are checked against signed bodies.
+ * UniFFI-safe device context. The platform gateway retains the opaque Nest
+ * session and attaches account authentication only while submitting.
  */
 public struct CleanChatAuthContextFfi {
-    public var authorization: String
-    public var dpopProof: String
-    public var dpopJkt: String
     public var deviceId: String
     public var authGeneration: Int64?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(authorization: String, dpopProof: String, dpopJkt: String, deviceId: String, authGeneration: Int64?) {
-        self.authorization = authorization
-        self.dpopProof = dpopProof
-        self.dpopJkt = dpopJkt
+    public init(deviceId: String, authGeneration: Int64?) {
         self.deviceId = deviceId
         self.authGeneration = authGeneration
     }
@@ -5423,15 +5485,6 @@ public struct CleanChatAuthContextFfi {
 
 extension CleanChatAuthContextFfi: Equatable, Hashable {
     public static func == (lhs: CleanChatAuthContextFfi, rhs: CleanChatAuthContextFfi) -> Bool {
-        if lhs.authorization != rhs.authorization {
-            return false
-        }
-        if lhs.dpopProof != rhs.dpopProof {
-            return false
-        }
-        if lhs.dpopJkt != rhs.dpopJkt {
-            return false
-        }
         if lhs.deviceId != rhs.deviceId {
             return false
         }
@@ -5442,9 +5495,6 @@ extension CleanChatAuthContextFfi: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(authorization)
-        hasher.combine(dpopProof)
-        hasher.combine(dpopJkt)
         hasher.combine(deviceId)
         hasher.combine(authGeneration)
     }
@@ -5457,18 +5507,12 @@ public struct FfiConverterTypeCleanChatAuthContextFfi: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanChatAuthContextFfi {
         return
             try CleanChatAuthContextFfi(
-                authorization: FfiConverterString.read(from: &buf),
-                dpopProof: FfiConverterString.read(from: &buf),
-                dpopJkt: FfiConverterString.read(from: &buf),
                 deviceId: FfiConverterString.read(from: &buf),
                 authGeneration: FfiConverterOptionInt64.read(from: &buf)
             )
     }
 
     public static func write(_ value: CleanChatAuthContextFfi, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.authorization, into: &buf)
-        FfiConverterString.write(value.dpopProof, into: &buf)
-        FfiConverterString.write(value.dpopJkt, into: &buf)
         FfiConverterString.write(value.deviceId, into: &buf)
         FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
     }
@@ -5490,27 +5534,21 @@ public func FfiConverterTypeCleanChatAuthContextFfi_lower(_ value: CleanChatAuth
 
 /**
  * UniFFI-safe prepared request. The request body is the generated DTO's JSON
- * bytes; platform clients own the actual HTTP execution. Unsigned requests
- * carry their already-authenticated transport headers as `Some`; signed
- * requests deliberately return `None` so the selected direct-DS or Nest
- * adapter can attach its own transport credentials.
+ * bytes; platform clients own authenticated HTTP execution through the
+ * gateway. Prepared requests never contain access tokens or DPoP material.
  */
 public struct CleanChatPreparedRequestFfi {
     public var operation: CleanChatOperationFfi
     public var method: String
     public var path: String
-    public var authorization: String?
-    public var dpop: String?
     public var body: Data?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(operation: CleanChatOperationFfi, method: String, path: String, authorization: String?, dpop: String?, body: Data?) {
+    public init(operation: CleanChatOperationFfi, method: String, path: String, body: Data?) {
         self.operation = operation
         self.method = method
         self.path = path
-        self.authorization = authorization
-        self.dpop = dpop
         self.body = body
     }
 }
@@ -5526,12 +5564,6 @@ extension CleanChatPreparedRequestFfi: Equatable, Hashable {
         if lhs.path != rhs.path {
             return false
         }
-        if lhs.authorization != rhs.authorization {
-            return false
-        }
-        if lhs.dpop != rhs.dpop {
-            return false
-        }
         if lhs.body != rhs.body {
             return false
         }
@@ -5542,8 +5574,6 @@ extension CleanChatPreparedRequestFfi: Equatable, Hashable {
         hasher.combine(operation)
         hasher.combine(method)
         hasher.combine(path)
-        hasher.combine(authorization)
-        hasher.combine(dpop)
         hasher.combine(body)
     }
 }
@@ -5558,8 +5588,6 @@ public struct FfiConverterTypeCleanChatPreparedRequestFfi: FfiConverterRustBuffe
                 operation: FfiConverterTypeCleanChatOperationFfi.read(from: &buf),
                 method: FfiConverterString.read(from: &buf),
                 path: FfiConverterString.read(from: &buf),
-                authorization: FfiConverterOptionString.read(from: &buf),
-                dpop: FfiConverterOptionString.read(from: &buf),
                 body: FfiConverterOptionData.read(from: &buf)
             )
     }
@@ -5568,8 +5596,6 @@ public struct FfiConverterTypeCleanChatPreparedRequestFfi: FfiConverterRustBuffe
         FfiConverterTypeCleanChatOperationFfi.write(value.operation, into: &buf)
         FfiConverterString.write(value.method, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
-        FfiConverterOptionString.write(value.authorization, into: &buf)
-        FfiConverterOptionString.write(value.dpop, into: &buf)
         FfiConverterOptionData.write(value.body, into: &buf)
     }
 }
@@ -5595,16 +5621,14 @@ public struct CleanChatSigningAuthorityFfi {
     public var publicKey: Data
     public var signature: Data
     public var deviceId: String
-    public var dpopJkt: String
     public var authGeneration: Int64?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(publicKey: Data, signature: Data, deviceId: String, dpopJkt: String, authGeneration: Int64?) {
+    public init(publicKey: Data, signature: Data, deviceId: String, authGeneration: Int64?) {
         self.publicKey = publicKey
         self.signature = signature
         self.deviceId = deviceId
-        self.dpopJkt = dpopJkt
         self.authGeneration = authGeneration
     }
 }
@@ -5620,9 +5644,6 @@ extension CleanChatSigningAuthorityFfi: Equatable, Hashable {
         if lhs.deviceId != rhs.deviceId {
             return false
         }
-        if lhs.dpopJkt != rhs.dpopJkt {
-            return false
-        }
         if lhs.authGeneration != rhs.authGeneration {
             return false
         }
@@ -5633,7 +5654,6 @@ extension CleanChatSigningAuthorityFfi: Equatable, Hashable {
         hasher.combine(publicKey)
         hasher.combine(signature)
         hasher.combine(deviceId)
-        hasher.combine(dpopJkt)
         hasher.combine(authGeneration)
     }
 }
@@ -5648,7 +5668,6 @@ public struct FfiConverterTypeCleanChatSigningAuthorityFfi: FfiConverterRustBuff
                 publicKey: FfiConverterData.read(from: &buf),
                 signature: FfiConverterData.read(from: &buf),
                 deviceId: FfiConverterString.read(from: &buf),
-                dpopJkt: FfiConverterString.read(from: &buf),
                 authGeneration: FfiConverterOptionInt64.read(from: &buf)
             )
     }
@@ -5657,7 +5676,6 @@ public struct FfiConverterTypeCleanChatSigningAuthorityFfi: FfiConverterRustBuff
         FfiConverterData.write(value.publicKey, into: &buf)
         FfiConverterData.write(value.signature, into: &buf)
         FfiConverterString.write(value.deviceId, into: &buf)
-        FfiConverterString.write(value.dpopJkt, into: &buf)
         FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
     }
 }
@@ -5679,15 +5697,13 @@ public func FfiConverterTypeCleanChatSigningAuthorityFfi_lower(_ value: CleanCha
 public struct CleanChatSigningContextFfi {
     public var actorDid: String
     public var deviceId: String
-    public var dpopJkt: String
     public var authGeneration: Int64?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(actorDid: String, deviceId: String, dpopJkt: String, authGeneration: Int64?) {
+    public init(actorDid: String, deviceId: String, authGeneration: Int64?) {
         self.actorDid = actorDid
         self.deviceId = deviceId
-        self.dpopJkt = dpopJkt
         self.authGeneration = authGeneration
     }
 }
@@ -5700,9 +5716,6 @@ extension CleanChatSigningContextFfi: Equatable, Hashable {
         if lhs.deviceId != rhs.deviceId {
             return false
         }
-        if lhs.dpopJkt != rhs.dpopJkt {
-            return false
-        }
         if lhs.authGeneration != rhs.authGeneration {
             return false
         }
@@ -5712,7 +5725,6 @@ extension CleanChatSigningContextFfi: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(actorDid)
         hasher.combine(deviceId)
-        hasher.combine(dpopJkt)
         hasher.combine(authGeneration)
     }
 }
@@ -5726,7 +5738,6 @@ public struct FfiConverterTypeCleanChatSigningContextFfi: FfiConverterRustBuffer
             try CleanChatSigningContextFfi(
                 actorDid: FfiConverterString.read(from: &buf),
                 deviceId: FfiConverterString.read(from: &buf),
-                dpopJkt: FfiConverterString.read(from: &buf),
                 authGeneration: FfiConverterOptionInt64.read(from: &buf)
             )
     }
@@ -5734,7 +5745,6 @@ public struct FfiConverterTypeCleanChatSigningContextFfi: FfiConverterRustBuffer
     public static func write(_ value: CleanChatSigningContextFfi, into buf: inout [UInt8]) {
         FfiConverterString.write(value.actorDid, into: &buf)
         FfiConverterString.write(value.deviceId, into: &buf)
-        FfiConverterString.write(value.dpopJkt, into: &buf)
         FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
     }
 }
@@ -7272,19 +7282,92 @@ public func FfiConverterTypeFFIDeferredRecoveryReport_lower(_ value: FfiDeferred
     return FfiConverterTypeFFIDeferredRecoveryReport.lower(value)
 }
 
+public struct FfiDeliveryStatusPair {
+    public var messageId: String
+    public var status: FfiDeliveryStatus
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String, status: FfiDeliveryStatus) {
+        self.messageId = messageId
+        self.status = status
+    }
+}
+
+extension FfiDeliveryStatusPair: Equatable, Hashable {
+    public static func == (lhs: FfiDeliveryStatusPair, rhs: FfiDeliveryStatusPair) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.status != rhs.status {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(status)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIDeliveryStatusPair: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeliveryStatusPair {
+        return
+            try FfiDeliveryStatusPair(
+                messageId: FfiConverterString.read(from: &buf),
+                status: FfiConverterTypeFFIDeliveryStatus.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiDeliveryStatusPair, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterTypeFFIDeliveryStatus.write(value.status, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIDeliveryStatusPair_lift(_ buf: RustBuffer) throws -> FfiDeliveryStatusPair {
+    return try FfiConverterTypeFFIDeliveryStatusPair.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIDeliveryStatusPair_lower(_ value: FfiDeliveryStatusPair) -> RustBuffer {
+    return FfiConverterTypeFFIDeliveryStatusPair.lower(value)
+}
+
 public struct FfiDeviceInfo {
     public var deviceId: String
     public var mlsDid: String
     public var deviceUuid: String
     public var createdAt: String?
+    public var keyId: String?
+    public var signaturePublicKey: Data?
+    public var authGeneration: Int64?
+    public var status: String?
+    public var availablePackageCount: UInt32?
+    public var reservedPackageCount: UInt32?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(deviceId: String, mlsDid: String, deviceUuid: String, createdAt: String?) {
+    public init(deviceId: String, mlsDid: String, deviceUuid: String, createdAt: String?, keyId: String?, signaturePublicKey: Data?, authGeneration: Int64?, status: String?, availablePackageCount: UInt32?, reservedPackageCount: UInt32?) {
         self.deviceId = deviceId
         self.mlsDid = mlsDid
         self.deviceUuid = deviceUuid
         self.createdAt = createdAt
+        self.keyId = keyId
+        self.signaturePublicKey = signaturePublicKey
+        self.authGeneration = authGeneration
+        self.status = status
+        self.availablePackageCount = availablePackageCount
+        self.reservedPackageCount = reservedPackageCount
     }
 }
 
@@ -7302,6 +7385,24 @@ extension FfiDeviceInfo: Equatable, Hashable {
         if lhs.createdAt != rhs.createdAt {
             return false
         }
+        if lhs.keyId != rhs.keyId {
+            return false
+        }
+        if lhs.signaturePublicKey != rhs.signaturePublicKey {
+            return false
+        }
+        if lhs.authGeneration != rhs.authGeneration {
+            return false
+        }
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.availablePackageCount != rhs.availablePackageCount {
+            return false
+        }
+        if lhs.reservedPackageCount != rhs.reservedPackageCount {
+            return false
+        }
         return true
     }
 
@@ -7310,6 +7411,12 @@ extension FfiDeviceInfo: Equatable, Hashable {
         hasher.combine(mlsDid)
         hasher.combine(deviceUuid)
         hasher.combine(createdAt)
+        hasher.combine(keyId)
+        hasher.combine(signaturePublicKey)
+        hasher.combine(authGeneration)
+        hasher.combine(status)
+        hasher.combine(availablePackageCount)
+        hasher.combine(reservedPackageCount)
     }
 }
 
@@ -7323,7 +7430,13 @@ public struct FfiConverterTypeFFIDeviceInfo: FfiConverterRustBuffer {
                 deviceId: FfiConverterString.read(from: &buf),
                 mlsDid: FfiConverterString.read(from: &buf),
                 deviceUuid: FfiConverterString.read(from: &buf),
-                createdAt: FfiConverterOptionString.read(from: &buf)
+                createdAt: FfiConverterOptionString.read(from: &buf),
+                keyId: FfiConverterOptionString.read(from: &buf),
+                signaturePublicKey: FfiConverterOptionData.read(from: &buf),
+                authGeneration: FfiConverterOptionInt64.read(from: &buf),
+                status: FfiConverterOptionString.read(from: &buf),
+                availablePackageCount: FfiConverterOptionUInt32.read(from: &buf),
+                reservedPackageCount: FfiConverterOptionUInt32.read(from: &buf)
             )
     }
 
@@ -7332,6 +7445,12 @@ public struct FfiConverterTypeFFIDeviceInfo: FfiConverterRustBuffer {
         FfiConverterString.write(value.mlsDid, into: &buf)
         FfiConverterString.write(value.deviceUuid, into: &buf)
         FfiConverterOptionString.write(value.createdAt, into: &buf)
+        FfiConverterOptionString.write(value.keyId, into: &buf)
+        FfiConverterOptionData.write(value.signaturePublicKey, into: &buf)
+        FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
+        FfiConverterOptionString.write(value.status, into: &buf)
+        FfiConverterOptionUInt32.write(value.availablePackageCount, into: &buf)
+        FfiConverterOptionUInt32.write(value.reservedPackageCount, into: &buf)
     }
 }
 
@@ -7485,6 +7604,75 @@ public func FfiConverterTypeFFIFetchMessagesResult_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeFFIFetchMessagesResult_lower(_ value: FfiFetchMessagesResult) -> RustBuffer {
     return FfiConverterTypeFFIFetchMessagesResult.lower(value)
+}
+
+public struct FfiGatewayResponse {
+    public var status: UInt16
+    public var contentType: String?
+    public var body: Data
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(status: UInt16, contentType: String?, body: Data) {
+        self.status = status
+        self.contentType = contentType
+        self.body = body
+    }
+}
+
+extension FfiGatewayResponse: Equatable, Hashable {
+    public static func == (lhs: FfiGatewayResponse, rhs: FfiGatewayResponse) -> Bool {
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.contentType != rhs.contentType {
+            return false
+        }
+        if lhs.body != rhs.body {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(status)
+        hasher.combine(contentType)
+        hasher.combine(body)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFIGatewayResponse: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiGatewayResponse {
+        return
+            try FfiGatewayResponse(
+                status: FfiConverterUInt16.read(from: &buf),
+                contentType: FfiConverterOptionString.read(from: &buf),
+                body: FfiConverterData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiGatewayResponse, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.contentType, into: &buf)
+        FfiConverterData.write(value.body, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIGatewayResponse_lift(_ buf: RustBuffer) throws -> FfiGatewayResponse {
+    return try FfiConverterTypeFFIGatewayResponse.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFIGatewayResponse_lower(_ value: FfiGatewayResponse) -> RustBuffer {
+    return FfiConverterTypeFFIGatewayResponse.lower(value)
 }
 
 public struct FfiGroupMutationResult {
@@ -11526,10 +11714,13 @@ public func FfiConverterTypeWelcomeResult_lower(_ value: WelcomeResult) -> RustB
 
 public enum ChatV2ErrorClass {
     /**
-     * The device credential, DPoP binding, or authentication generation is no
-     * longer valid.
+     * The PDS account session expired and login is required.
      */
-    case authentication
+    case accountSession
+    /**
+     * The MLS device requires enrollment or binding recovery.
+     */
+    case deviceLifecycle
     /**
      * Authenticated but not permitted in this state.
      */
@@ -11593,33 +11784,35 @@ public struct FfiConverterTypeChatV2ErrorClass: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatV2ErrorClass {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return .authentication
+        case 1: return .accountSession
 
-        case 2: return .authorization
+        case 2: return .deviceLifecycle
 
-        case 3: return .relationshipPolicy
+        case 3: return .authorization
 
-        case 4: return .readiness
+        case 4: return .relationshipPolicy
 
-        case 5: return .staleCoordinate
+        case 5: return .readiness
 
-        case 6: return .conflict
+        case 6: return .staleCoordinate
 
-        case 7: return .notFound
+        case 7: return .conflict
 
-        case 8: return .expired
+        case 8: return .notFound
 
-        case 9: return .limitReached
+        case 9: return .expired
 
-        case 10: return .malformedRequest
+        case 10: return .limitReached
 
-        case 11: return .overflow
+        case 11: return .malformedRequest
 
-        case 12: return .transient
+        case 12: return .overflow
 
-        case 13: return .cutoverRequired
+        case 13: return .transient
 
-        case 14: return .unknown
+        case 14: return .cutoverRequired
+
+        case 15: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -11627,47 +11820,50 @@ public struct FfiConverterTypeChatV2ErrorClass: FfiConverterRustBuffer {
 
     public static func write(_ value: ChatV2ErrorClass, into buf: inout [UInt8]) {
         switch value {
-        case .authentication:
+        case .accountSession:
             writeInt(&buf, Int32(1))
 
-        case .authorization:
+        case .deviceLifecycle:
             writeInt(&buf, Int32(2))
 
-        case .relationshipPolicy:
+        case .authorization:
             writeInt(&buf, Int32(3))
 
-        case .readiness:
+        case .relationshipPolicy:
             writeInt(&buf, Int32(4))
 
-        case .staleCoordinate:
+        case .readiness:
             writeInt(&buf, Int32(5))
 
-        case .conflict:
+        case .staleCoordinate:
             writeInt(&buf, Int32(6))
 
-        case .notFound:
+        case .conflict:
             writeInt(&buf, Int32(7))
 
-        case .expired:
+        case .notFound:
             writeInt(&buf, Int32(8))
 
-        case .limitReached:
+        case .expired:
             writeInt(&buf, Int32(9))
 
-        case .malformedRequest:
+        case .limitReached:
             writeInt(&buf, Int32(10))
 
-        case .overflow:
+        case .malformedRequest:
             writeInt(&buf, Int32(11))
 
-        case .transient:
+        case .overflow:
             writeInt(&buf, Int32(12))
 
-        case .cutoverRequired:
+        case .transient:
             writeInt(&buf, Int32(13))
 
-        case .unknown:
+        case .cutoverRequired:
             writeInt(&buf, Int32(14))
+
+        case .unknown:
+            writeInt(&buf, Int32(15))
         }
     }
 }
@@ -11965,7 +12161,6 @@ public enum CleanChatOperationFfi {
     case getSubscriptionTicket
     case prepareBlobUpload
     case publishTyping
-    case rebindDeviceAuthentication
     case rejectWelcome
     case replenishKeyPackages
     case requestLeafRecovery
@@ -12029,27 +12224,25 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
 
         case 21: return .publishTyping
 
-        case 22: return .rebindDeviceAuthentication
+        case 22: return .rejectWelcome
 
-        case 23: return .rejectWelcome
+        case 23: return .replenishKeyPackages
 
-        case 24: return .replenishKeyPackages
+        case 24: return .requestLeafRecovery
 
-        case 25: return .requestLeafRecovery
+        case 25: return .enrollDevice
 
-        case 26: return .enrollDevice
+        case 26: return .requestLeave
 
-        case 27: return .requestLeave
+        case 27: return .requestReset
 
-        case 28: return .requestReset
+        case 28: return .revokeDevice
 
-        case 29: return .revokeDevice
+        case 29: return .submitTransition
 
-        case 30: return .submitTransition
+        case 30: return .subscribeEvents
 
-        case 31: return .subscribeEvents
-
-        case 32: return .uploadBlob
+        case 31: return .uploadBlob
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -12120,38 +12313,35 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
         case .publishTyping:
             writeInt(&buf, Int32(21))
 
-        case .rebindDeviceAuthentication:
+        case .rejectWelcome:
             writeInt(&buf, Int32(22))
 
-        case .rejectWelcome:
+        case .replenishKeyPackages:
             writeInt(&buf, Int32(23))
 
-        case .replenishKeyPackages:
+        case .requestLeafRecovery:
             writeInt(&buf, Int32(24))
 
-        case .requestLeafRecovery:
+        case .enrollDevice:
             writeInt(&buf, Int32(25))
 
-        case .enrollDevice:
+        case .requestLeave:
             writeInt(&buf, Int32(26))
 
-        case .requestLeave:
+        case .requestReset:
             writeInt(&buf, Int32(27))
 
-        case .requestReset:
+        case .revokeDevice:
             writeInt(&buf, Int32(28))
 
-        case .revokeDevice:
+        case .submitTransition:
             writeInt(&buf, Int32(29))
 
-        case .submitTransition:
+        case .subscribeEvents:
             writeInt(&buf, Int32(30))
 
-        case .subscribeEvents:
-            writeInt(&buf, Int32(31))
-
         case .uploadBlob:
-            writeInt(&buf, Int32(32))
+            writeInt(&buf, Int32(31))
         }
     }
 }
@@ -14654,53 +14844,11 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     func currentDid() -> String?
 
+    func submitPreparedRequest(method: String, nsid: String, body: Data?, query: Data?) throws -> FfiGatewayResponse
+
     func getConversations(limit: UInt32, cursor: String?) throws -> FfiConversationListPage
 
-    func createConversation(groupId: String, initialMembers: [String]?, metadataName: String?, metadataDescription: String?, commitData: Data?, welcomeData: Data?) throws -> FfiCreateConversationResult
-
-    func leaveConversation(convoId: String) throws
-
-    func addMembers(convoId: String, memberDids: [String], commitData: Data, welcomeData: Data?) throws -> FfiAddMembersResult
-
-    /**
-     * Add members carrying an idempotency key. The delivery service uses the
-     * key to mark a pending Welcome-reissue request answered. Platform
-     * implementations forward `idempotency_key` into the XRPC body.
-     */
-    func addMembersWithIdempotency(convoId: String, memberDids: [String], commitData: Data, welcomeData: Data?, idempotencyKey: String) throws -> FfiAddMembersResult
-
-    func removeMembers(convoId: String, memberDids: [String], commitData: Data) throws
-
-    /**
-     * Send an encrypted message. `msg_id` is the orchestrator-generated
-     * message ID — platform implementations MUST forward it to the server
-     * (so local storage and server agree on the ID) and MUST return the
-     * server's `{messageId, seq, epoch}` acknowledgment. Dropping the
-     * response (or substituting a different msg_id) leaves locally-stored
-     * own messages with `sequenceNumber = 0`, which breaks display ordering.
-     */
-    func sendMessage(convoId: String, ciphertext: Data, epoch: UInt64, msgId: String) throws -> FfiSendMessageResponse
-
-    /**
-     * Fetch encrypted envelopes for a conversation.
-     *
-     * `message_type` / `from_epoch` / `to_epoch` mirror the
-     * `blue.catbird.chat.getMessages` lexicon params. Pass-through to the
-     * server URL — platform implementations should forward them untouched.
-     * `from_epoch` and `to_epoch` are inclusive epoch bounds; supplying them
-     * (especially with `message_type = Some("commit")`) keeps epoch catch-up
-     * from being stranded on groups with more than 50 lifetime commits.
-     */
     func getMessages(convoId: String, cursor: String?, limit: UInt32, messageType: String?, fromEpoch: UInt32?, toEpoch: UInt32?) throws -> FfiMessagesPage
-
-    func publishKeyPackage(keyPackage: Data, cipherSuite: String, expiresAt: String, deviceId: String?) throws
-
-    /**
-     * Publish multiple key packages in ONE request. The platform impl POSTs
-     * the whole array to `blue.catbird.chat.publishKeyPackages` (server cap
-     * 100), collapsing a full replenishment refill into a single round-trip.
-     */
-    func publishKeyPackages(keyPackages: [Data], cipherSuite: String, expiresAt: String, deviceId: String?) throws
 
     func getKeyPackages(actorDeviceId: String, dids: [String]) throws -> [FfiKeyPackageRef]
 
@@ -14708,122 +14856,15 @@ public protocol OrchestratorApiCallback: AnyObject {
 
     func syncKeyPackages(localHashes: [String], deviceId: String) throws -> FfiKeyPackageSyncResult
 
-    func registerDevice(deviceUuid: String, deviceName: String, mlsDid: String, signatureKey: Data, keyPackages: [Data], preparedRequestBody: Data) throws -> FfiDeviceInfo
-
     func listDevices(actorDeviceId: String) throws -> [FfiDeviceInfo]
-    func removeDevice(deviceId: String) throws
-
-    func publishGroupInfo(convoId: String, groupInfo: Data) throws
 
     func getGroupInfo(convoId: String) throws -> Data
 
-    /**
-     * Fetch a pending Welcome message for a conversation.
-     *
-     * Platform impls should call the `blue.catbird.chat.getGroupState`
-     * lexicon with `include: "welcome"` and return the raw Welcome bytes.
-     *
-     * If no Welcome is available for this device (consumed, expired, or
-     * never issued), return `OrchestratorBridgeError::ServerError` with
-     * status 404 (or 410 for an explicitly expired Welcome). The
-     * orchestrator uses the status code to distinguish "Welcome gone,
-     * fall back to External Commit" from "transport error".
-     */
     func getWelcome(convoId: String) throws -> Data
 
-    /**
-     * Ask the server to reissue a Welcome for this device.
-     *
-     * Platform impls should POST to `blue.catbird.chat.reissueWelcome`
-     * with the conversation id, the recipient device DID, and the reason
-     * string (e.g. `"no_matching_key_package"`). The active inviter/admin
-     * fulfills the request by resealing a Welcome to one of this device's
-     * CURRENT key packages — the recovery path for a Welcome sealed to a
-     * key package whose private key this device no longer holds
-     * (`NoMatchingKeyPackage`).
-     *
-     * Errors should be returned (not swallowed); the orchestrator records
-     * the attempt either way so the reissue backoff ladder keeps moving.
-     */
-    func requestWelcomeReissue(convoId: String, recipientDeviceDid: String, reason: String) throws
+    func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair]
 
-    /**
-     * Submit an External Commit to join/rejoin a conversation.
-     *
-     * Platform impls should POST to `blue.catbird.chat.commitGroupChange`
-     * with `action = "externalCommit"`, the commit bytes, optional
-     * post-commit GroupInfo, and the base64-encoded MLS confirmation tag
-     * from the new local group state. Return the server's new epoch and
-     * `rejoinedAt` timestamp.
-     *
-     * On 409 (epoch race), return `ServerError { status: 409 }` — the
-     * orchestrator treats this as a retryable failure without burning a
-     * recovery attempt slot. On 429, return `ServerError { status: 429 }`
-     * so the orchestrator can treat it as rate-limited (not a real failure).
-     */
-    func processExternalCommit(convoId: String, commitData: Data, groupInfo: Data?, confirmationTag: String?) throws -> FfiProcessExternalCommitResult
-
-    /**
-     * Report that recovery has been exhausted for a conversation.
-     *
-     * Called by the orchestrator's `RecoveryTracker` when a conversation has
-     * hit `MAX_REJOIN_ATTEMPTS` external-commit failures (S1.1 of the §8
-     * recovery pyramid). The platform impl should POST to
-     * `blue.catbird.chat.reportRecoveryFailure` so the server can
-     * accumulate quorum reports and trigger an automatic group reset (S2)
-     * per ADR-002 §6.
-     *
-     * `failure_type` is one of `"external_commit_exhausted"`,
-     * `"remote_data_error"`, or future variants.
-     *
-     * `epoch_authenticator` is the hex-encoded local epoch authenticator
-     * (RFC 9420 §8.7) when present — binds the report to a specific epoch
-     * so stale clients can't forge quorum votes. `None` is accepted by
-     * pre-A7 servers; once A7 ships, servers MAY require it.
-     *
-     * `failure_mode` (ADR-008 D1, spec §8.6.1): one of `"local_state_loss"`
-     * or `"group_state_unrecoverable"`. Mode A reports SHOULD NOT count
-     * toward server-side quorum auto-reset (clients should self-heal
-     * instead); Mode B reports indicate the group itself is unrecoverable
-     * and SHOULD count. Optional during interim deployment.
-     *
-     * Errors should be returned (not swallowed); the orchestrator logs but
-     * does not retry, since the local state is already terminal.
-     */
-    func reportRecoveryFailure(convoId: String, failureType: String, epochAuthenticator: String?, failureMode: String?) throws
-
-    /**
-     * Upload an encrypted group metadata blob via
-     * `blue.catbird.chat.putGroupMetadataBlob`. `kind` is `"metadata"` or
-     * `"avatar"`; `metadata_version` is the monotonic counter from the
-     * corresponding `MetadataReference`. Platform impls forward the args
-     * untouched into the XRPC body.
-     */
-    func putGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String, ciphertext: Data, kind: String, metadataVersion: UInt64, resetGeneration: Int32?) throws
-
-    /**
-     * Download an encrypted group metadata blob via
-     * `blue.catbird.chat.getGroupMetadataBlob`. Returns the raw ciphertext
-     * (`nonce || ciphertext || tag`) for `blob_locator`. On `BlobNotFound`
-     * (GC'd / never uploaded) return `ServerError { status: 404 }` so the
-     * orchestrator can skip metadata hydration without treating it as fatal.
-     */
     func getGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String) throws -> Data
-
-    /**
-     * Submit a non-membership commit (e.g. a metadata update) via
-     * `blue.catbird.chat.commitGroupChange`. Platform impls POST
-     * `{ convoId, action, commit }`; on success the server CAS-advances the
-     * authoritative `current_epoch`. `action` is e.g. `"updateMetadata"`.
-     * `confirmation_tag` is the optional base64 MLS confirmation tag.
-     *
-     * This MUST reach the server before the orchestrator merges the commit
-     * locally: a local merge without server acceptance advances the client
-     * epoch past the server and isolates the sender (every `sendMessage`
-     * 409s). On 409 (stale/raced epoch) return `ServerError { status: 409 }`
-     * so the orchestrator discards the pending commit instead of merging.
-     */
-    func commitGroupChange(convoId: String, commitData: Data, action: String, confirmationTag: String?) throws
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -14875,6 +14916,36 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                 writeReturn: writeReturn
             )
         },
+        submitPreparedRequest: { (
+            uniffiHandle: UInt64,
+            method: RustBuffer,
+            nsid: RustBuffer,
+            body: RustBuffer,
+            query: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiGatewayResponse in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.submitPreparedRequest(
+                    method: FfiConverterString.lift(method),
+                    nsid: FfiConverterString.lift(nsid),
+                    body: FfiConverterOptionData.lift(body),
+                    query: FfiConverterOptionData.lift(query)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         getConversations: { (
             uniffiHandle: UInt64,
             limit: UInt32,
@@ -14894,184 +14965,6 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIConversationListPage.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        createConversation: { (
-            uniffiHandle: UInt64,
-            groupId: RustBuffer,
-            initialMembers: RustBuffer,
-            metadataName: RustBuffer,
-            metadataDescription: RustBuffer,
-            commitData: RustBuffer,
-            welcomeData: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiCreateConversationResult in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.createConversation(
-                    groupId: FfiConverterString.lift(groupId),
-                    initialMembers: FfiConverterOptionSequenceString.lift(initialMembers),
-                    metadataName: FfiConverterOptionString.lift(metadataName),
-                    metadataDescription: FfiConverterOptionString.lift(metadataDescription),
-                    commitData: FfiConverterOptionData.lift(commitData),
-                    welcomeData: FfiConverterOptionData.lift(welcomeData)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFICreateConversationResult.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        leaveConversation: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.leaveConversation(
-                    convoId: FfiConverterString.lift(convoId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        addMembers: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            memberDids: RustBuffer,
-            commitData: RustBuffer,
-            welcomeData: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiAddMembersResult in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.addMembers(
-                    convoId: FfiConverterString.lift(convoId),
-                    memberDids: FfiConverterSequenceString.lift(memberDids),
-                    commitData: FfiConverterData.lift(commitData),
-                    welcomeData: FfiConverterOptionData.lift(welcomeData)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIAddMembersResult.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        addMembersWithIdempotency: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            memberDids: RustBuffer,
-            commitData: RustBuffer,
-            welcomeData: RustBuffer,
-            idempotencyKey: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiAddMembersResult in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.addMembersWithIdempotency(
-                    convoId: FfiConverterString.lift(convoId),
-                    memberDids: FfiConverterSequenceString.lift(memberDids),
-                    commitData: FfiConverterData.lift(commitData),
-                    welcomeData: FfiConverterOptionData.lift(welcomeData),
-                    idempotencyKey: FfiConverterString.lift(idempotencyKey)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIAddMembersResult.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        removeMembers: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            memberDids: RustBuffer,
-            commitData: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.removeMembers(
-                    convoId: FfiConverterString.lift(convoId),
-                    memberDids: FfiConverterSequenceString.lift(memberDids),
-                    commitData: FfiConverterData.lift(commitData)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        sendMessage: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            ciphertext: RustBuffer,
-            epoch: UInt64,
-            msgId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiSendMessageResponse in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.sendMessage(
-                    convoId: FfiConverterString.lift(convoId),
-                    ciphertext: FfiConverterData.lift(ciphertext),
-                    epoch: FfiConverterUInt64.lift(epoch),
-                    msgId: FfiConverterString.lift(msgId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFISendMessageResponse.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -15106,66 +14999,6 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIMessagesPage.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        publishKeyPackage: { (
-            uniffiHandle: UInt64,
-            keyPackage: RustBuffer,
-            cipherSuite: RustBuffer,
-            expiresAt: RustBuffer,
-            deviceId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.publishKeyPackage(
-                    keyPackage: FfiConverterData.lift(keyPackage),
-                    cipherSuite: FfiConverterString.lift(cipherSuite),
-                    expiresAt: FfiConverterString.lift(expiresAt),
-                    deviceId: FfiConverterOptionString.lift(deviceId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        publishKeyPackages: { (
-            uniffiHandle: UInt64,
-            keyPackages: RustBuffer,
-            cipherSuite: RustBuffer,
-            expiresAt: RustBuffer,
-            deviceId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.publishKeyPackages(
-                    keyPackages: FfiConverterSequenceData.lift(keyPackages),
-                    cipherSuite: FfiConverterString.lift(cipherSuite),
-                    expiresAt: FfiConverterString.lift(expiresAt),
-                    deviceId: FfiConverterOptionString.lift(deviceId)
-                )
-            }
-
-            let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -15247,40 +15080,6 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                 lowerError: FfiConverterTypeOrchestratorBridgeError.lower
             )
         },
-        registerDevice: { (
-            uniffiHandle: UInt64,
-            deviceUuid: RustBuffer,
-            deviceName: RustBuffer,
-            mlsDid: RustBuffer,
-            signatureKey: RustBuffer,
-            keyPackages: RustBuffer,
-            preparedRequestBody: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiDeviceInfo in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.registerDevice(
-                    deviceUuid: FfiConverterString.lift(deviceUuid),
-                    deviceName: FfiConverterString.lift(deviceName),
-                    mlsDid: FfiConverterString.lift(mlsDid),
-                    signatureKey: FfiConverterData.lift(signatureKey),
-                    keyPackages: FfiConverterSequenceData.lift(keyPackages),
-                    preparedRequestBody: FfiConverterData.lift(preparedRequestBody)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIDeviceInfo.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
         listDevices: { (
             uniffiHandle: UInt64,
             actorDeviceId: RustBuffer,
@@ -15298,56 +15097,6 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIDeviceInfo.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        removeDevice: { (
-            uniffiHandle: UInt64,
-            deviceId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.removeDevice(
-                    deviceId: FfiConverterString.lift(deviceId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        publishGroupInfo: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            groupInfo: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.publishGroupInfo(
-                    convoId: FfiConverterString.lift(convoId),
-                    groupInfo: FfiConverterData.lift(groupInfo)
-                )
-            }
-
-            let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -15403,123 +15152,25 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                 lowerError: FfiConverterTypeOrchestratorBridgeError.lower
             )
         },
-        requestWelcomeReissue: { (
+        getDeliveryStatus: { (
             uniffiHandle: UInt64,
             convoId: RustBuffer,
-            recipientDeviceDid: RustBuffer,
-            reason: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.requestWelcomeReissue(
-                    convoId: FfiConverterString.lift(convoId),
-                    recipientDeviceDid: FfiConverterString.lift(recipientDeviceDid),
-                    reason: FfiConverterString.lift(reason)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        processExternalCommit: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            commitData: RustBuffer,
-            groupInfo: RustBuffer,
-            confirmationTag: RustBuffer,
+            messageIds: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
             let makeCall = {
-                () throws -> FfiProcessExternalCommitResult in
+                () throws -> [FfiDeliveryStatusPair] in
                 guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return try uniffiObj.processExternalCommit(
+                return try uniffiObj.getDeliveryStatus(
                     convoId: FfiConverterString.lift(convoId),
-                    commitData: FfiConverterData.lift(commitData),
-                    groupInfo: FfiConverterOptionData.lift(groupInfo),
-                    confirmationTag: FfiConverterOptionString.lift(confirmationTag)
+                    messageIds: FfiConverterSequenceString.lift(messageIds)
                 )
             }
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIProcessExternalCommitResult.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        reportRecoveryFailure: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            failureType: RustBuffer,
-            epochAuthenticator: RustBuffer,
-            failureMode: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.reportRecoveryFailure(
-                    convoId: FfiConverterString.lift(convoId),
-                    failureType: FfiConverterString.lift(failureType),
-                    epochAuthenticator: FfiConverterOptionString.lift(epochAuthenticator),
-                    failureMode: FfiConverterOptionString.lift(failureMode)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        putGroupMetadataBlob: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            groupIdHex: RustBuffer,
-            blobLocator: RustBuffer,
-            ciphertext: RustBuffer,
-            kind: RustBuffer,
-            metadataVersion: UInt64,
-            resetGeneration: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.putGroupMetadataBlob(
-                    convoId: FfiConverterString.lift(convoId),
-                    groupIdHex: FfiConverterString.lift(groupIdHex),
-                    blobLocator: FfiConverterString.lift(blobLocator),
-                    ciphertext: FfiConverterData.lift(ciphertext),
-                    kind: FfiConverterString.lift(kind),
-                    metadataVersion: FfiConverterUInt64.lift(metadataVersion),
-                    resetGeneration: FfiConverterOptionInt32.lift(resetGeneration)
-                )
-            }
-
-            let writeReturn = { () }
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIDeliveryStatusPair.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -15548,36 +15199,6 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        commitGroupChange: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            commitData: RustBuffer,
-            action: RustBuffer,
-            confirmationTag: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.commitGroupChange(
-                    convoId: FfiConverterString.lift(convoId),
-                    commitData: FfiConverterData.lift(commitData),
-                    action: FfiConverterString.lift(action),
-                    confirmationTag: FfiConverterOptionString.lift(confirmationTag)
-                )
-            }
-
-            let writeReturn = { () }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -18159,6 +17780,31 @@ private struct FfiConverterSequenceTypeFFIConversationView: FfiConverterRustBuff
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeFFIDeliveryStatusPair: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiDeliveryStatusPair]
+
+    static func write(_ value: [FfiDeliveryStatusPair], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFFIDeliveryStatusPair.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiDeliveryStatusPair] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiDeliveryStatusPair]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFFIDeliveryStatusPair.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeFFIDeviceInfo: FfiConverterRustBuffer {
     typealias SwiftType = [FfiDeviceInfo]
 
@@ -19286,6 +18932,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_add_members_async() != 21247 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_mlscontext_add_members_with_aad() != 1815 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_mlscontext_add_members_with_metadata() != 60117 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19382,7 +19031,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_epoch_authenticator() != 21054 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_epoch_secret() != 1660 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_export_epoch_secret() != 49788 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_export_group_info() != 7698 {
@@ -19392,6 +19041,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_export_identity_key() != 30521 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_mlscontext_export_metadata_key() != 3232 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_mlscontext_export_metadata_key_from_pending() != 65171 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_export_secret() != 18925 {
@@ -19406,13 +19061,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_flush_storage() != 42921 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_confirmation_tag() != 39558 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_get_confirmation_tag() != 27123 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_get_current_metadata() != 5665 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_get_epoch() != 51406 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_mlscontext_get_group_context_hash() != 63454 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_get_group_debug_state() != 3494 {
@@ -19431,6 +19089,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_group_exists() != 48856 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_mlscontext_identity_public_key() != 46126 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_import_group_state() != 59918 {
@@ -19784,79 +19445,37 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_current_did() != 11398 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_conversations() != 51159 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_prepared_request() != 22918 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_create_conversation() != 45906 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_conversations() != 37768 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_leave_conversation() != 34061 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 12028 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_add_members() != 51707 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_packages() != 63192 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_add_members_with_idempotency() != 38276 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_package_stats() != 52584 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_remove_members() != 5614 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_sync_key_packages() != 7286 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_send_message() != 35312 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_list_devices() != 48626 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 11438 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_info() != 7897 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_package() != 53529 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 9001 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_key_packages() != 21647 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_delivery_status() != 62201 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_packages() != 4755 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_package_stats() != 27036 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_sync_key_packages() != 46258 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_register_device() != 1730 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_list_devices() != 44240 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_remove_device() != 38848 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_publish_group_info() != 63714 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_info() != 7959 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 14448 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_request_welcome_reissue() != 4775 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_process_external_commit() != 4703 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_report_recovery_failure() != 37829 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_group_metadata_blob() != 38505 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 30704 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_commit_group_change() != 24802 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 51954 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272 {

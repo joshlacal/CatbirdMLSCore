@@ -199,7 +199,6 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
         publicKey: authorityAfter.publicKey,
         signature: signature,
         deviceId: authorityAfter.deviceId,
-        dpopJkt: authorityAfter.dpopJkt,
         authGeneration: authorityAfter.authGeneration
       )
     }
@@ -287,7 +286,6 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
       publicKey: publicKey,
       signature: signature,
       deviceId: bindingAfterSignature.deviceId,
-      dpopJkt: bindingAfterSignature.dpopJkt,
       authGeneration: bindingAfterSignature.authGeneration
     )
   }

@@ -60,8 +60,15 @@ public final class MLSSyncValidator {
         lastValidation = Date()
 
         do {
-            // Use getOwnDevices to check device validity
-            let input = BlueCatbirdChatGetOwnDevices.Parameters()
+            // Use getOwnDevices to check device validity with current enrolled device
+            guard let userDid = try? await client.getDid(), !userDid.isEmpty,
+                  let actorDeviceId = try? MLSOrchestratorCredentialAdapter().getDeviceUuid(userDid: userDid),
+                  !actorDeviceId.isEmpty
+            else {
+                logger.warning("⚠️ Cannot validate sync state: no enrolled device found for current account")
+                return
+            }
+            let input = BlueCatbirdChatGetOwnDevices.Parameters(actorDeviceId: actorDeviceId)
             let (responseCode, output) = try await client.blue.catbird.chat.getOwnDevices(input: input)
 
             guard responseCode == 200, let output = output else {
