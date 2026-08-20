@@ -14702,16 +14702,15 @@ public protocol OrchestratorApiCallback: AnyObject {
      */
     func publishKeyPackages(keyPackages: [Data], cipherSuite: String, expiresAt: String, deviceId: String?) throws
 
-    func getKeyPackages(dids: [String]) throws -> [FfiKeyPackageRef]
+    func getKeyPackages(actorDeviceId: String, dids: [String]) throws -> [FfiKeyPackageRef]
 
     func getKeyPackageStats() throws -> FfiKeyPackageStats
 
     func syncKeyPackages(localHashes: [String], deviceId: String) throws -> FfiKeyPackageSyncResult
 
-    func registerDevice(deviceUuid: String, deviceName: String, mlsDid: String, signatureKey: Data, keyPackages: [Data]) throws -> FfiDeviceInfo
+    func registerDevice(deviceUuid: String, deviceName: String, mlsDid: String, signatureKey: Data, keyPackages: [Data], preparedRequestBody: Data) throws -> FfiDeviceInfo
 
-    func listDevices() throws -> [FfiDeviceInfo]
-
+    func listDevices(actorDeviceId: String) throws -> [FfiDeviceInfo]
     func removeDevice(deviceId: String) throws
 
     func publishGroupInfo(convoId: String, groupInfo: Data) throws
@@ -15176,6 +15175,7 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
         },
         getKeyPackages: { (
             uniffiHandle: UInt64,
+            actorDeviceId: RustBuffer,
             dids: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
@@ -15186,6 +15186,7 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try uniffiObj.getKeyPackages(
+                    actorDeviceId: FfiConverterString.lift(actorDeviceId),
                     dids: FfiConverterSequenceString.lift(dids)
                 )
             }
@@ -15253,6 +15254,7 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             mlsDid: RustBuffer,
             signatureKey: RustBuffer,
             keyPackages: RustBuffer,
+            preparedRequestBody: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -15266,7 +15268,8 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                     deviceName: FfiConverterString.lift(deviceName),
                     mlsDid: FfiConverterString.lift(mlsDid),
                     signatureKey: FfiConverterData.lift(signatureKey),
-                    keyPackages: FfiConverterSequenceData.lift(keyPackages)
+                    keyPackages: FfiConverterSequenceData.lift(keyPackages),
+                    preparedRequestBody: FfiConverterData.lift(preparedRequestBody)
                 )
             }
 
@@ -15280,6 +15283,7 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
         },
         listDevices: { (
             uniffiHandle: UInt64,
+            actorDeviceId: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -15289,6 +15293,7 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try uniffiObj.listDevices(
+                    actorDeviceId: FfiConverterString.lift(actorDeviceId)
                 )
             }
 

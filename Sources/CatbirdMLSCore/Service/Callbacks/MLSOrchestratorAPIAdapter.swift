@@ -223,7 +223,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
-  public func getKeyPackages(dids: [String]) throws -> [FfiKeyPackageRef] {
+  public func getKeyPackages(actorDeviceId _: String, dids: [String]) throws -> [FfiKeyPackageRef] {
     let didObjects = try dids.map { try DID(didString: $0) }
     let result = try blocking {
       try await self.apiClient.getKeyPackages(dids: didObjects, forceRefresh: true)
@@ -254,7 +254,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     deviceName: String,
     mlsDid: String,
     signatureKey: Data,
-    keyPackages: [Data]
+    keyPackages: [Data],
+    preparedRequestBody: Data
   ) throws -> FfiDeviceInfo {
     let output = try blocking {
       let items = keyPackages.map { packageData -> BlueCatbirdChatDefs.KeyPackageArtifact in
@@ -295,7 +296,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
               keyId: "k0",
               signaturePublicKey: Bytes(data: signatureKey),
               dpopJkt: "",
-              expectedAuthGeneration: 1,
+              expectedAuthGeneration: 0,
               capability: capability,
               keyPackages: items,
               idempotencyKey: UUID().uuidString,
@@ -320,7 +321,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     )
   }
 
-  public func listDevices() throws -> [FfiDeviceInfo] {
+  public func listDevices(actorDeviceId _: String) throws -> [FfiDeviceInfo] {
     let output = try blocking {
       let input = BlueCatbirdChatGetOwnDevices.Parameters()
       let (responseCode, output) = try await self.apiClient.client.blue.catbird.chat

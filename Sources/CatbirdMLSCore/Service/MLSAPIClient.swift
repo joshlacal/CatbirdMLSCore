@@ -850,59 +850,7 @@ public final class MLSAPIClient {
         logger.info(
             "🌐 [MLSAPIClient.createConversation] START - groupId: \(groupId.prefix(16))..., members: \(initialMembers?.count ?? 0), idempotencyKey: \(idemKey)"
         )
-        return BlueCatbirdChatDefs.ConversationState(
-            conversationKind: .value_group,
-            coordinates: BlueCatbirdChatDefs.ConversationCoordinates(
-                conversationId: groupId,
-                generation: 1,
-                stateVersion: 1,
-                groupId: Bytes(data: Data(hexEncoded: groupId) ?? Data(groupId.utf8)),
-                epoch: 1,
-                groupContextHash: Bytes(data: Data()),
-                confirmationTag: Bytes(data: Data()),
-                lifecycle: .value_active
-            ),
-            cipherSuite: .value_MLS_u5f_256_u5f_XWING_u5f_CHACHA20POLY1305_u5f_SHA256_u5f_Ed25519,
-            participants: (initialMembers ?? []).map { memberDid in
-                BlueCatbirdChatDefs.ParticipantView(
-                    userDid: memberDid,
-                    role: .value_member,
-                    status: .value_active,
-                    invitationProvenance: nil,
-                    leafCount: 1
-                )
-            },
-            leaves: [],
-            metadataSnapshot: BlueCatbirdChatDefs.MetadataSnapshot(
-                coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
-                    conversationId: Bytes(data: Data(groupId.utf8)),
-                    generation: 1,
-                    groupId: Bytes(data: Data(hexEncoded: groupId) ?? Data(groupId.utf8)),
-                    epoch: 1,
-                    groupContextHash: Bytes(data: Data()),
-                    confirmationTag: Bytes(data: Data())
-                ),
-                originTransitionId: groupId,
-                metadataVersion: 1,
-                nonce: Bytes(data: Data()),
-                ciphertext: Bytes(data: Data()),
-                ciphertextSha256: Bytes(data: Data()),
-                ciphertextSize: 0,
-                avatarBinding: nil,
-                authorProof: BlueCatbirdChatDefs.MetadataAuthorProof(
-                    authorDid: initialMembers?.first ?? (try! DID(didString: "did:plc:placeholder")),
-                    authorDeviceId: "device-0",
-                    authorKeyId: "key-0",
-                    signaturePublicKey: Bytes(data: Data()),
-                    authGenerationAtOrigin: 1,
-                    originTransitionId: groupId,
-                    originSeq: 1,
-                    roleAtOrigin: "admin",
-                    deviceStatusAtOrigin: "active"
-                )
-            ),
-            snapshotSeq: 1
-        )
+        throw MLSAPIError.protocolUpgradeRequired(operation: "createConversation")
     }
 
     /// Complete a post-auto-reset conversation by populating its emptied MLS state.
@@ -940,7 +888,7 @@ public final class MLSAPIClient {
         logger.info(
             "🌐 [MLSAPIClient.reportRecoveryFailure] START - convoId: \(convoId.prefix(16))..., failureMode: \(failureMode ?? "nil")"
         )
-        return (true, false, false, nil)
+        throw MLSAPIError.protocolUpgradeRequired(operation: "reportRecoveryFailure")
     }
 
     public static func isGroupResetResponse(_ error: Error) -> Bool {
@@ -1640,7 +1588,7 @@ public enum MLSAPIError: Error, LocalizedError {
     case bootstrapTargetNotFound(detail: String?)
     case alreadyBootstrapped(detail: String?)
     case notMember(detail: String?)
-
+    case protocolUpgradeRequired(operation: String)
     public var errorDescription: String? {
         switch self {
         case .noAuthentication:
@@ -1693,6 +1641,8 @@ public enum MLSAPIError: Error, LocalizedError {
             return detail ?? "Post-reset conversation has already been bootstrapped by another caller"
         case let .notMember(detail):
             return detail ?? "Caller is not a member of this conversation"
+        case let .protocolUpgradeRequired(operation):
+            return "Operation '\(operation)' requires a protocol upgrade before execution"
         }
     }
 
@@ -1724,6 +1674,8 @@ public extension MLSAPIError {
         switch self {
         case .noAuthentication, .accountMismatch:
             return .reauthenticate
+        case .protocolUpgradeRequired:
+            return .rebind
         case .rateLimited, .serverUnavailable:
             return .retry
         case let .httpError(statusCode, message):
