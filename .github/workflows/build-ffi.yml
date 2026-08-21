@@ -160,6 +160,7 @@ jobs:
           else
             gh release create "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
               --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
               --title "CatbirdMLSFFI ${RELEASE_TAG}" \
               --notes "Prebuilt CatbirdMLSFFI.xcframework from catbird-mls ${CATBIRD_MLS_REF}." \
               --latest
