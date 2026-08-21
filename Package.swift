@@ -4,10 +4,22 @@
 import Foundation
 import PackageDescription
 
-let ffiTarget: Target = .binaryTarget(
-    name: "CatbirdMLSFFI",
-    path: "Sources/CatbirdMLSFFI.xcframework"
-)
+let packageDir = URL(fileURLWithPath: #file).deletingLastPathComponent().path
+let localFrameworkPath = "\(packageDir)/Sources/CatbirdMLSFFI.xcframework"
+let useLocalBinary = FileManager.default.fileExists(atPath: localFrameworkPath)
+    || FileManager.default.fileExists(atPath: "Sources/CatbirdMLSFFI.xcframework")
+    || ProcessInfo.processInfo.environment["CATBIRD_USE_LOCAL_FFI"] == "1"
+
+let ffiTarget: Target = useLocalBinary
+    ? .binaryTarget(
+        name: "CatbirdMLSFFI",
+        path: "Sources/CatbirdMLSFFI.xcframework"
+    )
+    : .binaryTarget(
+        name: "CatbirdMLSFFI",
+        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.4.3/CatbirdMLSFFI.xcframework.zip",
+        checksum: "a9490e656052177d6e24d338a59fc3b02b9e544ce2e3d5eb2cebab26a3b37be0"
+    )
 let package = Package(
     name: "CatbirdMLSCore",
     platforms: [
@@ -22,8 +34,18 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
-        .package(path: "../Petrel"),
-        .package(path: "../PetrelCatbird")
+        // Published Petrel, pinned by revision. A sibling `path:` dependency
+        // builds against whichever line the neighbouring checkout is on, which
+        // no manifest records and no other machine reproduces.
+        .package(
+            url: "https://github.com/joshlacal/Petrel.git",
+            revision: "2bfd941ae82ec5975032c2e6bdf1c0607dabd5d0"
+        ),
+        // Published PetrelCatbird, pinned by revision.
+        .package(
+            url: "https://github.com/joshlacal/PetrelCatbird.git",
+            revision: "4b02d4544414bb2b7686cb5e2bc9ba4cae9da473"
+        )
     ],
     targets: [
         .target(
