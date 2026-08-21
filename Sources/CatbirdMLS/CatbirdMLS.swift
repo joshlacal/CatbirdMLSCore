@@ -1549,6 +1549,8 @@ public protocol MlsContextProtocol: AnyObject {
      */
     func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data
 
+    func removeMembersWithAad(groupId: Data, memberIdentities: [Data], aad: Data?) throws -> RemoveMembersResult
+
     /**
      * Remove a proposal from the proposal queue
      */
@@ -1717,6 +1719,8 @@ public protocol MlsContextProtocol: AnyObject {
      * blob via `getGroupMetadataBlob`.
      */
     func updateGroupMetadataEncrypted(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> UpdateGroupMetadataResultFfi
+
+    func updateGroupMetadataEncryptedWithAad(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, aad: Data?) throws -> UpdateGroupMetadataResultFfi
 
     /**
      * 🔒 FIX #3: Validate GroupInfo format before upload
@@ -2918,6 +2922,15 @@ open class MlsContext:
         })
     }
 
+    open func removeMembersWithAad(groupId: Data, memberIdentities: [Data], aad: Data?) throws -> RemoveMembersResult {
+        return try FfiConverterTypeRemoveMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_remove_members_with_aad(self.uniffiClonePointer(),
+                                                                            FfiConverterData.lower(groupId),
+                                                                            FfiConverterSequenceData.lower(memberIdentities),
+                                                                            FfiConverterOptionData.lower(aad), $0)
+        })
+    }
+
     /**
      * Remove a proposal from the proposal queue
      */
@@ -3186,6 +3199,18 @@ open class MlsContext:
                                                                                     FfiConverterOptionString.lower(description),
                                                                                     FfiConverterOptionString.lower(avatarBlobLocator),
                                                                                     FfiConverterOptionString.lower(avatarContentType), $0)
+        })
+    }
+
+    open func updateGroupMetadataEncryptedWithAad(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, aad: Data?) throws -> UpdateGroupMetadataResultFfi {
+        return try FfiConverterTypeUpdateGroupMetadataResultFfi.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata_encrypted_with_aad(self.uniffiClonePointer(),
+                                                                                             FfiConverterData.lower(groupId),
+                                                                                             FfiConverterOptionString.lower(title),
+                                                                                             FfiConverterOptionString.lower(description),
+                                                                                             FfiConverterOptionString.lower(avatarBlobLocator),
+                                                                                             FfiConverterOptionString.lower(avatarContentType),
+                                                                                             FfiConverterOptionData.lower(aad), $0)
         })
     }
 
@@ -10904,6 +10929,75 @@ public func FfiConverterTypeProposeResult_lower(_ value: ProposeResult) -> RustB
     return FfiConverterTypeProposeResult.lower(value)
 }
 
+public struct RemoveMembersResult {
+    public var commitData: Data
+    public var nextConfirmationTag: Data?
+    public var nextGroupContextHash: Data?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(commitData: Data, nextConfirmationTag: Data?, nextGroupContextHash: Data?) {
+        self.commitData = commitData
+        self.nextConfirmationTag = nextConfirmationTag
+        self.nextGroupContextHash = nextGroupContextHash
+    }
+}
+
+extension RemoveMembersResult: Equatable, Hashable {
+    public static func == (lhs: RemoveMembersResult, rhs: RemoveMembersResult) -> Bool {
+        if lhs.commitData != rhs.commitData {
+            return false
+        }
+        if lhs.nextConfirmationTag != rhs.nextConfirmationTag {
+            return false
+        }
+        if lhs.nextGroupContextHash != rhs.nextGroupContextHash {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(commitData)
+        hasher.combine(nextConfirmationTag)
+        hasher.combine(nextGroupContextHash)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRemoveMembersResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RemoveMembersResult {
+        return
+            try RemoveMembersResult(
+                commitData: FfiConverterData.read(from: &buf),
+                nextConfirmationTag: FfiConverterOptionData.read(from: &buf),
+                nextGroupContextHash: FfiConverterOptionData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: RemoveMembersResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.commitData, into: &buf)
+        FfiConverterOptionData.write(value.nextConfirmationTag, into: &buf)
+        FfiConverterOptionData.write(value.nextGroupContextHash, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRemoveMembersResult_lift(_ buf: RustBuffer) throws -> RemoveMembersResult {
+    return try FfiConverterTypeRemoveMembersResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRemoveMembersResult_lower(_ value: RemoveMembersResult) -> RustBuffer {
+    return FfiConverterTypeRemoveMembersResult.lower(value)
+}
+
 public struct RemoveProposalInfo {
     public var removedIndex: UInt32
 
@@ -11415,6 +11509,8 @@ public struct UpdateGroupMetadataResultFfi {
      * UUIDv4 locator the caller uses with `putGroupMetadataBlob`.
      */
     public var metadataBlobLocator: String
+    public var nextConfirmationTag: Data?
+    public var nextGroupContextHash: Data?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
@@ -11433,13 +11529,15 @@ public struct UpdateGroupMetadataResultFfi {
             */ metadataVersion: UInt64,
         /* 
             * UUIDv4 locator the caller uses with `putGroupMetadataBlob`.
-            */ metadataBlobLocator: String
+            */ metadataBlobLocator: String, nextConfirmationTag: Data?, nextGroupContextHash: Data?
     ) {
         self.commitBytes = commitBytes
         self.metadataBlobCiphertext = metadataBlobCiphertext
         self.metadataReferenceJson = metadataReferenceJson
         self.metadataVersion = metadataVersion
         self.metadataBlobLocator = metadataBlobLocator
+        self.nextConfirmationTag = nextConfirmationTag
+        self.nextGroupContextHash = nextGroupContextHash
     }
 }
 
@@ -11460,6 +11558,12 @@ extension UpdateGroupMetadataResultFfi: Equatable, Hashable {
         if lhs.metadataBlobLocator != rhs.metadataBlobLocator {
             return false
         }
+        if lhs.nextConfirmationTag != rhs.nextConfirmationTag {
+            return false
+        }
+        if lhs.nextGroupContextHash != rhs.nextGroupContextHash {
+            return false
+        }
         return true
     }
 
@@ -11469,6 +11573,8 @@ extension UpdateGroupMetadataResultFfi: Equatable, Hashable {
         hasher.combine(metadataReferenceJson)
         hasher.combine(metadataVersion)
         hasher.combine(metadataBlobLocator)
+        hasher.combine(nextConfirmationTag)
+        hasher.combine(nextGroupContextHash)
     }
 }
 
@@ -11483,7 +11589,9 @@ public struct FfiConverterTypeUpdateGroupMetadataResultFfi: FfiConverterRustBuff
                 metadataBlobCiphertext: FfiConverterData.read(from: &buf),
                 metadataReferenceJson: FfiConverterData.read(from: &buf),
                 metadataVersion: FfiConverterUInt64.read(from: &buf),
-                metadataBlobLocator: FfiConverterString.read(from: &buf)
+                metadataBlobLocator: FfiConverterString.read(from: &buf),
+                nextConfirmationTag: FfiConverterOptionData.read(from: &buf),
+                nextGroupContextHash: FfiConverterOptionData.read(from: &buf)
             )
     }
 
@@ -11493,6 +11601,8 @@ public struct FfiConverterTypeUpdateGroupMetadataResultFfi: FfiConverterRustBuff
         FfiConverterData.write(value.metadataReferenceJson, into: &buf)
         FfiConverterUInt64.write(value.metadataVersion, into: &buf)
         FfiConverterString.write(value.metadataBlobLocator, into: &buf)
+        FfiConverterOptionData.write(value.nextConfirmationTag, into: &buf)
+        FfiConverterOptionData.write(value.nextGroupContextHash, into: &buf)
     }
 }
 
@@ -19151,6 +19261,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_remove_members() != 30219 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_mlscontext_remove_members_with_aad() != 52054 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_mlscontext_remove_proposal() != 3317 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19203,6 +19316,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata_encrypted() != 40933 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata_encrypted_with_aad() != 39520 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_validate_group_info_format() != 57471 {
