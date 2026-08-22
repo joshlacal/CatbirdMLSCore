@@ -406,6 +406,43 @@ public final class MLSAPIClient {
         return (data, httpResponse)
     }
 
+    /// Read the lexicon error code from a failed `getOwnDevices` probe.
+    ///
+    /// The generated client returns only `(status, Output?)` and discards the error
+    /// body, but device readiness depends on the code, not the status: mls-ds answers
+    /// 401 for `DeviceNotRegistered` (which must start enrollment) and also for
+    /// `DeviceRevoked` / `DeviceBindingMismatch` / `AccountSessionExpired` (which must
+    /// never silently mint a replacement device). `submitPreparedRequest` preserves
+    /// non-2xx bodies, so re-issue the probe through it and return the code.
+    ///
+    /// Runs only after a probe has already failed, so it costs nothing on the hot path
+    /// and leaves the generated decode of a successful probe untouched.
+    public func deviceProbeErrorCode(actorDeviceId: String) async -> String? {
+        guard let query = "actorDeviceId=\(actorDeviceId)".data(using: .utf8) else {
+            return nil
+        }
+        do {
+            let (data, response) = try await submitPreparedRequest(
+                method: "GET",
+                nsid: "blue.catbird.chat.getOwnDevices",
+                body: nil,
+                query: query
+            )
+            guard response.statusCode != 200 else { return nil }
+            guard
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let code = object["error"] as? String,
+                !code.isEmpty
+            else { return nil }
+            return code
+        } catch {
+            logger.warning(
+                "⚠️ Could not read device-probe error code: \(error.localizedDescription)"
+            )
+            return nil
+        }
+    }
+
     // MARK: - Authentication Validation
 
     /// Get the currently authenticated user's DID from the ATProto client

@@ -126,7 +126,15 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       let (responseCode, output) = try await self.apiClient.client.blue.catbird.chat
         .getOwnDevices(input: input)
       guard responseCode == 200, let output else {
-        throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to list devices")
+        // Carry the lexicon error code, not a generic string: the orchestrator's
+        // readiness probe distinguishes `DeviceNotRegistered` (enroll this device)
+        // from `DeviceRevoked` / `AccountSessionExpired` (never mint a replacement),
+        // and both arrive as HTTP 401.
+        let code = await self.apiClient.deviceProbeErrorCode(actorDeviceId: actorDeviceId)
+        throw MLSAPIError.httpError(
+          statusCode: responseCode,
+          message: code.map { "Failed to list devices: \($0)" } ?? "Failed to list devices"
+        )
       }
       return output
     }
