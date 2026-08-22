@@ -138,18 +138,25 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       }
       return output
     }
+    // Every field below is carried by the response and is load-bearing: the
+    // orchestrator's `server_matches_custody` check requires status == "active"
+    // plus a keyId/signaturePublicKey that agree with local custody. Leaving them
+    // nil made that check unsatisfiable, so the already-registered fast path could
+    // never be taken and every startup re-enrolled — which then collides with the
+    // globally unique device_keys.key_id, because durable signer reuse derives the
+    // same keyId, and surfaces as an unmapped HTTP 500.
     return output.items.map { item in
       FfiDeviceInfo(
         deviceId: item.device.deviceId,
         mlsDid: "",
         deviceUuid: item.device.deviceId,
         createdAt: Self.iso8601Formatter.string(from: item.device.createdAt.date),
-        keyId: nil,
-        signaturePublicKey: nil,
-        authGeneration: nil,
-        status: nil,
-        availablePackageCount: nil,
-        reservedPackageCount: nil
+        keyId: item.device.keyId,
+        signaturePublicKey: item.device.signaturePublicKey.data,
+        authGeneration: Int64(item.device.authGeneration),
+        status: item.device.status.rawValue,
+        availablePackageCount: UInt32(clamping: item.device.availablePackageCount),
+        reservedPackageCount: UInt32(clamping: item.device.reservedPackageCount)
       )
     }
   }
