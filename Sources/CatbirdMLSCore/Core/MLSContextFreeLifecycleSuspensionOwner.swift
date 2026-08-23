@@ -28,10 +28,10 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
   public func markSuspensionInProgress(reason: String) {
     Self.sharedState.withLock { state in
       state.activeOwnerId = self.id
+      Self.logger.info("🚨 [ContextFreeOwner] Suspension marked in progress for owner \(self.id, privacy: .public): \(reason, privacy: .public)")
+      MLSCoreContext.markSuspensionInProgress()
+      MLSClient.markSuspensionInProgress(reason: "ContextFreeOwner(\(self.id)): \(reason)")
     }
-    Self.logger.info("🚨 [ContextFreeOwner] Suspension marked in progress for owner \(self.id, privacy: .public): \(reason, privacy: .public)")
-    MLSCoreContext.markSuspensionInProgress()
-    MLSClient.markSuspensionInProgress(reason: "ContextFreeOwner(\(self.id)): \(reason)")
   }
 
   /// Synchronously emergency closes all contexts if this instance is the currently active owner.
@@ -65,10 +65,14 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
 
     let decision = Self.sharedState.withLock { state -> ResumeDecision in
       guard let activeOwnerId = state.activeOwnerId else {
+        MLSCoreContext.clearSuspensionFlag()
+        MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner unowned resume")
         return .unowned
       }
       if activeOwnerId == self.id {
         state.activeOwnerId = nil
+        MLSCoreContext.clearSuspensionFlag()
+        MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner(\(self.id)) resume")
         return .owned
       }
       return .foreignOwner(activeOwnerId)
@@ -76,15 +80,11 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
 
     switch decision {
     case .owned:
-      Self.logger.info("✅ [ContextFreeOwner] Clearing suspension flags for active owner \(self.id, privacy: .public)")
-      MLSCoreContext.clearSuspensionFlag()
-      MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner(\(self.id)) resume")
+      Self.logger.info("✅ [ContextFreeOwner] Cleared suspension flags for active owner \(self.id, privacy: .public)")
       return true
 
     case .unowned:
-      Self.logger.info("✅ [ContextFreeOwner] Clearing unowned suspension flags (no active owner)")
-      MLSCoreContext.clearSuspensionFlag()
-      MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner unowned resume")
+      Self.logger.info("✅ [ContextFreeOwner] Cleared unowned suspension flags (no active owner)")
       return true
 
     case .foreignOwner(let activeOwnerId):
