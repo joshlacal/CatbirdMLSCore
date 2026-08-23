@@ -22,6 +22,7 @@ extension MLSConversationManager {
 
   internal nonisolated static func resetSuspensionStateForTesting() {
     _isSuspending.withLock { $0 = false }
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
   }
 
   /// Suspend all MLS operations when app enters background
@@ -49,8 +50,9 @@ extension MLSConversationManager {
     // Set flag to reject new operations
     isSuspending = true
     isSyncPaused = true
-    MLSCoreContext.markSuspensionInProgress()
-    MLSClient.markSuspensionInProgress(reason: "MLSConversationManager.suspendMLSOperations")
+    MLSContextFreeLifecycleSuspensionOwner.recordManagerSuspension(
+      reason: "MLSConversationManager.suspendMLSOperations"
+    )
     let rustPrepareSucceeded: Bool
     if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
       do {
@@ -192,8 +194,9 @@ extension MLSConversationManager {
     // Clear suspension flags only after the rustFull runtime is resumable again.
     isSuspending = false
     isSyncPaused = false
-    MLSCoreContext.clearSuspensionFlag()
-    MLSClient.clearSuspensionFlag(reason: "MLSConversationManager.resumeMLSOperations")
+    MLSContextFreeLifecycleSuspensionOwner.recordManagerResume(
+      reason: "MLSConversationManager.resumeMLSOperations"
+    )
     await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
     schedulePostReloadSyncIfNeeded()
 

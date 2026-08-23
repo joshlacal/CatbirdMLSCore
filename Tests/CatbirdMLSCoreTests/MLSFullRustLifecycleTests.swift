@@ -456,6 +456,66 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
   }
+  func testContextFreeResumeRefusesToClearGatesWhenManagerHoldsThem() async throws {
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+
+    await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must be set by manager")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must be set by manager")
+
+    let contextFreeOwner = MLSContextFreeLifecycleSuspensionOwner()
+    let resumed = await contextFreeOwner.resumeSuspensionIfOwnedAndContextFree()
+
+    XCTAssertFalse(resumed, "context-free resume must refuse to clear gates held by active manager")
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must remain set")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must remain set")
+
+    await manager.resumeMLSOperations()
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must be cleared by manager resume")
+    XCTAssertFalse(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must be cleared by manager resume")
+  }
+
+  func testContextFreeResumeDoesNotClearGatesIfManagerSuccessorInstallsConcurrently() async throws {
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    let priorOwner = MLSContextFreeLifecycleSuspensionOwner()
+
+    // 1. Prior owner marks suspension, then active owner is reset/nil'd (unowned state with flags set).
+    priorOwner.markSuspensionInProgress(reason: "prior owner")
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    MLSCoreContext.markSuspensionInProgress()
+    MLSClient.markSuspensionInProgress(reason: "unowned test")
+
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    // 2. Set synchronization seam: when priorOwner resolves its resume decision,
+    // manager immediately suspends and installs manager-owned gates.
+    MLSContextFreeLifecycleSuspensionOwner.setPostDecisionHookForTesting {
+      DispatchQueue.main.sync {
+        _ = manager.suspendMLSOperations()
+      }
+    }
+
+    // 3. Prior owner resumes (which saw unowned state).
+    let priorResumed = await priorOwner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(priorResumed, "prior unowned resume returned true")
+
+    // Manager's suspension flags must remain intact and must NOT have been clobbered by prior resume.
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must remain set for manager successor")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must remain set for manager successor")
+
+    // 4. Manager can now clear its own suspension.
+    await manager.resumeMLSOperations()
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+  }
 
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode

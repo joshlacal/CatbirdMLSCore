@@ -13,8 +13,13 @@ import OSLog
 public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
   public let id: UUID
 
+  private enum ActiveSuspensionOwner: Equatable, Sendable {
+    case contextFree(UUID)
+    case manager
+  }
+
   private struct SharedState: Sendable {
-    var activeOwnerId: UUID?
+    var activeOwner: ActiveSuspensionOwner?
     #if DEBUG
     var onPostDecisionHookForTesting: (@Sendable () -> Void)?
     #endif
@@ -30,10 +35,34 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
   /// Mark suspension in progress for this owner, setting both client and core suspension flags.
   public func markSuspensionInProgress(reason: String) {
     Self.sharedState.withLock { state in
-      state.activeOwnerId = self.id
+      state.activeOwner = .contextFree(self.id)
       Self.logger.info("🚨 [ContextFreeOwner] Suspension marked in progress for owner \(self.id, privacy: .public): \(reason, privacy: .public)")
       MLSCoreContext.markSuspensionInProgress()
       MLSClient.markSuspensionInProgress(reason: "ContextFreeOwner(\(self.id)): \(reason)")
+    }
+  }
+
+  /// Records a manager-owned suspension under the shared state lock,
+  /// updating the active owner to `.manager` and asserting both global gates.
+  public static func recordManagerSuspension(reason: String) {
+    sharedState.withLock { state in
+      state.activeOwner = .manager
+      logger.info("🚨 [ContextFreeOwner] Manager suspension marked in progress: \(reason, privacy: .public)")
+      MLSCoreContext.markSuspensionInProgress()
+      MLSClient.markSuspensionInProgress(reason: reason)
+    }
+  }
+
+  /// Records a manager-owned resume under the shared state lock,
+  /// clearing the active owner if it was manager-owned and releasing both global gates.
+  public static func recordManagerResume(reason: String) {
+    sharedState.withLock { state in
+      if state.activeOwner == .manager {
+        state.activeOwner = nil
+      }
+      logger.info("✅ [ContextFreeOwner] Manager suspension resumed: \(reason, privacy: .public)")
+      MLSCoreContext.clearSuspensionFlag()
+      MLSClient.clearSuspensionFlag(reason: reason)
     }
   }
 
@@ -41,7 +70,7 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
   @discardableResult
   public func emergencyCloseAllContextsIfOwned(reason: String) -> Bool {
     let isOwner = Self.sharedState.withLock { state -> Bool in
-      state.activeOwnerId == self.id
+      state.activeOwner == .contextFree(self.id)
     }
     guard isOwner else {
       Self.logger.warning("⚠️ [ContextFreeOwner] emergencyClose skipped: owner \(self.id, privacy: .public) is not active")
@@ -64,6 +93,7 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
       case owned
       case unowned
       case foreignOwner(UUID)
+      case managerOwned
     }
 
     #if DEBUG
@@ -75,18 +105,24 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
       testHook = state.onPostDecisionHookForTesting
       state.onPostDecisionHookForTesting = nil
       #endif
-      guard let activeOwnerId = state.activeOwnerId else {
+      guard let activeOwner = state.activeOwner else {
         MLSCoreContext.clearSuspensionFlag()
         MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner unowned resume")
         return .unowned
       }
-      if activeOwnerId == self.id {
-        state.activeOwnerId = nil
-        MLSCoreContext.clearSuspensionFlag()
-        MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner(\(self.id)) resume")
-        return .owned
+      switch activeOwner {
+      case .contextFree(let ownerId):
+        if ownerId == self.id {
+          state.activeOwner = nil
+          MLSCoreContext.clearSuspensionFlag()
+          MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner(\(self.id)) resume")
+          return .owned
+        } else {
+          return .foreignOwner(ownerId)
+        }
+      case .manager:
+        return .managerOwned
       }
-      return .foreignOwner(activeOwnerId)
     }
 
     #if DEBUG
@@ -105,12 +141,16 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
     case .foreignOwner(let activeOwnerId):
       Self.logger.warning("⚠️ [ContextFreeOwner] resume skipped: owner \(self.id, privacy: .public) is not active (held by \(activeOwnerId, privacy: .public))")
       return false
+
+    case .managerOwned:
+      Self.logger.warning("⚠️ [ContextFreeOwner] resume skipped: owner \(self.id, privacy: .public) is not active (held by manager)")
+      return false
     }
   }
 
   internal static func resetForTesting() {
     sharedState.withLock { state in
-      state.activeOwnerId = nil
+      state.activeOwner = nil
       #if DEBUG
       state.onPostDecisionHookForTesting = nil
       #endif
