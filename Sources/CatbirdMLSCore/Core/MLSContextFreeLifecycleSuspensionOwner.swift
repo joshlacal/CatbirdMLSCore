@@ -15,6 +15,9 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
 
   private struct SharedState: Sendable {
     var activeOwnerId: UUID?
+    #if DEBUG
+    var onPostDecisionHookForTesting: (@Sendable () -> Void)?
+    #endif
   }
 
   private static let sharedState = Mutex(SharedState())
@@ -63,7 +66,15 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
       case foreignOwner(UUID)
     }
 
+    #if DEBUG
+    var testHook: (@Sendable () -> Void)?
+    #endif
+
     let decision = Self.sharedState.withLock { state -> ResumeDecision in
+      #if DEBUG
+      testHook = state.onPostDecisionHookForTesting
+      state.onPostDecisionHookForTesting = nil
+      #endif
       guard let activeOwnerId = state.activeOwnerId else {
         MLSCoreContext.clearSuspensionFlag()
         MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner unowned resume")
@@ -77,6 +88,10 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
       }
       return .foreignOwner(activeOwnerId)
     }
+
+    #if DEBUG
+    testHook?()
+    #endif
 
     switch decision {
     case .owned:
@@ -96,6 +111,17 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
   internal static func resetForTesting() {
     sharedState.withLock { state in
       state.activeOwnerId = nil
+      #if DEBUG
+      state.onPostDecisionHookForTesting = nil
+      #endif
     }
   }
+
+  #if DEBUG
+  internal static func setPostDecisionHookForTesting(_ hook: (@Sendable () -> Void)?) {
+    sharedState.withLock { state in
+      state.onPostDecisionHookForTesting = hook
+    }
+  }
+  #endif
 }

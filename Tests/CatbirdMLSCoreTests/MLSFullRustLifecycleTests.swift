@@ -424,18 +424,33 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let priorOwner = MLSContextFreeLifecycleSuspensionOwner()
     let successorOwner = MLSContextFreeLifecycleSuspensionOwner()
 
-    // Simulate: priorOwner marked suspension, then owner was reset / dropped (unowned state).
+    // 1. Prior owner marks suspension, then active owner is reset/nil'd (unowned state with flags set).
     priorOwner.markSuspensionInProgress(reason: "prior owner")
     MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    MLSCoreContext.markSuspensionInProgress()
+    MLSClient.markSuspensionInProgress(reason: "unowned test")
 
-    // If successor marks suspension, priorOwner (which no longer matches) cannot clear successor's gates
-    successorOwner.markSuspensionInProgress(reason: "successor owner")
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    // 2. Set synchronization seam: when priorOwner resolves its resume decision,
+    // successorOwner immediately installs its ownership and sets suspension flags.
+    MLSContextFreeLifecycleSuspensionOwner.setPostDecisionHookForTesting {
+      successorOwner.markSuspensionInProgress(reason: "successor owner during unowned resume")
+    }
+
+    // 3. Prior owner resumes (which saw unowned state).
     let priorResumed = await priorOwner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(priorResumed, "prior unowned resume returned true")
 
-    XCTAssertFalse(priorResumed, "stale prior owner cannot clear successor's suspension")
+    // In the atomic implementation, flags were cleared inside the lock BEFORE the hook ran,
+    // so successorOwner's markSuspensionInProgress ran AFTER flag clearing, keeping flags true.
+    // In a non-atomic implementation where decision and clears are split, the hook would run
+    // before flag clearing, causing the subsequent clear to clobber successor's flags.
     XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must remain set for successor")
     XCTAssertTrue(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must remain set for successor")
 
+    // 4. Successor owner can now clear its own suspension.
     let successorResumed = await successorOwner.resumeSuspensionIfOwnedAndContextFree()
     XCTAssertTrue(successorResumed, "successor owner clears its own suspension")
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
