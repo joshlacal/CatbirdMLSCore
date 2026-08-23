@@ -53,24 +53,49 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
     return true
   }
 
-  /// Resumes suspension if this instance is still the active context-free owner.
+  /// Resumes suspension if this instance is the active owner or if the suspension has no owner.
+  /// If a different live owner holds the suspension, resume is refused.
   @discardableResult
   public func resumeSuspensionIfOwnedAndContextFree() async -> Bool {
-    let isOwner = Self.sharedState.withLock { state -> Bool in
-      if state.activeOwnerId == self.id {
-        state.activeOwnerId = nil
-        return true
-      }
-      return false
-    }
-    guard isOwner else {
-      Self.logger.debug("🔄 [ContextFreeOwner] resume skipped: owner \(self.id, privacy: .public) is not active")
-      return false
+    enum ResumeDecision {
+      case owned
+      case unowned
+      case foreignOwner(UUID)
     }
 
-    Self.logger.info("✅ [ContextFreeOwner] Clearing suspension flags for active owner \(self.id, privacy: .public)")
-    MLSCoreContext.clearSuspensionFlag()
-    MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner(\(self.id)) resume")
-    return true
+    let decision = Self.sharedState.withLock { state -> ResumeDecision in
+      guard let activeOwnerId = state.activeOwnerId else {
+        return .unowned
+      }
+      if activeOwnerId == self.id {
+        state.activeOwnerId = nil
+        return .owned
+      }
+      return .foreignOwner(activeOwnerId)
+    }
+
+    switch decision {
+    case .owned:
+      Self.logger.info("✅ [ContextFreeOwner] Clearing suspension flags for active owner \(self.id, privacy: .public)")
+      MLSCoreContext.clearSuspensionFlag()
+      MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner(\(self.id)) resume")
+      return true
+
+    case .unowned:
+      Self.logger.info("✅ [ContextFreeOwner] Clearing unowned suspension flags (no active owner)")
+      MLSCoreContext.clearSuspensionFlag()
+      MLSClient.clearSuspensionFlag(reason: "ContextFreeOwner unowned resume")
+      return true
+
+    case .foreignOwner(let activeOwnerId):
+      Self.logger.warning("⚠️ [ContextFreeOwner] resume skipped: owner \(self.id, privacy: .public) is not active (held by \(activeOwnerId, privacy: .public))")
+      return false
+    }
+  }
+
+  internal static func resetForTesting() {
+    sharedState.withLock { state in
+      state.activeOwnerId = nil
+    }
   }
 }

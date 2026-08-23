@@ -8,7 +8,9 @@ import Petrel
 final class MLSFullRustLifecycleTests: XCTestCase {
   override func tearDownWithError() throws {
     MLSConversationManager.resetSuspensionStateForTesting()
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
     MLSClient.clearSuspensionFlag(reason: "MLSFullRustLifecycleTests.tearDown")
+    MLSCoreContext.clearSuspensionFlag()
     try super.tearDownWithError()
   }
 
@@ -363,6 +365,58 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       FileManager.default.fileExists(atPath: appContentPath.path),
       "creating the Rust context should not synthesize a Swift projection database"
     )
+  }
+
+  func testContextFreeResumeClearsGatesWhenNoActiveOwnerHoldsThem() async {
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    MLSCoreContext.markSuspensionInProgress()
+    MLSClient.markSuspensionInProgress(reason: "unowned test")
+
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    let resumed = await owner.resumeSuspensionIfOwnedAndContextFree()
+
+    XCTAssertTrue(resumed, "unowned suspension must be cleared by context-free resume")
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must be cleared")
+    XCTAssertFalse(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must be cleared")
+  }
+
+  func testContextFreeResumeRefusesToClearGatesWhenDifferentLiveOwnerHoldsThem() async {
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    let activeOwner = MLSContextFreeLifecycleSuspensionOwner()
+    activeOwner.markSuspensionInProgress(reason: "active owner test")
+
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    let foreignOwner = MLSContextFreeLifecycleSuspensionOwner()
+    let foreignResumed = await foreignOwner.resumeSuspensionIfOwnedAndContextFree()
+
+    XCTAssertFalse(foreignResumed, "foreign owner must not be allowed to clear active owner's suspension")
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must remain set")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must remain set")
+
+    let activeResumed = await activeOwner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(activeResumed, "active owner must be allowed to clear its own suspension")
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress, "MLSCoreContext suspension flag must be cleared")
+    XCTAssertFalse(MLSClient.isSuspensionInProgress, "MLSClient suspension flag must be cleared")
+  }
+
+  func testContextFreeResumeClearsGatesWhenOwnedByMatchingInstance() async {
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    let owner = MLSContextFreeLifecycleSuspensionOwner()
+    owner.markSuspensionInProgress(reason: "owned test")
+
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    let resumed = await owner.resumeSuspensionIfOwnedAndContextFree()
+
+    XCTAssertTrue(resumed, "matching owner must clear suspension flags")
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
   }
 
   private func makeManager(
