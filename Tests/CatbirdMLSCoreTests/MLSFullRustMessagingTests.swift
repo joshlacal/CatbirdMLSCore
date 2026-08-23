@@ -7,6 +7,8 @@ import PetrelCatbird
 @testable import CatbirdMLSCore
 
 final class MLSFullRustMessagingTests: XCTestCase {
+  private let stableConversationID = "550e8400-e29b-41d4-a716-446655440000"
+  private let rawGroupID = "deadbeef"
   private var tempStorageDir: URL!
 
   override func setUpWithError() throws {
@@ -28,7 +30,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
 
   func testRustFullSendUsesResultBridgeAndSkipsLegacySendPath() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
-    try await seedConversation(conversationID: "convo-send", on: manager)
+    try await seedConversation(conversationID: stableConversationID, on: manager)
 
     let bridge = RecordingMessagingBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
@@ -38,27 +40,27 @@ final class MLSFullRustMessagingTests: XCTestCase {
     )
 
     let result = try await manager.sendMessage(
-      convoId: "convo-send",
+      convoId: stableConversationID,
       plaintext: "hello"
     )
 
     XCTAssertEqual(bridge.sendPayloadResultCallCount, 1)
     XCTAssertEqual(bridge.sendPayloadJsonCallCount, 0)
     XCTAssertEqual(result.messageId, "msg-1")
-    // The send boundary must hand Rust the hex MLS group id, not the UUID
-    // conversation id — Rust hex-decodes the id it receives.
-    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, "deadbeef")
+    // Public orchestrator mutations use the stable conversation identity.
+    // Rust resolves the current MLS group internally.
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, stableConversationID)
   }
 
   func testRustFullSendAppliesReturnedEngineEvents() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
-    try await seedConversation(conversationID: "convo-send", on: manager)
-    seedGroupState(conversationID: "convo-send", groupID: "deadbeef", on: manager)
+    try await seedConversation(conversationID: stableConversationID, on: manager)
+    seedGroupState(conversationID: stableConversationID, groupID: rawGroupID, on: manager)
 
     let bridge = RecordingMessagingBridge()
     bridge.sendResult = FfiSendResult(
       message: bridge.sendResult.message,
-      events: rustResetEvents(conversationID: "convo-send")
+      events: rustResetEvents(conversationID: stableConversationID)
     )
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
@@ -67,13 +69,97 @@ final class MLSFullRustMessagingTests: XCTestCase {
     )
 
     _ = try await manager.sendMessage(
-      convoId: "convo-send",
+      convoId: stableConversationID,
       plaintext: "hello"
     )
 
     XCTAssertEqual(bridge.sendPayloadResultCallCount, 1)
-    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, "deadbeef")
-    XCTAssertNil(manager.groupStates["deadbeef"])
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, stableConversationID)
+    XCTAssertNil(manager.groupStates[rawGroupID])
+  }
+
+  func testRustFullRawAliasSendUsesCanonicalConversationID() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedCanonicalAndRawAlias(on: manager)
+
+    let bridge = RecordingMessagingBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.sendMessage(
+      convoId: rawGroupID,
+      plaintext: "hello",
+      embed: .link(MLSLinkEmbed(url: "https://example.com/article"))
+    )
+
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, stableConversationID)
+  }
+
+  func testRustFullRawAliasReactionUsesCanonicalConversationID() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedCanonicalAndRawAlias(on: manager)
+
+    let bridge = RecordingMessagingBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.sendEncryptedReaction(
+      convoId: rawGroupID,
+      messageId: "message-1",
+      emoji: "+1",
+      action: .add
+    )
+
+    XCTAssertEqual(bridge.lastSendReactionConversationId, stableConversationID)
+  }
+
+  func testRustFullRawAliasEditAndUnsendUseCanonicalConversationID() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedCanonicalAndRawAlias(on: manager)
+    try await seedOwnMessage(messageID: "message-1", conversationID: rawGroupID, on: manager)
+
+    let bridge = RecordingMessagingBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.editMessage(
+      convoId: rawGroupID,
+      messageId: "message-1",
+      newText: "edited"
+    )
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, stableConversationID)
+
+    _ = try await manager.unsendMessage(convoId: rawGroupID, messageId: "message-1")
+    XCTAssertEqual(bridge.lastSendPayloadResultConversationId, stableConversationID)
+  }
+
+  func testRustFullRejectsUnrelatedNonCanonicalConversationIDBeforeMutation() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedCanonicalAndRawAlias(on: manager)
+
+    let bridge = RecordingMessagingBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    do {
+      _ = try await manager.sendMessage(convoId: "deadbeef00", plaintext: "must fail")
+      XCTFail("A lookalike raw id must fail closed before Rust mutation")
+    } catch {
+      XCTAssertTrue(error is MLSStorageError)
+    }
+    XCTAssertEqual(bridge.sendPayloadResultCallCount, 0)
   }
 
   func testRustFullIncomingUsesResultBridgeBeforeLegacyProcessing() async throws {
@@ -343,6 +429,52 @@ final class MLSFullRustMessagingTests: XCTestCase {
     )
   }
 
+  private func seedCanonicalAndRawAlias(on manager: MLSConversationManager) async throws {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let stable = MLSConversationModel(
+      conversationID: stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: rawGroupID)!,
+      epoch: 3,
+      createdAt: now,
+      updatedAt: now
+    )
+    let raw = MLSConversationModel(
+      conversationID: rawGroupID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: rawGroupID)!,
+      epoch: 3,
+      createdAt: now,
+      updatedAt: now
+    )
+    try await manager.database.write { db in
+      try stable.insert(db)
+      try raw.insert(db)
+    }
+    manager.conversations[stableConversationID] = stable.asConversationState()
+    manager.conversations[rawGroupID] = raw.asConversationState()
+  }
+
+  private func seedOwnMessage(
+    messageID: String,
+    conversationID: String,
+    on manager: MLSConversationManager
+  ) async throws {
+    let message = MLSMessageModel(
+      messageID: messageID,
+      currentUserDID: "did:plc:testuser",
+      conversationID: conversationID,
+      senderID: "did:plc:testuser",
+      epoch: 3,
+      sequenceNumber: 1,
+      isDelivered: true,
+      isSent: true
+    )
+    try await manager.database.write { db in
+      try message.insert(db)
+    }
+  }
+
   private func rustResetEvents(conversationID: String) -> [FfiEngineEvent] {
     [
       FfiEngineEvent(
@@ -410,6 +542,7 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
   private(set) var lastProcessServerEventJson: String?
   private(set) var lastSendPayloadResultConversationId: String?
   private(set) var lastSendPayloadConversationId: String?
+  private(set) var lastSendReactionConversationId: String?
 
   init() {
     super.init(noPointer: .init())
@@ -438,6 +571,16 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
       throw UnexpectedLegacyBridgeCall.sendPayloadJson
     }
     return sendPayloadJsonResult
+  }
+
+  override func sendReaction(
+    conversationId: String,
+    messageId: String,
+    emoji: String,
+    action: String
+  ) throws -> FfiMessage {
+    lastSendReactionConversationId = conversationId
+    return sendResult.message
   }
 
   override func processIncoming(

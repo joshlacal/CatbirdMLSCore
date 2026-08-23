@@ -18,6 +18,13 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
   public let messageID: String
   public let currentUserDID: String
   public let conversationID: String
+  /// Durable source identity used for field-level encryption and HMAC/AAD.
+  ///
+  /// Alias healing may change `conversationID` (the routing/foreign-key
+  /// identity) from the historical raw group id to the stable conversation
+  /// UUID.  Ciphertext and HMACs are still bound to the identity that was
+  /// used when the row was written, so that identity must survive the move.
+  public let cryptoConversationID: String?
   public let senderID: String
   /// Legacy column. After the v31 field-encryption migration, new rows write
   /// encrypted data into `payloadEncrypted` instead. Preserved only for any
@@ -88,7 +95,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       guard
         let plain = try? MLSFieldEncryption.decrypt(
           context: context,
-          conversationID: conversationID,
+          conversationID: cryptoConversationID ?? conversationID,
           wire: encrypted
         )
       else { return nil }
@@ -123,6 +130,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     messageID: String,
     currentUserDID: String,
     conversationID: String,
+    cryptoConversationID: String? = nil,
     senderID: String,
     payloadJSON: Data? = nil,
     wireFormat: Data? = nil,
@@ -155,6 +163,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.messageID = messageID
     self.currentUserDID = currentUserDID
     self.conversationID = conversationID
+    self.cryptoConversationID = cryptoConversationID
     self.senderID = senderID
     self.payloadJSON = payloadJSON
     self.wireFormat = wireFormat
@@ -198,6 +207,8 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
     self.messageID = try container.decode(String.self, forKey: .messageID)
     self.currentUserDID = try container.decode(String.self, forKey: .currentUserDID)
     self.conversationID = try container.decode(String.self, forKey: .conversationID)
+    self.cryptoConversationID = try container.decodeIfPresent(
+      String.self, forKey: .cryptoConversationID)
     self.senderID = try container.decode(String.self, forKey: .senderID)
     self.payloadJSON = try container.decodeIfPresent(Data.self, forKey: .payloadJSON)
     self.wireFormat = try container.decodeIfPresent(Data.self, forKey: .wireFormat)
@@ -238,6 +249,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
+      cryptoConversationID: cryptoConversationID,
       senderID: senderID,
       payloadJSON: payloadData,
       wireFormat: wireFormat,
@@ -275,6 +287,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
+      cryptoConversationID: cryptoConversationID,
       senderID: senderID,
       payloadJSON: payloadJSON,
       wireFormat: wireFormat,
@@ -312,6 +325,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
+      cryptoConversationID: cryptoConversationID,
       senderID: senderID,
       payloadJSON: payloadJSON,
       wireFormat: wireFormat,
@@ -349,6 +363,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
+      cryptoConversationID: cryptoConversationID,
       senderID: senderID,
       payloadJSON: payloadJSON,
       wireFormat: wireFormat,
@@ -386,6 +401,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
+      cryptoConversationID: cryptoConversationID,
       senderID: senderID,
       payloadJSON: nil,  // Clear payload
       wireFormat: wireFormat,
@@ -425,6 +441,7 @@ public struct MLSMessageModel: Codable, Sendable, Hashable, Identifiable {
       messageID: messageID,
       currentUserDID: currentUserDID,
       conversationID: conversationID,
+      cryptoConversationID: cryptoConversationID,
       senderID: senderID,
       payloadJSON: payloadJSON,
       wireFormat: wireFormat,
@@ -465,6 +482,7 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     public static let messageID = Column("messageID")
     public static let currentUserDID = Column("currentUserDID")
     public static let conversationID = Column("conversationID")
+    public static let cryptoConversationID = Column("cryptoConversationID")
     public static let senderID = Column("senderID")
     public static let payloadJSON = Column("payloadJSON")
     public static let wireFormat = Column("wireFormat")
@@ -500,6 +518,9 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     messageID = row["messageID"] ?? ""
     currentUserDID = row["currentUserDID"] ?? ""
     conversationID = row["conversationID"] ?? ""
+    cryptoConversationID = row.columnNames.contains("cryptoConversationID")
+      ? row["cryptoConversationID"]
+      : nil
     senderID = row["senderID"] ?? ""
     
     // Handle payloadJSON with fallback from old plaintext + embedData columns
@@ -564,6 +585,12 @@ extension MLSMessageModel: FetchableRecord, PersistableRecord {
     container["messageID"] = messageID
     container["currentUserDID"] = currentUserDID
     container["conversationID"] = conversationID
+    // Some focused legacy test schemas predate the field-encryption binding
+    // column.  Omitting a nil value keeps those schemas readable while the
+    // production v35 schema persists non-nil bindings during alias healing.
+    if let cryptoConversationID {
+      container["cryptoConversationID"] = cryptoConversationID
+    }
     container["senderID"] = senderID
     container["payloadJSON"] = payloadJSON
     container["wireFormat"] = wireFormat

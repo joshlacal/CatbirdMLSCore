@@ -706,7 +706,8 @@ extension MLSConversationManager {
       conversationId: convoId,
       senderDID: userDid,
       epoch: ffiEpoch,
-      contentKey: "history_boundary.new_member"
+      contentKey: "history_boundary.new_member",
+      groupIDHex: groupId
     )
 
     // Notify observers
@@ -731,7 +732,8 @@ extension MLSConversationManager {
     conversationId: String,
     senderDID: String,
     epoch: UInt64,
-    contentKey: String
+    contentKey: String,
+    groupIDHex: String? = nil
   ) async {
     let markerID = "hb-\(conversationId)-\(epoch)"
     let normalizedDID = MLSStorageHelpers.normalizeDID(senderDID)
@@ -757,44 +759,52 @@ extension MLSConversationManager {
       return
     }
 
-    let encryptedWire: Data
-    do {
-      encryptedWire = try MLSFieldEncryption.encrypt(
-        context: mlsContext,
-        conversationID: conversationId,
-        plaintext: payloadData
-      )
-    } catch {
-      logger.warning("⚠️ Failed to encrypt history boundary payload: \(error.localizedDescription)")
-      return
-    }
-
     do {
       try await database.write { db in
-        // Ensure conversation exists to satisfy the foreign key constraint
-        let conversationExists = try MLSConversationModel
-          .filter(MLSConversationModel.Columns.conversationID == conversationId)
-          .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
-          .fetchCount(db) > 0
-
-        if !conversationExists {
-          guard let groupIdData = Data(hexEncoded: conversationId) else {
-            throw MLSConversationError.operationFailed("Invalid group ID format for history boundary")
+        // Resolve the stable route and perform any exact raw-alias adoption
+        // before encrypting or inserting the marker.  A marker is an ordinary
+        // history row, so it must follow the same parent-before-child and
+        // source-crypto-binding rules as decrypted messages.
+        let routeID: String
+        if try db.tableExists(MLSConversationModel.databaseTableName) {
+          let resolvedGroupID: String
+          if let groupIDHex {
+            resolvedGroupID = groupIDHex
+          } else if let existing = try MLSConversationModel
+            .filter(MLSConversationModel.Columns.conversationID == conversationId)
+            .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
+            .fetchOne(db)
+          {
+            resolvedGroupID = existing.groupID.hexEncodedString()
+          } else {
+            resolvedGroupID = conversationId
           }
-          let newConvo = MLSConversationModel(
+          routeID = try MLSStorageHelpers.ensureConversationExistsStrictSync(
+            in: db,
+            userDID: normalizedDID,
             conversationID: conversationId,
-            currentUserDID: normalizedDID,
-            groupID: groupIdData,
-            epoch: Int64(epoch)
+            groupID: resolvedGroupID,
+            isPlaceholder: true
           )
-          try newConvo.insert(db)
-          self.logger.info("✅ Created placeholder conversation record to prevent FK violation for boundary marker")
+        } else {
+          routeID = conversationId
         }
+
+        let cryptoConversationID = try MLSStorageHelpers.preferredCryptoConversationIDSync(
+          conversationID: routeID,
+          currentUserDID: normalizedDID,
+          db: db
+        )
+        let encryptedWire = try MLSFieldEncryption.encrypt(
+          context: mlsContext,
+          conversationID: cryptoConversationID,
+          plaintext: payloadData
+        )
 
         // Walk the chain tail synchronously so this marker's HMAC is sealed
         // against the most recent row in the conversation.
         let prevHMAC: Data? = try MLSMessageModel
-          .filter(MLSMessageModel.Columns.conversationID == conversationId)
+          .filter(MLSMessageModel.Columns.conversationID == routeID)
           .filter(MLSMessageModel.Columns.currentUserDID == normalizedDID)
           .order(
             MLSMessageModel.Columns.sequenceNumber.desc,
@@ -806,7 +816,7 @@ extension MLSConversationManager {
 
         let entryHMAC = try MLSFieldEncryption.computeHMAC(
           context: mlsContext,
-          conversationID: conversationId,
+          conversationID: cryptoConversationID,
           previousHMAC: prevHMAC,
           messageID: markerID,
           payloadWire: encryptedWire
@@ -815,7 +825,8 @@ extension MLSConversationManager {
         let model = MLSMessageModel(
           messageID: markerID,
           currentUserDID: normalizedDID,
-          conversationID: conversationId,
+          conversationID: routeID,
+          cryptoConversationID: cryptoConversationID == routeID ? nil : cryptoConversationID,
           senderID: normalizedDID,
           payloadJSON: nil,
           wireFormat: nil,
@@ -1100,27 +1111,131 @@ extension MLSConversationManager {
   ) async throws {
     let convoId = convo.coordinates.conversationId.description
     let groupIdHex = convo.coordinates.groupId.data.hexEncodedString()
-    conversations[convoId] = convo
-    conversationStates[convoId] = .active
+    var effectiveConversationID = convoId
+
+    if let userDid = userDid {
+      let normalizedUserDID = MLSStorageHelpers.normalizeDID(userDid)
+      effectiveConversationID = try await storage.ensureConversationExists(
+        userDID: userDid,
+        conversationID: convoId,
+        groupID: groupIdHex,
+        database: database
+      )
+      let persistedConversationID = effectiveConversationID
+      try await database.write { db in
+        let existing = try MLSConversationModel
+          .filter(MLSConversationModel.Columns.conversationID == persistedConversationID)
+          .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db)
+        let model = MLSConversationModel.mergedRustSnapshot(
+          state: convo,
+          currentUserDID: normalizedUserDID,
+          existing: existing
+        )
+        // The Rust id is normally already canonical.  If a validated alias
+        // migration redirected it, persist the merged projection under that
+        // effective key instead of recreating the raw row.
+        let persistedModel = model.conversationID == persistedConversationID
+          ? model
+          : MLSConversationModel(
+              conversationID: persistedConversationID,
+              currentUserDID: model.currentUserDID,
+              groupID: model.groupID,
+              epoch: model.epoch,
+              joinMethod: model.joinMethod,
+              joinEpoch: model.joinEpoch,
+              title: model.title,
+              description: model.description,
+              avatarURL: model.avatarURL,
+              avatarImageData: model.avatarImageData,
+              createdAt: model.createdAt,
+              updatedAt: model.updatedAt,
+              lastMessageAt: model.lastMessageAt,
+              lastMembershipChangeAt: model.lastMembershipChangeAt,
+              unacknowledgedMemberChanges: model.unacknowledgedMemberChanges,
+              isActive: model.isActive,
+              needsRejoin: model.needsRejoin,
+              needsReset: model.needsReset,
+              isUnrecoverable: model.isUnrecoverable,
+              rejoinRequestedAt: model.rejoinRequestedAt,
+              lastRecoveryAttempt: model.lastRecoveryAttempt,
+              consecutiveFailures: model.consecutiveFailures,
+              isPlaceholder: model.isPlaceholder,
+              requestState: model.requestState,
+              mutedUntil: model.mutedUntil,
+              pendingNewGroupId: model.pendingNewGroupId,
+              pendingResetGeneration: model.pendingResetGeneration
+            )
+        try persistedModel.save(db)
+
+        // An empty Rust roster can be a transient projection; retain any
+        // already-hydrated rows until a non-empty snapshot is authoritative.
+        if !convo.participants.isEmpty {
+          // The Rust snapshot is authoritative for the roster. Retire stale
+          // rows first, then upsert every participant under the stable ID so the
+          // UI can hydrate self/member profiles immediately after create.
+          let now = Date()
+          try db.execute(
+            sql: """
+              UPDATE MLSMemberModel
+              SET isActive = 0, removedAt = ?, updatedAt = ?
+              WHERE conversationID = ? AND currentUserDID = ? AND isActive = 1
+              """,
+            arguments: [now, now, persistedConversationID, MLSStorageHelpers.normalizeDID(userDid)]
+          )
+
+          for (index, participant) in convo.participants.enumerated() {
+            let memberDID = MLSStorageHelpers.normalizeDID(participant.userDid.description)
+            let memberID = "\(persistedConversationID)_\(memberDID)"
+            let role = participant.role == .value_admin ? "admin" : "member"
+            try db.execute(
+              sql: """
+                INSERT INTO MLSMemberModel
+                  (memberID, conversationID, currentUserDID, did, handle, displayName, avatarURL,
+                   leafIndex, addedAt, updatedAt, isActive, role)
+                VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, 1, ?)
+                ON CONFLICT(memberID) DO UPDATE SET
+                  handle = COALESCE(MLSMemberModel.handle, excluded.handle),
+                  displayName = COALESCE(MLSMemberModel.displayName, excluded.displayName),
+                  credentialData = COALESCE(MLSMemberModel.credentialData, excluded.credentialData),
+                  signaturePublicKey = COALESCE(MLSMemberModel.signaturePublicKey, excluded.signaturePublicKey),
+                  capabilities = COALESCE(MLSMemberModel.capabilities, excluded.capabilities),
+                  avatarURL = COALESCE(MLSMemberModel.avatarURL, excluded.avatarURL),
+                  leafIndex = excluded.leafIndex,
+                  updatedAt = excluded.updatedAt,
+                  isActive = 1,
+                  removedAt = NULL,
+                  removedBy = NULL,
+                  removalReason = NULL,
+                  role = excluded.role
+                """,
+              arguments: [
+                memberID, persistedConversationID, MLSStorageHelpers.normalizeDID(userDid), memberDID,
+                index, now, now, role,
+              ]
+            )
+          }
+        }
+      }
+    }
+
+    conversations.removeValue(forKey: convoId)
+    conversations[effectiveConversationID] = convo
+    conversationStates.removeValue(forKey: convoId)
+    conversationStates[effectiveConversationID] = .active
     groupStates[groupIdHex] = MLSGroupState(
       groupId: groupIdHex,
-      convoId: convoId,
+      convoId: effectiveConversationID,
       epoch: UInt64(clamping: convo.coordinates.epoch),
       members: Set(convo.participants.map { $0.userDid.description }),
       knownServerEpoch: UInt64(clamping: convo.coordinates.epoch)
     )
 
-    if let userDid = userDid {
-      let model = MLSConversationModel(state: convo, currentUserDID: userDid)
-      try await database.write { db in
-        try model.save(db)
-      }
-    }
-
     let metadataTitle = metadata?.title ?? MLSConversationSnapshotMetadata.nonEmpty(titleOverride)
     let metadataDescription = metadata?.description
     let metadataAvatarURL = metadata?.avatarUrl
     if let userDid, metadataTitle != nil || metadataDescription != nil || metadataAvatarURL != nil {
+      let metadataConversationID = effectiveConversationID
       try await database.write { db in
         try db.execute(
           sql: """
@@ -1128,7 +1243,7 @@ extension MLSConversationManager {
             SET title = COALESCE(?, title), description = COALESCE(?, description), avatarURL = COALESCE(?, avatarURL), updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?
             """,
-          arguments: [metadataTitle, metadataDescription, metadataAvatarURL, Date(), convoId, userDid]
+          arguments: [metadataTitle, metadataDescription, metadataAvatarURL, Date(), metadataConversationID, MLSStorageHelpers.normalizeDID(userDid)]
         )
       }
     }

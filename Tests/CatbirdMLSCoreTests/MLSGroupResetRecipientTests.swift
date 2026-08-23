@@ -54,10 +54,8 @@ final class MLSGroupResetRecipientTests: XCTestCase {
 
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     try await dbQueue.write { db in
-      // CLIENT M (Task #75): pass `appliedGeneration: nil` to verify the
-      // legacy "null on success" behavior is preserved when no generation
-      // is supplied. Real callers in MLSConversationManager+Sync pass the
-      // observed generation through (see seeds-pendingResetGeneration test).
+      // A nil applied generation must retain the stored reset high-water.
+      // Real callers pass the observed generation through when available.
       try MLSConversationResetSQL.applyRecipientResetSuccess(
         db: db,
         conversationID: convoId,
@@ -85,9 +83,9 @@ final class MLSGroupResetRecipientTests: XCTestCase {
     XCTAssertFalse(row.needsRejoin, "needsRejoin must clear on success")
     XCTAssertFalse(row.isUnrecoverable, "isUnrecoverable must clear on success")
     XCTAssertNil(row.pendingNewGroupId, "pendingNewGroupId must be nulled")
-    XCTAssertNil(
-      row.pendingResetGeneration,
-      "pendingResetGeneration must be nulled when appliedGeneration is nil (back-compat)"
+    XCTAssertEqual(
+      row.pendingResetGeneration, 3,
+      "the reset high-water must survive completion when no newer generation is supplied"
     )
     XCTAssertEqual(row.consecutiveFailures, 0, "consecutiveFailures must reset")
     XCTAssertEqual(row.lastRecoveryAttempt, now)
@@ -338,7 +336,10 @@ final class MLSGroupResetRecipientTests: XCTestCase {
 
     XCTAssertTrue(row.needsReset, "clearPendingReset must leave needsReset set")
     XCTAssertNil(row.pendingNewGroupId, "pendingNewGroupId should be nulled")
-    XCTAssertNil(row.pendingResetGeneration, "pendingResetGeneration should be nulled")
+    XCTAssertEqual(
+      row.pendingResetGeneration, 2,
+      "the legacy generation column is retained as reset high-water while the pending target is cleared"
+    )
     XCTAssertEqual(row.groupID, staleGroup, "groupID must not change on clearPendingReset")
     XCTAssertEqual(row.epoch, 100, "epoch must not change on clearPendingReset")
     XCTAssertEqual(row.persistedRecoveryState, .resetPending)

@@ -37,23 +37,33 @@ public final class MLSEpochSecretStorageBridge: EpochSecretStorage {
         do {
             // Use write(for:) to safely route to Pool or lightweight Queue
             try await databaseManager.write(for: userDID) { [storage, userDID] db in
-                // Ensure conversation exists BEFORE storing epoch secret
-                // NOTE: The Rust FFI epoch secret callback passes group_id_hex as the
-                // `conversationId` parameter. Until the Rust side is updated to pass the
-                // true stable conversationId, this value is actually the MLS group ID.
-                // We use it for both conversationID and groupID since they are currently
-                // the same value from the FFI layer, and ensureConversationExistsSync
-                // only inserts if the row doesn't already exist.
-                try storage.ensureConversationExistsSync(
+                // Resolve without mutation first.  A callback-created raw group row is
+                // redirected to the canonical UUID, while reads never heal/delete rows.
+                let groupHint = Data(hexEncoded: conversationId) == nil ? nil : conversationId
+                let resolvedConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+                    in: db,
                     userDID: userDID,
                     conversationID: conversationId,
-                    groupID: conversationId,
-                    db: db
+                    groupID: groupHint
                 )
+                let effectiveConversationID: String
+                if let resolvedConversationID {
+                    effectiveConversationID = resolvedConversationID
+                } else {
+                    guard let groupHint else {
+                        throw MLSStorageError.invalidConversationID(conversationId)
+                    }
+                    effectiveConversationID = try MLSStorageHelpers.ensureConversationExistsSync(
+                        in: db,
+                        userDID: userDID,
+                        conversationID: conversationId,
+                        groupID: groupHint
+                    )
+                }
 
                 try storage.saveEpochSecretSync(
                     userDID: userDID,
-                    conversationID: conversationId,
+                    conversationID: effectiveConversationID,
                     epoch: epoch,
                     secretData: secretData,
                     db: db

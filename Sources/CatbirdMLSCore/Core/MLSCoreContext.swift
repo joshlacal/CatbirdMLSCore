@@ -1849,56 +1849,18 @@ public actor MLSCoreContext {
       let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
       let groupIDData = groupId  // Already Data from parameter
 
-      // Step 1: Resolve conversation ID (may insert placeholder -> write)
-      // Replicates ensureConversationExistsOrPlaceholder logic:
-      // - Direct match on conversationID + currentUserDID
-      // - Smart lookup by groupID + currentUserDID (prevents hex/UUID duplicates)
-      // - Create placeholder if neither exists
+      // Step 1: Resolve conversation ID (may insert placeholder -> write).
+      // Keep NSE's exact-ID writer on the same strict transactional resolver
+      // as the app/orchestrator paths: it may adopt only the exact normalized
+      // raw group alias, and it migrates children before retiring that alias.
       resolvedConversationID = try await databaseManager.nseWrite(for: userDid) { db in
-        // Direct check
-        if let existing = try MLSConversationModel
-          .filter(
-            MLSConversationModel.Columns.conversationID == conversationID
-              && MLSConversationModel.Columns.currentUserDID == normalizedDID
-          )
-          .fetchOne(db)
-        {
-          return existing.conversationID
-        }
-        // Smart lookup by groupID (binary Data comparison)
-        if let byGroup = try MLSConversationModel
-          .filter(
-            MLSConversationModel.Columns.groupID == groupIDData
-              && MLSConversationModel.Columns.currentUserDID == normalizedDID
-          )
-          .fetchOne(db)
-        {
-          return byGroup.conversationID
-        }
-        // Create placeholder — main app will heal with real metadata during listConvos sync
-        let placeholder = MLSConversationModel(
+        try MLSStorageHelpers.ensureConversationExistsStrictSync(
+          in: db,
+          userDID: normalizedDID,
           conversationID: conversationID,
-          currentUserDID: normalizedDID,
-          groupID: groupIDData,
-          epoch: 0,
-          joinMethod: .unknown,
-          joinEpoch: 0,
-          title: "New Conversation",
-          avatarURL: nil,
-          createdAt: Date(),
-          updatedAt: Date(),
-          lastMessageAt: Date(),
-          lastMembershipChangeAt: nil,
-          unacknowledgedMemberChanges: 0,
-          isActive: true,
-          needsRejoin: false,
-          rejoinRequestedAt: nil,
-          lastRecoveryAttempt: nil,
-          consecutiveFailures: 0,
+          groupID: groupIDData.hexEncodedString(),
           isPlaceholder: true
         )
-        try placeholder.insert(db)
-        return conversationID
       }
 
       // Step 2: Check for cached payload (read-only)

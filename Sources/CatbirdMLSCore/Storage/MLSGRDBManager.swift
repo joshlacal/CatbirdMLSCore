@@ -5559,6 +5559,22 @@ public actor MLSGRDBManager {
           """)
     }
 
+    // MARK: v35 — durable message crypto binding
+    //
+    // Alias healing changes the routing/foreign-key conversationID from the
+    // historical raw group hex to the stable conversation UUID.  Field-level
+    // ciphertext and entry HMACs are authenticated with the original
+    // conversation identity, so that identity must survive the routing move.
+    // The column is nullable for new canonical rows; alias migration fills it
+    // from the pre-migration conversationID before changing that routing key.
+    migrator.registerMigration("v35_message_crypto_binding") { db in
+      let existing = try db.columns(in: "MLSMessageModel").map { $0.name }
+      if !existing.contains("cryptoConversationID") {
+        try db.execute(
+          sql: "ALTER TABLE MLSMessageModel ADD COLUMN cryptoConversationID TEXT")
+      }
+    }
+
     return migrator
   }
 

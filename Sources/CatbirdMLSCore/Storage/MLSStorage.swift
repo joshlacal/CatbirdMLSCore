@@ -89,85 +89,21 @@ public final class MLSStorage: @unchecked Sendable {
     groupID: String,
     database: MLSDatabase
   ) async throws -> String {
-    let normalizedUserDID = normalizeDID(userDID)
-
-    // Check if conversation already exists (Standard Check)
-    let exists = try await database.read { db in
-      let count =
-        try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationID)
-        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
-        .fetchCount(db)
-      return count > 0
-    }
-
-    if exists {
-      logger.debug("Conversation already exists: \(conversationID)")
-      return conversationID
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // DUPLICATE HEALING (2024-12-21)
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Check if a PLACEHOLDER exists with the same Group ID but different Conversation ID.
-    // This happens when NSE creates a conversation via Hex ID (from push)
-    // but the App syncs it via UUID (from backend).
-    //
-    // If found, we must MIGRATE the messages to the new ID and DELETE the placeholder.
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    guard let groupIDData = Data(hexEncoded: groupID) else {
+    guard Data(hexEncoded: groupID) != nil else {
       throw MLSStorageError.invalidGroupID(groupID)
     }
 
-    try await database.write { db in
-      // 1. Search for duplicate placeholder by Group ID
-      let placeholder =
-        try MLSConversationModel
-        .filter(MLSConversationModel.Columns.groupID == groupIDData)
-        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
-        .filter(MLSConversationModel.Columns.conversationID != conversationID)  // Not the one we're creating
-        .fetchOne(db)
-
-      if let placeholder = placeholder {
-        let oldID = placeholder.conversationID
-        logger.warning(
-          "🩹 [HEALING] Found duplicate placeholder: \(oldID) -> New: \(conversationID)")
-
-        // 2. Migrate Messages
-        try db.execute(
-          sql: """
-              UPDATE MLSMessageModel
-              SET conversationID = ?
-              WHERE conversationID = ? AND currentUserDID = ?
-            """, arguments: [conversationID, oldID, normalizedUserDID])
-
-        // 3. Migrate Epoch Keys
-        try db.execute(
-          sql: """
-              UPDATE MLSEpochKeyModel
-              SET conversationID = ?
-              WHERE conversationID = ? AND currentUserDID = ?
-            """, arguments: [conversationID, oldID, normalizedUserDID])
-
-        // 4. Delete Placeholder
-        try placeholder.delete(db)
-        logger.info("✅ [HEALING] Migrated data and deleted placeholder \(oldID)")
-      }
-
-      // 5. Create new conversation
-      let conversation = MLSConversationModel(
+    let effectiveConversationID = try await database.write { db in
+      try MLSStorageHelpers.ensureConversationExistsSync(
+        in: db,
+        userDID: userDID,
         conversationID: conversationID,
-        currentUserDID: normalizedUserDID,
-        groupID: groupIDData,
-        createdAt: Date(),
-        updatedAt: Date()
+        groupID: groupID,
+        isPlaceholder: false
       )
-      try conversation.insert(db)
     }
 
-    logger.info("✅ Created conversation: \(conversationID)")
-    return conversationID
+    return effectiveConversationID
   }
 
   /// Ensure a conversation exists, creating a placeholder if necessary
@@ -193,82 +129,19 @@ public final class MLSStorage: @unchecked Sendable {
     senderDID: String? = nil,
     database: MLSDatabase
   ) async throws -> String {
-    let normalizedUserDID = normalizeDID(userDID)
-    
-    guard let groupIDData = Data(hexEncoded: groupID) else {
+    guard Data(hexEncoded: groupID) != nil else {
       throw MLSStorageError.invalidGroupID(groupID)
     }
-
-    // 1. Direct Check: Does the requested ID exist?
-    let existingDirect = try await database.read { db in
-      try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationID)
-        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
-        .fetchOne(db)
-    }
-
-    if let existing = existingDirect {
-      logger.debug("Conversation exists (Direct Match): \(conversationID)")
-      return existing.conversationID
-    }
-    
-    // 2. Smart Lookup: Does ANY conversation exist for this Group ID?
-    // This prevents creating a Hex-ID placeholder if the UUID-ID real conversation exists.
-    let existingByGroup = try await database.read { db in
-      try MLSConversationModel
-        .filter(MLSConversationModel.Columns.groupID == groupIDData)
-        .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
-        .fetchOne(db)
-    }
-
-    if let existing = existingByGroup {
-      logger.info(
-        "ℹ️ [NSE-Dedup] Found existing conversation \(existing.conversationID) for group \(groupID)")
-      logger.info("   Redirecting message from requested ID \(conversationID) to existing ID")
-      return existing.conversationID
-    }
-
-    // 3. Create placeholder conversation (if absolutely no record exists)
-    // The main app will heal this with real metadata during listConvos sync
-    try await database.write { db in
-      // Use sender DID as a placeholder title, or "New Conversation" if unknown
-      let placeholderTitle: String?
-      if let senderDID = senderDID {
-        if senderDID.hasPrefix("did:plc:") {
-          placeholderTitle = "Chat with \(senderDID.suffix(8))..."
-        } else {
-          placeholderTitle = senderDID
-        }
-      } else {
-        placeholderTitle = "New Conversation"
-      }
-
-      let placeholder = MLSConversationModel(
+    _ = senderDID // Placeholder titles are filled by the authoritative snapshot.
+    return try await database.write { db in
+      try MLSStorageHelpers.ensureConversationExistsStrictSync(
+        in: db,
+        userDID: userDID,
         conversationID: conversationID,
-        currentUserDID: normalizedUserDID,
-        groupID: groupIDData,
-        epoch: 0,
-        joinMethod: .unknown,
-        joinEpoch: 0,
-        title: placeholderTitle,
-        avatarURL: nil,
-        createdAt: Date(),
-        updatedAt: Date(),
-        lastMessageAt: Date(),
-        lastMembershipChangeAt: nil,
-        unacknowledgedMemberChanges: 0,
-        isActive: true,
-        needsRejoin: false,
-        rejoinRequestedAt: nil,
-        lastRecoveryAttempt: nil,
-        consecutiveFailures: 0,
+        groupID: groupID,
         isPlaceholder: true
       )
-      try placeholder.insert(db)
     }
-
-    logger.warning("🆕 [NSE] Created PLACEHOLDER conversation: \(conversationID)")
-    return conversationID
   }
 
   /// Fetch a persisted conversation for the current user if it exists
@@ -332,6 +205,32 @@ public final class MLSStorage: @unchecked Sendable {
       return row.entryHMAC
     }
     return nil
+  }
+
+  /// Return the durable field-encryption/HMAC identity for a routed
+  /// conversation.  Alias healing rewrites `conversationID`, but migrated
+  /// message rows retain their original binding.  New rows must continue the
+  /// old chain/key until a conversation has no historical binding at all.
+  fileprivate static func preferredCryptoConversationIDSync(
+    conversationID: String,
+    currentUserDID: String,
+    db: Database
+  ) throws -> String {
+    let columns = try db.columns(in: MLSMessageModel.databaseTableName).map(\.name)
+    guard columns.contains("cryptoConversationID") else {
+      return conversationID
+    }
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(currentUserDID)
+    let rows = try MLSMessageModel
+      .filter(MLSMessageModel.Columns.conversationID == conversationID)
+      .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+      .order(
+        MLSMessageModel.Columns.sequenceNumber.desc,
+        MLSMessageModel.Columns.timestamp.desc,
+        MLSMessageModel.Columns.messageID.desc
+      )
+      .fetchAll(db)
+    return rows.compactMap { $0.cryptoConversationID }.first(where: { !$0.isEmpty }) ?? conversationID
   }
 
   /// Async wrapper over `fetchLastEntryHMACSync` for tests / future callers.
@@ -400,13 +299,6 @@ public final class MLSStorage: @unchecked Sendable {
     let payloadData = try payload.encodeToJSON()
     logger.debug("Encoded payload (\(payloadData.count) bytes)")
 
-    let encryptedWire = try MLSFieldEncryption.encrypt(
-      context: context,
-      conversationID: conversationID,
-      plaintext: payloadData
-    )
-    logger.debug("Encrypted payload (\(encryptedWire.count) bytes wire)")
-
     let normalizedUserDID = normalizeDID(currentUserDID)
     let shouldBeUnread = shouldPersistAsUnread(
       payload: payload,
@@ -436,6 +328,37 @@ public final class MLSStorage: @unchecked Sendable {
 
       let exists = existingMessage != nil
 
+      // Resolve the public routing ID before any new-row insert.  An existing
+      // row may still carry the legacy alias while an authoritative projection
+      // is being adopted; keep that row's route for an update so its
+      // authenticated source identity is never rewritten accidentally.
+      let effectiveConversationID = try MLSStorageHelpers.effectiveConversationIDForPayloadSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        db: db
+      )
+      let routedConversationID = existingMessage?.conversationID ?? effectiveConversationID
+
+      // Keep field encryption/HMAC bound to the historical source identity
+      // after routing alias healing.  A new conversation with no history uses
+      // its stable routing ID as before.
+      let cryptoConversationID: String
+      if let existingBinding = existingMessage?.cryptoConversationID, !existingBinding.isEmpty {
+        cryptoConversationID = existingBinding
+      } else {
+        cryptoConversationID = try Self.preferredCryptoConversationIDSync(
+          conversationID: routedConversationID,
+          currentUserDID: normalizedUserDID,
+          db: db
+        )
+      }
+      let encryptedWire = try MLSFieldEncryption.encrypt(
+        context: context,
+        conversationID: cryptoConversationID,
+        plaintext: payloadData
+      )
+      logger.debug("Encrypted payload (\(encryptedWire.count) bytes wire)")
+
       // Compute the entry HMAC over (prev_hmac || messageID || encryptedWire).
       // For the first message in a conversation prev_hmac is nil (Rust seeds
       // with 32 zero bytes). For subsequent messages we walk the highest
@@ -443,14 +366,14 @@ public final class MLSStorage: @unchecked Sendable {
       // re-seal with the same prev_hmac (best-effort under the current
       // verifier contract).
       let prevHMAC = try Self.fetchLastEntryHMACSync(
-        conversationID: conversationID,
+        conversationID: routedConversationID,
         currentUserDID: normalizedUserDID,
         legacyUserDID: currentUserDID,
         db: db
       )
       let entryHMAC = try MLSFieldEncryption.computeHMAC(
         context: context,
-        conversationID: conversationID,
+        conversationID: cryptoConversationID,
         previousHMAC: prevHMAC,
         messageID: messageID,
         payloadWire: encryptedWire
@@ -536,7 +459,8 @@ public final class MLSStorage: @unchecked Sendable {
         let message = MLSMessageModel(
           messageID: messageID,
           currentUserDID: normalizedUserDID,
-          conversationID: conversationID,
+          conversationID: effectiveConversationID,
+          cryptoConversationID: cryptoConversationID == effectiveConversationID ? nil : cryptoConversationID,
           senderID: senderID,
           payloadJSON: nil,
           wireFormat: Data(),
@@ -568,7 +492,7 @@ public final class MLSStorage: @unchecked Sendable {
 
       _ = try MLSStorageHelpers.applyReadFrontierToMessagesSync(
         in: db,
-        conversationID: conversationID,
+        conversationID: routedConversationID,
         currentUserDID: normalizedUserDID
       )
 
@@ -607,7 +531,7 @@ public final class MLSStorage: @unchecked Sendable {
       if advanceSequenceState {
         if let existingState =
           try MLSConversationSequenceState
-          .filter(MLSConversationSequenceState.Columns.conversationID == conversationID)
+          .filter(MLSConversationSequenceState.Columns.conversationID == routedConversationID)
           .filter(MLSConversationSequenceState.Columns.currentUserDID == normalizedUserDID)
           .fetchOne(db)
         {
@@ -619,7 +543,7 @@ public final class MLSStorage: @unchecked Sendable {
           }
         } else {
           let state = MLSConversationSequenceState(
-            conversationID: conversationID,
+            conversationID: routedConversationID,
             currentUserDID: normalizedUserDID,
             lastProcessedSeq: sequenceNumber,
             updatedAt: Date()
@@ -795,7 +719,7 @@ public final class MLSStorage: @unchecked Sendable {
       do {
         let plain = try MLSFieldEncryption.decrypt(
           context: context,
-          conversationID: model.conversationID,
+          conversationID: model.cryptoConversationID ?? model.conversationID,
           wire: encrypted
         )
         let payload = try MLSMessagePayload.decodeFromJSON(plain)
@@ -1070,20 +994,18 @@ public final class MLSStorage: @unchecked Sendable {
 
     do {
       try await database.write { db in
-        let epochKey = MLSEpochKeyModel(
-          epochKeyID: "\(conversationID)-\(epoch)",
-          conversationID: conversationID,
-          currentUserDID: normalizedUserDID,
-          epoch: Int64(epoch),
-          keyMaterial: secretData,  // Actual epoch secret
-          createdAt: Date(),
-          expiresAt: nil,
-          isActive: true
+        let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+          in: db,
+          userDID: normalizedUserDID,
+          conversationID: conversationID
+        ) ?? conversationID
+        try saveEpochSecretSync(
+          userDID: normalizedUserDID,
+          conversationID: effectiveConversationID,
+          epoch: epoch,
+          secretData: secretData,
+          db: db
         )
-        // ⭐ CRITICAL FIX: Use save() instead of insert() to handle duplicate epoch exports
-        // This allows epoch 0 to be exported both at group creation AND before merge_pending_commit
-        // without hitting UNIQUE constraint violations
-        try epochKey.save(db)
       }
 
       logger.info(
@@ -1118,8 +1040,15 @@ public final class MLSStorage: @unchecked Sendable {
     let normalizedUserDID = normalizeDID(userDID)
 
     let secret = try await database.read { db in
-      try MLSEpochKeyModel
-        .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
+      guard let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      ) else {
+        return Optional<Data>.none
+      }
+      return try MLSEpochKeyModel
+        .filter(MLSEpochKeyModel.Columns.conversationID == effectiveConversationID)
         .filter(MLSEpochKeyModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSEpochKeyModel.Columns.epoch == Int64(epoch))
         .filter(MLSEpochKeyModel.Columns.isActive == true)
@@ -1152,13 +1081,20 @@ public final class MLSStorage: @unchecked Sendable {
     let normalizedUserDID = normalizeDID(userDID)
 
     try await database.write { db in
+      guard let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      ) else {
+        return
+      }
       let now = Date()
       try db.execute(
         sql: """
             UPDATE MLSEpochKeyModel
             SET deletedAt = ?, isActive = ?
             WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
-          """, arguments: [now, false, conversationID, normalizedUserDID, Int64(epoch)])
+          """, arguments: [now, false, effectiveConversationID, normalizedUserDID, Int64(epoch)])
     }
 
     logger.info("Deleted epoch secret: \(conversationID) epoch \(epoch)")
@@ -1176,6 +1112,27 @@ public final class MLSStorage: @unchecked Sendable {
   ) throws {
     let normalizedUserDID = normalizeDID(userDID)
 
+    let existing = try MLSEpochKeyModel
+      .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
+      .filter(MLSEpochKeyModel.Columns.currentUserDID == normalizedUserDID)
+      .filter(MLSEpochKeyModel.Columns.epoch == Int64(epoch))
+      .fetchAll(db)
+    if !existing.isEmpty {
+      guard existing.allSatisfy({ $0.keyMaterial == secretData }) else {
+        throw MLSStorageError.epochSecretConflict(
+          conversationID: conversationID,
+          epoch: epoch
+        )
+      }
+      for duplicate in existing.dropFirst() {
+        try db.execute(
+          sql: "DELETE FROM MLSEpochKeyModel WHERE epochKeyID = ?",
+          arguments: [duplicate.epochKeyID]
+        )
+      }
+      return
+    }
+
     let epochKey = MLSEpochKeyModel(
       epochKeyID: "\(conversationID)-\(epoch)",
       conversationID: conversationID,
@@ -1186,7 +1143,7 @@ public final class MLSStorage: @unchecked Sendable {
       expiresAt: nil,
       isActive: true
     )
-    try epochKey.save(db)
+    try epochKey.insert(db)
   }
 
   /// Synchronous version of getEpochSecret for use within db closures
@@ -1198,8 +1155,16 @@ public final class MLSStorage: @unchecked Sendable {
   ) throws -> Data? {
     let normalizedUserDID = normalizeDID(userDID)
 
+    guard let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+      in: db,
+      userDID: normalizedUserDID,
+      conversationID: conversationID
+    ) else {
+      return nil
+    }
+
     return try MLSEpochKeyModel
-      .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
+      .filter(MLSEpochKeyModel.Columns.conversationID == effectiveConversationID)
       .filter(MLSEpochKeyModel.Columns.currentUserDID == normalizedUserDID)
       .filter(MLSEpochKeyModel.Columns.epoch == Int64(epoch))
       .filter(MLSEpochKeyModel.Columns.isActive == true)
@@ -1216,13 +1181,21 @@ public final class MLSStorage: @unchecked Sendable {
   ) throws {
     let normalizedUserDID = normalizeDID(userDID)
 
+    guard let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+      in: db,
+      userDID: normalizedUserDID,
+      conversationID: conversationID
+    ) else {
+      return
+    }
+
     let now = Date()
     try db.execute(
       sql: """
           UPDATE MLSEpochKeyModel
           SET deletedAt = ?, isActive = ?
           WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
-        """, arguments: [now, false, conversationID, normalizedUserDID, Int64(epoch)])
+        """, arguments: [now, false, effectiveConversationID, normalizedUserDID, Int64(epoch)])
   }
 
   /// Synchronous version of deleteEpochsBefore for use within db closures
@@ -1233,6 +1206,13 @@ public final class MLSStorage: @unchecked Sendable {
     db: Database
   ) throws -> Int {
     let normalizedUserDID = normalizeDID(userDID)
+    guard let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+      in: db,
+      userDID: normalizedUserDID,
+      conversationID: conversationID
+    ) else {
+      return 0
+    }
     let now = Date()
 
     try db.execute(
@@ -1240,7 +1220,7 @@ public final class MLSStorage: @unchecked Sendable {
           UPDATE MLSEpochKeyModel
           SET deletedAt = ?, isActive = ?
           WHERE conversationID = ? AND currentUserDID = ? AND epoch < ? AND isActive = 1;
-        """, arguments: [now, false, conversationID, normalizedUserDID, Int64(cutoffEpoch)])
+        """, arguments: [now, false, effectiveConversationID, normalizedUserDID, Int64(cutoffEpoch)])
 
     return db.changesCount
   }
@@ -1252,50 +1232,12 @@ public final class MLSStorage: @unchecked Sendable {
     groupID: String,
     db: Database
   ) throws {
-    let normalizedUserDID = normalizeDID(userDID)
-
-    // Check if conversation already exists
-    let existing =
-      try MLSConversationModel
-      .filter(MLSConversationModel.Columns.conversationID == conversationID)
-      .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
-      .fetchOne(db)
-
-    if existing == nil {
-      // `groupID` is a HEX string (the MLS group id). Store the RAW group bytes,
-      // not the hex string's ASCII bytes. `Data(groupID.utf8)` was wrong: it
-      // stored e.g. the 32 ASCII bytes of "4c71…", so `asConvoView()`'s later
-      // `groupID.hexEncodedString()` produced a DOUBLE-hex-encoded id ("3463…" =
-      // hex of ASCII "4c71…"), which then failed every FFI group lookup
-      // (get_epoch → GroupNotFound) on the DB-projection fallback path.
-      let groupIDData = Data(hexEncoded: groupID) ?? Data(groupID.utf8)
-
-      // Create minimal placeholder conversation
-      let conversation = MLSConversationModel(
-        conversationID: conversationID,
-        currentUserDID: normalizedUserDID,
-        groupID: groupIDData,
-        epoch: 0,
-        joinMethod: .unknown,
-        joinEpoch: 0,
-        title: nil,
-        avatarURL: nil,
-        createdAt: Date(),
-        updatedAt: Date(),
-        lastMessageAt: nil,
-        lastMembershipChangeAt: nil,
-        unacknowledgedMemberChanges: 0,
-        isActive: true,
-        needsRejoin: false,
-        rejoinRequestedAt: nil,
-        lastRecoveryAttempt: nil,
-        consecutiveFailures: 0,
-        isPlaceholder: true
-      )
-      try conversation.insert(db)
-      logger.debug(
-        "[EPOCH-STORAGE] Created placeholder conversation: \(conversationID.prefix(16))...")
-    }
+    _ = try MLSStorageHelpers.ensureConversationExistsSync(
+      in: db,
+      userDID: userDID,
+      conversationID: conversationID,
+      groupID: groupID
+    )
   }
 
   /// Record an epoch key for forward secrecy tracking (deprecated - use saveEpochSecret)
@@ -1315,20 +1257,25 @@ public final class MLSStorage: @unchecked Sendable {
     let normalizedUserDID = normalizeDID(userDID)
 
     try await database.write { db in
-      let epochKeyID = "\(conversationID)-\(epoch)"
-      let existingKey =
-        try MLSEpochKeyModel
-        .filter(MLSEpochKeyModel.Columns.epochKeyID == epochKeyID)
+      let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      ) ?? conversationID
+      let existingKey = try MLSEpochKeyModel
+        .filter(MLSEpochKeyModel.Columns.conversationID == effectiveConversationID)
+        .filter(MLSEpochKeyModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSEpochKeyModel.Columns.epoch == epoch)
         .fetchOne(db)
 
       guard existingKey == nil else {
-        logger.debug("Epoch key already recorded: \(conversationID) epoch \(epoch)")
+        logger.debug("Epoch key already recorded: \(effectiveConversationID) epoch \(epoch)")
         return
       }
 
       let epochKey = MLSEpochKeyModel(
-        epochKeyID: epochKeyID,
-        conversationID: conversationID,
+        epochKeyID: "\(effectiveConversationID)-\(epoch)",
+        conversationID: effectiveConversationID,
         currentUserDID: normalizedUserDID,
         epoch: epoch,
         keyMaterial: Data(),  // Placeholder - actual key material should be provided
@@ -1357,11 +1304,17 @@ public final class MLSStorage: @unchecked Sendable {
   ) async throws {
 
     try await database.write { db in
+      let normalizedUserDID = normalizeDID(userDID)
+      let effectiveConversationID = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      ) ?? conversationID
       // Get all epoch keys for this conversation
       let allKeys =
         try MLSEpochKeyModel
-        .filter(MLSEpochKeyModel.Columns.conversationID == conversationID)
-        .filter(MLSEpochKeyModel.Columns.currentUserDID == userDID)
+        .filter(MLSEpochKeyModel.Columns.conversationID == effectiveConversationID)
+        .filter(MLSEpochKeyModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSEpochKeyModel.Columns.isActive == true)
         .order(MLSEpochKeyModel.Columns.epoch.desc)
         .fetchAll(db)
@@ -1381,7 +1334,7 @@ public final class MLSStorage: @unchecked Sendable {
               UPDATE MLSEpochKeyModel
               SET deletedAt = ?
               WHERE conversationID = ? AND currentUserDID = ? AND epoch = ?;
-            """, arguments: [now, conversationID, userDID, key.epoch])
+            """, arguments: [now, effectiveConversationID, normalizedUserDID, key.epoch])
       }
 
       logger.info("Marked \(keysToDelete.count) epoch keys for deletion")
@@ -2814,22 +2767,27 @@ public final class MLSStorage: @unchecked Sendable {
       // alter the target message's existing embed").
       let updatedPayload = MLSMessagePayload.text(newText, embed: existingPayload?.embed)
       let payloadData = try updatedPayload.encodeToJSON()
+      // The target row is authoritative for both routing and authenticated
+      // history.  Alias callers may still pass the pre-healing raw id; using
+      // it for the tail would reseal the edit against the wrong chain.
+      let routedConversationID = existing.conversationID
+      let cryptoConversationID = existing.cryptoConversationID ?? routedConversationID
       let encryptedWire = try MLSFieldEncryption.encrypt(
         context: context,
-        conversationID: conversationID,
+        conversationID: cryptoConversationID,
         plaintext: payloadData
       )
       // Best-effort HMAC re-seal against the current tail, mirroring
       // `savePayloadForMessage`'s UPDATE path for mid-chain rewrites.
       let prevHMAC = try Self.fetchLastEntryHMACSync(
-        conversationID: conversationID,
+        conversationID: routedConversationID,
         currentUserDID: normalizedUserDID,
         legacyUserDID: nil,
         db: db
       )
       let entryHMAC = try MLSFieldEncryption.computeHMAC(
         context: context,
-        conversationID: conversationID,
+        conversationID: cryptoConversationID,
         previousHMAC: prevHMAC,
         messageID: targetMessageID,
         payloadWire: encryptedWire
@@ -2908,20 +2866,22 @@ public final class MLSStorage: @unchecked Sendable {
       // else uses (spec §5.8.2 step 3).
       let blanked = MLSMessagePayload.text("")
       let payloadData = try blanked.encodeToJSON()
+      let routedConversationID = existing.conversationID
+      let cryptoConversationID = existing.cryptoConversationID ?? routedConversationID
       let encryptedWire = try MLSFieldEncryption.encrypt(
         context: context,
-        conversationID: conversationID,
+        conversationID: cryptoConversationID,
         plaintext: payloadData
       )
       let prevHMAC = try Self.fetchLastEntryHMACSync(
-        conversationID: conversationID,
+        conversationID: routedConversationID,
         currentUserDID: normalizedUserDID,
         legacyUserDID: nil,
         db: db
       )
       let entryHMAC = try MLSFieldEncryption.computeHMAC(
         context: context,
-        conversationID: conversationID,
+        conversationID: cryptoConversationID,
         previousHMAC: prevHMAC,
         messageID: targetMessageID,
         payloadWire: encryptedWire
@@ -3514,6 +3474,10 @@ enum MLSStorageError: LocalizedError {
   case messageNotFound(String)
   case keyPackageNotFound(String)
   case invalidGroupID(String)
+  case invalidConversationID(String)
+  case ambiguousConversationID(String)
+  case unsafeConversationAliasMigration(String)
+  case epochSecretConflict(conversationID: String, epoch: UInt64)
   case saveFailed(Error)
   case foreignKeyViolation(String)
   case accountMismatch(requested: String, active: String)
@@ -3533,6 +3497,14 @@ enum MLSStorageError: LocalizedError {
       return "Key package not found: \(id)"
     case .invalidGroupID(let id):
       return "Invalid group ID format: \(id)"
+    case .invalidConversationID(let id):
+      return "Invalid canonical conversation ID: \(id)"
+    case .ambiguousConversationID(let id):
+      return "Ambiguous conversation identity for group: \(id)"
+    case .unsafeConversationAliasMigration(let message):
+      return "Conversation alias migration refused: \(message)"
+    case .epochSecretConflict(let conversationID, let epoch):
+      return "Conflicting epoch secret for conversation \(conversationID), epoch \(epoch)"
     case .saveFailed(let error):
       return "Failed to save: \(error.localizedDescription)"
     case .foreignKeyViolation(let message):

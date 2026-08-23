@@ -369,7 +369,7 @@ extension MLSConversationManager {
       guard let mlsContext = try? await MLSCoreContext.shared.getContext(for: userDid),
             let plain = try? MLSFieldEncryption.decrypt(
               context: mlsContext,
-              conversationID: storedMessage.conversationID,
+              conversationID: storedMessage.cryptoConversationID ?? storedMessage.conversationID,
               wire: encrypted
             ),
             let payload = try? MLSMessagePayload.decodeFromJSON(plain)

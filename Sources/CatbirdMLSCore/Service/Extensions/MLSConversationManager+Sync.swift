@@ -1142,10 +1142,17 @@ public extension MLSConversationManager {
                     needsRejoin = 0,
                     epoch = 0,
                     pendingNewGroupId = NULL,
-                    pendingResetGeneration = NULL,
+                    pendingResetGeneration = CASE
+                      WHEN pendingResetGeneration IS NULL OR pendingResetGeneration < ?
+                        THEN ?
+                      ELSE pendingResetGeneration
+                    END,
                     updatedAt = ?
                 WHERE conversationID = ? AND currentUserDID = ?;
-            """, arguments: [Date(), convo.conversationID, userDid])
+            """, arguments: [
+              Int64(result.resetGeneration), Int64(result.resetGeneration), Date(),
+              convo.conversationID, userDid,
+            ])
         }
 
         // 5. Clear old group state
@@ -1515,7 +1522,6 @@ public extension MLSConversationManager {
               sql: """
                 UPDATE MLSConversationModel
                 SET pendingNewGroupId = NULL,
-                    pendingResetGeneration = NULL,
                     updatedAt = ?
                 WHERE conversationID = ? AND currentUserDID = ?;
               """,

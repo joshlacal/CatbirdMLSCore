@@ -7,6 +7,8 @@ import PetrelCatbird
 @testable import CatbirdMLSCore
 
 final class MLSFullRustGroupLifecycleTests: XCTestCase {
+  private static let stableConversationID = "550e8400-e29b-41d4-a716-446655440000"
+
   func testRuntimeCreateConversationWrapsBridgeResult() throws {
     let bridge = RecordingGroupLifecycleBridge()
     let runtime = MLSOrchestratorRuntime(
@@ -67,6 +69,313 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(persisted?.title, "Rust group")
     XCTAssertEqual(persisted?.description, "unit-test")
     XCTAssertEqual(persisted?.avatarURL, "https://example.com/request-avatar.png")
+  }
+
+  func testRustFullCreateGroupPersistsParticipantRowsWithStableConversationIDAndRoles() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.createConversationResult = FfiCreateConversationResult(
+      conversation: FfiConversationView(
+        groupId: "deadbeef",
+        conversationId: Self.stableConversationID,
+        epoch: 7,
+        members: [
+          FfiMemberView(did: "did:plc:testuser", role: "admin"),
+          FfiMemberView(did: "did:plc:bob", role: "member"),
+        ],
+        name: "Rust group",
+        description: "unit-test",
+        avatarUrl: nil,
+        createdAt: ISO8601DateFormatter().string(from: Date()),
+        updatedAt: nil
+      ),
+      commitData: nil,
+      welcomeData: nil
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.createGroup(
+      initialMembers: [try DID(didString: "did:plc:bob")],
+      name: "Rust group"
+    )
+
+    let members = try await manager.database.read { db in
+      try MLSMemberModel
+        .filter(MLSMemberModel.Columns.conversationID == Self.stableConversationID)
+        .filter(MLSMemberModel.Columns.currentUserDID == "did:plc:testuser")
+        .order(MLSMemberModel.Columns.did)
+        .fetchAll(db)
+    }
+
+    XCTAssertEqual(members.map(\.did), ["did:plc:bob", "did:plc:testuser"])
+    XCTAssertEqual(members.map(\.conversationID), [Self.stableConversationID, Self.stableConversationID])
+    XCTAssertEqual(members.map(\.role), [.member, .admin])
+  }
+
+  func testRustFullSnapshotRetiresRawGroupAliasWithoutDroppingEpochState() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let rawGroupID = "deadbeef"
+    let canonicalSeed = MLSConversationModel(
+      conversationID: Self.stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: rawGroupID)!,
+      epoch: 5,
+      title: "Existing canonical"
+    )
+    let alias = MLSConversationModel(
+      conversationID: rawGroupID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: rawGroupID)!,
+      epoch: 3,
+      title: "Raw alias"
+    )
+    let epochKey = MLSEpochKeyModel(
+      epochKeyID: "raw-group-epoch-3",
+      conversationID: rawGroupID,
+      currentUserDID: "did:plc:testuser",
+      epoch: 3,
+      keyMaterial: Data([0x01, 0x02, 0x03])
+    )
+    try await manager.database.write { db in
+      try canonicalSeed.insert(db)
+      try alias.insert(db)
+      try epochKey.insert(db)
+    }
+
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.createConversationResult = FfiCreateConversationResult(
+      conversation: FfiConversationView(
+        groupId: rawGroupID,
+        conversationId: Self.stableConversationID,
+        epoch: 7,
+        members: [FfiMemberView(did: "did:plc:testuser", role: "admin")],
+        name: "Canonical group",
+        description: nil,
+        avatarUrl: nil,
+        createdAt: ISO8601DateFormatter().string(from: Date()),
+        updatedAt: nil
+      ),
+      commitData: nil,
+      welcomeData: nil
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.createGroup(name: "Canonical group")
+
+    let rows = try await manager.database.read { db in
+      let conversations = try MLSConversationModel
+        .filter(MLSConversationModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchAll(db)
+      let epochKeys = try MLSEpochKeyModel
+        .filter(MLSEpochKeyModel.Columns.currentUserDID == "did:plc:testuser")
+        .fetchAll(db)
+      return (conversations, epochKeys)
+    }
+
+    XCTAssertEqual(rows.0.map(\.conversationID), [Self.stableConversationID])
+    let canonical = try XCTUnwrap(rows.0.first)
+    XCTAssertEqual(canonical.groupID, Data(hexEncoded: rawGroupID))
+    XCTAssertEqual(canonical.epoch, 7)
+    XCTAssertEqual(rows.1.map(\.conversationID), [Self.stableConversationID])
+    XCTAssertEqual(rows.1.first?.keyMaterial, Data([0x01, 0x02, 0x03]))
+    XCTAssertEqual(manager.groupStates[rawGroupID]?.convoId, Self.stableConversationID)
+  }
+
+  func testRustFullSnapshotPreservesLocalRecoveryMuteAvatarAndJoinFields() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let rawGroupID = "deadbeef"
+    let rejoinRequestedAt = Date(timeIntervalSince1970: 1_700_000_010)
+    let lastRecoveryAttempt = Date(timeIntervalSince1970: 1_700_000_020)
+    let mutedUntil = Date(timeIntervalSince1970: 1_700_000_030)
+    let existing = MLSConversationModel(
+      conversationID: Self.stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: rawGroupID)!,
+      epoch: 4,
+      joinMethod: .creator,
+      joinEpoch: 1,
+      title: "Local title",
+      description: "Local description",
+      avatarURL: "https://example.com/local.png",
+      avatarImageData: Data([0x01, 0x02]),
+      needsRejoin: true,
+      needsReset: true,
+      isUnrecoverable: true,
+      rejoinRequestedAt: rejoinRequestedAt,
+      lastRecoveryAttempt: lastRecoveryAttempt,
+      consecutiveFailures: 4,
+      isPlaceholder: true,
+      requestState: .pendingInbound,
+      mutedUntil: mutedUntil,
+      pendingNewGroupId: "cafebabe",
+      pendingResetGeneration: 9
+    )
+    try await manager.database.write { db in
+      try existing.insert(db)
+    }
+
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.createConversationResult = FfiCreateConversationResult(
+      conversation: makeFFIConversationView(
+        conversationID: Self.stableConversationID,
+        groupID: rawGroupID,
+        epoch: 8,
+        members: ["did:plc:testuser"],
+        name: "Server title",
+        description: nil,
+        avatarUrl: nil
+      ),
+      commitData: nil,
+      welcomeData: nil
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.createGroup(name: "Server title")
+
+    let persisted = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(persisted?.epoch, 8)
+    XCTAssertEqual(persisted?.joinMethod, .creator)
+    XCTAssertEqual(persisted?.joinEpoch, 1)
+    XCTAssertEqual(persisted?.description, "Local description")
+    XCTAssertEqual(persisted?.avatarURL, "https://example.com/local.png")
+    XCTAssertEqual(persisted?.avatarImageData, Data([0x01, 0x02]))
+    XCTAssertEqual(persisted?.needsRejoin, true)
+    XCTAssertEqual(persisted?.needsReset, true)
+    XCTAssertEqual(persisted?.isUnrecoverable, true)
+    XCTAssertEqual(persisted?.rejoinRequestedAt, rejoinRequestedAt)
+    XCTAssertEqual(persisted?.lastRecoveryAttempt, lastRecoveryAttempt)
+    XCTAssertEqual(persisted?.consecutiveFailures, 4)
+    XCTAssertEqual(persisted?.requestState, .pendingInbound)
+    XCTAssertEqual(persisted?.mutedUntil, mutedUntil)
+    XCTAssertEqual(persisted?.pendingNewGroupId, "cafebabe")
+    XCTAssertEqual(persisted?.pendingResetGeneration, 9)
+  }
+
+  func testRustFullSnapshotReactivatesMemberMergingProfileSecurityAndRemovalState() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let existing = MLSConversationModel(
+      conversationID: Self.stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: "deadbeef")!
+    )
+    let removedAt = Date(timeIntervalSince1970: 1_700_000_040)
+    let existingMember = MLSMemberModel(
+      memberID: "\(Self.stableConversationID)_did:plc:bob",
+      conversationID: Self.stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      did: "did:plc:bob",
+      handle: "bob",
+      displayName: "Bob",
+      leafIndex: 4,
+      credentialData: Data([0x11]),
+      signaturePublicKey: Data([0x22]),
+      removedAt: removedAt,
+      removedBy: "did:plc:former-admin",
+      removalReason: "left",
+      isActive: false,
+      role: .member,
+      avatarURL: "https://example.com/bob.png"
+    )
+    try await manager.database.write { db in
+      try existing.insert(db)
+      try existingMember.insert(db)
+    }
+
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.createConversationResult = FfiCreateConversationResult(
+      conversation: makeFFIConversationView(
+        conversationID: Self.stableConversationID,
+        groupID: "deadbeef",
+        epoch: 5,
+        members: ["did:plc:bob"],
+        name: "Rust group"
+      ),
+      commitData: nil,
+      welcomeData: nil
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.createGroup(name: "Rust group")
+
+    let member = try await manager.database.read { db in
+      try MLSMemberModel
+        .filter(MLSMemberModel.Columns.memberID == "\(Self.stableConversationID)_did:plc:bob")
+        .fetchOne(db)
+    }
+    XCTAssertEqual(member?.conversationID, Self.stableConversationID)
+    XCTAssertEqual(member?.handle, "bob")
+    XCTAssertEqual(member?.displayName, "Bob")
+    XCTAssertEqual(member?.avatarURL, "https://example.com/bob.png")
+    XCTAssertEqual(member?.credentialData, Data([0x11]))
+    XCTAssertEqual(member?.signaturePublicKey, Data([0x22]))
+    XCTAssertEqual(member?.isActive, true)
+    XCTAssertNil(member?.removedAt)
+    XCTAssertNil(member?.removedBy)
+    XCTAssertNil(member?.removalReason)
+  }
+
+  func testRustFullEmptySnapshotRetainsPreviouslyHydratedMembers() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let existing = MLSConversationModel(
+      conversationID: Self.stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      groupID: Data(hexEncoded: "deadbeef")!
+    )
+    let member = MLSMemberModel(
+      memberID: "\(Self.stableConversationID)_did:plc:bob",
+      conversationID: Self.stableConversationID,
+      currentUserDID: "did:plc:testuser",
+      did: "did:plc:bob",
+      leafIndex: 1,
+      role: .member
+    )
+    try await manager.database.write { db in
+      try existing.insert(db)
+      try member.insert(db)
+    }
+
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.createConversationResult = FfiCreateConversationResult(
+      conversation: makeFFIConversationView(
+        conversationID: Self.stableConversationID,
+        groupID: "deadbeef",
+        epoch: 5,
+        members: [],
+        name: "Rust group"
+      ),
+      commitData: nil,
+      welcomeData: nil
+    )
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    _ = try await manager.createGroup(name: "Rust group")
+
+    let persistedMember = try await manager.database.read { db in
+      try MLSMemberModel
+        .filter(MLSMemberModel.Columns.memberID == "\(Self.stableConversationID)_did:plc:bob")
+        .fetchOne(db)
+    }
+    XCTAssertEqual(persistedMember?.isActive, true)
   }
 
   func testRustFullAddMembersUsesRuntimeAndSkipsLegacyStageCommitPath() async throws {

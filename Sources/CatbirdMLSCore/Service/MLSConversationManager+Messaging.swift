@@ -473,6 +473,26 @@ public extension MLSConversationManager {
     return convo.groupId
   }
 
+  /// Resolve a caller-supplied identifier to the canonical stable UUID
+  /// required by Rust's public mutation API. Raw group hex remains confined to
+  /// low-level MLS crypto paths.
+  private func rustConversationID(for requestedID: String) async throws -> String {
+    guard let userDid else { throw MLSConversationError.noAuthentication }
+    let groupHint = conversations[requestedID]?.groupId
+    let resolved = try await database.read { db in
+      try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: userDid,
+        conversationID: requestedID,
+        groupID: groupHint
+      )
+    } ?? requestedID
+    guard MLSStorageHelpers.isCanonicalUUIDv4(resolved) else {
+      throw MLSStorageError.invalidConversationID(resolved)
+    }
+    return resolved
+  }
+
   /// Send a text message to a conversation
   /// - Parameters:
   ///   - convoId: The conversation group ID
@@ -489,10 +509,10 @@ public extension MLSConversationManager {
     try throwIfShuttingDown("sendMessage")
 
     if protocolAuthorityMode == .rustFull {
-      let groupIdHex = try rustGroupIdHex(for: convoId)
+      let stableConversationID = try await rustConversationID(for: convoId)
       let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
+        try runtime.sendPayloadResult(conversationId: stableConversationID, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "sendMessage")
       let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
@@ -528,10 +548,10 @@ public extension MLSConversationManager {
     try await refreshDatabaseIfNeeded()
 
     if protocolAuthorityMode.usesRustForDecisions {
-      let groupIdHex = try rustGroupIdHex(for: convoId)
+      let stableConversationID = try await rustConversationID(for: convoId)
       let payload = MLSMessagePayload.text(plaintext, embed: embed)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayload(conversationId: groupIdHex, payload: payload)
+        try runtime.sendPayload(conversationId: stableConversationID, payload: payload)
       }
       let timestamp = ISO8601DateFormatter().date(from: ffiMessage.timestamp) ?? Date()
       return (
@@ -883,15 +903,15 @@ public extension MLSConversationManager {
   ) {
     try throwIfShuttingDown("sendEncryptedReaction")
 
-    guard let userDid = userDid, let convo = conversations[convoId] else {
+    guard let userDid else {
       throw MLSConversationError.noAuthentication
     }
 
     if protocolAuthorityMode.usesRustForDecisions {
-      let groupIdHex = try rustGroupIdHex(for: convoId)
+      let stableConversationID = try await rustConversationID(for: convoId)
       let ffiMessage = try await withRustAuthoritativeRuntime(operation: "sendEncryptedReaction") { runtime in
         try runtime.sendReaction(
-          conversationId: groupIdHex,
+          conversationId: stableConversationID,
           messageId: messageId,
           emoji: emoji,
           action: action
@@ -906,6 +926,9 @@ public extension MLSConversationManager {
       )
     }
 
+    guard let convo = conversations[convoId] else {
+      throw MLSConversationError.conversationNotFound
+    }
     guard let groupIdData = Data(hexEncoded: convo.groupId) else {
       throw MLSConversationError.invalidGroupId
     }
@@ -1023,10 +1046,6 @@ public extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-    guard conversations[convoId] != nil else {
-      throw MLSConversationError.conversationNotFound
-    }
-
     // Pre-validate locally: target must exist and must have been sent by self.
     // Server-side authorization (spec §5.7.2 step 2) is re-checked on every
     // receiving client too — this is purely a fast local fail for the sender's
@@ -1050,9 +1069,9 @@ public extension MLSConversationManager {
     let payload = MLSMessagePayload.edit(targetMessageId: messageId, newText: newText)
 
     if protocolAuthorityMode == .rustFull {
-      let groupIdHex = try rustGroupIdHex(for: convoId)
+      let stableConversationID = try await rustConversationID(for: convoId)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "editMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
+        try runtime.sendPayloadResult(conversationId: stableConversationID, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "editMessage")
 
@@ -1178,10 +1197,6 @@ public extension MLSConversationManager {
     guard let userDid = userDid else {
       throw MLSConversationError.noAuthentication
     }
-    guard conversations[convoId] != nil else {
-      throw MLSConversationError.conversationNotFound
-    }
-
     guard
       let targetRow = try await storage.fetchMessage(
         messageID: messageId,
@@ -1201,9 +1216,9 @@ public extension MLSConversationManager {
     let payload = MLSMessagePayload.unsend(targetMessageId: messageId)
 
     if protocolAuthorityMode == .rustFull {
-      let groupIdHex = try rustGroupIdHex(for: convoId)
+      let stableConversationID = try await rustConversationID(for: convoId)
       let sendResult = try await withRustAuthoritativeRuntime(operation: "unsendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: groupIdHex, payload: payload)
+        try runtime.sendPayloadResult(conversationId: stableConversationID, payload: payload)
       }
       await handleRustEngineEvents(sendResult.events, source: "unsendMessage")
 
@@ -4617,11 +4632,18 @@ public extension MLSConversationManager {
                   needsRejoin = 0,
                   isUnrecoverable = 0,
                   pendingNewGroupId = ?,
-                  pendingResetGeneration = ?,
+                  pendingResetGeneration = CASE
+                    WHEN ? IS NULL THEN pendingResetGeneration
+                    WHEN pendingResetGeneration IS NULL OR pendingResetGeneration < ? THEN ?
+                    ELSE pendingResetGeneration
+                  END,
                   updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
           """,
-        arguments: [pendingNewGroupId, pendingResetGeneration, Date(), convoId, userDID]
+        arguments: [
+          pendingNewGroupId, pendingResetGeneration, pendingResetGeneration, pendingResetGeneration,
+          Date(), convoId, userDID,
+        ]
       )
       return true
     }
@@ -4662,7 +4684,6 @@ public extension MLSConversationManager {
               UPDATE MLSConversationModel
               SET needsReset = 0,
                   pendingNewGroupId = NULL,
-                  pendingResetGeneration = NULL,
                   updatedAt = ?
               WHERE conversationID = ? AND currentUserDID = ?;
           """, arguments: [Date(), convoId, userDID])
@@ -5627,7 +5648,8 @@ public extension MLSConversationManager {
       conversationId: convoId,
       senderDID: userDid,
       epoch: newEpoch,
-      contentKey: "history_boundary.device_rejoined"
+      contentKey: "history_boundary.device_rejoined",
+      groupIDHex: newGroupIdHex
     )
 
     // Note: The conversation record in `conversations` dictionary uses ConvoView from server
@@ -7116,7 +7138,8 @@ public extension MLSConversationManager {
         conversationId: convo.conversationId,
         senderDID: userDid,
         epoch: ffiEpoch,
-        contentKey: "history_boundary.new_member"
+        contentKey: "history_boundary.new_member",
+        groupIDHex: groupIdHex
       )
     }
 
@@ -7571,7 +7594,8 @@ public extension MLSConversationManager {
       conversationId: convo.conversationId,
       senderDID: userDid,
       epoch: ecEpoch,
-      contentKey: contentKey
+      contentKey: contentKey,
+      groupIDHex: groupIdHex
     )
 
     // Log diagnostic info

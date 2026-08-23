@@ -33,6 +33,60 @@ public struct MLSStorageHelpers {
     return did.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
   }
 
+  /// Preserve the authenticated source identity when appending to a
+  /// conversation whose routing ID was healed from a raw group alias.
+  static func preferredCryptoConversationIDSync(
+    conversationID: String,
+    currentUserDID: String,
+    db: Database
+  ) throws -> String {
+    let columns = try db.columns(in: MLSMessageModel.databaseTableName).map(\.name)
+    guard columns.contains("cryptoConversationID") else { return conversationID }
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    let rows = try MLSMessageModel
+      .filter(MLSMessageModel.Columns.conversationID == conversationID)
+      .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+      .order(
+        MLSMessageModel.Columns.sequenceNumber.desc,
+        MLSMessageModel.Columns.timestamp.desc,
+        MLSMessageModel.Columns.messageID.desc
+      )
+      .fetchAll(db)
+    return rows.compactMap(\.cryptoConversationID).first(where: { !$0.isEmpty }) ?? conversationID
+  }
+
+  /// Resolve the routing identity before a payload write. A missing raw
+  /// group-id row may be created by this write, but a missing stable UUID has
+  /// no safe group mapping available at this layer and must fail closed. This
+  /// prevents a direct decrypt path from inserting a stable parent beside an
+  /// existing raw alias while projection adoption is still pending.
+  static func effectiveConversationIDForPayloadSync(
+    conversationID: String,
+    currentUserDID: String,
+    db: Database
+  ) throws -> String {
+    // A few migration/codec callers intentionally exercise only the message
+    // tables.  There is no routing authority to consult in that reduced
+    // schema, so preserve the historical direct-write behavior; production
+    // schemas always include MLSConversationModel and take the strict path.
+    guard try db.tableExists(MLSConversationModel.databaseTableName) else {
+      return conversationID
+    }
+
+    if let resolved = try resolveCanonicalConversationIDSync(
+      in: db,
+      userDID: currentUserDID,
+      conversationID: conversationID
+    ) {
+      return resolved
+    }
+
+    guard let groupData = Data(hexEncoded: conversationID) else {
+      throw MLSStorageError.invalidConversationID(conversationID)
+    }
+    return groupData.hexEncodedString()
+  }
+
   private static func normalizeOptionalMessageID(_ messageID: String?) -> String? {
     guard let messageID else { return nil }
     let trimmed = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -101,25 +155,50 @@ public struct MLSStorageHelpers {
     let normalizedUserDID = normalizeDID(currentUserDID)
     let normalizedSenderID = normalizeDID(senderID)
 
-    // Encode + encrypt payload (field-level encryption above SQLCipher)
-    let payloadData = try payload.encodeToJSON()
-    let encryptedWire = try MLSFieldEncryption.encrypt(
-      context: context,
-      conversationID: conversationID,
-      plaintext: payloadData
-    )
-
     try await database.write { db in
+      let effectiveConversationID = try effectiveConversationIDForPayloadSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        db: db
+      )
+      let existingMessage = try MLSMessageModel
+        .filter(MLSMessageModel.Columns.messageID == messageID)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)
+      let routedConversationID = existingMessage?.conversationID ?? effectiveConversationID
+      let cryptoConversationID: String
+      if let existingBinding = existingMessage?.cryptoConversationID,
+         !existingBinding.isEmpty
+      {
+        cryptoConversationID = existingBinding
+      } else {
+        cryptoConversationID = try preferredCryptoConversationIDSync(
+          conversationID: routedConversationID,
+          currentUserDID: normalizedUserDID,
+          db: db
+        )
+      }
+
+      // Encode + encrypt payload (field-level encryption above SQLCipher).
+      // Keep route resolution, encryption, and the HMAC append in one write
+      // transaction so alias adoption cannot race this projection.
+      let payloadData = try payload.encodeToJSON()
+      let encryptedWire = try MLSFieldEncryption.encrypt(
+        context: context,
+        conversationID: cryptoConversationID,
+        plaintext: payloadData
+      )
+
       // Walk to the chain tail to seal this entry's HMAC.
       let prevHMAC = try fetchLastEntryHMACSync(
-        conversationID: conversationID,
+        conversationID: routedConversationID,
         currentUserDID: normalizedUserDID,
         legacyUserDID: currentUserDID,
         db: db
       )
       let entryHMAC = try MLSFieldEncryption.computeHMAC(
         context: context,
-        conversationID: conversationID,
+        conversationID: cryptoConversationID,
         previousHMAC: prevHMAC,
         messageID: messageID,
         payloadWire: encryptedWire
@@ -157,7 +236,7 @@ public struct MLSStorageHelpers {
         // messages from new conversations (e.g., Welcome message arrives first)
         try ensureConversationExistsInTransaction(
           db: db,
-          conversationID: conversationID,
+          conversationID: effectiveConversationID,
           userDID: normalizedUserDID,
           senderDID: normalizedSenderID
         )
@@ -165,7 +244,8 @@ public struct MLSStorageHelpers {
         let message = MLSMessageModel(
           messageID: messageID,
           currentUserDID: normalizedUserDID,
-          conversationID: conversationID,
+          conversationID: effectiveConversationID,
+          cryptoConversationID: cryptoConversationID == effectiveConversationID ? nil : cryptoConversationID,
           senderID: normalizedSenderID,
           payloadJSON: nil,
           wireFormat: nil,
@@ -267,22 +347,45 @@ public struct MLSStorageHelpers {
     let normalizedUserDID = normalizeDID(currentUserDID)
     let normalizedSenderID = normalizeDID(senderID)
 
+      let effectiveConversationID = try effectiveConversationIDForPayloadSync(
+        conversationID: conversationID,
+        currentUserDID: normalizedUserDID,
+        db: db
+      )
+    let existingMessage = try MLSMessageModel
+      .filter(MLSMessageModel.Columns.messageID == messageID)
+      .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+      .fetchOne(db)
+    let routedConversationID = existingMessage?.conversationID ?? effectiveConversationID
+    let cryptoConversationID: String
+    if let existingBinding = existingMessage?.cryptoConversationID,
+       !existingBinding.isEmpty
+    {
+      cryptoConversationID = existingBinding
+    } else {
+      cryptoConversationID = try preferredCryptoConversationIDSync(
+        conversationID: routedConversationID,
+        currentUserDID: normalizedUserDID,
+        db: db
+      )
+    }
+
     // Encode + encrypt payload (field-level encryption above SQLCipher)
     let payloadData = try payload.encodeToJSON()
     let encryptedWire = try MLSFieldEncryption.encrypt(
       context: context,
-      conversationID: conversationID,
+      conversationID: cryptoConversationID,
       plaintext: payloadData
     )
     let prevHMAC = try fetchLastEntryHMACSync(
-      conversationID: conversationID,
+      conversationID: routedConversationID,
       currentUserDID: normalizedUserDID,
       legacyUserDID: currentUserDID,
       db: db
     )
     let entryHMAC = try MLSFieldEncryption.computeHMAC(
       context: context,
-      conversationID: conversationID,
+      conversationID: cryptoConversationID,
       previousHMAC: prevHMAC,
       messageID: messageID,
       payloadWire: encryptedWire
@@ -317,7 +420,7 @@ public struct MLSStorageHelpers {
       // 🚨 FOREIGN KEY FIX: Ensure conversation exists before inserting message
       try ensureConversationExistsInTransaction(
         db: db,
-        conversationID: conversationID,
+        conversationID: effectiveConversationID,
         userDID: normalizedUserDID,
         senderDID: normalizedSenderID
       )
@@ -325,7 +428,8 @@ public struct MLSStorageHelpers {
       let message = MLSMessageModel(
         messageID: messageID,
         currentUserDID: normalizedUserDID,
-        conversationID: conversationID,
+        conversationID: effectiveConversationID,
+        cryptoConversationID: cryptoConversationID == effectiveConversationID ? nil : cryptoConversationID,
         senderID: normalizedSenderID,
         payloadJSON: nil,
         wireFormat: nil,
@@ -444,64 +548,32 @@ public struct MLSStorageHelpers {
   
   /// Public API for ensuring a conversation exists (for use in write(for:) closures)
   ///
-  /// This method creates a minimal "placeholder" conversation record if one doesn't exist,
-  /// satisfying foreign key constraints for message inserts.
+  /// This method creates a minimal conversation record if one doesn't exist,
+  /// satisfying foreign key constraints for message inserts. It also heals a
+  /// callback-created raw group-ID alias when a validated stable ID is supplied.
   ///
   /// - Parameters:
   ///   - db: Active GRDB database connection (within a write transaction)
   ///   - userDID: User DID
   ///   - conversationID: Conversation identifier (hex-encoded group ID)
   ///   - groupID: MLS group ID (hex-encoded)
+  ///   - isPlaceholder: Whether a newly inserted row is marked as a placeholder
+  @discardableResult
   public static func ensureConversationExistsSync(
     in db: Database,
     userDID: String,
     conversationID: String,
-    groupID: String
-  ) throws {
-    let normalizedUserDID = normalizeDID(userDID)
-    
-    // Check if conversation already exists
-    let existingCount =
-      try MLSConversationModel
-      .filter(MLSConversationModel.Columns.conversationID == conversationID)
-      .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
-      .fetchCount(db)
-
-    if existingCount > 0 {
-      // Conversation exists, nothing to do
-      return
-    }
-
-    // Create placeholder conversation
-    guard let groupIDData = Data(hexEncoded: groupID) else {
-      logger.warning("⚠️ [FK-FIX] groupID not valid hex: \(groupID.prefix(16))...")
-      return
-    }
-
-    let placeholder = MLSConversationModel(
+    groupID: String,
+    isPlaceholder: Bool = true
+  ) throws -> String {
+    return try ensureConversationExistsStrictSync(
+      in: db,
+      userDID: userDID,
       conversationID: conversationID,
-      currentUserDID: normalizedUserDID,
-      groupID: groupIDData,
-      epoch: 0,
-      joinMethod: .unknown,
-      joinEpoch: 0,
-      title: nil,
-      avatarURL: nil,
-      createdAt: Date(),
-      updatedAt: Date(),
-      lastMessageAt: nil,
-      lastMembershipChangeAt: nil,
-      unacknowledgedMemberChanges: 0,
-      isActive: true,
-      needsRejoin: false,
-      rejoinRequestedAt: nil,
-      lastRecoveryAttempt: nil,
-      consecutiveFailures: 0,
-      isPlaceholder: true
+      groupID: groupID,
+      isPlaceholder: isPlaceholder
     )
 
-    try placeholder.insert(db)
-    logger.info("🔧 [FK-FIX] Created placeholder conversation (sync): \(conversationID.prefix(16))...")
   }
 
   /// Ensure a conversation exists within an active database transaction
@@ -538,49 +610,13 @@ public struct MLSStorageHelpers {
       return
     }
 
-    // Create placeholder conversation
-    // Use conversationID as groupID (they should be the same hex string)
+    // A missing parent can only be safely created when the requested route is
+    // itself a normalized raw group id. A stable UUID has no authoritative
+    // group mapping in this helper; manufacturing UTF-8 group bytes would
+    // strand a canonical row beside a raw alias and make future healing
+    // ambiguous.
     guard let groupIDData = Data(hexEncoded: conversationID) else {
-      // If conversationID isn't valid hex, use it as UTF-8 bytes
-      logger.warning(
-        "⚠️ [FK-FIX] conversationID not valid hex, using UTF-8 bytes: \(conversationID.prefix(16))..."
-      )
-      let groupIDData = Data(conversationID.utf8)
-
-      let placeholderTitle: String
-      if senderDID.hasPrefix("did:plc:") {
-        placeholderTitle = "Chat with \(senderDID.suffix(8))..."
-      } else {
-        placeholderTitle = senderDID.isEmpty ? "New Conversation" : senderDID
-      }
-
-      let placeholder = MLSConversationModel(
-        conversationID: conversationID,
-        currentUserDID: userDID,
-        groupID: groupIDData,
-        epoch: 0,
-        joinMethod: .unknown,
-        joinEpoch: 0,
-        title: placeholderTitle,
-        avatarURL: nil,
-        createdAt: Date(),
-        updatedAt: Date(),
-        lastMessageAt: Date(),
-        lastMembershipChangeAt: nil,
-        unacknowledgedMemberChanges: 0,
-        isActive: true,
-        needsRejoin: false,
-        rejoinRequestedAt: nil,
-        lastRecoveryAttempt: nil,
-        consecutiveFailures: 0,
-        isPlaceholder: true
-      )
-      try placeholder.insert(db)
-
-      logger.warning(
-        "🆕 [FK-FIX] Created PLACEHOLDER conversation: \(conversationID.prefix(16))... (UTF-8 groupID)"
-      )
-      return
+      throw MLSStorageError.invalidConversationID(conversationID)
     }
 
     // Build placeholder title from sender DID

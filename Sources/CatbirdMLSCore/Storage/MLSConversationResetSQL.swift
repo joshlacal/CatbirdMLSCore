@@ -29,8 +29,8 @@ public enum MLSConversationResetSQL {
   /// proceed to call `MLSClient.deleteGroup` on the freshly bootstrapped
   /// group, and the convo is destroyed by replay traffic. CLIENT M (Task #75)
   /// added the `appliedGeneration` plumbing so success paths leave a real
-  /// number behind. Pass `nil` from non-reset success paths to fall back to
-  /// the legacy null-on-success behavior.
+  /// number behind. A nil value keeps the previously stored high-water; the
+  /// high-water is never lowered by a completion.
   ///
   /// Generation staleness must be checked by the caller before invoking this
   /// helper — see `MLSConversationResetSQL.loadPendingResetGeneration`.
@@ -53,23 +53,32 @@ public enum MLSConversationResetSQL {
                 needsRejoin = 0,
                 isUnrecoverable = 0,
                 pendingNewGroupId = NULL,
-                pendingResetGeneration = ?,
+                pendingResetGeneration = CASE
+                  WHEN ? IS NULL THEN pendingResetGeneration
+                  WHEN pendingResetGeneration IS NULL OR pendingResetGeneration < ? THEN ?
+                  ELSE pendingResetGeneration
+                END,
                 consecutiveFailures = 0,
                 lastRecoveryAttempt = ?,
                 updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?;
         """,
       arguments: [
-        newGroupID, newEpoch, newEpoch, appliedGeneration, now, now,
-        conversationID, currentUserDID,
+        newGroupID, newEpoch, newEpoch, appliedGeneration, appliedGeneration, appliedGeneration,
+        now, now, conversationID, currentUserDID,
       ]
     )
   }
 
-  /// Clear only the pending-reset staging columns, leaving `needsReset` intact.
-  /// Used when verification fails (e.g. server returned a different group ID
-  /// than the one the SSE event announced) and we want to drop the stale
-  /// pointer while remaining in RESET_PENDING for another attempt.
+  /// Clear only the pending-reset target, leaving `needsReset` and the reset
+  /// generation high-water intact. Used when verification fails (e.g. the
+  /// server returned a different group ID than the one the SSE event
+  /// announced) and we want to drop the stale pointer while remaining in
+  /// RESET_PENDING for another attempt.
+  ///
+  /// The current schema predates the Rust split between reset high-water and
+  /// RESET_PENDING generation, so `pendingResetGeneration` is retained as the
+  /// high-water value until the sealed schema provides separate columns.
   public static func clearPendingReset(
     db: Database,
     conversationID: String,
@@ -80,7 +89,6 @@ public enum MLSConversationResetSQL {
       sql: """
             UPDATE MLSConversationModel
             SET pendingNewGroupId = NULL,
-                pendingResetGeneration = NULL,
                 updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?;
         """,

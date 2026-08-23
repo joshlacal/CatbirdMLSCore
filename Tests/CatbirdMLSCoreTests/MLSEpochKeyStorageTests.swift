@@ -79,9 +79,127 @@ final class MLSEpochKeyStorageTests: XCTestCase {
     XCTAssertEqual(key?.keyMaterial, secret)
   }
 
+  func testSaveEpochSecretDeduplicatesIdenticalConversationEpochSecret() async throws {
+    let conversationID = "550e8400-e29b-41d4-a716-446655440000"
+    let userDID = "did:plc:epoch-user"
+    let secret = Data([0xCA, 0x7B, 0x1D])
+
+    try await insertConversation(conversationID: conversationID, currentUserDID: userDID)
+    try await storage.saveEpochSecret(
+      userDID: userDID,
+      conversationID: conversationID,
+      epoch: 7,
+      secretData: secret,
+      database: dbQueue
+    )
+    try await storage.saveEpochSecret(
+      userDID: userDID,
+      conversationID: conversationID,
+      epoch: 7,
+      secretData: secret,
+      database: dbQueue
+    )
+
+    let keys = try await fetchEpochKeys(conversationID: conversationID, currentUserDID: userDID)
+    XCTAssertEqual(keys.count, 1)
+    XCTAssertEqual(keys.first?.keyMaterial, secret)
+  }
+
+  func testSaveEpochSecretRejectsDifferentSecretForSameConversationEpoch() async throws {
+    let conversationID = "550e8400-e29b-41d4-a716-446655440000"
+    let userDID = "did:plc:epoch-user"
+    let original = Data([0xCA, 0x7B, 0x1D])
+    let conflicting = Data([0xEE, 0xAD, 0x01])
+
+    try await insertConversation(conversationID: conversationID, currentUserDID: userDID)
+    try await storage.saveEpochSecret(
+      userDID: userDID,
+      conversationID: conversationID,
+      epoch: 7,
+      secretData: original,
+      database: dbQueue
+    )
+
+    var didThrow = false
+    do {
+      try await storage.saveEpochSecret(
+        userDID: userDID,
+        conversationID: conversationID,
+        epoch: 7,
+        secretData: conflicting,
+        database: dbQueue
+      )
+    } catch {
+      didThrow = true
+    }
+    XCTAssertTrue(didThrow)
+
+    let keys = try await fetchEpochKeys(conversationID: conversationID, currentUserDID: userDID)
+    XCTAssertEqual(keys.count, 1)
+    XCTAssertEqual(keys.first?.keyMaterial, original)
+  }
+
+  func testEpochStoreGetAndDeleteResolveExactRawAliasToStableConversation() async throws {
+    let rawGroupID = "deadbeef"
+    let stableConversationID = "550e8400-e29b-41d4-a716-446655440000"
+    let userDID = "did:plc:epoch-user"
+    let secret = Data([0x01, 0x02, 0x03])
+
+    try await insertConversation(
+      conversationID: stableConversationID,
+      currentUserDID: userDID,
+      groupID: Data(hexEncoded: rawGroupID)
+    )
+    try await insertConversation(
+      conversationID: rawGroupID,
+      currentUserDID: userDID,
+      groupID: Data(hexEncoded: rawGroupID)
+    )
+
+    try await storage.saveEpochSecret(
+      userDID: userDID,
+      conversationID: rawGroupID,
+      epoch: 9,
+      secretData: secret,
+      database: dbQueue
+    )
+
+    let fetched = try await storage.getEpochSecret(
+      userDID: userDID,
+      conversationID: rawGroupID,
+      epoch: 9,
+      database: dbQueue
+    )
+    XCTAssertEqual(fetched, secret)
+    let routedKeys = try await fetchEpochKeys(
+      conversationID: stableConversationID,
+      currentUserDID: userDID
+    )
+    XCTAssertEqual(routedKeys.map(\.epoch), [9])
+
+    let epochStorage = storage
+    let deleted = try await dbQueue.write { db in
+      try epochStorage.deleteEpochsBeforeSync(
+        userDID: userDID,
+        conversationID: rawGroupID,
+        cutoffEpoch: 10,
+        db: db
+      )
+    }
+    XCTAssertEqual(deleted, 1)
+    let remaining = try await storage.getEpochSecret(
+      userDID: userDID,
+      conversationID: stableConversationID,
+      epoch: 9,
+      database: dbQueue
+    )
+    XCTAssertNil(remaining)
+  }
+
   private func insertConversation(
     conversationID: String,
-    currentUserDID: String
+    currentUserDID: String,
+    groupID: Data? = nil
   ) async throws {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     try await dbQueue.write { db in
@@ -96,7 +214,7 @@ final class MLSEpochKeyStorageTests: XCTestCase {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
         arguments: [
-          conversationID, currentUserDID, Data(conversationID.utf8), 0,
+          conversationID, currentUserDID, groupID ?? Data(conversationID.utf8), 0,
           "unknown", 0, now, now,
           0, true,
           false, false, false,

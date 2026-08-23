@@ -145,6 +145,33 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     return Self.iso8601Formatter.string(from: date)
   }
 
+  /// Read-only callback identity resolution. A missing exact raw group id may
+  /// remain on its normalized raw id for legacy insertion paths; a missing
+  /// stable id fails closed so an auxiliary child cannot be stranded beside a
+  /// canonical parent that the projection callback has not adopted yet.
+  private func resolvedConversationID(
+    in db: Database,
+    requestedID: String,
+    groupID: String? = nil
+  ) throws -> String {
+    if let resolved = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
+      in: db,
+      userDID: userDID,
+      conversationID: requestedID,
+      groupID: groupID
+    ) {
+      return resolved
+    }
+
+    if groupID == nil,
+       requestedID == requestedID.lowercased(),
+       let rawData = Data(hexEncoded: requestedID)
+    {
+      return rawData.hexEncodedString()
+    }
+    throw MLSStorageError.invalidConversationID(requestedID)
+  }
+
   // MARK: - Conversation Operations
 
   public func ensureConversationExists(
@@ -152,45 +179,17 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     conversationId: String,
     groupId: String
   ) throws {
-    let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
-
     try dbPool.write { db in
-      // Check if conversation already exists
-      let count = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
-        .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
-        .fetchCount(db)
-
-      guard count == 0 else { return }
-
-      // Convert groupId hex string to Data
-      guard let groupIDData = Data(hexEncoded: groupId) else {
+      guard Data(hexEncoded: groupId) != nil else {
         throw MLSStorageError.invalidGroupID(groupId)
       }
-
-      let conversation = MLSConversationModel(
+      _ = try MLSStorageHelpers.ensureConversationExistsSync(
+        in: db,
+        userDID: userDid,
         conversationID: conversationId,
-        currentUserDID: normalizedDID,
-        groupID: groupIDData,
-        epoch: 0,
-        joinMethod: .unknown,
-        joinEpoch: 0,
-        title: nil,
-        avatarURL: nil,
-        createdAt: Date(),
-        updatedAt: Date(),
-        lastMessageAt: nil,
-        lastMembershipChangeAt: nil,
-        unacknowledgedMemberChanges: 0,
-        isActive: true,
-        needsRejoin: false,
-        rejoinRequestedAt: nil,
-        lastRecoveryAttempt: nil,
-        consecutiveFailures: 0,
-        isPlaceholder: false,
-        requestState: .none
+        groupID: groupId,
+        isPlaceholder: false
       )
-      try conversation.insert(db)
     }
   }
 
@@ -211,8 +210,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }()
 
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       if let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
         .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
         .fetchOne(db)
       {
@@ -229,8 +229,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
 
     return try dbPool.read { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       guard let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
         .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
         .fetchOne(db)
       else {
@@ -239,7 +240,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
       // Fetch active members for this conversation
       let members = try MLSMemberModel
-        .filter(MLSMemberModel.Columns.conversationID == conversationId)
+        .filter(MLSMemberModel.Columns.conversationID == effectiveID)
         .filter(MLSMemberModel.Columns.currentUserDID == normalizedDID)
         .filter(MLSMemberModel.Columns.isActive == true)
         .fetchAll(db)
@@ -286,8 +287,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       // CASCADE on MLSMessageModel will handle cleanup if we hard-delete,
       // but soft-delete preserves message history.
       for conversationId in ids {
+        let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
         if let conversation = try MLSConversationModel
-          .filter(MLSConversationModel.Columns.conversationID == conversationId)
+          .filter(MLSConversationModel.Columns.conversationID == effectiveID)
           .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
           .fetchOne(db)
         {
@@ -302,8 +304,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     // The Rust orchestrator uses a string "state" field (e.g. "active", "left", "error").
     // Map this to the existing MLSConversationModel fields.
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       if let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       {
         let updated: MLSConversationModel
@@ -328,8 +332,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func getConversationState(conversationId: String) throws -> FfiConversationState? {
     try dbPool.read { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       guard let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
         .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       else {
@@ -343,7 +348,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           FROM mls_orchestrator_quarantine
           WHERE conversation_id = ? AND user_did = ?
           """,
-        arguments: [conversationId, userDID]
+        arguments: [effectiveID, userDID]
       ) {
         return FfiConversationState(
           state: "quarantined",
@@ -396,6 +401,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       throw OrchestratorBridgeError.Storage(message: "Unknown quarantine reason: \(reasonTag)")
     }
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_quarantine (conversation_id, user_did, reason_tag, since_ms)
@@ -404,16 +410,17 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             reason_tag = excluded.reason_tag,
             since_ms = excluded.since_ms
           """,
-        arguments: [conversationId, userDID, reasonTag, sinceMs]
+        arguments: [effectiveID, userDID, reasonTag, sinceMs]
       )
     }
   }
 
   public func clearQuarantine(conversationId: String) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: "DELETE FROM mls_orchestrator_quarantine WHERE conversation_id = ? AND user_did = ?",
-        arguments: [conversationId, userDID]
+        arguments: [effectiveID, userDID]
       )
     }
   }
@@ -435,13 +442,14 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   ) throws {
     let incomingGen = Int64(resetGeneration)
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       let stored = try Int64.fetchOne(
         db,
         sql: """
           SELECT pendingResetGeneration FROM MLSConversationModel
-          WHERE conversationID = ?
+          WHERE conversationID = ? AND currentUserDID = ?
           """,
-        arguments: [conversationId]
+        arguments: [effectiveID, userDID]
       )
       if let stored, stored >= incomingGen {
         return
@@ -455,27 +463,29 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
               pendingNewGroupId = ?,
               pendingResetGeneration = ?,
               updatedAt = ?
-          WHERE conversationID = ?
+          WHERE conversationID = ? AND currentUserDID = ?
           """,
-        arguments: [newGroupIdHex, incomingGen, Date(), conversationId]
+        arguments: [newGroupIdHex, incomingGen, Date(), effectiveID, userDID]
       )
     }
   }
 
-  /// Clear the staged pending-reset pointer after the conversation has
-  /// adopted the new group. Leaves `needsReset` untouched — callers handle
-  /// that via the usual clear path.
+  /// Clear the staged pending-reset target after the conversation has adopted
+  /// the new group. Leaves `needsReset` and the reset generation high-water
+  /// untouched — callers handle the lifecycle state separately. The current
+  /// schema has one generation column, so it is retained as the provisional
+  /// high-water until the sealed split-column contract is available.
   public func clearResetPending(conversationId: String) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           UPDATE MLSConversationModel
           SET pendingNewGroupId = NULL,
-              pendingResetGeneration = NULL,
               updatedAt = ?
-          WHERE conversationID = ?
+          WHERE conversationID = ? AND currentUserDID = ?
           """,
-        arguments: [Date(), conversationId]
+        arguments: [Date(), effectiveID, userDID]
       )
     }
   }
@@ -487,16 +497,20 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     authoritativeNewTarget: String
   ) throws -> Bool {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           UPDATE MLSConversationModel
           SET pendingNewGroupId = ?,
               updatedAt = ?
           WHERE conversationID = ?
+            AND currentUserDID = ?
             AND pendingResetGeneration = ?
             AND (pendingNewGroupId = ? OR pendingNewGroupId IS NULL)
           """,
-        arguments: [authoritativeNewTarget, Date(), conversationId, Int64(expectedGeneration), expectedOldTarget]
+        arguments: [
+          authoritativeNewTarget, Date(), effectiveID, userDID, Int64(expectedGeneration), expectedOldTarget,
+        ]
       )
       return db.changesCount > 0
     }
@@ -509,6 +523,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     landedEpoch: UInt64
   ) throws -> Bool {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       guard let groupData = Data(hexEncoded: expectedNewGroupIdHex) else {
         return false
       }
@@ -521,12 +536,17 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
               needsRejoin = 0,
               isUnrecoverable = 0,
               pendingNewGroupId = NULL,
-              pendingResetGeneration = NULL,
+              pendingResetGeneration = COALESCE(pendingResetGeneration, ?),
               updatedAt = ?
           WHERE conversationID = ?
+            AND currentUserDID = ?
             AND (pendingResetGeneration = ? OR pendingResetGeneration IS NULL)
+            AND (LOWER(pendingNewGroupId) = LOWER(?) OR pendingNewGroupId IS NULL)
           """,
-        arguments: [groupData, Int64(landedEpoch), Date(), conversationId, Int64(expectedGeneration)]
+        arguments: [
+          groupData, Int64(landedEpoch), Int64(expectedGeneration), Date(), effectiveID, userDID,
+          Int64(expectedGeneration), expectedNewGroupIdHex,
+        ]
       )
       return db.changesCount > 0
     }
@@ -537,16 +557,20 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     expectedGeneration: Int32
   ) throws -> Bool {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           UPDATE MLSConversationModel
           SET pendingNewGroupId = NULL,
-              pendingResetGeneration = NULL,
+              pendingResetGeneration = COALESCE(pendingResetGeneration, ?),
               updatedAt = ?
           WHERE conversationID = ?
+            AND currentUserDID = ?
             AND (pendingResetGeneration = ? OR pendingResetGeneration IS NULL)
           """,
-        arguments: [Date(), conversationId, Int64(expectedGeneration)]
+        arguments: [
+          Int64(expectedGeneration), Date(), effectiveID, userDID, Int64(expectedGeneration),
+        ]
       )
       return db.changesCount > 0
     }
@@ -562,8 +586,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func markNeedsRejoin(conversationId: String) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       if let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       {
         let updated = conversation.withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
@@ -574,8 +600,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func needsRejoin(conversationId: String) throws -> Bool {
     try dbPool.read { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       return conversation?.needsRejoin ?? false
     }
@@ -583,8 +611,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func clearRejoinFlag(conversationId: String) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       if let conversation = try MLSConversationModel
-        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.conversationID == effectiveID)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       {
         let updated = conversation.withRejoinState(needsRejoin: false, rejoinRequestedAt: nil)
@@ -626,11 +656,15 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
 
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(
+        in: db,
+        requestedID: message.conversationId
+      )
       try MLSStorageHelpers.savePayloadSync(
         context: mlsContext,
         in: db,
         messageID: message.id,
-        conversationID: message.conversationId,
+        conversationID: effectiveID,
         currentUserDID: normalizedDID,
         payload: payload,
         senderID: message.senderDid,
@@ -666,8 +700,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
 
     let models: [MLSMessageModel] = try dbPool.read { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       var request = MLSMessageModel
-        .filter(MLSMessageModel.Columns.conversationID == conversationId)
+        .filter(MLSMessageModel.Columns.conversationID == effectiveID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedDID)
 
       if let before = beforeSequence {
@@ -702,6 +737,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func storePendingMessage(conversationId: String, messageId: String) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_pending_messages (message_id, conversation_id, user_did, created_at)
@@ -710,7 +746,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             conversation_id = excluded.conversation_id,
             user_did = excluded.user_did
           """,
-        arguments: [messageId, conversationId, userDID, Date()]
+        arguments: [messageId, effectiveID, userDID, Date()]
       )
     }
   }
@@ -727,6 +763,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func storeSequencerReceipt(receipt: FfiSequencerReceipt) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: receipt.convoId)
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_sequencer_receipts
@@ -740,7 +777,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
             signature = excluded.signature
           """,
         arguments: [
-          receipt.convoId,
+          effectiveID,
           userDID,
           receipt.epoch,
           Int64(receipt.sequencerTerm),
@@ -758,12 +795,13 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     sinceEpoch: Int32?
   ) throws -> [FfiSequencerReceipt] {
     try dbPool.read { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       var sql = """
         SELECT conversation_id, epoch, sequencer_term, commit_hash, sequencer_did, issued_at, signature
         FROM mls_orchestrator_sequencer_receipts
         WHERE conversation_id = ? AND user_did = ?
         """
-      var arguments: StatementArguments = [conversationId, userDID]
+      var arguments: StatementArguments = [effectiveID, userDID]
       if let sinceEpoch {
         sql += " AND epoch >= ?"
         arguments += [sinceEpoch]
@@ -786,9 +824,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func clearSequencerReceipts(conversationId: String) throws {
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: "DELETE FROM mls_orchestrator_sequencer_receipts WHERE conversation_id = ? AND user_did = ?",
-        arguments: [conversationId, userDID]
+        arguments: [effectiveID, userDID]
       )
     }
   }
@@ -859,6 +898,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func setGroupState(state: FfiGroupState) throws {
     try dbPool.write { db in
       ensureGroupStateTableExists(db)
+      let effectiveID = try resolvedConversationID(
+        in: db,
+        requestedID: state.conversationId,
+        groupID: state.groupId
+      )
 
       let membersJSON = try JSONEncoder().encode(state.members)
 
@@ -874,7 +918,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           """,
         arguments: [
           state.groupId,
-          state.conversationId,
+          effectiveID,
           Int64(state.epoch),
           membersJSON,
           Date(),
@@ -905,9 +949,14 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       let membersData: Data = row["members_json"] ?? Data()
       let members = (try? JSONDecoder().decode([String].self, from: membersData)) ?? []
 
+      let effectiveID = try resolvedConversationID(
+        in: db,
+        requestedID: row["conversation_id"],
+        groupID: groupId
+      )
       return FfiGroupState(
         groupId: row["group_id"],
-        conversationId: row["conversation_id"],
+        conversationId: effectiveID,
         epoch: UInt64(row["epoch"] as Int64? ?? 0),
         members: members
       )
@@ -951,9 +1000,13 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         .filter(MLSRecoveryGlobalStateModel.Columns.currentUserDID == normalizedDID)
         .fetchOne(db)
       return FfiPersistedRecoveryState(
-        entries: rows.map { row in
+        entries: try rows.map { row in
           FfiPersistedRecoveryBackoff(
-            conversationId: row.conversationID,
+            // Ambiguous or invalid identity must propagate to the Rust
+            // callback rather than silently exposing the raw alias.  The
+            // resolver is read-only; adoption belongs to the transactional
+            // projection path.
+            conversationId: try self.resolvedConversationID(in: db, requestedID: row.conversationID),
             failedRejoinCount: UInt32(clamping: row.failedRejoinCount),
             lastAttemptAtMs: row.lastAttemptAtMs,
             quarantinedUntilMs: row.quarantinedUntilMs
@@ -966,14 +1019,15 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   /// Write-through one conversation's rejoin-backoff snapshot.
   public func setRecoveryBackoff(entry: FfiPersistedRecoveryBackoff) throws {
-    let model = MLSRecoveryAttemptStateModel(
-      conversationID: entry.conversationId,
-      currentUserDID: userDID,
-      failedRejoinCount: Int(entry.failedRejoinCount),
-      lastAttemptAtMs: entry.lastAttemptAtMs,
-      quarantinedUntilMs: entry.quarantinedUntilMs
-    )
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: entry.conversationId)
+      let model = MLSRecoveryAttemptStateModel(
+        conversationID: effectiveID,
+        currentUserDID: userDID,
+        failedRejoinCount: Int(entry.failedRejoinCount),
+        lastAttemptAtMs: entry.lastAttemptAtMs,
+        quarantinedUntilMs: entry.quarantinedUntilMs
+      )
       // Conflict policy on the model is .replace — insert acts as upsert,
       // matching MLSRecoveryStateStore.upsertConversationState.
       try model.insert(db)
@@ -984,12 +1038,13 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func clearRecoveryBackoff(conversationId: String) throws {
     let normalizedDID = userDID
     try dbPool.write { db in
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           DELETE FROM MLSRecoveryAttemptStateModel
           WHERE conversationID = ? AND currentUserDID = ?
           """,
-        arguments: [conversationId, normalizedDID]
+        arguments: [effectiveID, normalizedDID]
       )
     }
   }
@@ -1018,6 +1073,11 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func markPendingLocalDelete(conversationId: String, groupIdHex: String?) throws {
     try dbPool.write { db in
       ensurePendingLocalDeleteTableExists(db)
+      let effectiveID = try resolvedConversationID(
+        in: db,
+        requestedID: conversationId,
+        groupID: groupIdHex
+      )
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_pending_local_deletes (conversation_id, user_did, group_id_hex, created_at)
@@ -1025,7 +1085,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           ON CONFLICT(conversation_id, user_did) DO UPDATE SET
             group_id_hex = excluded.group_id_hex
           """,
-        arguments: [conversationId, userDID, groupIdHex, Date()]
+        arguments: [effectiveID, userDID, groupIdHex, Date()]
       )
     }
   }
@@ -1034,12 +1094,13 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func clearPendingLocalDelete(conversationId: String) throws {
     try dbPool.write { db in
       ensurePendingLocalDeleteTableExists(db)
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
       try db.execute(
         sql: """
           DELETE FROM mls_orchestrator_pending_local_deletes
           WHERE conversation_id = ? AND user_did = ?
           """,
-        arguments: [conversationId, userDID]
+        arguments: [effectiveID, userDID]
       )
     }
   }
@@ -1062,10 +1123,16 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
           """,
         arguments: [normalizedDID]
       )
-      return rows.map { row in
-        FfiPendingLocalDelete(
-          conversationId: row["conversation_id"],
-          groupIdHex: row["group_id_hex"]
+      return try rows.map { row in
+        let requestedID: String = row["conversation_id"]
+        let groupID: String? = row["group_id_hex"]
+        return FfiPendingLocalDelete(
+          conversationId: try self.resolvedConversationID(
+            in: db,
+            requestedID: requestedID,
+            groupID: groupID
+          ),
+          groupIdHex: groupID
         )
       }
     }
