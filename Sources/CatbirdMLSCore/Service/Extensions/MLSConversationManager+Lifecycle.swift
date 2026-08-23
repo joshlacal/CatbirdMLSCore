@@ -50,9 +50,10 @@ extension MLSConversationManager {
     // Set flag to reject new operations
     isSuspending = true
     isSyncPaused = true
-    MLSContextFreeLifecycleSuspensionOwner.recordManagerSuspension(
+    let suspensionID = MLSContextFreeLifecycleSuspensionOwner.recordManagerSuspension(
       reason: "MLSConversationManager.suspendMLSOperations"
     )
+    activeSuspensionID = suspensionID
     let rustPrepareSucceeded: Bool
     if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
       do {
@@ -151,6 +152,7 @@ extension MLSConversationManager {
       return
     }
 
+    let observedSuspensionID = activeSuspensionID
     logger.info("▶️ [RESUME] Resuming MLS operations after app foreground")
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
@@ -191,12 +193,30 @@ extension MLSConversationManager {
       }
     }
 
-    // Clear suspension flags only after the rustFull runtime is resumable again.
-    isSuspending = false
-    isSyncPaused = false
-    MLSContextFreeLifecycleSuspensionOwner.recordManagerResume(
-      reason: "MLSConversationManager.resumeMLSOperations"
-    )
+    // Clear suspension flags only if this resume owns the current suspension.
+    let didRelease: Bool
+    if let observedSuspensionID {
+      didRelease = MLSContextFreeLifecycleSuspensionOwner.recordManagerResume(
+        id: observedSuspensionID,
+        reason: "MLSConversationManager.resumeMLSOperations"
+      )
+    } else {
+      didRelease = false
+    }
+
+    if didRelease {
+      if activeSuspensionID == observedSuspensionID {
+        activeSuspensionID = nil
+      }
+      isSuspending = false
+      isSyncPaused = false
+    } else if observedSuspensionID == nil {
+      isSuspending = false
+      isSyncPaused = false
+    } else {
+      logger.warning("⚠️ [RESUME] Stale or unowned manager resume did not clear active suspension gates")
+    }
+
     await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
     schedulePostReloadSyncIfNeeded()
 

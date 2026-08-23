@@ -516,6 +516,76 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
     XCTAssertFalse(MLSClient.isSuspensionInProgress)
   }
+  func testManagerResumeRefusesToClearGatesWhenForeignManagerHoldsThem() async throws {
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    let manager1 = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    let manager2 = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+
+    await MainActor.run {
+      manager1.suspendMLSOperations()
+    }
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    await MainActor.run {
+      manager2.suspendMLSOperations()
+    }
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    // manager1's resume must refuse to clear gates held by manager2
+    await manager1.resumeMLSOperations()
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "gates must remain set when stale manager resumes")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "gates must remain set when stale manager resumes")
+
+    // manager2's resume must clear the gates it owns
+    await manager2.resumeMLSOperations()
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress, "gates must be cleared when active manager resumes")
+    XCTAssertFalse(MLSClient.isSuspensionInProgress, "gates must be cleared when active manager resumes")
+  }
+
+  func testManagerResumeRefusesToClearGatesWhenContextFreeOwnerHoldsThem() async throws {
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    let manager = try await makeManager(protocolAuthorityMode: .swiftLegacy)
+    let contextFreeOwner = MLSContextFreeLifecycleSuspensionOwner()
+
+    await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    // Context-free owner takes over suspension
+    contextFreeOwner.markSuspensionInProgress(reason: "context free takeover")
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertTrue(MLSClient.isSuspensionInProgress)
+
+    // Manager resume must refuse to clear gates held by contextFreeOwner
+    await manager.resumeMLSOperations()
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "gates must remain set when manager resume is stale")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "gates must remain set when manager resume is stale")
+
+    // Context-free owner can clear its own gates
+    let resumed = await contextFreeOwner.resumeSuspensionIfOwnedAndContextFree()
+    XCTAssertTrue(resumed)
+    XCTAssertFalse(MLSCoreContext.isSuspensionInProgress)
+    XCTAssertFalse(MLSClient.isSuspensionInProgress)
+  }
+
+  func testManagerResumeRefusesToClearUnownedSuspension() {
+    MLSConversationManager.resetSuspensionStateForTesting()
+    MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
+    MLSCoreContext.markSuspensionInProgress()
+    MLSClient.markSuspensionInProgress(reason: "unowned test")
+
+    let staleId = UUID()
+    let resumed = MLSContextFreeLifecycleSuspensionOwner.recordManagerResume(id: staleId, reason: "stale resume")
+    XCTAssertFalse(resumed, "manager resume with unmatching ID must return false on unowned gates")
+    XCTAssertTrue(MLSCoreContext.isSuspensionInProgress, "gates must remain asserted")
+    XCTAssertTrue(MLSClient.isSuspensionInProgress, "gates must remain asserted")
+  }
 
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode

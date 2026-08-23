@@ -49,6 +49,7 @@ public final class MLSConversationManager {
     @ObservationIgnored internal var rustRuntimeRequiresForegroundRestore = false
     @ObservationIgnored internal var rustStartupReconcileCompleted = false
     @ObservationIgnored internal var postReloadSyncPending = false
+    @ObservationIgnored internal var activeSuspensionID: UUID?
 
     /// Called when the database pool is refreshed after recovery.
     /// Allows the app layer to update its own cached pool references.
