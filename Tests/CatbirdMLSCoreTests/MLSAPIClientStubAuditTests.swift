@@ -9,7 +9,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("registerDeviceToken routes through updatePushToken and does not throw methodNotImplemented")
     func registerDeviceToken_doesNotThrowMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         do {
@@ -29,7 +29,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("unregisterDeviceToken routes through updatePushToken and does not throw methodNotImplemented")
     func unregisterDeviceToken_doesNotThrowMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         do {
@@ -45,7 +45,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("leaveConversation throws methodNotImplemented on legacy stub")
     func leaveConversation_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {
@@ -55,7 +55,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("addMembers throws methodNotImplemented on legacy stub")
     func addMembers_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {
@@ -68,7 +68,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("processExternalCommit throws methodNotImplemented on legacy stub")
     func processExternalCommit_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {
@@ -81,7 +81,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("getPendingDeviceAdditions throws methodNotImplemented")
     func getPendingDeviceAdditions_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {
@@ -91,7 +91,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("claimPendingDeviceAddition throws methodNotImplemented")
     func claimPendingDeviceAddition_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {
@@ -101,7 +101,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("completePendingDeviceAddition throws methodNotImplemented")
     func completePendingDeviceAddition_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {
@@ -114,7 +114,7 @@ struct MLSAPIClientStubAuditTests {
 
     @Test("publishKeyPackagesBatch throws methodNotImplemented")
     func publishKeyPackagesBatch_throwsMethodNotImplemented() async throws {
-        let client = ATProtoClient()
+        let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
         let apiClient = await MLSAPIClient(client: client)
 
         await #expect(throws: MLSAPIError.self) {

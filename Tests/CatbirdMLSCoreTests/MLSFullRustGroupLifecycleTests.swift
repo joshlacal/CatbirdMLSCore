@@ -518,12 +518,12 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
 
     let convoId = "convo-pending-1"
     try await manager.database.write { db in
-      var convo = MLSConversationModel(
+      let convo = MLSConversationModel(
         conversationID: convoId,
         currentUserDID: "did:plc:testuser",
-        groupID: Data([0xde, 0xad, 0xbe, 0xef])
+        groupID: Data([0xde, 0xad, 0xbe, 0xef]),
+        requestState: .pendingInbound
       )
-      convo.requestState = .pending
       try convo.insert(db)
     }
 
@@ -537,7 +537,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
         .filter(MLSConversationModel.Columns.conversationID == convoId)
         .fetchOne(db)
     }
-    XCTAssertEqual(updatedConvo?.requestState, .accepted)
+    XCTAssertEqual(updatedConvo?.requestState, MLSRequestState.none)
   }
 
   func testRustFullAcceptConversationRequestFailsClosedWhenRustThrows() async throws {
@@ -552,12 +552,12 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
 
     let convoId = "convo-pending-2"
     try await manager.database.write { db in
-      var convo = MLSConversationModel(
+      let convo = MLSConversationModel(
         conversationID: convoId,
         currentUserDID: "did:plc:testuser",
-        groupID: Data([0xde, 0xad, 0xbe, 0xef])
+        groupID: Data([0xde, 0xad, 0xbe, 0xef]),
+        requestState: .pendingInbound
       )
-      convo.requestState = .pending
       try convo.insert(db)
     }
 
@@ -572,7 +572,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
         .filter(MLSConversationModel.Columns.conversationID == convoId)
         .fetchOne(db)
     }
-    XCTAssertEqual(unchangedConvo?.requestState, .pending, "Local row must NOT be flipped to accepted on failure")
+    XCTAssertEqual(unchangedConvo?.requestState, .pendingInbound, "Local row must NOT be flipped to accepted on failure")
   }
 
   private func makeManager(
@@ -810,7 +810,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
     acceptConversationCallCount += 1
     lastAcceptConversationId = conversationId
     if shouldFailAcceptConversation {
-      throw OrchestratorBridgeError.invalidInput(message: "Simulated accept failure")
+      throw OrchestratorBridgeError.InvalidInput(message: "Simulated accept failure")
     }
   }
 
