@@ -943,7 +943,7 @@ public final class MLSAPIClient {
                 group.addTask {
                     let decl = try? await MLSPublicPDSReader.fetchDeclaration(
                         did: didStr,
-                        resolvePDS: { [client] d in
+                        resolvePDS: { [client = self.client] d in
                             try await client.resolveDIDToPDSURL(did: d)
                         }
                     )

@@ -3305,6 +3305,11 @@ public func FfiConverterTypeMLSContext_lower(_ value: MlsContext) -> UnsafeMutab
  */
 public protocol OrchestratorBridgeProtocol: AnyObject {
     /**
+     * Accept an invitation to a conversation (direct or group).
+     */
+    func acceptConversation(conversationId: String) throws
+
+    /**
      * Add members to an existing group.
      */
     func addMembers(groupId: String, memberDids: [String]) throws
@@ -3381,6 +3386,11 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * Fetch and process new messages from server.
      */
     func fetchMessages(conversationId: String, cursor: String?, limit: UInt32) throws -> FfiFetchMessagesResult
+
+    /**
+     * Fulfill an open leaf recovery request for a conversation.
+     */
+    func fulfillLeafRecovery(conversationId: String) throws
 
     /**
      * Snapshot of a conversation quarantine state, if any.
@@ -3816,6 +3826,16 @@ open class OrchestratorBridge:
     }
 
     /**
+     * Accept an invitation to a conversation (direct or group).
+     */
+    open func acceptConversation(conversationId: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_accept_conversation(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(conversationId), $0)
+        }
+    }
+
+    /**
      * Add members to an existing group.
      */
     open func addMembers(groupId: String, memberDids: [String]) throws {
@@ -3964,6 +3984,16 @@ open class OrchestratorBridge:
                                                                            FfiConverterOptionString.lower(cursor),
                                                                            FfiConverterUInt32.lower(limit), $0)
         })
+    }
+
+    /**
+     * Fulfill an open leaf recovery request for a conversation.
+     */
+    open func fulfillLeafRecovery(conversationId: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_fulfill_leaf_recovery(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(conversationId), $0)
+        }
     }
 
     /**
@@ -19327,6 +19357,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_verify_message_hmac() != 32676 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_accept_conversation() != 42256 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members() != 30814 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19364,6 +19397,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_fetch_messages() != 30152 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_fulfill_leaf_recovery() != 30615 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_quarantine_state() != 47830 {
