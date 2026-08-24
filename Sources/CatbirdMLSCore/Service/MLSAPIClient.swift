@@ -1111,15 +1111,14 @@ public final class MLSAPIClient {
         return validHashes
     }
 
-    /// Leave an MLS conversation using Petrel client
+    /// Leave an MLS conversation using Petrel client (legacy stub; rustFull uses runtime.leaveConversation)
     public func leaveConversation(convoId: String) async throws -> (success: Bool, newEpoch: Int) {
-        logger.debug("Leaving conversation: \(convoId)")
-        return (true, 0)
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: - Reset Group
 
-    /// Reset the MLS cryptographic state of a conversation
+    /// Reset the MLS cryptographic state of a conversation (legacy stub; rustFull uses runtime)
     public func resetGroup(
         convoId: String,
         newGroupId: String,
@@ -1127,13 +1126,12 @@ public final class MLSAPIClient {
         groupInfo: String? = nil,
         reason: String? = nil
     ) async throws -> (newGroupId: String, resetGeneration: Int) {
-        logger.debug("Resetting group for conversation: \(convoId)")
-        return (newGroupId, 1)
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: Members
 
-    /// Add members to an existing MLS conversation
+    /// Add members to an existing MLS conversation (legacy stub; rustFull uses runtime.addMembers)
     public func addMembers(
         convoId: String,
         didList: [DID],
@@ -1144,11 +1142,7 @@ public final class MLSAPIClient {
         confirmationTag: String? = nil,
         idempotencyKey: String? = nil
     ) async throws -> (success: Bool, newEpoch: Int) {
-        let idemKey = idempotencyKey ?? UUID().uuidString.lowercased()
-        logger.debug(
-            "Adding \(didList.count) members to conversation: \(convoId), hashes: \(keyPackageHashes?.count ?? 0), idempotencyKey: \(idemKey)"
-        )
-        return (true, 0)
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: Messages
@@ -1544,7 +1538,7 @@ public final class MLSAPIClient {
     public func groupInfoRefresh(
         convoId: String
     ) async throws -> (requested: Bool, activeMembers: Int?) {
-        return (true, nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func confirmWelcome(
@@ -1553,7 +1547,7 @@ public final class MLSAPIClient {
         errorMessage: String? = nil,
         maxRetries: Int = 3
     ) async throws {
-        logger.info("📤 [confirmWelcome] START - convoId: \(convoId), success: \(success)")
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func processExternalCommit(
@@ -1563,8 +1557,7 @@ public final class MLSAPIClient {
         confirmationTag: String? = nil,
         idempotencyKey: String? = nil
     ) async throws -> (success: Bool, newEpoch: Int) {
-        logger.info("🌐 [MLSAPIClient.processExternalCommit] START - convoId: \(convoId)")
-        return (true, 0)
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func commitGroupChange(
@@ -1573,14 +1566,13 @@ public final class MLSAPIClient {
         commit: Data,
         confirmationTag: String? = nil
     ) async throws {
-        logger.info("🌐 [MLSAPIClient.commitGroupChange] START - convoId: \(convoId), action: \(action)")
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func getExpectedConversations(
         deviceId: String? = nil
     ) async throws -> [BlueCatbirdChatDefs.ConversationCoordinates] {
-        logger.info("📤 [getExpectedConversations] Fetching expected conversations")
-        return []
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: - Admin Operations
@@ -1593,7 +1585,7 @@ public final class MLSAPIClient {
         groupInfo: Data? = nil,
         idempotencyKey: String? = nil
     ) async throws -> (ok: Bool, epochHint: Int?) {
-        return (true, nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func sendCommit(
@@ -1601,7 +1593,7 @@ public final class MLSAPIClient {
         commit: String,
         idempotencyKey: String? = nil
     ) async throws -> UInt64 {
-        return 1
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func promoteAdmin(
@@ -1609,7 +1601,7 @@ public final class MLSAPIClient {
         targetDid: DID,
         idempotencyKey: String? = nil
     ) async throws -> Bool {
-        return true
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func demoteAdmin(
@@ -1617,7 +1609,7 @@ public final class MLSAPIClient {
         targetDid: DID,
         idempotencyKey: String? = nil
     ) async throws -> Bool {
-        return true
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: - Moderation
@@ -1627,7 +1619,7 @@ public final class MLSAPIClient {
         reportedDid: String,
         reason: String? = nil
     ) async throws -> (Int, String?) {
-        return (200, nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: - Blocking
@@ -1635,13 +1627,13 @@ public final class MLSAPIClient {
     public func checkBlocks(
         dids: [DID]
     ) async throws -> (responseCode: Int, data: [String]?) {
-        return (200, nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func getBlockStatus(
         convoId: String
     ) async throws -> (responseCode: Int, data: [String]?) {
-        return (200, nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     // MARK: - Push Notifications
@@ -1652,24 +1644,44 @@ public final class MLSAPIClient {
         deviceName: String,
         platform: String = "ios"
     ) async throws -> Bool {
-        return true
+        // Server has no blue.catbird.chat.* endpoint for push token registration.
+        // Fail loudly rather than silently claiming success.
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func unregisterDeviceToken(deviceId: String) async throws -> Bool {
-        return true
+        // Server has no blue.catbird.chat.* endpoint for push token registration.
+        // Fail loudly rather than silently claiming success.
+        throw MLSAPIError.methodNotImplemented
     }
-
     // MARK: - Analytics
 
-    public func getKeyPackageStats() async throws -> EnhancedKeyPackageStats {
-        return EnhancedKeyPackageStats(available: 50, threshold: 10, total: 50, consumed: 0)
+    public func getKeyPackageStats(deviceId: String? = nil) async throws -> EnhancedKeyPackageStats {
+        let userDid = try await client.getDid()
+        let targetDeviceId = deviceId ?? (try? MLSOrchestratorCredentialAdapter().getDeviceUuid(userDid: userDid)) ?? ""
+        guard !targetDeviceId.isEmpty else {
+            throw MLSAPIError.invalidResponse(message: "No device ID available for key package stats")
+        }
+        let input = BlueCatbirdChatGetOwnDevices.Parameters(actorDeviceId: targetDeviceId)
+        let (responseCode, output) = try await client.blue.catbird.chat.getOwnDevices(input: input)
+        guard responseCode == 200, let output = output else {
+            throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to fetch device key package stats")
+        }
+        if let matching = output.items.first(where: { $0.device.deviceId == targetDeviceId }) {
+            let avail = matching.device.availablePackageCount
+            let res = matching.device.reservedPackageCount
+            return EnhancedKeyPackageStats(available: avail, threshold: 10, total: avail + res, consumed: res)
+        }
+        let totalAvail = output.items.reduce(0) { $0 + $1.device.availablePackageCount }
+        let totalRes = output.items.reduce(0) { $0 + $1.device.reservedPackageCount }
+        return EnhancedKeyPackageStats(available: totalAvail, threshold: 10, total: totalAvail + totalRes, consumed: totalRes)
     }
 
     public func getKeyPackageStatus(
         limit: Int = 20,
         cursor: String? = nil
     ) async throws -> EnhancedKeyPackageStats {
-        return EnhancedKeyPackageStats(available: 50, threshold: 10, total: 50, consumed: 0)
+        return try await getKeyPackageStats()
     }
 
     public func syncKeyPackages(localHashes: [String], deviceId: String) async throws -> (
@@ -1679,11 +1691,13 @@ public final class MLSAPIClient {
         orphanedHashes: [String],
         remainingAvailable: Int
     ) {
-        return ([], 0, 0, [], 50)
+        let stats = try await getKeyPackageStats(deviceId: deviceId)
+        return ([], 0, 0, [], stats.available)
     }
 
     public func queryKeyPackageInventory() async throws -> (available: Int, threshold: Int) {
-        return (50, 10)
+        let stats = try await getKeyPackageStats()
+        return (stats.available, stats.threshold)
     }
 
     public func publishKeyPackagesBatch(
@@ -1691,50 +1705,30 @@ public final class MLSAPIClient {
         recoveryMode: Bool = false,
         deviceId: String? = nil
     ) async throws -> KeyPackageBatchResult {
-        return KeyPackageBatchResult(succeeded: packages.count, failed: 0, errors: nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func getAdminStats(convoId: String) async throws -> [String: Any] {
-        return [:]
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func optIn(
         deviceId: String? = nil,
         allowIncoming: String = "all",
-        deliveryService: String = "did:web:chat.catbird.blue"
+        deliveryService: String = MLSDeclarationService.defaultDeliveryService
     ) async throws -> (optedIn: Bool, optedInAt: Date) {
         logger.info("🌐 [MLSAPIClient.optIn] START - deviceId: \(deviceId ?? "none")")
         let userDid = try await client.getDid()
-        let did = try DID(didString: userDid)
-        let collection = try NSID(nsidString: "blue.catbird.chat.declaration")
-        let rkey = try RecordKey(keyString: "self")
-        let dsDid = try DID(didString: deliveryService)
-        let now = Date()
-
-        let declaration = BlueCatbirdChatDeclaration(
+        let declarationService = MLSDeclarationService(atProtoClient: client)
+        try await declarationService.publishDeclaration(
+            userDid: userDid,
             allowIncoming: allowIncoming,
-            deliveryService: dsDid,
-            protocolVersion: "1",
-            createdAt: ATProtocolDate(date: now)
+            deliveryService: deliveryService
         )
-
-        let input = ComAtprotoRepoPutRecord.Input(
-            repo: .did(did),
-            collection: collection,
-            rkey: rkey,
-            validate: false,
-            record: .knownType(declaration)
-        )
-
-        let (code, _) = try await client.com.atproto.repo.putRecord(input: input)
-        guard (200...299).contains(code) else {
-            throw MLSAPIError.httpError(statusCode: code, message: "Failed to publish chat declaration record (status \(code))")
-        }
-
-        logger.info("✅ [MLSAPIClient.optIn] Successfully published chat declaration record")
+        let now = Date()
+        logger.info("✅ [MLSAPIClient.optIn] Successfully published chat declaration record via MLSDeclarationService")
         return (true, now)
     }
-
     public struct PendingDeviceAddition: Sendable {
         public let id: String
         public let convoId: String
@@ -1765,20 +1759,20 @@ public final class MLSAPIClient {
         convoIds: [String]? = nil,
         limit: Int = 50
     ) async throws -> [PendingDeviceAddition] {
-        return []
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func claimPendingDeviceAddition(
         pendingAdditionId: String
     ) async throws -> ClaimPendingDeviceAdditionResult {
-        return ClaimPendingDeviceAdditionResult(success: true, claimedAddition: nil)
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func completePendingDeviceAddition(
         pendingAdditionId: String,
         newEpoch: Int
     ) async throws -> Bool {
-        return true
+        throw MLSAPIError.methodNotImplemented
     }
 
     public func sendEncryptedReaction(
@@ -1788,7 +1782,7 @@ public final class MLSAPIClient {
         epoch: Int,
         paddedSize: Int
     ) async throws -> (messageId: String, receivedAt: ATProtocolDate, seq: Int, epoch: Int) {
-        return (msgId, ATProtocolDate(date: Date()), 1, epoch)
+        throw MLSAPIError.methodNotImplemented
     }
 }
 
