@@ -2913,6 +2913,57 @@ public actor MLSGRDBManager {
     // Delete encryption key
     try await encryption.deleteKey(for: userDID)
   }
+  /// Completely destroy all database files (main, wal, shm, journal, and any quarantine files)
+  /// for a specific user.
+  /// Gated to explicit account removal.
+  public func destroyDatabaseFiles(for userDID: String) async {
+    closeDatabase(for: userDID)
+
+    // Clear all memory tracking for this user
+    repairAttempts.removeValue(forKey: userDID)
+    walRepairState.removeValue(forKey: userDID)
+    usersNeedingHardReset.remove(userDID)
+    consecutiveHMACFailures.removeValue(forKey: userDID)
+    databaseAccessSuspensions.removeValue(forKey: userDID)
+    updateConnectionState(.closed, for: userDID)
+
+    let sanitizedDID = sanitizeDID(userDID)
+    let dbFilename = "mls_messages_\(sanitizedDID).\(fileExtension)"
+    let dbPath = databaseDirectory.appendingPathComponent(dbFilename)
+    let pathsToDelete = [
+      dbPath,
+      URL(fileURLWithPath: dbPath.path + "-wal"),
+      URL(fileURLWithPath: dbPath.path + "-shm"),
+      URL(fileURLWithPath: dbPath.path + "-journal"),
+      dbPath.appendingPathExtension("wal"),
+      dbPath.appendingPathExtension("shm"),
+      dbPath.appendingPathExtension("journal")
+    ]
+    for path in pathsToDelete {
+      if FileManager.default.fileExists(atPath: path.path) {
+        try? FileManager.default.removeItem(at: path)
+        logger.info("🗑️ [MLSGRDBManager] Deleted database file: \(path.lastPathComponent)")
+      }
+    }
+
+    // Clean up any quarantine entries for this user
+    let didTag = userDID.data(using: .utf8)?.base64EncodedString()
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "=", with: "")
+      .prefix(16).description ?? "unknown"
+    let altTag = String(sanitizedDID.prefix(16))
+
+    let quarantineDir = databaseDirectory.appendingPathComponent("Quarantine", isDirectory: true)
+    if let entries = try? FileManager.default.contentsOfDirectory(atPath: quarantineDir.path) {
+      for entry in entries where entry.contains(didTag) || entry.contains(altTag) {
+        let entryURL = quarantineDir.appendingPathComponent(entry)
+        try? FileManager.default.removeItem(at: entryURL)
+        logger.info("🗑️ [MLSGRDBManager] Deleted quarantine entry: \(entry)")
+      }
+    }
+  }
+
 
   /// Tracks repair attempts per user to prevent infinite repair loops
   private var repairAttempts: [String: (count: Int, lastAttempt: Date)] = [:]

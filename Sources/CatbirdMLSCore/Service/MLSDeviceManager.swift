@@ -715,6 +715,26 @@ public actor MLSDeviceManager {
     let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines)
     return deviceInfoByUser[normalizedUserDid] != nil
   }
+  /// Remove device info from memory and UserDefaults (called on complete account removal)
+  public func removeDeviceInfo(for userDid: String) {
+    let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines)
+    deviceInfoByUser.removeValue(forKey: normalizedUserDid)
+    saveDeviceInfoStorage()
+    logger.info("🗑️ Removed in-memory device info for user: \(normalizedUserDid.prefix(20))")
+  }
+
+  /// Remove stored device info for a user from UserDefaults even when no manager instance is in memory
+  public static func removeStoredDeviceInfo(for userDid: String) {
+    let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let data = UserDefaults.standard.data(forKey: "blue.catbird.mls.deviceInfoByUser"),
+       var decoded = try? JSONDecoder().decode([String: UserDeviceInfo].self, from: data) {
+      decoded.removeValue(forKey: normalizedUserDid)
+      if let encoded = try? JSONEncoder().encode(decoded) {
+        UserDefaults.standard.set(encoded, forKey: "blue.catbird.mls.deviceInfoByUser")
+      }
+    }
+  }
+
 
   /// Stable device scope for protected subscription failure records. This is
   /// intentionally device-local: IDFV is preferred on iOS, while the existing

@@ -201,8 +201,14 @@ public actor MLSCoreContext {
     }
   }
 
-  /// Deduplicate concurrent decrypt attempts for the same messageID
+  /// Deduplicate concurrent decrypt attempts for the same (userDID, conversationID, messageID)
   private var inFlightDecryptions: [String: Task<DecryptionOutcome, Error>] = [:]
+
+  /// Composite key for in-flight decryption tasks ensuring strict per-account/per-conversation isolation
+  private func inFlightDecryptionKey(userDID: String, conversationID: String, messageID: String) -> String {
+    let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
+    return "\(normalizedDID):\(conversationID):\(messageID)"
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CRITICAL FIX (2024-12): Per-Group Decryption Serialization
@@ -766,12 +772,14 @@ public actor MLSCoreContext {
   /// - Returns: Coordination result indicating how the caller should proceed
   public func checkOrAwaitDecryption(
     messageID: String,
-    userDID: String
+    userDID: String,
+    conversationID: String = ""
   ) async -> DecryptionCoordinationResult {
-    // Check 1: Is there an in-flight decryption for this message?
-    if let inFlightTask = inFlightDecryptions[messageID] {
+    let key = inFlightDecryptionKey(userDID: userDID, conversationID: conversationID, messageID: messageID)
+    // Check 1: Is there an in-flight decryption for this message under this account?
+    if let inFlightTask = inFlightDecryptions[key] {
       logger.info(
-        "🔗 [COORD] Message \(messageID.prefix(16))... has in-flight decryption - awaiting")
+        "🔗 [COORD] Message \(messageID.prefix(16))... for \(userDID.prefix(16))... has in-flight decryption - awaiting")
       do {
         let outcome = try await inFlightTask.value
         logger.info("✅ [COORD] Awaited in-flight decryption for \(messageID.prefix(16))...")
@@ -920,9 +928,10 @@ public actor MLSCoreContext {
     senderID: String?,
     useEphemeralAccess: Bool = false
   ) async throws -> DecryptionOutcome {
-    // Per-messageID deduplication (same message from NSE + App)
-    if let inFlight = inFlightDecryptions[messageID] {
-      logger.debug("[DECRYPT] Awaiting in-flight decryption for message: \(messageID)")
+    let inFlightKey = inFlightDecryptionKey(userDID: userDid, conversationID: conversationID, messageID: messageID)
+    // Per-(userDID, conversationID, messageID) deduplication (same message from NSE + App)
+    if let inFlight = inFlightDecryptions[inFlightKey] {
+      logger.debug("[DECRYPT] Awaiting in-flight decryption for key: \(inFlightKey)")
       return try await inFlight.value
     }
 
@@ -958,14 +967,14 @@ public actor MLSCoreContext {
       }
     }
 
-    inFlightDecryptions[messageID] = task
+    inFlightDecryptions[inFlightKey] = task
 
     do {
       let outcome = try await task.value
-      inFlightDecryptions.removeValue(forKey: messageID)
+      inFlightDecryptions.removeValue(forKey: inFlightKey)
       return outcome
     } catch {
-      inFlightDecryptions.removeValue(forKey: messageID)
+      inFlightDecryptions.removeValue(forKey: inFlightKey)
       throw error
     }
   }

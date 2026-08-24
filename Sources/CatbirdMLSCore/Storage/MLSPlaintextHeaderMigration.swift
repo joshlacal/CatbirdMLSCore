@@ -118,6 +118,14 @@ public enum MLSPlaintextHeaderMigration {
       return false
     }
   }
+  /// Clear migration flags for a user (called on complete account removal so re-adding works cleanly)
+  public static func clearMigrationFlags(for userDID: String) {
+    let defaults = UserDefaults(suiteName: appGroupSuite)
+    defaults?.removeObject(forKey: migrationKey(for: userDID, type: .swiftGRDB))
+    defaults?.removeObject(forKey: migrationKey(for: userDID, type: .rustFFI))
+    defaults?.synchronize()
+  }
+
 
   /// Database type for migration tracking
   public enum DatabaseType: String {

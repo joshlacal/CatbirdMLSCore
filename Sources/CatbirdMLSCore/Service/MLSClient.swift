@@ -3835,6 +3835,96 @@ public actor MLSClient {
     logger.info("✅ [Diagnostics] MLS storage reset complete for \(normalizedDID)")
   }
 
+  /// Completely destroy all MLS storage, databases, WAL/SHM/journal files,
+  /// Keychain cryptographic materials, content-root keys, signing credentials,
+  /// device registration records, and migration flags for a user.
+  ///
+  /// CRITICAL: Gated exclusively to the explicit "remove account completely" user action.
+  /// NEVER call on logout, account switch, or failure recovery.
+  public func destroyStorageCompletely(for userDID: String) async {
+    let normalizedDID = normalizeUserDID(userDID)
+    logger.info("💥 [MLSClient] Completely destroying all MLS data for user: \(normalizedDID)")
+
+    // Phase 1: Invalidate and remove in-memory contexts and clients
+    apiClients.removeValue(forKey: normalizedDID)
+    deviceManagers.removeValue(forKey: normalizedDID)
+    recoveryManagers.removeValue(forKey: normalizedDID)
+    await MLSCoreContext.shared.removeContext(for: normalizedDID)
+
+    // Phase 2: Close and drain database gate
+    do {
+      try await MLSDatabaseGate.shared.closeGateAndDrain(for: normalizedDID, timeout: .seconds(3))
+    } catch {
+      await MLSDatabaseGate.shared.forceCloseGate(for: normalizedDID)
+    }
+
+    // Phase 3: Destroy Swift SQLCipher database files (main, wal, shm, journal, quarantine)
+    await MLSGRDBManager.shared.destroyDatabaseFiles(for: normalizedDID)
+
+    // Phase 4: Destroy Rust state database files (main, wal, shm, journal, quarantine)
+    let appSupport = MLSStoragePaths.baseContainerURL()
+    let mlsStateDir = appSupport.appendingPathComponent("mls-state", isDirectory: true)
+    let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "=", with: "")
+      .prefix(64).description ?? "default"
+
+    let storageFileURL = mlsStateDir.appendingPathComponent("\(didHash).db")
+    let rustFileVariants = [
+      storageFileURL,
+      URL(fileURLWithPath: storageFileURL.path + "-wal"),
+      URL(fileURLWithPath: storageFileURL.path + "-shm"),
+      URL(fileURLWithPath: storageFileURL.path + "-journal"),
+      storageFileURL.appendingPathExtension("wal"),
+      storageFileURL.appendingPathExtension("shm"),
+      storageFileURL.appendingPathExtension("journal")
+    ]
+    for fileURL in rustFileVariants {
+      if FileManager.default.fileExists(atPath: fileURL.path) {
+        try? FileManager.default.removeItem(at: fileURL)
+        logger.info("🗑️ [MLSClient] Deleted Rust state file: \(fileURL.lastPathComponent)")
+      }
+    }
+
+    // Clean up any quarantine directories containing this didHash
+    let rustQuarantineDir = mlsStateDir.appendingPathComponent("Quarantine", isDirectory: true)
+    if let entries = try? FileManager.default.contentsOfDirectory(atPath: rustQuarantineDir.path) {
+      for entry in entries where entry.contains(String(didHash.prefix(16))) {
+        let entryURL = rustQuarantineDir.appendingPathComponent(entry)
+        try? FileManager.default.removeItem(at: entryURL)
+        logger.info("🗑️ [MLSClient] Deleted Rust quarantine entry: \(entry)")
+      }
+    }
+
+    // Phase 5: Destroy Keychain materials
+    // 5a. SQLCipher DB key and salt
+    try? await MLSSQLCipherEncryption.shared.deleteKey(for: normalizedDID)
+    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: normalizedDID)
+    try? MLSKeychainManager.shared.deleteEncryptionKey(forUserDID: normalizedDID)
+
+    // 5b. Content-root key (field encryption)
+    try? MLSContentRootKey.delete(for: normalizedDID)
+
+    // 5c. Identity and signing keys
+    try? MLSKeychain.deleteSignatureKey(forIdentity: normalizedDID)
+    try? MLSKeychainManager.shared.delete(forKey: "mls_identity_key_\(normalizedDID)")
+
+    // 5d. Device credentials & orchestrator adapter keys
+    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.mlsDid.\(normalizedDID)")
+    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.deviceUuid.\(normalizedDID)")
+    MLSDeviceManager.removeStoredDeviceInfo(for: normalizedDID)
+
+    // Phase 6: Destroy Migration preferences and version tracking
+    MLSPlaintextHeaderMigration.clearMigrationFlags(for: normalizedDID)
+    MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
+
+    // Phase 7: Re-open database gate and clear activity shutdown state so re-adding this account works cleanly
+    await MLSDatabaseGate.shared.openGate(for: normalizedDID)
+    MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
+    logger.info("✅ [MLSClient] Complete destruction finished for user: \(normalizedDID)")
+  }
+
   /// Delete specific consumed key package bundles from storage
   ///
   /// Removes bundles that the server has marked as consumed but remain in local storage.
