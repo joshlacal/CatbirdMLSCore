@@ -507,6 +507,74 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(bridge.addMembersCallCount, 0)
   }
 
+  func testRustFullAcceptConversationRequestCallsRustAndMarksAccepted() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingGroupLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let convoId = "convo-pending-1"
+    try await manager.database.write { db in
+      var convo = MLSConversationModel(
+        conversationID: convoId,
+        currentUserDID: "did:plc:testuser",
+        groupID: Data([0xde, 0xad, 0xbe, 0xef])
+      )
+      convo.requestState = .pending
+      try convo.insert(db)
+    }
+
+    try await manager.acceptConversationRequest(convoId: convoId)
+
+    XCTAssertEqual(bridge.acceptConversationCallCount, 1)
+    XCTAssertEqual(bridge.lastAcceptConversationId, convoId)
+
+    let updatedConvo = try await manager.database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == convoId)
+        .fetchOne(db)
+    }
+    XCTAssertEqual(updatedConvo?.requestState, .accepted)
+  }
+
+  func testRustFullAcceptConversationRequestFailsClosedWhenRustThrows() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.shouldFailAcceptConversation = true
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: bridge
+    )
+
+    let convoId = "convo-pending-2"
+    try await manager.database.write { db in
+      var convo = MLSConversationModel(
+        conversationID: convoId,
+        currentUserDID: "did:plc:testuser",
+        groupID: Data([0xde, 0xad, 0xbe, 0xef])
+      )
+      convo.requestState = .pending
+      try convo.insert(db)
+    }
+
+    await XCTAssertThrowsErrorAsync(try await manager.acceptConversationRequest(convoId: convoId)) { _ in
+      // Expected failure
+    }
+
+    XCTAssertEqual(bridge.acceptConversationCallCount, 1)
+
+    let unchangedConvo = try await manager.database.read { db in
+      try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == convoId)
+        .fetchOne(db)
+    }
+    XCTAssertEqual(unchangedConvo?.requestState, .pending, "Local row must NOT be flipped to accepted on failure")
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
@@ -692,6 +760,10 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
   private(set) var lastCreateConversationName: String?
   private(set) var lastCreateConversationDescription: String?
 
+  var shouldFailAcceptConversation = false
+  private(set) var acceptConversationCallCount = 0
+  private(set) var lastAcceptConversationId: String?
+
   init() {
     super.init(noPointer: .init())
   }
@@ -732,6 +804,14 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
   ) throws -> FfiLeaveResult {
     leaveConversationCallCount += 1
     return leaveResult
+  }
+
+  override func acceptConversation(conversationId: String) throws {
+    acceptConversationCallCount += 1
+    lastAcceptConversationId = conversationId
+    if shouldFailAcceptConversation {
+      throw OrchestratorBridgeError.invalidInput(message: "Simulated accept failure")
+    }
   }
 
   override func shutdown() {

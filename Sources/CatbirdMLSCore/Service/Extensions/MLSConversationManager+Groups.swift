@@ -1299,17 +1299,23 @@ extension MLSConversationManager {
   // MARK: - Chat Request Management
 
   /// Accept a pending chat request, moving the conversation to the main inbox.
-  /// This is a local-only operation - no server call needed since the E2EE
-  /// conversation already exists.
+  /// In rustFull mode, this calls through to the Rust orchestrator to submit
+  /// `blue.catbird.chat.acceptConversation` to the server before updating local storage.
   ///
   /// - Parameter convoId: The conversation ID to accept
-  /// - Throws: MLSConversationError if the conversation doesn't exist
+  /// - Throws: MLSConversationError if the operation fails
   public func acceptConversationRequest(convoId: String) async throws {
     guard let userDid = userDid else {
       throw MLSConversationError.contextNotInitialized
     }
 
     logger.info("✅ Accepting chat request: \(convoId.prefix(16))...")
+
+    if protocolAuthorityMode.usesRustForDecisions {
+      try await withRustAuthoritativeRuntime(operation: "acceptConversationRequest") { runtime in
+        try runtime.acceptConversation(conversationId: convoId)
+      }
+    }
 
     try await storage.acceptConversationRequest(
       conversationID: convoId,

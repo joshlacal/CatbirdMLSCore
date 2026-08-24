@@ -428,6 +428,14 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     )
   }
 
+  public func acceptConversation(conversationId: String) throws {
+    try bridge.acceptConversation(conversationId: conversationId)
+  }
+
+  public func fulfillLeafRecovery(conversationId: String) throws {
+    try bridge.fulfillLeafRecovery(conversationId: conversationId)
+  }
+
   public func reportUnrecoverableLocal(conversationId: String, reason: String) throws {
     try bridge.reportUnrecoverableLocal(convoId: conversationId, reason: reason)
   }
