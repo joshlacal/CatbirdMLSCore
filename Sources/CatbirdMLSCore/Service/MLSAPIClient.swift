@@ -1644,15 +1644,21 @@ public final class MLSAPIClient {
         deviceName: String,
         platform: String = "ios"
     ) async throws -> Bool {
-        // Server has no blue.catbird.chat.* endpoint for push token registration.
-        // Fail loudly rather than silently claiming success.
-        throw MLSAPIError.methodNotImplemented
+        let input = BlueCatbirdChatUpdatePushToken.Input(token: pushToken)
+        let (responseCode, _) = try await client.blue.catbird.chat.updatePushToken(input: input)
+        guard (200 ... 299).contains(responseCode) else {
+            throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to register device push token")
+        }
+        return true
     }
 
     public func unregisterDeviceToken(deviceId: String) async throws -> Bool {
-        // Server has no blue.catbird.chat.* endpoint for push token registration.
-        // Fail loudly rather than silently claiming success.
-        throw MLSAPIError.methodNotImplemented
+        let input = BlueCatbirdChatUpdatePushToken.Input(token: nil)
+        let (responseCode, _) = try await client.blue.catbird.chat.updatePushToken(input: input)
+        guard (200 ... 299).contains(responseCode) else {
+            throw MLSAPIError.httpError(statusCode: responseCode, message: "Failed to unregister device push token")
+        }
+        return true
     }
     // MARK: - Analytics
 

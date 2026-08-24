@@ -7,27 +7,39 @@ import Testing
 @Suite("MLSAPIClient Stub Audit")
 struct MLSAPIClientStubAuditTests {
 
-    @Test("registerDeviceToken throws methodNotImplemented instead of returning hardcoded true")
-    func registerDeviceToken_throwsMethodNotImplemented() async throws {
+    @Test("registerDeviceToken routes through updatePushToken and does not throw methodNotImplemented")
+    func registerDeviceToken_doesNotThrowMethodNotImplemented() async throws {
         let client = ATProtoClient()
         let apiClient = await MLSAPIClient(client: client)
 
-        await #expect(throws: MLSAPIError.self) {
+        do {
             _ = try await apiClient.registerDeviceToken(
                 deviceId: "test-device",
                 pushToken: "0123456789abcdef",
                 deviceName: "Test Device"
             )
+        } catch let error as MLSAPIError {
+            if case .methodNotImplemented = error {
+                Issue.record("registerDeviceToken threw methodNotImplemented")
+            }
+        } catch {
+            // Network / client errors are expected for unconfigured mock client
         }
     }
 
-    @Test("unregisterDeviceToken throws methodNotImplemented instead of returning hardcoded true")
-    func unregisterDeviceToken_throwsMethodNotImplemented() async throws {
+    @Test("unregisterDeviceToken routes through updatePushToken and does not throw methodNotImplemented")
+    func unregisterDeviceToken_doesNotThrowMethodNotImplemented() async throws {
         let client = ATProtoClient()
         let apiClient = await MLSAPIClient(client: client)
 
-        await #expect(throws: MLSAPIError.self) {
+        do {
             _ = try await apiClient.unregisterDeviceToken(deviceId: "test-device")
+        } catch let error as MLSAPIError {
+            if case .methodNotImplemented = error {
+                Issue.record("unregisterDeviceToken threw methodNotImplemented")
+            }
+        } catch {
+            // Network / client errors are expected for unconfigured mock client
         }
     }
 
