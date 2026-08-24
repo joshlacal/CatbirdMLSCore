@@ -18,6 +18,7 @@ import PetrelCatbird
 /// needed.
 enum MLSPublicPDSReader {
   static let deviceCollection = "blue.catbird.chat.device"
+  static let declarationCollection = "blue.catbird.chat.declaration"
 
   private static let logger = Logger(subsystem: "blue.catbird", category: "MLSPublicPDSReader")
 
@@ -81,6 +82,62 @@ enum MLSPublicPDSReader {
       throw ReaderError.httpStatus(http.statusCode)
     }
     return decodeDeviceSignatureKeys(fromListRecordsJSON: data)
+  }
+
+  // MARK: - Declaration
+
+  /// Build the unauthenticated `getRecord` URL for a DID's declaration record on its hosting PDS.
+  static func declarationGetRecordURL(pds: URL, did: String) -> URL? {
+    guard pds.scheme?.lowercased() == "https" else { return nil }
+    guard var comps = URLComponents(url: pds, resolvingAgainstBaseURL: false) else { return nil }
+
+    var basePath = comps.path
+    if basePath.hasSuffix("/") { basePath.removeLast() }
+    comps.path = basePath + "/xrpc/com.atproto.repo.getRecord"
+    comps.queryItems = [
+      URLQueryItem(name: "repo", value: did),
+      URLQueryItem(name: "collection", value: declarationCollection),
+      URLQueryItem(name: "rkey", value: "self"),
+    ]
+    return comps.url
+  }
+
+  /// Decode a declaration record from a `com.atproto.repo.getRecord` JSON response.
+  static func decodeDeclaration(fromGetRecordJSON data: Data) -> BlueCatbirdChatDeclaration? {
+    struct GetRecordEnvelope: Decodable {
+      let value: BlueCatbirdChatDeclaration?
+    }
+    let envelope = try? JSONDecoder().decode(GetRecordEnvelope.self, from: data)
+    return envelope?.value
+  }
+
+  /// Resolve the DID's hosting PDS and fetch its public chat declaration, unauthenticated.
+  /// Returns nil if the record does not exist (400/404) or cannot be decoded.
+  static func fetchDeclaration(
+    did: String,
+    resolvePDS: @Sendable (String) async throws -> URL,
+    session: URLSession = .shared
+  ) async throws -> BlueCatbirdChatDeclaration? {
+    let pds = try await resolvePDS(did)
+    guard let url = declarationGetRecordURL(pds: pds, did: did) else {
+      throw ReaderError.invalidEndpoint
+    }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "GET"
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    let (data, response) = try await session.data(for: request)
+    guard let http = response as? HTTPURLResponse else {
+      throw ReaderError.invalidResponse
+    }
+    guard (200...299).contains(http.statusCode) else {
+      if http.statusCode == 400 || http.statusCode == 404 {
+        return nil
+      }
+      throw ReaderError.httpStatus(http.statusCode)
+    }
+    return decodeDeclaration(fromGetRecordJSON: data)
   }
 
   // MARK: - JSON shapes

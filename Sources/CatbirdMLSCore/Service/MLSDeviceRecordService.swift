@@ -37,8 +37,10 @@ internal actor MLSDeviceRecordService {
     if alreadyPublished {
       logger.debug("Device record already published")
     } else {
+      let deviceId = await mlsClient.getDeviceInfo(for: normalized)?.deviceId
       try await publishDeviceRecord(
         did: did,
+        deviceId: deviceId,
         signaturePublicKey: sigMaterial.publicKey,
         algorithm: sigMaterial.algorithm
       )
@@ -262,37 +264,58 @@ internal actor MLSDeviceRecordService {
 
   private func publishDeviceRecord(
     did: DID,
+    deviceId: String?,
     signaturePublicKey: Data,
     algorithm: String
   ) async throws {
     let collection = try NSID(nsidString: Self.deviceCollection)
 
-    let record = MLSDeviceRecord(
+    let record = BlueCatbirdChatDevice(
       mlsSignaturePublicKey: Bytes(data: signaturePublicKey),
       algorithm: algorithm,
       createdAt: ATProtocolDate(date: Date())
     )
 
-    let input = ComAtprotoRepoCreateRecord.Input(
-      repo: .did(did),
-      collection: collection,
-      rkey: nil,
-      validate: false,
-      record: .knownType(record),
-      swapCommit: nil
-    )
-
-    let (code, _) = try await atProtoClient.com.atproto.repo.createRecord(input: input)
-    guard (200...299).contains(code) else {
-      throw DeviceRecordError.networkFailure("Failed to publish device record (status: \(code))")
+    if let deviceId = deviceId, let rkey = try? RecordKey(keyString: deviceId) {
+      let input = ComAtprotoRepoPutRecord.Input(
+        repo: .did(did),
+        collection: collection,
+        rkey: rkey,
+        validate: false,
+        record: .knownType(record)
+      )
+      let (code, _) = try await atProtoClient.com.atproto.repo.putRecord(input: input)
+      guard (200...299).contains(code) else {
+        throw DeviceRecordError.networkFailure("Failed to publish device record (status: \(code))")
+      }
+      logger.info("Published device record with rkey \(deviceId)")
+    } else {
+      let input = ComAtprotoRepoCreateRecord.Input(
+        repo: .did(did),
+        collection: collection,
+        rkey: nil,
+        validate: false,
+        record: .knownType(record),
+        swapCommit: nil
+      )
+      let (code, _) = try await atProtoClient.com.atproto.repo.createRecord(input: input)
+      guard (200...299).contains(code) else {
+        throw DeviceRecordError.networkFailure("Failed to publish device record (status: \(code))")
+      }
+      logger.info("Published device record")
     }
-    logger.info("Published device record")
   }
 
-  private func decodeDeviceRecord(from value: ATProtocolValueContainer) -> MLSDeviceRecord? {
+  private func decodeDeviceRecord(from value: ATProtocolValueContainer) -> (mlsSignaturePublicKey: Bytes, algorithm: String)? {
     switch value {
     case .knownType(let typed):
-      return typed as? MLSDeviceRecord
+      if let device = typed as? BlueCatbirdChatDevice {
+        return (device.mlsSignaturePublicKey, device.algorithm)
+      }
+      if let device = typed as? MLSDeviceRecord {
+        return (device.mlsSignaturePublicKey, device.algorithm)
+      }
+      return nil
     case .unknownType(_, let nested):
       return decodeDeviceRecord(from: nested)
     default:

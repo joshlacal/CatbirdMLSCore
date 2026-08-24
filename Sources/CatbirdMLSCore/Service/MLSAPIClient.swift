@@ -927,12 +927,96 @@ public final class MLSAPIClient {
         }
     }
 
-    /// Check opt-in status for a list of users
-    /// - Parameter dids: List of DIDs to check (max 100)
+    /// Check opt-in status for a list of users by inspecting declaration records and active device inventory.
+    /// - Parameter dids: List of DIDs to check
     /// - Returns: Array of opt-in status objects
     public func getOptInStatus(dids: [DID]) async throws -> [MLSOptInStatus] {
         logger.info("🌐 [MLSAPIClient.getOptInStatus] START - \(dids.count) DIDs")
-        return dids.map { MLSOptInStatus(did: $0, optedIn: true) }
+        guard !dids.isEmpty else { return [] }
+
+        // Step 1: In parallel, fetch declaration records for all DIDs.
+        let didStrings = dids.map { $0.didString() }
+        let declarations: [String: BlueCatbirdChatDeclaration?] = await withTaskGroup(
+            of: (String, BlueCatbirdChatDeclaration?).self
+        ) { group in
+            for didStr in didStrings {
+                group.addTask {
+                    let decl = try? await MLSPublicPDSReader.fetchDeclaration(
+                        did: didStr,
+                        resolvePDS: { [client] d in
+                            try await client.resolveDIDToPDSURL(did: d)
+                        }
+                    )
+                    return (didStr.lowercased(), decl)
+                }
+            }
+            var dict: [String: BlueCatbirdChatDeclaration?] = [:]
+            for await (d, decl) in group {
+                dict[d] = decl
+            }
+            return dict
+        }
+
+        // Filter for candidate DIDs that have a valid declaration with allowIncoming != "none"
+        var candidateDids: [DID] = []
+        for did in dids {
+            let key = did.didString().lowercased()
+            if let decl = declarations[key], let decl = decl {
+                if decl.protocolVersion == "1" && decl.allowIncoming != "none" {
+                    candidateDids.append(did)
+                }
+            }
+        }
+
+        // Step 2: Query delivery service for authoritative active devices for candidate DIDs
+        // blue.catbird.chat.getDevices accepts 1..5 userDids per request
+        var didsWithActiveDevices: Set<String> = []
+        if !candidateDids.isEmpty {
+            let actorDeviceId = (try? await requireActorDeviceId()) ?? ""
+            if !actorDeviceId.isEmpty {
+                let chunkSize = 5
+                let chunks = stride(from: 0, to: candidateDids.count, by: chunkSize).map {
+                    Array(candidateDids[$0..<min($0 + chunkSize, candidateDids.count)])
+                }
+
+                await withTaskGroup(of: Set<String>.self) { group in
+                    for chunk in chunks {
+                        group.addTask {
+                            let input = BlueCatbirdChatGetDevices.Parameters(
+                                actorDeviceId: actorDeviceId,
+                                userDids: chunk
+                            )
+                            do {
+                                let (code, output) = try await self.client.blue.catbird.chat.getDevices(input: input)
+                                if (200...299).contains(code), let output = output {
+                                    let deviceDids = Set(output.devices.map { $0.userDid.didString().lowercased() })
+                                    return deviceDids
+                                }
+                            } catch {
+                                self.logger.warning("Failed getDevices query for chunk: \(error.localizedDescription)")
+                            }
+                            return Set<String>()
+                        }
+                    }
+
+                    for await activeSet in group {
+                        didsWithActiveDevices.formUnion(activeSet)
+                    }
+                }
+            } else {
+                // Fall back to candidate DIDs with declarations if actorDeviceId is unassigned
+                didsWithActiveDevices = Set(candidateDids.map { $0.didString().lowercased() })
+            }
+        }
+
+        // Step 3: Build final status list for all requested DIDs
+        return dids.map { did in
+            let key = did.didString().lowercased()
+            let isCandidate = candidateDids.contains { $0.didString().lowercased() == key }
+            let hasDevices = didsWithActiveDevices.contains(key)
+            let optedIn = isCandidate && hasDevices
+            return MLSOptInStatus(did: did, optedIn: optedIn)
+        }
     }
 
     /// Create a new MLS conversation using Petrel client
@@ -1614,8 +1698,41 @@ public final class MLSAPIClient {
         return [:]
     }
 
-    public func optIn(deviceId: String? = nil) async throws -> (optedIn: Bool, optedInAt: Date) {
-        return (true, Date())
+    public func optIn(
+        deviceId: String? = nil,
+        allowIncoming: String = "all",
+        deliveryService: String = "did:web:chat.catbird.blue"
+    ) async throws -> (optedIn: Bool, optedInAt: Date) {
+        logger.info("🌐 [MLSAPIClient.optIn] START - deviceId: \(deviceId ?? "none")")
+        let userDid = try await client.getDid()
+        let did = try DID(didString: userDid)
+        let collection = try NSID(nsidString: "blue.catbird.chat.declaration")
+        let rkey = try RecordKey(keyString: "self")
+        let dsDid = try DID(didString: deliveryService)
+        let now = Date()
+
+        let declaration = BlueCatbirdChatDeclaration(
+            allowIncoming: allowIncoming,
+            deliveryService: dsDid,
+            protocolVersion: "1",
+            createdAt: ATProtocolDate(date: now)
+        )
+
+        let input = ComAtprotoRepoPutRecord.Input(
+            repo: .did(did),
+            collection: collection,
+            rkey: rkey,
+            validate: false,
+            record: .knownType(declaration)
+        )
+
+        let (code, _) = try await client.com.atproto.repo.putRecord(input: input)
+        guard (200...299).contains(code) else {
+            throw MLSAPIError.httpError(statusCode: code, message: "Failed to publish chat declaration record (status \(code))")
+        }
+
+        logger.info("✅ [MLSAPIClient.optIn] Successfully published chat declaration record")
+        return (true, now)
     }
 
     public struct PendingDeviceAddition: Sendable {

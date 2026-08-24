@@ -338,6 +338,9 @@ public final class MLSConversationManager {
 
     /// Device record service for per-device key verification.
     let deviceRecordService: MLSDeviceRecordService
+    /// Declaration service for secure chat opt-in and eligibility.
+    public let declarationService: MLSDeclarationService
+
 
     /// Coordinates message ordering across processes (prevents out-of-order processing)
     public let messageOrderingCoordinator = MLSMessageOrderingCoordinator()
@@ -461,6 +464,10 @@ public final class MLSConversationManager {
             atProtoClient: atProtoClient,
             mlsClient: MLSClient.shared
         )
+        declarationService = MLSDeclarationService(
+            atProtoClient: atProtoClient
+        )
+
 
         self.configuration = configuration
 
@@ -602,6 +609,29 @@ public final class MLSConversationManager {
             allowFollowingBypass: allowFollowingBypass,
             autoExpireDays: autoExpireDays
         )
+    }
+
+    public func publishDeclaration(
+        allowIncoming: String = "all",
+        deliveryService: String = "did:web:chat.catbird.blue"
+    ) async throws {
+        try throwIfShuttingDown("publishDeclaration")
+        guard let activeDid = userDid else {
+            throw MLSConversationError.noAuthentication
+        }
+        try await declarationService.publishDeclaration(
+            userDid: activeDid,
+            allowIncoming: allowIncoming,
+            deliveryService: deliveryService
+        )
+    }
+
+    public func fetchDeclaration(for targetDid: String) async throws -> BlueCatbirdChatDeclaration? {
+        try await declarationService.fetchDeclaration(for: targetDid)
+    }
+
+    public func checkEligibility(targetDid: String, targetFollowsViewer: Bool) async -> Bool {
+        await declarationService.checkEligibility(targetDid: targetDid, targetFollowsViewer: targetFollowsViewer)
     }
 
     public func getChatPolicy() async -> MLSChatPolicy? {
