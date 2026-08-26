@@ -55,6 +55,34 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
     }
   }
 
+  /// Reasserts manager-owned suspension after a failed foreground restore, but only
+  /// when no newer lifecycle transition owns the gates.
+  ///
+  /// A foreground restore must release its own global gates before rebuilding a
+  /// force-closed Rust context. If that rebuild fails, this method restores the
+  /// fail-closed state without overwriting a newer inactive/background owner.
+  @discardableResult
+  static func recordManagerSuspensionIfUnowned(
+    id: UUID = UUID(),
+    reason: String
+  ) -> UUID? {
+    sharedState.withLock { state in
+      guard state.activeOwner == nil else {
+        logger.warning(
+          "⚠️ [ContextFreeOwner] Manager suspension reassert skipped for owner \(id, privacy: .public): a newer owner is active"
+        )
+        return nil
+      }
+      state.activeOwner = .manager(id)
+      logger.warning(
+        "🚨 [ContextFreeOwner] Manager suspension reasserted for owner \(id, privacy: .public): \(reason, privacy: .public)"
+      )
+      MLSCoreContext.markSuspensionInProgress()
+      MLSClient.markSuspensionInProgress(reason: reason)
+      return id
+    }
+  }
+
   /// Records a manager-owned resume under the shared state lock,
   /// clearing the active owner if it was owned by this manager ID and releasing both global gates.
   /// If a different live owner holds the suspension, both gates remain asserted and false is returned.

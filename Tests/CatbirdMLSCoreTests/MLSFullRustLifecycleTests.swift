@@ -193,6 +193,53 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertFalse(manager.rustRuntimeRequiresForegroundRestore)
   }
 
+  func testRustFullForceCloseReleasesOwnedGatesBeforeRuntimeRestore() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    let staleBridge = RecordingLifecycleBridge()
+    let rebuiltBridge = RecordingLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser",
+      mode: .rustFull,
+      bridge: staleBridge
+    )
+    manager.orchestratorRuntimeResumeFactory = {
+      guard !MLSClient.isSuspensionInProgress,
+            !MLSCoreContext.isSuspensionInProgress
+      else {
+        return nil
+      }
+      return MLSOrchestratorRuntime(
+        userDID: "did:plc:testuser",
+        mode: .rustFull,
+        bridge: rebuiltBridge
+      )
+    }
+
+    let rustPrepared = await MainActor.run {
+      manager.suspendMLSOperations()
+    }
+    XCTAssertTrue(rustPrepared)
+
+    await MainActor.run {
+      manager.markRustRuntimeClosedForSuspend(reason: "unit-test force close")
+    }
+
+    await manager.resumeMLSOperations()
+
+    XCTAssertFalse(
+      manager.isSuspending,
+      "owned suspension gates must be released before rebuilding the Rust runtime"
+    )
+    XCTAssertNotNil(manager.orchestratorRuntime)
+    XCTAssertEqual(
+      rebuiltBridge.reattachCalls,
+      [LifecycleUserReasonCall(
+        userDID: "did:plc:testuser",
+        reason: "MLSConversationManager.resumeMLSOperations"
+      )]
+    )
+  }
+
   func testRustFullForceCloseRestoreRerunsStartupReconcileOnRebuiltRuntime() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let staleBridge = RecordingLifecycleBridge()
@@ -329,6 +376,14 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     )
     XCTAssertTrue(manager.isSuspending, "resume should not silently re-enable work without a runtime")
     XCTAssertNil(manager.orchestratorRuntime)
+    XCTAssertTrue(
+      MLSClient.isSuspensionInProgress,
+      "failed runtime restore must reassert the client lifecycle gate"
+    )
+    XCTAssertTrue(
+      MLSCoreContext.isSuspensionInProgress,
+      "failed runtime restore must reassert the core lifecycle gate"
+    )
   }
 
   func testSwiftHostMaterialKeepsAppContentAndRustStorageSeparate() throws {

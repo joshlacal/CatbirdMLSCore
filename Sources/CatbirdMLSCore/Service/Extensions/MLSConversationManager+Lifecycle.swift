@@ -160,15 +160,54 @@ extension MLSConversationManager {
       process: "app"
     )
 
+    // Rebuilding a force-closed Rust context calls MLSClient.getContext(), which
+    // intentionally rejects work while the global suspension gates are asserted.
+    // Release only this manager's suspension before attempting the rebuild.
+    if let observedSuspensionID {
+      guard MLSContextFreeLifecycleSuspensionOwner.recordManagerResume(
+        id: observedSuspensionID,
+        reason: "MLSConversationManager.resumeMLSOperations"
+      ) else {
+        logger.warning(
+          "⚠️ [RESUME] Stale or unowned manager resume did not clear active suspension gates"
+        )
+        return
+      }
+      if activeSuspensionID == observedSuspensionID {
+        activeSuspensionID = nil
+      }
+    } else {
+      guard !MLSClient.isSuspensionInProgress,
+            !MLSCoreContext.isSuspensionInProgress
+      else {
+        logger.warning(
+          "⚠️ [RESUME] Manager without an owned suspension cannot clear active lifecycle gates"
+        )
+        return
+      }
+    }
+
+    let reassertSuspensionAfterRestoreFailure: (String) -> Void = { [self] reason in
+      activeSuspensionID =
+        MLSContextFreeLifecycleSuspensionOwner.recordManagerSuspensionIfUnowned(
+          reason: reason
+        )
+      isSuspending = true
+      isSyncPaused = true
+    }
+
     if protocolAuthorityMode == .rustFull {
       let resumeReason = "MLSConversationManager.resumeMLSOperations"
       if rustRuntimeRequiresForegroundRestore || orchestratorRuntime == nil {
         logger.info(
-          "🔄 [MLS-FULL-RUST] Restoring runtime before foreground resume"
+          "🔄 [MLS-FULL-RUST] Restoring runtime after releasing owned suspension gates"
         )
         guard await restoreOrchestratorRuntimeAfterSuspendClose(reason: resumeReason) != nil else {
           logger.error(
             "❌ [MLS-FULL-RUST] Failed to rebuild runtime after suspension close; keeping MLS work suspended"
+          )
+          reassertSuspensionAfterRestoreFailure(
+            "MLSConversationManager runtime restore failed"
           )
           return
         }
@@ -186,6 +225,9 @@ extension MLSConversationManager {
             logger.error(
               "❌ [MLS-FULL-RUST] Failed to rebuild runtime after resume failure; keeping MLS work suspended"
             )
+            reassertSuspensionAfterRestoreFailure(
+              "MLSConversationManager runtime recovery failed"
+            )
             return
           }
           rustRuntimeRequiresForegroundRestore = false
@@ -193,29 +235,19 @@ extension MLSConversationManager {
       }
     }
 
-    // Clear suspension flags only if this resume owns the current suspension.
-    let didRelease: Bool
-    if let observedSuspensionID {
-      didRelease = MLSContextFreeLifecycleSuspensionOwner.recordManagerResume(
-        id: observedSuspensionID,
-        reason: "MLSConversationManager.resumeMLSOperations"
+    // A newer inactive/background transition may have acquired the gates while
+    // the async runtime restore was in flight. Never resume work through it.
+    guard !MLSClient.isSuspensionInProgress,
+          !MLSCoreContext.isSuspensionInProgress
+    else {
+      logger.warning(
+        "⚠️ [RESUME] A newer lifecycle transition asserted suspension during runtime restore"
       )
-    } else {
-      didRelease = false
+      return
     }
 
-    if didRelease {
-      if activeSuspensionID == observedSuspensionID {
-        activeSuspensionID = nil
-      }
-      isSuspending = false
-      isSyncPaused = false
-    } else if observedSuspensionID == nil {
-      isSuspending = false
-      isSyncPaused = false
-    } else {
-      logger.warning("⚠️ [RESUME] Stale or unowned manager resume did not clear active suspension gates")
-    }
+    isSuspending = false
+    isSyncPaused = false
 
     await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
     schedulePostReloadSyncIfNeeded()
