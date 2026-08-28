@@ -5471,6 +5471,7 @@ public actor MLSGRDBManager {
 
     probeWALFiles(in: grdbDir, dbType: "GRDB", userDID: didPrefix, label: label, processTag: processTag, pid: pid)
     probeWALFiles(in: rustDir, dbType: "Rust", userDID: didPrefix, label: label, processTag: processTag, pid: pid)
+  }
 
   private nonisolated static func probeWALFiles(
     in directory: URL,
