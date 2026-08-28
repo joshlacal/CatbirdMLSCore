@@ -498,7 +498,7 @@ final class MLSStorageCutoverTests: XCTestCase {
     }
 
     // First open using MLSCoreContext
-    let context = try await MLSCoreContext.shared.getContext(for: testDID)
+    try await MLSCoreContext.shared.ensureContext(for: testDID)
     let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: testDID)
     XCTAssertGreaterThanOrEqual(diskVersion, 0)
 
@@ -595,7 +595,7 @@ final class MLSStorageCutoverTests: XCTestCase {
 
     let markerURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
     let markerDir = markerURL.deletingLastPathComponent()
-    let pathHash = MLSStoragePaths.pathHash(for: testDID)
+    let pathHash = try coordinator.databasePathHash(for: .swiftGRDB, userDID: testDID)
     let tempPrefix = "tmp_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(pathHash.prefix(16))_"
     let tempMarker = markerDir.appendingPathComponent("\(tempPrefix)test_attempt_12345.json")
     try Data("temp-marker".utf8).write(to: tempMarker)

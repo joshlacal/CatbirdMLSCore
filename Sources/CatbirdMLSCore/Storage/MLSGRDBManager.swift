@@ -3421,71 +3421,23 @@ public actor MLSGRDBManager {
       )
 
     case .quarantineOnly:
-      // Quarantine files but don't reopen - require user action to continue
-      logger.critical("📦 [HMAC-LADDER] Quarantining files without auto-reopen")
-      _ = await performHardReset(for: userDID)
+      logger.critical("🛑 [HMAC-LADDER] Automatic quarantine is disabled")
       markNeedsHardReset(for: userDID)
       throw MLSSQLCipherError.needsUserAction(
-        reason:
-          "MLS storage was quarantined for investigation. Use Settings ▸ Diagnostics to continue."
+        reason: "MLS storage needs repair. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
       )
 
     case .autoResetAfterRetries(let maxRetries):
-      // Legacy behavior: allow auto-reset after N failures
-      if failureCount >= maxRetries {
-        logger.warning(
-          "⚠️ [HMAC-LADDER] Max retries (\(maxRetries)) exceeded - performing hard reset")
-        return try await hardResetAndReopenDatabase(
-          for: userDID,
-          mode: mode,
-          context: context
-        )
-      } else {
-        // Not enough failures yet - mark as needing reset and fail
-        // This allows the user/app to retry first
-        logger.info(
-          "🔄 [HMAC-LADDER] Failure \(failureCount)/\(maxRetries) - will retry before reset")
-        markNeedsHardReset(for: userDID)
-        throw MLSSQLCipherError.needsUserAction(
-          reason:
-            "MLS storage error (attempt \(failureCount)/\(maxRetries)). Will auto-repair after \(maxRetries) failures."
-        )
-      }
-    }
-  }
-
-  private func hardResetAndReopenDatabase(
-    for userDID: String,
-    mode: DatabaseOpenMode,
-    context: String
-  ) async throws -> DatabasePool {
-    if isRunningInExtension {
-      logger.error(
-        "🛑 [HARD-RESET] Blocked in extension for \(userDID.prefix(20), privacy: .private)")
-      throw MLSSQLCipherError.storageUnavailable(
-        reason: "MLS storage reset is not allowed from extensions."
+      logger.critical(
+        "🛑 [HMAC-LADDER] Automatic reset is disabled after \(failureCount)/\(maxRetries) failures"
       )
-    }
-
-    logger.critical(
-      "💥 [HMAC] Forcing reset for \(userDID.prefix(20), privacy: .private)...")
-    logger.critical("   Context: \(context, privacy: .public)")
-
-    let resetSucceeded = await performHardReset(for: userDID)
-    guard resetSucceeded else {
       markNeedsHardReset(for: userDID)
-      throw MLSSQLCipherError.storageUnavailable(
-        reason: "MLS storage locked; unable to reset storage"
+      throw MLSSQLCipherError.needsUserAction(
+        reason: "MLS storage needs repair. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
       )
     }
-
-    switch mode {
-    case .primary:
-      return try await getDatabasePool(for: userDID)
-    case .ephemeral:
-      return try await openOrCreateDatabase(for: userDID, mode: .ephemeral)
-    }
   }
+
 
   private func cacheEphemeralDatabase(
     _ database: DatabasePool,

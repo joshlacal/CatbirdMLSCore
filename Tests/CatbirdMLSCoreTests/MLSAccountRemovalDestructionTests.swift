@@ -131,7 +131,7 @@ final class MLSAccountRemovalDestructionTests: XCTestCase {
     XCTAssertEqual(swiftMigration as? Bool, true, "Swift legacy migration flag must remain untouched")
     let rustMigration = appGroupDefaults?.object(forKey: "MLSRustFFIMigrationV1_\(legacyDidHash)")
     XCTAssertEqual(rustMigration as? Bool, true, "Rust legacy migration flag must remain untouched")
-    let gateState = await MLSDatabaseGate.shared.gateState(for: testDID)
+    let gateState = await MLSDatabaseGate.shared.gateState(for: testDID.lowercased())
     XCTAssertEqual(gateState, .open, "Database gate must be left open for clean re-add")
 
     // Clean up test suite keys

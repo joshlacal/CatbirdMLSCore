@@ -425,7 +425,7 @@ public actor MLSCoreContext {
   /// - Throws: MLSError if context creation fails
   public func getContext(for userDid: String) async throws -> MlsContext {
     let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    guard !isSuspended else {
+    guard !Self.isSuspensionInProgress else {
       throw MLSError.contextCreationBlocked(reason: "App is transitioning to background - MLS operations suspended")
     }
 

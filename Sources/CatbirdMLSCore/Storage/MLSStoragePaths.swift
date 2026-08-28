@@ -686,7 +686,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     #endif
 
     let candidateData = try JSONEncoder().encode(candidateRecord)
-    let pathHash = MLSStoragePaths.pathHash(for: normalizedDID)
+    let pathHash = try databasePathHash(for: kind, userDID: normalizedDID)
     let tempPrefix = "tmp_\(kind.rawValue)_\(pathHash.prefix(16))_"
     let tempMarkerURL = markerDir.appendingPathComponent("\(tempPrefix)\(candidateAttemptUUID)_\(ProcessInfo.processInfo.processIdentifier).json")
     try candidateData.write(to: tempMarkerURL, options: .atomic)
@@ -873,7 +873,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     // 3. Delete clean marker CAS temp files
     let markerURL = try self.markerURL(for: kind, userDID: normalizedDID)
     let markerDir = markerURL.deletingLastPathComponent()
-    let pathHash = MLSStoragePaths.pathHash(for: normalizedDID)
+    let pathHash = try databasePathHash(for: kind, userDID: normalizedDID)
     let tempPrefix = "tmp_\(kind.rawValue)_\(pathHash.prefix(16))_"
     if try MLSStoragePaths.fileExistsStrict(at: markerDir) {
       let markerEntries = try FileManager.default.contentsOfDirectory(atPath: markerDir.path)
