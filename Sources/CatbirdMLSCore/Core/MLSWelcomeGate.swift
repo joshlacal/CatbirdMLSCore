@@ -5,6 +5,7 @@
 //  Cross-process Welcome/message ordering gate.
 //
 
+import CryptoKit
 import Foundation
 import OSLog
 
@@ -31,24 +32,33 @@ public actor MLSWelcomeGate {
     }
   }
 
-  /// Mark that Welcome processing has started for the given conversation.
-  public func beginWelcomeProcessing(for conversationID: String, userDID: String) {
+  /// Atomically claim Welcome processing ownership for the given conversation.
+  /// Uses exclusive create (O_EXCL) so only one process wins; losers throw.
+  public func beginWelcomeProcessing(for conversationID: String, userDID: String) throws {
     let url = markerURL(conversationID: conversationID, userDID: userDID)
 
     do {
       try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-      let exists = try MLSStoragePaths.fileExistsStrict(at: url)
-      if !exists {
-        guard FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil) else {
-          logger.critical("🚨 [WelcomeGate] Failed to create welcome marker at \(url.path), marking gate unavailable for user \(userDID.prefix(20), privacy: .private)")
-          unavailableUsers.insert(userDID)
-          return
-        }
+      let fd = open(url.path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+      if fd >= 0 {
+        close(fd)
         logger.info("⏳ [WelcomeGate] Begin Welcome: convo=\(conversationID.prefix(16))..., user=\(userDID.prefix(20), privacy: .private)")
+        return
       }
+      if errno == EEXIST {
+        throw MLSStorageInitializationError.admissionDenied(
+          details: "Welcome already being processed for \(conversationID)"
+        )
+      }
+      throw MLSStorageInitializationError.admissionDenied(
+        details: "Failed to create welcome marker for \(conversationID): \(errno)"
+      )
+    } catch let error as MLSStorageInitializationError {
+      throw error
     } catch {
-      logger.critical("🚨 [WelcomeGate] Filesystem error beginning welcome for user \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
-      unavailableUsers.insert(userDID)
+      throw MLSStorageInitializationError.admissionDenied(
+        details: "Filesystem error beginning welcome for \(conversationID): \(error.localizedDescription)"
+      )
     }
   }
 
@@ -65,7 +75,6 @@ public actor MLSWelcomeGate {
       logger.critical("🚨 [WelcomeGate] Failed to remove welcome marker at \(url.path): \(error.localizedDescription)")
     }
   }
-
   /// Cross-process check: is Welcome currently pending for this conversation?
   public func hasPendingWelcome(for conversationID: String, userDID: String) -> Bool {
     if unavailableUsers.contains(userDID) {
@@ -80,16 +89,20 @@ public actor MLSWelcomeGate {
       return true
     }
 
-    // Safety: if we crashed mid-Welcome, don't block forever.
-    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-       let modified = attrs[.modificationDate] as? Date,
-       Date().timeIntervalSince(modified) > 30 {
-      try? FileManager.default.removeItem(at: url)
-      logger.warning("⚠️ [WelcomeGate] Stale Welcome marker removed: convo=\(conversationID.prefix(16))...")
-      return false
-    }
-
     return true
+  }
+
+  /// Remove all pending Welcome markers for a user on explicit account reset.
+  public func clearAll(for userDID: String) throws {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let userComponent = MLSStoragePaths.didHash(normalized)
+    let userDir = gateDirectory.appendingPathComponent(userComponent, isDirectory: true)
+    if try MLSStoragePaths.fileExistsStrict(at: userDir) {
+      try FileManager.default.removeItem(at: userDir)
+    }
+    unavailableUsers.remove(normalized)
+    unavailableUsers.remove(userDID)
+    logger.info("🗑️ [WelcomeGate] Cleared all welcome markers for user: \(normalized.prefix(20), privacy: .private)")
   }
 
   /// Wait until Welcome is no longer pending (or timeout).
@@ -118,25 +131,12 @@ public actor MLSWelcomeGate {
 
   // MARK: - Private
 
-  private func markerURL(conversationID: String, userDID: String) -> URL {
-    let userComponent = sanitize(userDID)
-    let convoComponent = sanitize(conversationID)
+  func markerURL(conversationID: String, userDID: String) -> URL {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let userComponent = MLSStoragePaths.didHash(normalized)
+    let convoDigest = SHA256.hash(data: Data(conversationID.utf8)).compactMap { String(format: "%02x", $0) }.joined()
     return gateDirectory
       .appendingPathComponent(userComponent, isDirectory: true)
-      .appendingPathComponent("\(convoComponent).pending", isDirectory: false)
-  }
-
-  private func sanitize(_ value: String) -> String {
-    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
-    let replacement = UnicodeScalar("_")
-
-    var output = String.UnicodeScalarView()
-    output.reserveCapacity(value.unicodeScalars.count)
-
-    for scalar in value.unicodeScalars {
-      output.append(allowed.contains(scalar) ? scalar : replacement)
-    }
-
-    return String(output)
+      .appendingPathComponent("\(convoDigest).pending", isDirectory: false)
   }
 }

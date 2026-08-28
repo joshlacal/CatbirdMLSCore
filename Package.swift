@@ -1,25 +1,8 @@
 // swift-tools-version: 6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
-import Foundation
 import PackageDescription
 
-let packageDir = URL(fileURLWithPath: #file).deletingLastPathComponent().path
-let localFrameworkPath = "\(packageDir)/Sources/CatbirdMLSFFI.xcframework"
-let useLocalBinary = FileManager.default.fileExists(atPath: localFrameworkPath)
-    || FileManager.default.fileExists(atPath: "Sources/CatbirdMLSFFI.xcframework")
-    || ProcessInfo.processInfo.environment["CATBIRD_USE_LOCAL_FFI"] == "1"
-
-let ffiTarget: Target = useLocalBinary
-    ? .binaryTarget(
-        name: "CatbirdMLSFFI",
-        path: "Sources/CatbirdMLSFFI.xcframework"
-    )
-    : .binaryTarget(
-        name: "CatbirdMLSFFI",
-        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.6/CatbirdMLSFFI.xcframework.zip",
-        checksum: "253ca12220a2ac146de6e93f186465d4cacf641e3cbbbbfcc5074b652a444828"
-    )
 let package = Package(
     name: "CatbirdMLSCore",
     platforms: [
@@ -39,12 +22,12 @@ let package = Package(
         // no manifest records and no other machine reproduces.
         .package(
             url: "https://github.com/joshlacal/Petrel.git",
-            revision: "77879aa416a0e0b3c072514d52b8ea0ade745a32"
+            revision: "a4caf64fd837e72ded5f6843c630a4d032c9d872"
         ),
         // Published PetrelCatbird, pinned by revision.
         .package(
             url: "https://github.com/joshlacal/PetrelCatbird.git",
-            revision: "a4a0539c8e8aa85f6578b25ea030329d6b0890ed"
+            revision: "a7c789bd5a2b6b6033dc5aece54cfd49d1480f0d"
         )
     ],
     targets: [
@@ -77,7 +60,10 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
-        ffiTarget,
+        .binaryTarget(
+            name: "CatbirdMLSFFI",
+            path: "Sources/CatbirdMLSFFI.xcframework"
+        ),
         .testTarget(
             name: "CatbirdMLSCoreTests",
             dependencies: ["CatbirdMLSCore"]

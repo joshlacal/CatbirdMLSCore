@@ -7,8 +7,7 @@
 //  The `MLSConversationManager.ownCommits` map records SHA-256 hashes of
 //  commits we produced locally, so when the server fans the same ciphertext
 //  back over WebSocket / SSE we can short-circuit at the decrypt path
-//  instead of attempting to decrypt our own message (which would fail
-//  with `CannotDecryptOwnMessage` per MLS forward secrecy).
+//  instead of sending it through the remote commit-decryption path.
 //
 //  Three of the four own-commit producers (create-group, addMembers, group
 //  setup) already record into that map directly because they live in

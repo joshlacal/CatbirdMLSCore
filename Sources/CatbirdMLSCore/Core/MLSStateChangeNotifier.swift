@@ -194,13 +194,15 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
   /// - Note: This is a static method so it can be called without keeping a reference
   ///   to the notifier instance (important for NSE which has limited lifecycle).
   @discardableResult
-  public static func postNSEWillClose(userDID: String) -> UInt64 {
+  public static func postNSEWillClose(userDID: String) throws -> UInt64 {
     let logger = Logger(subsystem: "blue.catbird.mls", category: "StateChangeNotifier")
 
-    let request = MLSAppGroupHandshakeStore.shared.issueWillCloseRequest(for: userDID)
-    
+    let request = try MLSAppGroupHandshakeStore.shared.issueWillCloseRequest(for: userDID)
+    guard request.token > 0 else {
+      throw MLSStorageInitializationError.validationFailed(details: "Invalid handshake token issued")
+    }
+
     let center = CFNotificationCenterGetDarwinNotifyCenter()
-    
     CFNotificationCenterPostNotification(
       center,
       CFNotificationName(kMLSNSEWillCloseNotification),
@@ -208,7 +210,6 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
       nil,
       true
     )
-    
     logger.info("📢 [Handshake] NSE posting nseWillClose (token=\(request.token, privacy: .public))")
     return request.token
   }
@@ -461,7 +462,13 @@ public final class MLSStateChangeNotifier: @unchecked Sendable {
       return
     }
 
-    let requests = MLSAppGroupHandshakeStore.shared.allRequests()
+    let requests: [MLSNSEWillCloseRequest]
+    do {
+      requests = try MLSAppGroupHandshakeStore.shared.allRequests()
+    } catch {
+      logger.critical("🚨 [Handshake] Corrupt handshake request record found: \(error.localizedDescription)")
+      return
+    }
     guard !requests.isEmpty else {
       logger.debug("   No handshake requests found in App Group store")
       return

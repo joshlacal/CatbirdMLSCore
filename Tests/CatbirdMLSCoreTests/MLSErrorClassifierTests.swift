@@ -38,4 +38,15 @@ final class MLSErrorClassifierTests: XCTestCase {
     XCTAssertFalse(classification.quarantineTriggerEligible)
     XCTAssertTrue(classification.wrongEpoch)
   }
+  func testRemovedOwnMessageDiagnosticIsNotProtocolAuthority() async {
+    struct RemovedDiagnostic: Error, CustomStringConvertible {
+      let description = "CannotDecryptOwnMessage"
+    }
+
+    let classification = await MLSDecryptionLedger.shared.classifyError(RemovedDiagnostic())
+    guard case .permanent = classification else {
+      return XCTFail("removed 0.8.1 diagnostic must not be treated as typed own-message evidence")
+    }
+  }
+
 }

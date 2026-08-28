@@ -176,7 +176,7 @@ public extension MLSConversationManager {
     if await conversationNeedsRejoin(conversationID) { return }
 
     logger.error(
-      "🔴 [MLS-REJOIN] CannotDecryptOwnMessage x\(count) for \(conversationID.prefix(16)) source=\(source) — deferring rejoin to avoid epoch inflation"
+      "🔴 [MLS-REJOIN] Self-echo cache miss x\(count) for \(conversationID.prefix(16)) source=\(source) — deferring rejoin to avoid epoch inflation"
     )
 
     // Mark for deferred rejoin — the sync loop will handle recovery with backoff.
@@ -970,7 +970,7 @@ public extension MLSConversationManager {
 
         // 🔒 CRITICAL FIX: Cache BEFORE network call
         // Use a synthetic MessageView for the pre-cache step
-        // Must succeed or we abort to avoid "CannotDecryptOwnMessage" later
+        // Must succeed or we abort; own SSE echoes resolve from this durable payload.
         try throwIfShuttingDown("sendEncryptedReaction-preCache")
         try await cacheControlMessageEnvelope(
           messageID: localMsgId,
@@ -1090,8 +1090,8 @@ public extension MLSConversationManager {
     }
 
     // Legacy path — mirrors `sendEncryptedReaction`'s structure (control message
-    // sent through the queued/locked encrypt+send flow, own row cached so the SSE
-    // echo doesn't hit CannotDecryptOwnMessage).
+    // sent through the queued/locked encrypt+send flow, with its own row cached
+    // before the SSE echo arrives).
     guard let convo = conversations[convoId] else {
       throw MLSConversationError.conversationNotFound
     }
@@ -1709,7 +1709,6 @@ public extension MLSConversationManager {
     let maxRetries = 2  // Increased from 1 to give more chances for cache to be populated
     var lastError: Error?
     let attemptID = nextProcessingAttemptID()
-    var processingContext: ProcessingContext?
 
     for attempt in 0...maxRetries {
       do {
@@ -1720,7 +1719,6 @@ public extension MLSConversationManager {
               source: source,
               queueIndex: queueIndex
             )
-            processingContext = context
             self.logger.info(
               "🧵 [PROCESS-QUEUE] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
             )
@@ -1737,48 +1735,9 @@ public extension MLSConversationManager {
       } catch {
         lastError = error
         let errorDesc = error.localizedDescription
-        let context = processingContext ?? ProcessingContext(
-          attemptID: attemptID,
-          source: source,
-          queueIndex: 0
-        )
 
-        // CannotDecryptOwnMessage is a definitive self-echo signal from MLS.
-        // Recover the pre-cached payload from the pending send instead of saving an error placeholder.
-        if case MLSError.cannotDecryptOwnMessage = error {
-          let outcome = try await recoverSelfSentMessage(message: message, context: context, source: source)
-          // CRITICAL: Record as processed to prevent re-processing loop
-          _ = await withAdvisoryLockBestEffort(for: userDid) {
-            try await self.messageOrderingCoordinator.recordMessageProcessed(
-              messageID: message.id,
-              conversationID: message.convoId,
-              sequenceNumber: Int64(message.seq),
-              currentUserDID: userDid,
-              database: self.database
-            )
-          }
-          return outcome
-        }
-
-        // Also check string description for backward compatibility with FFI errors
-        if errorDesc.contains("CannotDecryptOwnMessage") || errorDesc.contains("cannotDecryptOwnMessage") {
-          let outcome = try await recoverSelfSentMessage(message: message, context: context, source: source)
-          // CRITICAL: Record as processed to prevent re-processing loop
-          _ = await withAdvisoryLockBestEffort(for: userDid) {
-            try await self.messageOrderingCoordinator.recordMessageProcessed(
-              messageID: message.id,
-              conversationID: message.convoId,
-              sequenceNumber: Int64(message.seq),
-              currentUserDID: userDid,
-              database: self.database
-            )
-          }
-          return outcome
-        }
-
-        // Check for SecretReuseError (NSE race condition indicator), Future Epoch, or Decryption Failure
-        // Explicitly EXCLUDE CannotDecryptOwnMessage to prevent death spiral
-        if (errorDesc.contains("SecretReuseError") || errorDesc.contains("FutureEpoch") || errorDesc.contains("DecryptionFailed")) && !errorDesc.contains("CannotDecryptOwnMessage") {
+        // Check for retryable duplicate, future-epoch, or decryption failures.
+        if errorDesc.contains("SecretReuseError") || errorDesc.contains("FutureEpoch") || errorDesc.contains("DecryptionFailed") {
           // Fast path: if NSE already wrote the payload, treat this as success and return from DB.
           if let cachedMessage = try? await storage.fetchMessage(
             messageID: message.id,
@@ -2906,8 +2865,8 @@ public extension MLSConversationManager {
         return .application(payload: cachedPayload, sender: cachedSender)
       } else {
         // CRITICAL FIX: Save a placeholder to prevent re-processing attempts
-        // Without this, the message would be retried on next sync, hitting the FFI
-        // and failing with CannotDecryptOwnMessage error (forward secrecy)
+        // Without this, the next sync would retry ciphertext whose forward-
+        // secrecy key the sender no longer has.
         logger.warning("⚠️ [SELF-ECHO] Message \(message.id) is self-sent but payload missing - saving placeholder")
 
         let placeholderPayload = MLSMessagePayload.text(
@@ -3470,14 +3429,6 @@ public extension MLSConversationManager {
 
       let errorDescription = error.localizedDescription
 
-      if errorDescription.contains("CannotDecryptOwnMessage") {
-          return try await recoverSelfSentMessage(
-            message: message,
-            context: context,
-            source: context.source ?? "unknown"
-          )
-      }
-
       if errorDescription.contains("SecretReuseError") || errorDescription.contains("Decryption failed") {
         // CRITICAL FIX: Rethrow SecretReuseError (and generic decryption failures which mask it)
         // so the parent method can catch it and retry/reload from cache if available.
@@ -3493,11 +3444,6 @@ public extension MLSConversationManager {
         context: context
       )
     } catch {
-       let errorDescr = error.localizedDescription
-       if errorDescr.contains("CannotDecryptOwnMessage") {
-         return try await recoverSelfSentMessage(message: message, context: context, source: context.source ?? "unknown")
-       }
-
       logger.error("❌ Failed to process MLS message \(message.id): \(error.localizedDescription)")
       return try await saveErrorPlaceholder(
         message: message,
@@ -3615,75 +3561,6 @@ public extension MLSConversationManager {
       processingError: processingError,
       validationReason: validationReason,
       context: resolvedContext
-    )
-  }
-
-  /// Recover a self-sent message when CannotDecryptOwnMessage is encountered.
-  ///
-  /// MLS authoritatively tells us this message was sent by the current user (senders
-  /// cannot decrypt their own ciphertext). Instead of saving an error placeholder,
-  /// we look up the oldest unconfirmed pre-cached send for this conversation
-  /// (identifiable by senderID == userDid AND processingState == pendingSelfSend) and adopt its
-  /// payload. This eliminates the race between SSE delivery and the HTTP send response.
-  ///
-  /// Falls back to error placeholder only if no pending send is found.
-  private func recoverSelfSentMessage(
-    message: BlueCatbirdChatDefs.ApplicationEntry,
-    context: ProcessingContext?,
-    source: String
-  ) async throws -> MessageProcessingOutcome {
-    guard let userDid = userDid else {
-      throw MLSConversationError.noAuthentication
-    }
-
-    // CannotDecryptOwnMessage IS the self-echo signal — sender is definitively current user
-    if let pendingMsg = try? await storage.fetchOldestUnconfirmedSelfSentMessage(
-      conversationID: message.convoId,
-      senderDID: userDid,
-      currentUserDID: userDid,
-      database: database
-    ), let cachedPayload = pendingMsg.parsedPayload, pendingMsg.processingError == nil {
-      logger.info("[SELF-ECHO-RECOVER] Adopting pre-cached payload from pending send \(pendingMsg.messageID.prefix(16)) for SSE message \(message.id.prefix(16))")
-
-      // Persist the recovered payload under the server-assigned message ID
-      let resolvedContext = context ?? ProcessingContext(
-        attemptID: nextProcessingAttemptID(),
-        source: source,
-        queueIndex: 0
-      )
-      _ = try await persistProcessedPayload(
-        message: message,
-        payload: cachedPayload,
-        senderID: userDid,
-        processingError: nil,
-        validationReason: nil,
-        context: resolvedContext
-      )
-
-      // Delete the orphaned local-ID record (server ID record now has the payload)
-      if pendingMsg.messageID != message.id {
-        try? await database.write { db in
-          try db.execute(
-            sql: "DELETE FROM MLSMessageModel WHERE messageID = ? AND currentUserDID = ?",
-            arguments: [pendingMsg.messageID, MLSStorageHelpers.normalizeDID(userDid)]
-          )
-        }
-        logger.debug("[SELF-ECHO-RECOVER] Cleaned up orphaned local record \(pendingMsg.messageID.prefix(16))")
-      }
-
-      clearSelfDecryptFailures(conversationID: message.convoId)
-
-      return .application(payload: cachedPayload, sender: userDid)
-    }
-
-    // Fallback: no pending send found — save error placeholder to advance sequence
-    logger.warning("[SELF-ECHO-RECOVER] No pending self-sent payload found for \(message.id.prefix(16)) — saving placeholder")
-    await recordSelfDecryptFailure(conversationID: message.convoId, source: source)
-    return try await saveErrorPlaceholder(
-      message: message,
-      error: "Self-sent message (cache missing)",
-      validationReason: "CannotDecryptOwnMessage: Sender is current user",
-      context: context
     )
   }
 
@@ -4441,7 +4318,7 @@ public extension MLSConversationManager {
     processingState: String = MLSMessageProcessingState.cached
   ) async throws {
     // Retry logic for robust caching (max 3 attempts)
-    // We CANNOT proceed without caching, or we will hit CannotDecryptOwnMessage on echo
+    // We cannot proceed without caching; an own echo must resolve from durable payload.
     // Field-level encryption requires an `MlsContext` for both encrypt and HMAC.
     let mlsContext = try await MLSCoreContext.shared.getContext(for: currentUserDID)
 
@@ -5002,7 +4879,7 @@ public extension MLSConversationManager {
 
     let epochInt = Int(clamping: newEpoch)
 
-    guard var convo = conversations[convoId] else {
+    guard let convo = conversations[convoId] else {
       logger.warning("Conversation not found for epoch update: \(convoId)")
       return
     }
@@ -5018,16 +4895,17 @@ public extension MLSConversationManager {
       confirmationTag: convo.coordinates.confirmationTag,
       lifecycle: convo.coordinates.lifecycle
     )
-    let updatedConvo = BlueCatbirdChatDefs.ConversationState(
+    conversations[convoId] = BlueCatbirdChatDefs.ConversationState(
       conversationKind: convo.conversationKind,
       coordinates: coordinates,
       cipherSuite: convo.cipherSuite,
       participants: convo.participants,
       leaves: convo.leaves,
       metadataSnapshot: convo.metadataSnapshot,
-      snapshotSeq: convo.snapshotSeq
+      snapshotSeq: convo.snapshotSeq,
+      sequencerDid: convo.sequencerDid,
+      sequencerTerm: convo.sequencerTerm
     )
-    conversations[convoId] = updatedConvo
 
     // Update group state
     if var state = groupStates[convo.groupId] {
@@ -5222,9 +5100,7 @@ public extension MLSConversationManager {
     // this commit (it was applied at send time), and re-feeding it would
     // either:
     //   - return a no-op (idempotent FFI) with a confusing trace, OR
-    //   - emit `CannotDecryptOwnMessage` from OpenMLS (forward secrecy:
-    //     senders can't decrypt their own ciphertext after the ratchet
-    //     advances).
+    //   - fail as an unrecognized own echo after forward secrecy advances.
     //
     // The `ownCommits` map is populated by the four producer sites:
     //   - createConvo (MLSConversationManager.swift:760)
@@ -5475,14 +5351,6 @@ public extension MLSConversationManager {
         )
       } catch {
         logger.warning("Failed to persist epoch after commit: \(error.localizedDescription)")
-      }
-
-      // Persist epoch to keychain
-      do {
-        try MLSKeychainManager.shared.storeCurrentEpoch(epochInt, forConversationID: state.convoId)
-        logger.debug("Persisted epoch \(epochInt) to keychain for conversation \(state.convoId)")
-      } catch {
-        logger.error("Failed to persist epoch to keychain: \(error)")
       }
 
       // Record new epoch in storage for cleanup tracking
@@ -6894,11 +6762,15 @@ public extension MLSConversationManager {
     // This prevents race conditions where NSE and App both try to process the Welcome simultaneously
     // The NSE might have received the first notification and started processing the Welcome
     // before the App finished syncing the conversation list.
-    let _ = await MLSWelcomeGate.shared.waitForWelcomeIfPending(
+    let welcomeReady = await MLSWelcomeGate.shared.waitForWelcomeIfPending(
       for: convo.conversationId,
       userDID: userDid,
       timeout: .seconds(3)
     )
+    guard welcomeReady else {
+      logger.warning("⚠️ [WelcomeGate] Welcome still pending for \(convo.conversationId.prefix(8))... after wait - deferring processing")
+      return
+    }
 
     // Check if group appeared while we waited (meaning NSE successfully processed it)
     if let groupIdData = Data(hexEncoded: convo.groupId),
@@ -6910,7 +6782,7 @@ public extension MLSConversationManager {
        return
     }
 
-    await MLSWelcomeGate.shared.beginWelcomeProcessing(for: convo.conversationId, userDID: userDid)
+    try await MLSWelcomeGate.shared.beginWelcomeProcessing(for: convo.conversationId, userDID: userDid)
     defer {
       Task { await MLSWelcomeGate.shared.completeWelcomeProcessing(for: convo.conversationId, userDID: userDid) }
     }

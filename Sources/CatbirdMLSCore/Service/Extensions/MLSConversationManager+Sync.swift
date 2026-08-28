@@ -221,7 +221,9 @@ public extension MLSConversationManager {
         participants: apiParticipants,
         leaves: [],
         metadataSnapshot: metadataSnapshot,
-        snapshotSeq: 1
+        snapshotSeq: 1,
+        sequencerDid: nil,
+        sequencerTerm: nil
       )
 
       hydratedConversations.append(convo)
@@ -298,7 +300,9 @@ public extension MLSConversationManager {
           participants: participants,
           leaves: convo.leaves,
           metadataSnapshot: convo.metadataSnapshot,
-          snapshotSeq: convo.snapshotSeq
+          snapshotSeq: convo.snapshotSeq,
+          sequencerDid: convo.sequencerDid,
+          sequencerTerm: convo.sequencerTerm
         )
       )
     }

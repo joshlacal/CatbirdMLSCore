@@ -33,13 +33,9 @@ public final class MLSCoordinationStore {
   
   private let queue = DispatchQueue(label: "blue.catbird.mls.coordination", qos: .userInitiated)
   
-  private var fileURL: URL {
-    if let dir = try? MLSStoragePaths.coordinationDirectory() {
-      return dir.appendingPathComponent(fileName)
-    }
-    let fallbackDir = FileManager.default.temporaryDirectory
-      .appendingPathComponent("blue.catbird.mls.coordination", isDirectory: true)
-    return fallbackDir.appendingPathComponent(fileName)
+  private func fileURL() throws -> URL {
+    let dir = try MLSStoragePaths.coordinationDirectory()
+    return dir.appendingPathComponent(fileName)
   }
 
   private init() {
@@ -47,12 +43,12 @@ public final class MLSCoordinationStore {
   }
 
   private func ensureStateExists() {
-    let url = fileURL
-    var statBuf = stat()
-    if lstat(url.path, &statBuf) == 0 {
-      return
-    }
     do {
+      let url = try fileURL()
+      var statBuf = stat()
+      if lstat(url.path, &statBuf) == 0 {
+        return
+      }
       let dir = url.deletingLastPathComponent()
       try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
       let data = try JSONEncoder().encode(State.initial)
@@ -66,7 +62,7 @@ public final class MLSCoordinationStore {
 
   /// Strict fetch that differentiates absent file from corrupt/unreadable JSON
   func fetchState() throws -> State {
-    let url = fileURL
+    let url = try fileURL()
     var statBuf = stat()
     if lstat(url.path, &statBuf) != 0 {
       if errno == ENOENT {
@@ -93,8 +89,8 @@ public final class MLSCoordinationStore {
     do {
       return try fetchState()
     } catch {
-      logger.critical("⚠️ [COORD] Failed to fetch coordination state: \(error.localizedDescription)")
-      return State.initial
+      logger.critical("⚠️ [COORD] Failed to fetch coordination state (corrupt or unavailable): \(error.localizedDescription)")
+      return State(coordinationGeneration: -1, activeUserDID: nil, phase: .closed, updatedAt: Date())
     }
   }
   
@@ -151,7 +147,7 @@ public final class MLSCoordinationStore {
       logger.critical("🚫 [COORD] Generation validation failed due to unreadable state: \(error.localizedDescription)")
       throw MLSCoordinationError.generationMismatch(expected: expectedGen, current: -1)
     }
-    if expectedGen != currentGen {
+    if expectedGen != currentGen || currentGen < 0 {
       logger.warning("🚫 [COORD] Generation mismatch: expected \(expectedGen), current \(currentGen). Task must cancel.")
       throw MLSCoordinationError.generationMismatch(expected: expectedGen, current: currentGen)
     }
@@ -189,7 +185,7 @@ public final class MLSCoordinationStore {
   }
 
   func saveStrict(_ state: State) throws {
-    let url = fileURL
+    let url = try fileURL()
     let dir = url.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let data = try JSONEncoder().encode(state)

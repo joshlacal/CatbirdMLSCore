@@ -133,7 +133,7 @@ extension MLSConversationManager {
           optimisticSeq = 1
         }
 
-        // Pre-cache BEFORE network send to avoid CannotDecryptOwnMessage race.
+        // Pre-cache before network send so the own SSE echo resolves durably.
         try throwIfShuttingDown("sendDeliveryAck-preCache")
         try await cacheControlMessageEnvelope(
           messageID: localMsgId,

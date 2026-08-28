@@ -152,7 +152,7 @@ public actor MLSDeviceManager {
   /// - Returns: The MLS DID for this device
   public func ensureDeviceRegistered(userDid: String) async throws -> String {
     // Normalize userDID for consistent storage lookup
-    let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if MLSAuthorityModeSharedState.isRustFullEnabled {
       logger.warning(
         "⏭️ [MLSDeviceManager.ensureDeviceRegistered] rustFull authority: blocking Swift MLS key package mutation for \(normalizedUserDid.prefix(20))"
@@ -162,6 +162,12 @@ public actor MLSDeviceManager {
       )
     }
 
+    return try await withMLSExclusiveAccess(userDID: normalizedUserDid, purpose: .ffiMutation) {
+      try await self.performEnsureDeviceRegistered(userDid: userDid, normalizedUserDid: normalizedUserDid)
+    }
+  }
+
+  private func performEnsureDeviceRegistered(userDid: String, normalizedUserDid: String) async throws -> String {
     // CRITICAL FIX: Prevent concurrent registration race condition
     // If another call is already registering this user, wait for completion using async/await
     if registrationInProgress.contains(normalizedUserDid) {
@@ -530,18 +536,6 @@ public actor MLSDeviceManager {
       } catch {
         lastError = error
         logger.error("❌ Registration attempt \(attempt) failed: \(error.localizedDescription)")
-
-        // ✅ CRITICAL FIX: Rollback MLS state on registration failure
-        // Clean up key package bundles created before registration attempt
-        // Device info was NOT saved (only saved on success), so retry is clean
-        do {
-          logger.warning("🔄 Rolling back MLS state (clearing key package bundles)...")
-          try await mlsClient.clearStorage(for: userDid)
-          logger.info("✅ MLS state cleared - ready for clean retry")
-        } catch {
-          logger.error("⚠️ Failed to clear MLS state during rollback: \(error.localizedDescription)")
-          // Continue anyway - retry might still succeed or final failure will clear state
-        }
 
         if attempt < maxRetries {
           let delay = Double(attempt * 2)

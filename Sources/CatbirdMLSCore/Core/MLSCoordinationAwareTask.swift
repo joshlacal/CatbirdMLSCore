@@ -28,7 +28,7 @@ public enum MLSCoordinationAwareTask {
 
   public static func validateGeneration(_ expected: Int) throws {
     let current = MLSCoordinationStore.shared.currentGeneration
-    if expected != current {
+    if expected != current || current < 0 {
       throw GenerationStaleError(expected: expected, current: current)
     }
   }

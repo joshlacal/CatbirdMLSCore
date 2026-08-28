@@ -113,6 +113,8 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   public func initialize() throws {
+    let mutationLease = try MLSStorageCoordinator.shared.acquireMutationMutexSync(for: .rustState, userDID: userDID)
+    defer { mutationLease.release() }
     try bridge.initialize(userDid: userDID)
     logger.info(
       "MlsEngine initialized mode=\(self.mode.rawValue, privacy: .public) user=\(self.userDID.prefix(20), privacy: .private)"
@@ -316,9 +318,10 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   @discardableResult
   public func ensureDeviceRegistered() throws -> String {
-    try bridge.ensureDeviceRegistered()
+    let mutationLease = try MLSStorageCoordinator.shared.acquireMutationMutexSync(for: .rustState, userDID: userDID)
+    defer { mutationLease.release() }
+    return try bridge.ensureDeviceRegistered()
   }
-
   public func replenishKeyPackagesIfNeeded() throws {
     try bridge.replenishKeyPackagesIfNeeded()
   }
@@ -700,7 +703,9 @@ private func decodeConversationSnapshot(
     participants: participants,
     leaves: [],
     metadataSnapshot: metadataSnapshot,
-    snapshotSeq: 1
+    snapshotSeq: 1,
+    sequencerDid: nil,
+    sequencerTerm: nil
   )
 }
 

@@ -32,8 +32,7 @@ final class MLSDatabaseGateTests: XCTestCase {
     
     // 4. Acquire connection
     let token = try await gate.acquireConnection(for: testDID)
-    XCTAssertEqual(token.userDID, testDID)
-    
+    XCTAssertEqual(token.userDID, testDID.lowercased())
     let count = await gate.connectionCount(for: testDID)
     XCTAssertEqual(count, 1)
     
@@ -117,5 +116,74 @@ final class MLSDatabaseGateTests: XCTestCase {
     XCTAssertEqual(result, "success")
     let finalCount = await gate.connectionCount(for: testDID)
     XCTAssertEqual(finalCount, 0)
+  }
+
+  func testExactTokenAtomicReleaseAndIdempotency() async throws {
+    let testDID = "did:plc:exact_token_\(UUID().uuidString.lowercased())"
+    let gate = MLSDatabaseGate.shared
+    await gate.openGate(for: testDID)
+
+    let token1 = try await gate.acquireConnection(for: testDID)
+    let token2 = try await gate.acquireConnection(for: testDID)
+
+    var count = await gate.connectionCount(for: testDID)
+    XCTAssertEqual(count, 2)
+    var valid1 = await gate.isTokenValid(token1)
+    var valid2 = await gate.isTokenValid(token2)
+    XCTAssertTrue(valid1)
+    XCTAssertTrue(valid2)
+
+    // Releasing token1 decrements count to 1
+    await gate.releaseConnection(token1)
+    count = await gate.connectionCount(for: testDID)
+    XCTAssertEqual(count, 1)
+    valid1 = await gate.isTokenValid(token1)
+    valid2 = await gate.isTokenValid(token2)
+    XCTAssertFalse(valid1)
+    XCTAssertTrue(valid2)
+
+    // Duplicate release of token1 is a no-op (idempotent, does not decrement count)
+    await gate.releaseConnection(token1)
+    count = await gate.connectionCount(for: testDID)
+    XCTAssertEqual(count, 1)
+    valid2 = await gate.isTokenValid(token2)
+    XCTAssertTrue(valid2)
+
+    // Releasing token2 decrements count to 0
+    await gate.releaseConnection(token2)
+    count = await gate.connectionCount(for: testDID)
+    XCTAssertEqual(count, 0)
+    valid2 = await gate.isTokenValid(token2)
+    XCTAssertFalse(valid2)
+
+    // Stale/fake token release does not decrement count below 0
+    let fakeToken = MLSConnectionToken(userDID: testDID, generation: 999)
+    await gate.releaseConnection(fakeToken)
+    count = await gate.connectionCount(for: testDID)
+    XCTAssertEqual(count, 0)
+  }
+
+  func testCaseVariantDIDSharesHandle() async throws {
+    let lower = "did:plc:case_variant_\(UUID().uuidString.lowercased())"
+    let upper = lower.uppercased()
+    let gate = MLSDatabaseGate.shared
+
+    await gate.openGate(for: upper)
+    let isLowerOpen = await gate.isOpen(for: lower)
+    let isUpperOpen = await gate.isOpen(for: upper)
+    XCTAssertTrue(isLowerOpen)
+    XCTAssertTrue(isUpperOpen)
+
+    let token = try await gate.acquireConnection(for: upper)
+    var lowerCount = await gate.connectionCount(for: lower)
+    var upperCount = await gate.connectionCount(for: upper)
+    XCTAssertEqual(lowerCount, 1)
+    XCTAssertEqual(upperCount, 1)
+
+    await gate.releaseConnection(token)
+    lowerCount = await gate.connectionCount(for: lower)
+    upperCount = await gate.connectionCount(for: upper)
+    XCTAssertEqual(lowerCount, 0)
+    XCTAssertEqual(upperCount, 0)
   }
 }

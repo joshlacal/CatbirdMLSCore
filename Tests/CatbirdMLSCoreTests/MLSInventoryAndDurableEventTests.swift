@@ -1308,7 +1308,9 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       participants: [],
       leaves: [],
       metadataSnapshot: metadata,
-      snapshotSeq: 3
+      snapshotSeq: 3,
+      sequencerDid: nil,
+      sequencerTerm: nil
     )
     let removal = BlueCatbirdChatDefs.ConversationRemovalTombstone(
       conversationId: "conversation-removed",

@@ -49,7 +49,7 @@ public enum MLSDecryptionDecision: Sendable {
 /// Classification of decryption errors for state transitions
 public enum MLSDecryptionErrorClass: Sendable {
   /// Expected outcomes that indicate success (cache should have data)
-  case expectedSuccess  // SecretReuseError, CannotDecryptOwnMessage
+  case expectedSuccess  // SecretReuseError
   
   /// Transient errors that may resolve on retry
   case transient        // NetworkError, DatabaseBusy, Timeout, StaleState
@@ -210,9 +210,7 @@ public actor MLSDecryptionLedger {
     let errorString = String(describing: error).lowercased()
     
     // Expected success (cache should have data)
-    if errorString.contains("secretreuse") ||
-       errorString.contains("cannot decrypt own message") ||
-       errorString.contains("cannotdecryptownmessage") {
+    if errorString.contains("secretreuse") {
       return .expectedSuccess
     }
     
@@ -377,7 +375,7 @@ public actor MLSDecryptionLedger {
         
         switch errorClass {
         case .expectedSuccess:
-          // SecretReuseError, CannotDecryptOwnMessage - treat as done
+          // SecretReuseError means another process already consumed the key.
           receipt.state = .done
           receipt.completedAt = Date()
           receipt.errorType = errorType
@@ -409,9 +407,7 @@ public actor MLSDecryptionLedger {
   nonisolated private func classifyErrorString(_ errorString: String) -> MLSDecryptionErrorClass {
     let lowercased = errorString.lowercased()
     
-    if lowercased.contains("secretreuse") ||
-       lowercased.contains("cannot decrypt own") ||
-       lowercased.contains("cannotdecryptownmessage") {
+    if lowercased.contains("secretreuse") {
       return .expectedSuccess
     }
     

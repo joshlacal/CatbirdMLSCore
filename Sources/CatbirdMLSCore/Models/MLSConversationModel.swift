@@ -721,7 +721,9 @@ extension MLSConversationModel: FetchableRecord, PersistableRecord {
           deviceStatusAtOrigin: "active"
         )
       ),
-      snapshotSeq: 1
+      snapshotSeq: 1,
+      sequencerDid: nil,
+      sequencerTerm: nil
     )
   }
 }

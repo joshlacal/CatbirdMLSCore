@@ -340,10 +340,12 @@ public actor MLSClient {
     let normalizedDID = normalizeUserDID(userDID)
     self.apiClients[normalizedDID] = apiClient
 
-    // Create managers for this specific user context
-    self.deviceManagers[normalizedDID] = MLSDeviceManager(
-      apiClient: atProtoClient, mlsAPIClient: apiClient, mlsClient: self)
-
+    // Create legacy device manager ONLY on the Swift-legacy authority path.
+    // Clean startup (rustFull) must never construct MLSDeviceManager or access legacy keychain/defaults.
+    if MLSAuthorityModeSharedState.currentMode() == .swiftLegacy {
+      self.deviceManagers[normalizedDID] = MLSDeviceManager(
+        apiClient: atProtoClient, mlsAPIClient: apiClient, mlsClient: self)
+    }
     self.recoveryManagers[normalizedDID] = MLSRecoveryManager(
       mlsClient: self, mlsAPIClient: apiClient)
 
@@ -363,8 +365,11 @@ public actor MLSClient {
     logger.info("[E2E] Invalidated cached MLS clients and context for \(normalizedDID.prefix(20))...")
   }
 
-  /// Get the device manager for a specific user
+  /// Get the device manager for a specific user (legacy path only)
   public func getDeviceManager(for userDID: String) -> MLSDeviceManager? {
+    guard MLSAuthorityModeSharedState.currentMode() == .swiftLegacy else {
+      return nil
+    }
     let normalizedDID = normalizeUserDID(userDID)
     return deviceManagers[normalizedDID]
   }
@@ -408,7 +413,9 @@ public actor MLSClient {
         "❌ Device manager not configured for user \(normalizedDID) - call configure() first")
       throw MLSError.configurationError
     }
-    return try await deviceManager.ensureDeviceRegistered(userDid: userDid)
+    return try await withMLSExclusiveAccess(userDID: normalizedDID, purpose: .ffiMutation) {
+      try await deviceManager.ensureDeviceRegistered(userDid: userDid)
+    }
   }
 
   /// Get device info for key package uploads for a specific user
@@ -2127,6 +2134,7 @@ public actor MLSClient {
       // Update epoch checkpoint after successful decryption (for next staleness check)
       // ═══════════════════════════════════════════════════════════════════════════
       await MLSEpochCheckpoint.shared.recordEpoch(
+        userDID: userDID,
         groupId: groupId,
         epoch: result.epoch,
         isNSE: false  // This is the main app
@@ -2206,6 +2214,7 @@ public actor MLSClient {
     // Check against epoch checkpoint
     guard
       let checkResult = await MLSEpochCheckpoint.shared.checkStaleness(
+        userDID: normalizedDID,
         groupId: groupId,
         inMemoryEpoch: inMemoryEpoch
       )
@@ -3043,6 +3052,7 @@ public actor MLSClient {
         do {
           let newEpoch = try await self.getEpoch(for: userDID, groupId: groupId)
           await MLSEpochCheckpoint.shared.recordEpoch(
+            userDID: userDID,
             groupId: groupId,
             epoch: newEpoch,
             isNSE: false
@@ -3109,21 +3119,6 @@ public actor MLSClient {
         logger.info("   Caller should retrieve plaintext from database cache")
         // Note: We don't have messageID here, but caller will handle appropriately
         throw MLSError.secretReuseSkipped(messageID: "unknown")
-      }
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // CRITICAL FIX (2026-01): Handle CannotDecryptOwnMessage BEFORE ratchetStateDesync
-      // ═══════════════════════════════════════════════════════════════════════════
-      // This error occurs when we try to decrypt a message we sent ourselves.
-      // MLS encrypts messages for recipients only - senders can't decrypt their own messages.
-      // This is NOT a desync - it's a permanent failure that retrying won't fix.
-      // The caller should use the pre-cached payload from when the message was sent.
-      // ═══════════════════════════════════════════════════════════════════════════
-      if errorMessage.contains("CannotDecryptOwnMessage") || errorMessageLower.contains("cannotdecryptownmessage") {
-        logger.warning("⚠️ [MLSClient.processMessage] CannotDecryptOwnMessage - this is a self-sent message")
-        logger.info("   MLS messages are encrypted for recipients only, senders cannot decrypt their own messages")
-        logger.info("   Caller should use pre-cached payload from send operation")
-        throw MLSError.cannotDecryptOwnMessage
       }
 
       // Detect ratchet state desynchronization errors
@@ -3670,10 +3665,17 @@ public actor MLSClient {
 
   /// Clear all MLS storage for a specific user.
   ///
-  /// IMPORTANT: This is a manual, user-initiated operation. It quarantines files (does not delete).
+  /// IMPORTANT: This is an explicit, user-initiated operation. It permanently deletes the clean database and all clean key material.
   public func clearStorage(for userDID: String) async throws {
+    let originalDID = userDID
     let normalizedDID = normalizeUserDID(userDID)
-    logger.info("🧰 [Diagnostics] Resetting MLS storage for user: \(normalizedDID)")
+    logger.info("🧰 [Diagnostics] Resetting MLS storage for user: \(normalizedDID) (original: \(originalDID))")
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 0: Acquire per-DID reset-lifecycle mutex
+    // ═══════════════════════════════════════════════════════════════════════════
+    let resetLifecycleMutex = try await MLSStorageCoordinator.shared.acquireResetLifecycleMutex(for: normalizedDID)
+    defer { resetLifecycleMutex.release() }
 
     let coordinator = storageMaintenanceCoordinator
     if let coordinator {
@@ -3681,71 +3683,102 @@ public actor MLSClient {
       await coordinator.prepareMLSStorageReset(for: normalizedDID)
     }
 
-    var resetError: Error?
-    do {
-      // ═══════════════════════════════════════════════════════════════════════════
-      // PHASE 1: Signal globally that this user is under maintenance
-      // ═══════════════════════════════════════════════════════════════════════════
-      MLSAppActivityState.setShuttingDown(true, userDID: normalizedDID)
-      try MLSCoordinationStore.shared.incrementGenerationStrict(for: normalizedDID)
-      bumpGeneration(for: normalizedDID)
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // PHASE 2: Close the database gate and wait for drain (failure aborts reset)
-      // ═══════════════════════════════════════════════════════════════════════════
-      try await MLSDatabaseGate.shared.closeGateAndDrain(for: normalizedDID, timeout: .seconds(5))
-      logger.info("✅ [Diagnostics] Database gate closed and drained")
-
-      // Invalidate and remove in-memory clients
-      apiClients.removeValue(forKey: normalizedDID)
-      deviceManagers.removeValue(forKey: normalizedDID)
-      recoveryManagers.removeValue(forKey: normalizedDID)
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // PHASE 3: Close / flush Rust context and GRDB databases before deletion
-      // ═══════════════════════════════════════════════════════════════════════════
-      try await MLSCoreContext.shared.resetAndCloseContext(for: normalizedDID)
-      try await MLSGRDBManager.shared.closeAndDrainDatabase(for: normalizedDID)
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // PHASE 4: Perform coordinated reset of clean Swift and Rust resources
-      // ═══════════════════════════════════════════════════════════════════════════
-      try await MLSStorageCoordinator.shared.coordinateReset(for: .swiftGRDB, userDID: normalizedDID)
-      try await MLSStorageCoordinator.shared.coordinateReset(for: .rustState, userDID: normalizedDID)
-
-      // ═══════════════════════════════════════════════════════════════════════════
-      // PHASE 5: Clear generation-scoped per-user coordination metadata
-      // ═══════════════════════════════════════════════════════════════════════════
-      MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
-      try MLSCoordinationStore.shared.deleteStateStrict(for: normalizedDID)
-      MLSAppGroupHandshakeStore.shared.clearAll(for: normalizedDID)
-
-      logger.info("✅ [Diagnostics] MLS storage reset complete for \(normalizedDID)")
-    } catch {
-      resetError = error
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 1: Set persistent reset sentinel and signal globally
+    // ═══════════════════════════════════════════════════════════════════════════
+    MLSStoragePaths.setResetSentinel(for: normalizedDID)
+    MLSAppActivityState.setShuttingDown(true, userDID: normalizedDID)
+    if originalDID != normalizedDID {
+      MLSAppActivityState.setShuttingDown(true, userDID: originalDID)
+    }
+    try MLSCoordinationStore.shared.incrementGenerationStrict(for: normalizedDID)
+    bumpGeneration(for: normalizedDID)
+    if originalDID != normalizedDID {
+      bumpGeneration(for: originalDID)
     }
 
-    // Structured await cleanup on both success and failure
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 2: Close the database gate and wait for drain (failure aborts reset)
+    // ═══════════════════════════════════════════════════════════════════════════
+    try await MLSDatabaseGate.shared.closeGateAndDrain(for: normalizedDID, timeout: .seconds(5))
+    logger.info("✅ [Diagnostics] Database gate closed and drained")
+
+    // Invalidate and remove in-memory clients (both original and normalized)
+    apiClients.removeValue(forKey: originalDID)
+    apiClients.removeValue(forKey: normalizedDID)
+    deviceManagers.removeValue(forKey: originalDID)
+    deviceManagers.removeValue(forKey: normalizedDID)
+    recoveryManagers.removeValue(forKey: originalDID)
+    recoveryManagers.removeValue(forKey: normalizedDID)
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 3: Close / flush Rust context and GRDB databases before taking admission lease
+    // ═══════════════════════════════════════════════════════════════════════════
+    try await MLSCoreContext.shared.resetAndCloseContext(for: originalDID)
+    if originalDID != normalizedDID {
+      try await MLSCoreContext.shared.resetAndCloseContext(for: normalizedDID)
+    }
+    let drainedOrig = await MLSGRDBManager.closeAndDrainAllManagers(for: originalDID)
+    let drainedNorm = (originalDID == normalizedDID) ? true : await MLSGRDBManager.closeAndDrainAllManagers(for: normalizedDID)
+    guard drainedOrig && drainedNorm else {
+      throw MLSStorageInitializationError.admissionDenied(
+        details: "Failed to close and drain all database handles for \(originalDID) / \(normalizedDID)"
+      )
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 4: Acquire exclusive admission leases across both database kinds
+    // ═══════════════════════════════════════════════════════════════════════════
+    let swiftLease = try await MLSStorageCoordinator.shared.acquireExclusiveResetLease(for: .swiftGRDB, userDID: normalizedDID)
+    defer { swiftLease.release() }
+    let rustLease = try await MLSStorageCoordinator.shared.acquireExclusiveResetLease(for: .rustState, userDID: normalizedDID)
+    defer { rustLease.release() }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE 5: Perform coordinated reset of clean Swift and Rust resources
+    // ═══════════════════════════════════════════════════════════════════════════
+    try await MLSStorageCoordinator.shared.coordinateReset(
+      for: .swiftGRDB,
+      userDID: normalizedDID,
+      originalUserDID: originalDID,
+      heldResetLease: swiftLease
+    )
+    try await MLSStorageCoordinator.shared.coordinateReset(
+      for: .rustState,
+      userDID: normalizedDID,
+      originalUserDID: originalDID,
+      heldResetLease: rustLease
+    )
+    // ═══════════════════════════════════════════════════════════════════════════
+    MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
+    if originalDID != normalizedDID {
+      MLSStateVersionManager.shared.clearVersion(for: originalDID)
+    }
+    try MLSCoordinationStore.shared.deleteStateStrict(for: normalizedDID)
+    try MLSAppGroupHandshakeStore.shared.clearAll(for: normalizedDID)
+
+    logger.info("✅ [Diagnostics] MLS storage reset complete for \(normalizedDID)")
+
+    // Only after Swift+Rust+checkpoint completion, clear the cross-kind reset sentinel, shutdown flag, and open gate.
+    MLSStoragePaths.clearResetSentinel(for: normalizedDID)
     MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
+    if originalDID != normalizedDID {
+      MLSAppActivityState.setShuttingDown(false, userDID: originalDID)
+    }
     await MLSDatabaseGate.shared.openGate(for: normalizedDID)
     if let coordinator {
       await coordinator.endStorageMaintenance(for: normalizedDID)
-    }
-
-    if let resetError {
-      throw resetError
     }
   }
 
   /// Completely destroy all MLS storage for a user (explicit user action)
   public func destroyStorageCompletely(for userDID: String) async {
-    let normalizedDID = normalizeUserDID(userDID)
-    logger.info("💥 [MLSClient] Completely destroying all MLS data for user: \(normalizedDID)")
+    logger.info("💥 [MLSClient] Completely destroying all MLS data for user: \(userDID)")
     do {
-      try await clearStorage(for: normalizedDID)
-      logger.info("✅ [MLSClient] Complete destruction finished for user: \(normalizedDID)")
+      try await clearStorage(for: userDID)
+      logger.info("✅ [MLSClient] Complete destruction finished for user: \(userDID)")
     } catch {
-      logger.critical("❌ [MLSClient] Complete destruction failed for user: \(normalizedDID): \(error.localizedDescription)")
+      logger.critical("❌ [MLSClient] Complete destruction failed for user: \(userDID): \(error.localizedDescription)")
     }
   }
 
@@ -3895,65 +3928,24 @@ public actor MLSClient {
           logger.info("   ✅ Server inventory drained during confirmation - skipping recovery")
           desyncDetected = localCount != serverStats.stats.available
         } else {
-          // PHASE 1: Try non-destructive recovery first by reloading context from SQLite
-          logger.info("   🔄 [Phase 1] Attempting non-destructive context reload...")
+          // Try non-destructive recovery first by reloading context from SQLite
+          logger.info("   🔄 Attempting non-destructive context reload...")
           do {
             let recoveredCount = try await reloadContextFromStorage(for: userDID)
             if recoveredCount > 0 {
               logger.info(
-                "   ✅ [Phase 1] Non-destructive recovery successful! Recovered \(recoveredCount) bundles"
+                "   ✅ Non-destructive recovery successful! Recovered \(recoveredCount) bundles"
               )
               localCount = Int(recoveredCount)
               desyncDetected = localCount != serverStats.stats.available
-              // Skip destructive recovery
             } else {
               logger.warning(
-                "   ⚠️ [Phase 1] Non-destructive recovery found 0 bundles - proceeding to Phase 2")
-
-              // PHASE 2: Fall back to destructive recovery if non-destructive failed
-              let normalizedDID = normalizeUserDID(userDID)
-              if let deviceManager = self.deviceManagers[normalizedDID] {
-                do {
-                  logger.warning("   ⚠️ ⚠️ ⚠️ [Phase 2] INITIATING DESTRUCTIVE RECOVERY ⚠️ ⚠️ ⚠️")
-                  logger.warning("   This will delete server bundles and clear local storage")
-                  try await deviceManager.recoverFromKeyPackageDesync(userDid: userDID)
-                  localCount = 0
-                } catch {
-                  logger.error("   ❌ Destructive recovery FAILED: \(error.localizedDescription)")
-                  logger.error(
-                    "      ACTION REQUIRED: Manually call deviceManager.recoverFromKeyPackageDesync(userDid:)"
-                  )
-                }
-              } else {
-                logger.error(
-                  "   ❌ Cannot auto-recover: deviceManager not configured for user \(normalizedDID)"
-                )
-                logger.error(
-                  "      ACTION: Call deviceManager.recoverFromKeyPackageDesync(userDid:)")
-              }
+                "   ⚠️ Non-destructive recovery found 0 bundles. Fails closed (requires explicit user diagnostics reset).")
+              desyncDetected = true
             }
           } catch {
-            logger.error("   ❌ Non-destructive recovery failed: \(error.localizedDescription)")
-
-            // PHASE 2: Fall back to destructive recovery on error
-            let normalizedDID = normalizeUserDID(userDID)
-            if let deviceManager = self.deviceManagers[normalizedDID] {
-              do {
-                logger.warning("   ⚠️ ⚠️ ⚠️ [Phase 2] INITIATING DESTRUCTIVE RECOVERY ⚠️ ⚠️ ⚠️")
-                logger.warning("   This will delete server bundles and clear local storage")
-                try await deviceManager.recoverFromKeyPackageDesync(userDid: userDID)
-                localCount = 0
-              } catch {
-                logger.error("   ❌ Destructive recovery FAILED: \(error.localizedDescription)")
-                logger.error(
-                  "      ACTION REQUIRED: Manually call deviceManager.recoverFromKeyPackageDesync(userDid:)"
-                )
-              }
-            } else {
-              logger.error(
-                "   ❌ Cannot auto-recover: deviceManager not configured for user \(normalizedDID)")
-              logger.error("      ACTION: Call deviceManager.recoverFromKeyPackageDesync(userDid:)")
-            }
+            logger.error("   ❌ Non-destructive recovery failed: \(error.localizedDescription). Fails closed (requires explicit user diagnostics reset).")
+            desyncDetected = true
           }
         }
       } else if localCount > 0 && serverStats.stats.available == 0 {

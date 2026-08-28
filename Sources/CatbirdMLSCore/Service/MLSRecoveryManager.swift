@@ -1562,35 +1562,19 @@ public actor MLSRecoveryManager {
     recoveryInProgress.insert(userDid)
     defer { recoveryInProgress.remove(userDid) }
 
-    do {
-      // Use the unified reregisterDevice flow which handles:
-      // 1. Delete device from server
-      // 2. Clear local MLS storage
-      // 3. Re-register with fresh key packages
-      logger.info(
-        "🔄 [MLSRecoveryManager] Step 1/2: Re-registering device (atomic cleanup + registration)...")
-      _ = try await mlsClient.reregisterDevice(for: userDid)
-      logger.info("✅ [MLSRecoveryManager] Device re-registered successfully")
-
-      // Step 2: Persist conversations for deferred rejoin recovery.
-      logger.info(
-        "🔄 [MLSRecoveryManager] Step 2/2: Marking \(conversationIds.count) conversations for deferred rejoin..."
-      )
-      if !conversationIds.isEmpty {
-        if let deferredRejoinHandler {
-          await deferredRejoinHandler(userDid, conversationIds)
-        } else {
-          logger.warning(
-            "⚠️ [MLSRecoveryManager] No deferred rejoin handler configured; caller must persist needsRejoin for \(conversationIds.count) conversation(s)"
-          )
-        }
+    // Automatic silent recovery no longer executes destructive device deletion / clearStorage.
+    // Mark affected conversations for deferred rejoin and fail closed requiring explicit diagnostics reset.
+    if !conversationIds.isEmpty {
+      if let deferredRejoinHandler {
+        await deferredRejoinHandler(userDid, conversationIds)
+      } else {
+        logger.warning(
+          "⚠️ [MLSRecoveryManager] No deferred rejoin handler configured for \(conversationIds.count) conversation(s)"
+        )
       }
-
-      logger.info("✅ [MLSRecoveryManager] Silent recovery complete for \(userDid.prefix(20))")
-    } catch {
-      logger.error("❌ [MLSRecoveryManager] Recovery failed: \(error.localizedDescription)")
-      throw MLSRecoveryError.recoveryFailed(underlying: error)
     }
+    logger.warning("⚠️ [MLSRecoveryManager] Automatic destructive recovery is disabled; requiring explicit user diagnostics reset.")
+    throw MLSRecoveryError.needsUserAction(reason: "Automatic destructive recovery disabled; explicit diagnostics reset required")
   }
 
   // MARK: - Device Management
@@ -2163,6 +2147,7 @@ public enum MLSRecoveryError: LocalizedError {
   case recoveryInProgress
   case deviceDeletionFailed
   case maxRetriesExceeded
+  case needsUserAction(reason: String)
 
   public var errorDescription: String? {
     switch self {
@@ -2174,6 +2159,8 @@ public enum MLSRecoveryError: LocalizedError {
       return "Failed to delete device from server"
     case .maxRetriesExceeded:
       return "Maximum retry attempts exceeded"
+    case .needsUserAction(let reason):
+      return "MLS recovery requires user action: \(reason)"
     }
   }
 }

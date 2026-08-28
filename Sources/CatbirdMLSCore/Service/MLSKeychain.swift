@@ -54,15 +54,11 @@ public class MLSKeychain {
             throw MLSKeychainError.invalidData
         }
         let tag = MLSStoragePaths.orchestratorSignerAccount(for: identity)
-        do {
-            try MLSKeychainManager.shared.storeImmutableKeyStrict(
-                key,
-                forKey: tag,
-                service: signatureKeyService
-            )
-        } catch {
-            throw MLSKeychainError.storeFailed(-1)
-        }
+        _ = try MLSKeychainManager.shared.storeOrAdoptImmutableKey(
+            key,
+            forKey: tag,
+            service: signatureKeyService
+        )
     }
 
     static func retrieveSignatureKeyClean(forIdentity identity: String) throws -> Data? {

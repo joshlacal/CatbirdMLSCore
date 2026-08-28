@@ -36,10 +36,6 @@ public enum MLSError: LocalizedError {
     /// Account switch detected during MLS operation - abort to prevent state corruption
     /// The operation should not be retried; the user context is invalid
     case accountSwitchInterrupted(epochBefore: UInt64, epochAfter: UInt64)
-    /// Attempted to decrypt a message we sent ourselves
-    /// MLS encrypts for recipients only - senders cannot decrypt their own messages
-    /// The caller should use the pre-cached payload from the send operation
-    case cannotDecryptOwnMessage
     /// Context creation blocked because app is transitioning to background (0xdead10cc prevention)
     /// This is a protective measure - MLS operations should not start during suspension
     case contextCreationBlocked(reason: String)
@@ -109,8 +105,6 @@ public enum MLSError: LocalizedError {
         case .accountSwitchInterrupted(let epochBefore, let epochAfter):
             return
                 "Account switch detected during operation (epoch \(epochBefore) → \(epochAfter)) - aborting to prevent state corruption"
-        case .cannotDecryptOwnMessage:
-            return "Cannot decrypt own message - MLS encrypts for recipients only. Use cached payload from send operation."
         case .contextCreationBlocked(let reason):
             return "MLS context creation blocked: \(reason)"
         case .commitProcessingFailed(let message):

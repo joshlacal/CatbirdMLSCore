@@ -66,8 +66,8 @@ public enum MLSNotificationCoordinator {
   }
 
   @discardableResult
-  public static func prepareNSECloseHandshake(userDID: String) -> UInt64 {
-    let token = MLSStateChangeNotifier.postNSEWillClose(userDID: userDID)
+  public static func prepareNSECloseHandshake(userDID: String) throws -> UInt64 {
+    let token = try MLSStateChangeNotifier.postNSEWillClose(userDID: userDID)
     logger.info(
       "🤝 [MLS Handshake] nse_will_close token=\(token, privacy: .public) user=\(userDID.prefix(20), privacy: .private)"
     )

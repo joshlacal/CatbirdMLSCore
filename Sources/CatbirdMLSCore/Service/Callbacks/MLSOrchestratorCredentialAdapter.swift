@@ -310,7 +310,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
       throw MLSKeychainError.invalidData
     }
     logger.debug("Storing MLS DID for user: \(userDid.prefix(20))...")
-    try MLSKeychainManager.shared.storeImmutableKeyStrict(data, forKey: key)
+    _ = try MLSKeychainManager.shared.storeOrAdoptImmutableKey(data, forKey: key)
     logger.info("Stored MLS DID for user: \(userDid.prefix(20))...")
   }
 
@@ -334,7 +334,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
       throw MLSKeychainError.invalidData
     }
     logger.debug("Storing device UUID for user: \(userDid.prefix(20))...")
-    try MLSKeychainManager.shared.storeImmutableKeyStrict(data, forKey: key)
+    _ = try MLSKeychainManager.shared.storeOrAdoptImmutableKey(data, forKey: key)
     logger.info("Stored device UUID for user: \(userDid.prefix(20))...")
   }
 
@@ -360,20 +360,10 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   }
 
   public func clearAll(userDid: String) throws {
-    logger.info("Clearing all credentials for user: \(userDid.prefix(20))...")
-
-    // Delete signing key
-    try deleteSigningKey(userDid: userDid)
-
-    // Delete MLS DID
-    let mlsDidKey = MLSStoragePaths.mlsDidAccount(for: userDid)
-    try MLSKeychainManager.shared.deleteStrict(forKey: mlsDidKey)
-
-    // Delete device UUID
-    let deviceUuidKey = MLSStoragePaths.deviceUuidAccount(for: userDid)
-    try MLSKeychainManager.shared.deleteStrict(forKey: deviceUuidKey)
-
-    logger.info("Cleared all credentials for user: \(userDid.prefix(20))...")
+    logger.error("🚨 Prohibiting automatic credential deletion for user: \(userDid.prefix(20))... Explicit reset required.")
+    throw MLSStorageInitializationError.validationFailed(
+      details: "Automatic clean credential deletion is prohibited. Explicit reset required."
+    )
   }
 
   // MARK: - Authorized Device Keys

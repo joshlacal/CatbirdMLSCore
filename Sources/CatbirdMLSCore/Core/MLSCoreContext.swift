@@ -37,12 +37,12 @@
 //  at a time in strict order.
 //
 
+import CryptoKit
 import Foundation
 import GRDB
 @_exported import CatbirdMLS
 import OSLog
 import Synchronization
-
 /// Manages MLS contexts and handles message decryption with database storage
 /// Thread-safe singleton providing per-user context isolation
 public actor MLSCoreContext {
@@ -57,9 +57,11 @@ public actor MLSCoreContext {
   /// This is necessary because iOS can suspend us at any point after scenePhase changes
   /// and we MUST release SQLite file handles synchronously or face 0xdead10cc termination.
   private struct EmergencyState: @unchecked Sendable {
-    var contexts: [String: MlsContext] = [:]
+    var activeContexts: [String: MlsContext] = [:]
+    var failedEmergencyContexts: [String: MlsContext] = [:]
     var cacheInvalidated = false
     var suspensionInProgress = false
+    var emergencyGeneration: UInt64 = 0
   }
 
   private static let emergencyState = Mutex(EmergencyState())
@@ -80,7 +82,7 @@ public actor MLSCoreContext {
   /// Safe to call from any thread — InterruptHandle is Send+Sync and doesn't require the Rust Mutex.
   /// Call this SYNCHRONOUSLY in handleScenePhaseChange before the async emergency close Task.
   public nonisolated static func interruptAllContexts() {
-    let contexts = emergencyState.withLock { Array($0.contexts.values) }
+    let contexts = emergencyState.withLock { Array($0.activeContexts.values) + Array($0.failedEmergencyContexts.values) }
     for context in contexts {
       context.interrupt()
     }
@@ -101,9 +103,10 @@ public actor MLSCoreContext {
     // to avoid holding the lock during potentially slow FFI calls.
     let contextsToClose: [String: MlsContext] = emergencyState.withLock { state in
       state.suspensionInProgress = true
-      let snapshot = state.contexts
-      state.contexts.removeAll()
+      state.emergencyGeneration &+= 1
       state.cacheInvalidated = true
+      let snapshot = state.activeContexts
+      state.activeContexts.removeAll()
       return snapshot
     }
 
@@ -127,9 +130,10 @@ public actor MLSCoreContext {
       do {
         context.clearContentRootKey()
         try context.flushAndPrepareClose()
+        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: userDID)
         staticLogger.debug("✅ [0xdead10cc-FIX] Rust context closed for \(userDID.prefix(20), privacy: .private)...")
       } catch {
-        staticLogger.warning("⚠️ [0xdead10cc-FIX] Rust context close failed for \(userDID.prefix(20), privacy: .private)...: \(error)")
+        emergencyState.withLock { $0.failedEmergencyContexts[userDID] = context }
         MLSSuspensionFlightRecorder.shared.record(
           .flushFailed,
           details: "MLSCoreContext close failed for \(userDID.prefix(20)): \(error.localizedDescription)",
@@ -149,13 +153,14 @@ public actor MLSCoreContext {
   /// Register a context for emergency close.
   /// Called internally when a context is created or retrieved.
   private nonisolated static func registerForEmergencyClose(_ context: MlsContext, for userDID: String) {
-    emergencyState.withLock { $0.contexts[userDID] = context }
+    emergencyState.withLock { $0.activeContexts[userDID] = context }
   }
 
-  /// Unregister a context from emergency close.
-  /// Called internally when a context is explicitly closed.
-  private nonisolated static func unregisterFromEmergencyClose(for userDID: String) {
-    emergencyState.withLock { $0.contexts.removeValue(forKey: userDID) }
+  /// Remove the exact normalized emergency registration, if this call owns one.
+  @discardableResult
+  private nonisolated static func unregisterFromEmergencyClose(for userDID: String) -> Bool {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return emergencyState.withLock { $0.activeContexts.removeValue(forKey: normalized) != nil }
   }
 
   // MARK: - Properties
@@ -168,6 +173,11 @@ public actor MLSCoreContext {
   /// Per-user state version at time of context creation/reload.
   /// Used to detect when NSE has advanced the ratchet and we need to reload.
   private var contextVersions: [String: Int] = [:]
+
+  /// Per-DID in-flight context creation tasks, so concurrent getContext calls coalesce
+  /// to one open and the loser adopts the winner's context instead of overwriting maps
+  /// and leaking a second admission lease.
+  private var inFlightContextCreates: [String: (id: UUID, task: Task<MlsContext, Error>)] = [:]
 
   private struct DecryptionOutcome {
     let plaintext: String
@@ -257,7 +267,9 @@ public actor MLSCoreContext {
         return cached
       }
       let resolved = MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
-      _cachedKeychainAccessGroup = .some(resolved)
+      if resolved != nil {
+        _cachedKeychainAccessGroup = .some(resolved)
+      }
       return resolved
     #endif
   }
@@ -392,7 +404,6 @@ public actor MLSCoreContext {
   private func ensureKeychainConfigured() async {
     guard !keychainConfigured else { return }
     await configureKeychainAccess()
-    keychainConfigured = true
   }
 
   /// Configure keychain access for App Group sharing
@@ -401,15 +412,17 @@ public actor MLSCoreContext {
       MLSKeychainManager.shared.accessGroup = accessGroup
       logger.info(
         "✅ [MLSCoreContext] Configured MLSKeychainManager.shared.accessGroup: \(accessGroup)")
+      keychainConfigured = true
     } else {
       #if targetEnvironment(simulator)
         logger.info("ℹ️ [MLSCoreContext] Simulator mode - using default keychain access")
+        keychainConfigured = true
       #else
         logger.error(
           "⚠️ [MLSCoreContext] No keychain access group - extension sharing will NOT work!")
+        // Do NOT set keychainConfigured = true on device when resolution is nil, so later calls retry
       #endif
     }
-    keychainConfigured = true
   }
 
   // MARK: - Context Management
@@ -429,11 +442,27 @@ public actor MLSCoreContext {
       throw MLSError.contextCreationBlocked(reason: "App is transitioning to background - MLS operations suspended")
     }
 
-    // CRITICAL: Clear stale cache after emergency suspension close
-    // Emergency close happens synchronously from a nonisolated context and can't clear the actor's cache directly.
-    // So we check the flag here and clear the cache if needed.
+    // Retry failed emergency survivors ONLY (never normal active registrations)
+    let failedToRetry = Self.emergencyState.withLock { state -> [String: MlsContext] in
+      return state.failedEmergencyContexts
+    }
+    if !failedToRetry.isEmpty {
+      for (unclosedUser, unclosedContext) in failedToRetry {
+        unclosedContext.clearContentRootKey()
+        do {
+          try unclosedContext.flushAndPrepareClose()
+          Self.emergencyState.withLock { _ = $0.failedEmergencyContexts.removeValue(forKey: unclosedUser) }
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: unclosedUser)
+          logger.info("✅ [0xdead10cc-FIX] Cleaned up failed emergency context on retry for \(unclosedUser.prefix(20), privacy: .private)")
+        } catch {
+          logger.critical("🚨 [0xdead10cc-FIX] Failed emergency context could not be closed for \(unclosedUser.prefix(20), privacy: .private): \(error)")
+          throw MLSError.contextCreationBlocked(reason: "Cannot open context while unclosed emergency handle persists for \(unclosedUser)")
+        }
+      }
+    }
+
     let needsCacheClear = Self.emergencyState.withLock { state in
-      if state.cacheInvalidated {
+      if state.cacheInvalidated && state.failedEmergencyContexts.isEmpty {
         state.cacheInvalidated = false
         return true
       }
@@ -460,12 +489,14 @@ public actor MLSCoreContext {
         logger.warning("🔄 [CONTEXT] Stale context detected for \(normalized.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
         logger.info("   NSE advanced the ratchet - reloading context from disk")
 
-        // Close the stale context
+        // Close the stale context: only evict and unregister on proven success
         existingContext.clearContentRootKey()
-        try? existingContext.flushAndPrepareClose()
+        try existingContext.flushAndPrepareClose()
         contexts.removeValue(forKey: normalized)
         contextVersions.removeValue(forKey: normalized)
-        Self.unregisterFromEmergencyClose(for: normalized)
+        if Self.unregisterFromEmergencyClose(for: normalized) {
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+        }
         // Fall through to create fresh context below
       } else {
         return existingContext
@@ -479,66 +510,106 @@ public actor MLSCoreContext {
 
     logger.info("Creating new MLS context for user: \(userDid, privacy: .private)")
 
-    // Check and coordinate storage state machine
-    let coordinator = MLSStorageCoordinator.shared
-    let newContext = try await coordinator.coordinateOpen(for: .rustState, userDID: normalized) { attemptUUID, isFirstCreation in
-      // Create storage path for this user
-      let storagePath = try self.createStoragePath(for: userDid)
+    // Check and coordinate storage state machine (coalesced per-DID to avoid concurrent
+    // same-DID opens overwriting maps and leaking admission leases). The owner caches +
+    // registers the context exactly once; waiters return the shared context. Cancellation
+    // belongs to the owner task; a cancelled waiter abandons only its await and never
+    // closes/releases the shared context.
+    let newContext = try await coalescedContextCreate(for: normalized, userDid: userDid)
+    return newContext
+  }
 
-      // Strictly retrieve encryption key (coordinator created it during admission)
-      let encryptionKey = try await self.getEncryptionKey(for: userDid)
-
-      // Create keychain access bridge bound to userDID
-      let keychainBridge = MLSKeychainAccessBridge(userDID: userDid)
-
-      // CRITICAL: Re-check suspension & cancellation right before opening Rust FFI / SQLCipher
-      if Self.isSuspensionInProgress || Task.isCancelled {
-        self.logger.warning("🚫 [0xdead10cc-FIX] getContext aborted right before MlsContext init - suspension or cancellation")
-        throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
+  /// Coalesce a coordinated Rust context creation for a DID. The owner performs open +
+  /// cache + single emergency registration; waiters return the already-cached context.
+  /// Cancellation belongs to the owner task; waiters may abandon only their await and
+  /// never close/release the shared context.
+  private func coalescedContextCreate(for normalized: String, userDid: String) async throws -> MlsContext {
+    if let existing = inFlightContextCreates[normalized] {
+      defer {
+        if inFlightContextCreates[normalized]?.id == existing.id {
+          inFlightContextCreates.removeValue(forKey: normalized)
+        }
       }
-
-      let context = try MlsContext(
-        storagePath: storagePath,
-        encryptionKey: encryptionKey,
-        keychain: keychainBridge
-      )
-
-      // If suspension or cancellation intervened while MlsContext was constructing, immediately close it
-      if Self.isSuspensionInProgress || Task.isCancelled {
-        self.logger.warning("🚫 [0xdead10cc-FIX] Closing freshly created MlsContext due to suspension during init")
-        try? context.flushAndPrepareClose()
-        throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
-      }
-
-      // Set up external join authorizer
-      let authorizer = MLSExternalJoinAuthorizerBridge()
-      try context.setExternalJoinAuthorizer(authorizer: authorizer)
-
-      let epochStorage = MLSEpochSecretStorageBridge(userDID: userDid, databaseManager: .shared)
-      try context.setEpochSecretStorage(storage: epochStorage)
-      self.logger.info("✅ Configured epoch secret storage for historical message decryption")
-
-      let contentRootKey = try MLSContentRootKey.loadStrict(for: userDid)
-      try context.setContentRootKey(key: contentRootKey)
-      self.logger.info("✅ Installed per-DID content root key on MLS context")
-
-      return context
+      return try await existing.task.value
     }
 
-    // Track the current disk version at context creation time
-    let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
-    contexts[normalized] = newContext
-    contextVersions[normalized] = currentDiskVersion
+    let coordinator = MLSStorageCoordinator.shared
+    let capturedGen = Self.emergencyState.withLock { $0.emergencyGeneration }
+    let task = Task<MlsContext, Error> {
+      let context = try await coordinator.coordinateOpen(for: .rustState, userDID: normalized) { attemptUUID, isFirstCreation in
+        // Create storage path for this user
+        let storagePath = try self.createStoragePath(for: userDid)
 
-    // Register for emergency close (0xdead10cc prevention)
-    Self.registerForEmergencyClose(newContext, for: normalized)
+        // Strictly retrieve encryption key (coordinator created it during admission)
+        let encryptionKey = try await self.getEncryptionKey(for: userDid)
 
-    // Sync the version manager's cache
-    MLSStateVersionManager.shared.syncLastKnownVersion(for: normalized)
+        // Non-mutating read-only validation for existing state before opening writable context
+        if !isFirstCreation {
+          try await self.validateExistingRustDatabase(at: storagePath, encryptionKey: encryptionKey)
+        }
 
-    logger.info("Created MLS context for user: \(normalized, privacy: .private) at version \(currentDiskVersion)")
+        // Create keychain access bridge bound to userDID
+        let keychainBridge = MLSKeychainAccessBridge(userDID: userDid)
 
-    return newContext
+        let context = try MlsContext(
+          storagePath: storagePath,
+          encryptionKey: encryptionKey,
+          keychain: keychainBridge
+        )
+        // Set up external join authorizer
+        let authorizer = MLSExternalJoinAuthorizerBridge()
+        try context.setExternalJoinAuthorizer(authorizer: authorizer)
+
+        let epochStorage = MLSEpochSecretStorageBridge(userDID: userDid, databaseManager: .shared)
+        try context.setEpochSecretStorage(storage: epochStorage)
+        self.logger.info("✅ Configured epoch secret storage for historical message decryption")
+
+        let contentRootKey = try MLSContentRootKey.loadStrict(for: userDid)
+        try context.setContentRootKey(key: contentRootKey)
+        self.logger.info("✅ Installed per-DID content root key on MLS context")
+
+        return context
+      }
+
+      let registered = Self.emergencyState.withLock { state -> Bool in
+        guard !state.suspensionInProgress && state.emergencyGeneration == capturedGen else {
+          return false
+        }
+        state.activeContexts[normalized] = context
+        return true
+      }
+
+      guard registered else {
+        context.clearContentRootKey()
+        do {
+          try context.flushAndPrepareClose()
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+        } catch {
+          Self.emergencyState.withLock {
+            $0.failedEmergencyContexts[normalized] = context
+          }
+          throw MLSError.contextCreationBlocked(
+            reason: "Emergency suspension intervened and the rejected context could not close"
+          )
+        }
+        throw MLSError.contextCreationBlocked(reason: "Emergency suspension intervened during context creation")
+      }
+
+      // Owner caches + registers the context exactly once
+      let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
+      contexts[normalized] = context
+      contextVersions[normalized] = currentDiskVersion
+      MLSStateVersionManager.shared.syncLastKnownVersion(for: normalized)
+      return context
+    }
+    let taskID = UUID()
+    inFlightContextCreates[normalized] = (id: taskID, task: task)
+    defer {
+      if inFlightContextCreates[normalized]?.id == taskID {
+        inFlightContextCreates.removeValue(forKey: normalized)
+      }
+    }
+    return try await task.value
   }
 
   /// Force reload MLS context from disk.
@@ -551,14 +622,16 @@ public actor MLSCoreContext {
   public func reloadContext(for userDid: String) async throws {
     logger.info("🔄 [CONTEXT] Force reloading context for \(userDid.prefix(20))...")
 
-    // Close existing context if any
-    if let existingContext = contexts.removeValue(forKey: userDid) {
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let existingContext = contexts.removeValue(forKey: userDid) ?? contexts.removeValue(forKey: normalized) {
       existingContext.clearContentRootKey()
-      try? existingContext.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: userDid)
+      try existingContext.flushAndPrepareClose()
+      contextVersions.removeValue(forKey: userDid)
+      contextVersions.removeValue(forKey: normalized)
+      if Self.unregisterFromEmergencyClose(for: normalized) {
+        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+      }
     }
-    contextVersions.removeValue(forKey: userDid)
-
     // Create fresh context (this will update version tracking)
     _ = try await getContext(for: userDid)
   }
@@ -579,17 +652,170 @@ public actor MLSCoreContext {
     }
     return keyData.hexEncodedString()
   }
+  func validateExistingRustDatabase(at path: String, encryptionKey: String) async throws {
+    let dbURL = URL(fileURLWithPath: path)
+    guard try MLSStoragePaths.fileExistsStrict(at: dbURL) else {
+      throw MLSStorageInitializationError.validationFailed(details: "Rust database file missing for validation")
+    }
+
+    // Rust OpenMLS SQLCipher uses 32-byte plaintext header starting with SQLite header
+    let fileHandle = try FileHandle(forReadingFrom: dbURL)
+    defer { try? fileHandle.close() }
+    let headerData = fileHandle.readData(ofLength: 32)
+    guard headerData.count == 32 else {
+      throw MLSStorageInitializationError.validationFailed(details: "Rust database file header shorter than 32 bytes")
+    }
+    guard headerData.prefix(16) == Data("SQLite format 3\0".utf8) else {
+      throw MLSStorageInitializationError.validationFailed(details: "Rust database file missing valid SQLite plaintext header")
+    }
+
+    // Derive 16-byte salt matching Rust: first 16 bytes of SHA256(encryption_key)
+    let keyHash = SHA256.hash(data: Data(encryptionKey.utf8))
+    let saltHex = Array(keyHash.prefix(16)).map { String(format: "%02x", $0) }.joined()
+
+    // Open read-only SQLite connection replicating exact Rust SQLCipher pragmas
+    var config = GRDB.Configuration()
+    config.readonly = true
+    config.prepareDatabase { db in
+      try db.execute(sql: "PRAGMA cipher_memory_security = OFF;")
+      try db.execute(sql: "PRAGMA key = '\(encryptionKey)';")
+      try db.execute(sql: "PRAGMA cipher_plaintext_header_size = 32;")
+      try db.execute(sql: "PRAGMA cipher_salt = \"x'\(saltHex)'\";")
+      try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
+      try db.execute(sql: "PRAGMA kdf_iter = 256000;")
+      try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
+      try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+    }
+
+    do {
+      let queue = try DatabaseQueue(path: path, configuration: config)
+      defer { try? queue.close() }
+
+      let cipherVersion: String? = try await queue.read { db in
+        try String.fetchOne(db, sql: "PRAGMA cipher_version;")
+      }
+      guard let cipherVersion, !cipherVersion.isEmpty else {
+        throw MLSStorageInitializationError.validationFailed(details: "Rust database PRAGMA cipher_version failed")
+      }
+
+      let check: String? = try await queue.read { db in
+        try String.fetchOne(db, sql: "PRAGMA quick_check;")
+      }
+      guard check == "ok" else {
+        throw MLSStorageInitializationError.validationFailed(details: "Rust database quick_check failed: \(check ?? "nil")")
+      }
+      // 1. Validate migration table has EXACTLY versions 1..=6
+      let refineryVersions: [Int] = try await queue.read { db in
+        if try db.tableExists("openmls_sqlite_storage_migrations") {
+          return try Int.fetchAll(db, sql: "SELECT version FROM openmls_sqlite_storage_migrations ORDER BY version ASC;")
+        } else if try db.tableExists("refinery_schema_history") {
+          return try Int.fetchAll(db, sql: "SELECT version FROM refinery_schema_history ORDER BY version ASC;")
+        } else {
+          throw MLSStorageInitializationError.validationFailed(details: "Rust database missing migration table")
+        }
+      }
+      let isRefineryExtended = (refineryVersions == [1, 2, 3, 4, 5, 6])
+      let isBaseOpenMLS = (refineryVersions == [1, 2])
+      guard isRefineryExtended || isBaseOpenMLS else {
+        throw MLSStorageInitializationError.validationFailed(
+          details: "Rust database migration versions must exactly match [1, 2, 3, 4, 5, 6] (found: \(refineryVersions))"
+        )
+      }
+
+      // 2. Validate all expected tables exist
+      let tables: [String] = try await queue.read { db in
+        try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='table';")
+      }
+      let requiredBaseTables = [
+        "mls_manifests",
+        "mls_key_package_bundles",
+        "openmls_encryption_keys",
+        "openmls_epoch_keys_pairs",
+        "openmls_group_data",
+        "openmls_key_packages",
+        "openmls_own_leaf_nodes",
+        "openmls_proposals",
+        "openmls_psks",
+        "openmls_signature_keys"
+      ]
+      let requiredExtendedTables = requiredBaseTables + [
+        "mls_own_echo_proofs",
+        "vc_emulation_group_secrets",
+        "vc_emulation_bindings",
+        "vc_operation_trees",
+        "vc_retained_key_package_material",
+        "registered_vc_emulation_epochs"
+      ]
+      let tablesToCheck = isRefineryExtended ? requiredExtendedTables : requiredBaseTables
+      for req in tablesToCheck {
+        guard tables.contains(req) else {
+          throw MLSStorageInitializationError.validationFailed(
+            details: "Rust database missing required table \(req) (found: \(tables))"
+          )
+        }
+      }
+
+      if isRefineryExtended {
+        // 3. Validate index vc_retained_key_package_material_epoch_id
+        let indices: [String] = try await queue.read { db in
+          try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='vc_retained_key_package_material';")
+        }
+        guard indices.contains("vc_retained_key_package_material_epoch_id") else {
+          throw MLSStorageInitializationError.validationFailed(details: "Rust database missing required index vc_retained_key_package_material_epoch_id")
+        }
+      }
+      let legacyBlobExists: Bool = try await queue.read { db in
+        try Int.fetchOne(db, sql: "SELECT 1 FROM mls_manifests WHERE key = 'key_package_bundles';") != nil
+      }
+      if legacyBlobExists {
+        throw MLSStorageInitializationError.validationFailed(
+          details: "Legacy unmigrated key_package_bundles blob found in mls_manifests"
+        )
+      }
+    } catch let error as MLSStorageInitializationError {
+      throw error
+    } catch {
+      throw MLSStorageInitializationError.validationFailed(details: "Rust database read-only validation failed: \(error.localizedDescription)")
+    }
+  }
 
   /// Reset and close context for explicit full storage destruction
   func resetAndCloseContext(for userDid: String) async throws {
     let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if let context = contexts.removeValue(forKey: normalized) {
+    let aliases = userDid == normalized ? [normalized] : [userDid, normalized]
+    let (staticActive, staticFailed) = Self.emergencyState.withLock { state in
+      (state.activeContexts[normalized], state.failedEmergencyContexts[normalized])
+    }
+
+    var contextsToClose: [MlsContext] = []
+    for context in [staticFailed] + aliases.map({ contexts[$0] }) + [staticActive] {
+      if let context, !contextsToClose.contains(where: { $0 === context }) {
+        contextsToClose.append(context)
+      }
+    }
+    for context in contextsToClose {
       context.clearContentRootKey()
       try context.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: normalized)
     }
-    contextVersions.removeValue(forKey: normalized)
-    try await databaseManager.closeAndDrainDatabase(for: normalized)
+
+    let removedFailed = Self.emergencyState.withLock {
+      $0.failedEmergencyContexts.removeValue(forKey: normalized) != nil
+    }
+    if removedFailed {
+      MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+    }
+    for key in aliases {
+      contexts.removeValue(forKey: key)
+      contextVersions.removeValue(forKey: key)
+    }
+    if Self.unregisterFromEmergencyClose(for: normalized) {
+      MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+    }
+
+    let drained = await MLSGRDBManager.closeAndDrainAllManagers(for: normalized)
+    guard drained else {
+      throw MLSSQLCipherError.storageUnavailable(reason: "Failed to close and drain all database handles for \(normalized)")
+    }
   }
 
   /// Remove context for a user (e.g., on logout)
@@ -598,17 +824,35 @@ public actor MLSCoreContext {
   @discardableResult
   public func removeContext(for userDid: String) -> Bool {
     let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if let context = contexts.removeValue(forKey: normalized) {
-      context.clearContentRootKey()
-      try? context.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: normalized)
-      contextVersions.removeValue(forKey: normalized)
-      logger.info("Removed MLS context for user: \(normalized, privacy: .private)")
-      return true
+    let aliases = userDid == normalized ? [normalized] : [userDid, normalized]
+    var contextsToClose: [MlsContext] = []
+    for key in aliases {
+      if let context = contexts[key], !contextsToClose.contains(where: { $0 === context }) {
+        contextsToClose.append(context)
+      }
     }
-    contextVersions.removeValue(forKey: normalized)
-    logger.debug("No MLS context cached for user: \(normalized, privacy: .private)")
-    return false
+
+    var removed = false
+    for context in contextsToClose {
+      context.clearContentRootKey()
+      do {
+        try context.flushAndPrepareClose()
+      } catch {
+        logger.error(
+          "Failed to close MLS context for \(normalized, privacy: .private): \(error.localizedDescription)"
+        )
+        continue
+      }
+      for key in aliases where contexts[key] === context {
+        contexts.removeValue(forKey: key)
+        contextVersions.removeValue(forKey: key)
+      }
+      if Self.unregisterFromEmergencyClose(for: normalized) {
+        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+      }
+      removed = true
+    }
+    return removed
   }
 
   /// Clear all contexts except the active user.
@@ -621,30 +865,45 @@ public actor MLSCoreContext {
       $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != normalizedKeep
     }
 
+    var removedCount = 0
     for userDid in usersToRemove {
-      if let context = contexts.removeValue(forKey: userDid) {
-        context.clearContentRootKey()
-        try? context.flushAndPrepareClose()
-        Self.unregisterFromEmergencyClose(for: userDid)
+      guard let context = contexts[userDid] else { continue }
+      context.clearContentRootKey()
+      do {
+        try context.flushAndPrepareClose()
+        contexts.removeValue(forKey: userDid)
+        contextVersions.removeValue(forKey: userDid)
+        if Self.unregisterFromEmergencyClose(for: userDid) {
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: userDid)
+        }
+        removedCount += 1
+      } catch {
+        logger.warning("⚠️ Failed to cleanly close context on bulk removal for \(userDid.prefix(20)): \(error)")
       }
-      contextVersions.removeValue(forKey: userDid)
     }
-
-    if !usersToRemove.isEmpty {
-      logger.info("Removed \(usersToRemove.count) MLS context(s), kept \(keepUserDid.prefix(20), privacy: .private)...")
+    if removedCount > 0 {
+      logger.info("Removed \(removedCount) MLS context(s), kept \(keepUserDid.prefix(20), privacy: .private)...")
     }
-    return usersToRemove.count
+    return removedCount
   }
 
   /// Clear all contexts
   public func clearAllContexts() {
-    for (userDid, context) in contexts {
+    let allUsers = Array(contexts.keys)
+    for userDid in allUsers {
+      guard let context = contexts[userDid] else { continue }
       context.clearContentRootKey()
-      try? context.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: userDid)
+      do {
+        try context.flushAndPrepareClose()
+        contexts.removeValue(forKey: userDid)
+        contextVersions.removeValue(forKey: userDid)
+        if Self.unregisterFromEmergencyClose(for: userDid) {
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: userDid)
+        }
+      } catch {
+        logger.warning("⚠️ Failed to cleanly close context on clearAll for \(userDid.prefix(20)): \(error)")
+      }
     }
-    contexts.removeAll()
-    contextVersions.removeAll()
     logger.info("Cleared all MLS contexts")
   }
 
@@ -674,15 +933,15 @@ public actor MLSCoreContext {
     // Remove stale contexts to prevent cross-account decryption issues
     if !staleContextUsers.isEmpty {
       for staleUser in staleContextUsers {
-        if let context = contexts.removeValue(forKey: staleUser) {
+        if let context = contexts[staleUser] {
           context.clearContentRootKey()
-          try? context.flushAndPrepareClose()
-          Self.unregisterFromEmergencyClose(for: staleUser)
+          try context.flushAndPrepareClose()
+          contexts.removeValue(forKey: staleUser)
+          contextVersions.removeValue(forKey: staleUser)
+          if Self.unregisterFromEmergencyClose(for: staleUser) {
+            MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: staleUser)
+          }
         }
-        contextVersions.removeValue(forKey: staleUser)
-        logger.warning(
-          "🔄 [ensureContext] Removed stale context for user: \(staleUser.prefix(20), privacy: .private)..."
-        )
       }
       logger.info(
         "🔄 [ensureContext] Cleared \(staleContextUsers.count) stale context(s) for account switch")
@@ -1045,13 +1304,8 @@ public actor MLSCoreContext {
       // ═══════════════════════════════════════════════════════════════════════════════
       let accountSwitchEpochBefore = MLSAppActivityState.getAccountSwitchEpoch()
 
-      // ═══════════════════════════════════════════════════════════════════════════════
-      // CRITICAL FIX (2025-01): Skip FFI decrypt for self-sent messages
-      // ═══════════════════════════════════════════════════════════════════════════════
-      // MLS protocol returns CannotDecryptOwnMessage when trying to decrypt our own
-      // sent messages. We MUST have cached the plaintext at send time (see
-      // MLSConversationManager+Messaging.swift). If the cache is empty, we have data loss.
-      // ═══════════════════════════════════════════════════════════════════════════════
+      // Sender identity is authoritative for own echoes; never infer ownership from
+      // an OpenMLS error description.
       if let senderID = senderID {
         let normalizedSender = MLSStorageHelpers.normalizeDID(senderID)
         let normalizedUser = MLSStorageHelpers.normalizeDID(userDid)
@@ -1107,49 +1361,7 @@ public actor MLSCoreContext {
       } catch {
         let desc = String(describing: error)
 
-        // ═══════════════════════════════════════════════════════════════════════════
-        // CRITICAL FIX (2025-01): Handle Self-Message Decryption Failure
-        // ═══════════════════════════════════════════════════════════════════════════
-        // OpenMLS throws "ValidationError(CannotDecryptOwnMessage)" (or similar)
-        // when trying to decrypt a message we sent ourselves because the ratchet
-        // state was already advanced on send. This is NOT a desync.
-        // ═══════════════════════════════════════════════════════════════════════════
-        if desc.contains("CannotDecryptOwnMessage") {
-          logger.info("✅ [DECRYPT] Caught CannotDecryptOwnMessage - treating as self-message")
-
-          if let cachedPayload = try? await storage.fetchPayloadForMessage(
-            context: context,
-            messageID,
-            currentUserDID: userDid,
-            database: database
-          ) {
-            let cachedSender = try? await storage.fetchSenderForMessage(
-              messageID,
-              currentUserDID: userDid,
-              database: database
-            )
-            return DecryptionOutcome(
-              plaintext: cachedPayload.text ?? "",
-              embed: cachedPayload.embed,
-              senderDID: cachedSender ?? userDid,
-              messageType: cachedPayload.messageType,
-              reaction: cachedPayload.reaction,
-              epoch: nil
-            )
-          } else {
-            logger.warning("⚠️ [DECRYPT] Self-message not found in cache - returning placeholder")
-            return DecryptionOutcome(
-              plaintext: "⚠️ Message unavailable (sent from this account)",
-              embed: nil,
-              senderDID: userDid,
-              messageType: .text,
-              reaction: nil,
-              epoch: nil
-            )
-          }
-        }
-
-        // SecretReuseError handling (existing logic)
+        // SecretReuseError: another process already consumed the ratchet key.
         if desc.contains("SecretReuseError") || desc.contains("SecretTreeError") {
           // Duplicate processing: attempt to use cache with RETRY/BACKOFF
           // The other process might still be writing to the DB.
@@ -1593,9 +1805,14 @@ public actor MLSCoreContext {
       // If NSE processed messages, our cached context may be stale. Always reload
       // from disk to ensure we have the latest ratchet state.
       // ═══════════════════════════════════════════════════════════════════════════
-      if contexts[userDid] != nil {
+      if let oldContext = contexts[userDid] {
+        oldContext.clearContentRootKey()
+        try oldContext.flushAndPrepareClose()
         contexts.removeValue(forKey: userDid)
-        Self.unregisterFromEmergencyClose(for: userDid)
+        contextVersions.removeValue(forKey: userDid)
+        if Self.unregisterFromEmergencyClose(for: userDid) {
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: userDid)
+        }
         logger.info("🔄 [DECRYPT] Invalidated cached context for fresh disk read")
       }
 
@@ -1934,9 +2151,14 @@ public actor MLSCoreContext {
     // The main app may have processed messages. Always reload from disk to ensure
     // we have the latest ratchet state.
     // ═══════════════════════════════════════════════════════════════════════════
-    if contexts[userDid] != nil {
+    if let oldContext = contexts[userDid] {
+      oldContext.clearContentRootKey()
+      try oldContext.flushAndPrepareClose()
       contexts.removeValue(forKey: userDid)
-      Self.unregisterFromEmergencyClose(for: userDid)
+      contextVersions.removeValue(forKey: userDid)
+      if Self.unregisterFromEmergencyClose(for: userDid) {
+        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: userDid)
+      }
       logger.info("🔄 [DECRYPT-NOTIF] Invalidated cached context for fresh disk read")
     }
 

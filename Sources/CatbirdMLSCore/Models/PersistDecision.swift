@@ -76,7 +76,7 @@ public enum SkipReason: Sendable, Equatable {
   /// The message's sender device DID matches our local device DID. We
   /// already have the plaintext (cached at send time); persisting again
   /// would either dedupe via the message ID or — worse — produce a stale
-  /// "Cannot decrypt own message" placeholder.
+  /// missing-payload placeholder.
   case ownMessage
 
   /// A commit message we produced locally, fanned back to us via SSE /
@@ -147,8 +147,7 @@ public struct PersistDecisionInput: Sendable, Equatable {
   /// `.ownCommitConfirmed` (commit).
   public let isCommit: Bool
 
-  /// Whether the caller has already populated a placeholder payload
-  /// (e.g. via `recoverSelfSentMessage` adopting a pre-cached send).
+  /// Whether the caller has already populated a placeholder payload.
   /// Reserved for future use; in D-S.4 only consulted via the
   /// `decryptSucceeded` axis.
   public let hasPlaceholderPayload: Bool

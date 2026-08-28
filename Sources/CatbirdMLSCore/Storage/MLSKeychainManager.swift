@@ -49,8 +49,10 @@ public final class MLSKeychainManager: @unchecked Sendable {
       return cachedResolvedGroup
     }
     let resolved = resolvedAccessGroup(suffix: "blue.catbird.shared")
-    cachedResolvedGroup = resolved
-    didResolveGroup = true
+    if let resolved {
+      cachedResolvedGroup = resolved
+      didResolveGroup = true
+    }
     return resolved
   }
 
@@ -184,7 +186,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
   // MARK: - Keychain Keys
 
-  private enum KeychainKey {
+  enum KeychainKey {
     case groupState(conversationID: String)
     case privateKey(conversationID: String, epoch: Int64)
     case signatureKey(conversationID: String)
@@ -193,25 +195,31 @@ public final class MLSKeychainManager: @unchecked Sendable {
     case hpkePrivateKey(keyPackageID: String)
     case currentEpoch(conversationID: String)
     case welcomeMessage(conversationID: String)
+    case invitePSK(inviteID: String)
+    case rejoinPSK(conversationID: String, userDID: String)
 
     var key: String {
       switch self {
       case .groupState(let id):
-        return "mls.groupstate.\(id)"
+        return "mls.groupstate.\(id).\(MLSStoragePaths.cleanSuffix)"
       case .privateKey(let id, let epoch):
-        return "mls.privatekey.\(id).epoch.\(epoch)"
+        return "mls.privatekey.\(id).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
       case .signatureKey(let id):
-        return "mls.signaturekey.\(id)"
+        return "mls.signaturekey.\(id).\(MLSStoragePaths.cleanSuffix)"
       case .encryptionKey(let id):
-        return "mls.encryptionkey.\(id)"
+        return "mls.encryptionkey.\(id).\(MLSStoragePaths.cleanSuffix)"
       case .epochSecrets(let id, let epoch):
-        return "mls.epochsecrets.\(id).epoch.\(epoch)"
+        return "mls.epochsecrets.\(id).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
       case .hpkePrivateKey(let id):
-        return "mls.hpke.privatekey.\(id)"
+        return "mls.hpke.privatekey.\(id).\(MLSStoragePaths.cleanSuffix)"
       case .currentEpoch(let id):
-        return "mls.currentepoch.\(id)"
+        return "mls.currentepoch.\(id).\(MLSStoragePaths.cleanSuffix)"
       case .welcomeMessage(let id):
-        return "mls.welcomemessage.\(id)"
+        return "mls.welcomemessage.\(id).\(MLSStoragePaths.cleanSuffix)"
+      case .invitePSK(let inviteID):
+        return "mls.invite.psk.\(inviteID).\(MLSStoragePaths.cleanSuffix)"
+      case .rejoinPSK(let conversationID, let userDID):
+        return "mls.rejoin.psk.\(conversationID).\(userDID).\(MLSStoragePaths.cleanSuffix)"
       }
     }
 
@@ -359,8 +367,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   ///   - inviteID: Invite identifier
   /// - Throws: KeychainError if storage fails
   public func storeInvitePSK(_ psk: Data, for inviteID: String) throws {
-    let key = "mls.invite.psk.\(inviteID)"
-    try store(psk, forKey: key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+    let key = KeychainKey.invitePSK(inviteID: inviteID)
+    try store(psk, forKey: key.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored invite PSK for invite: \(inviteID)")
   }
 
@@ -368,16 +376,16 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// - Parameter inviteID: Invite identifier
   /// - Returns: Pre-shared key data, or nil if not found
   public func retrieveInvitePSK(for inviteID: String) -> Data? {
-    let key = "mls.invite.psk.\(inviteID)"
-    return try? retrieve(forKey: key)
+    let key = KeychainKey.invitePSK(inviteID: inviteID)
+    return try? retrieve(forKey: key.key)
   }
 
   /// Delete pre-shared key for an invite
   /// - Parameter inviteID: Invite identifier
   /// - Throws: KeychainError if deletion fails
   public func deleteInvitePSK(for inviteID: String) throws {
-    let key = "mls.invite.psk.\(inviteID)"
-    try delete(forKey: key)
+    let key = KeychainKey.invitePSK(inviteID: inviteID)
+    try delete(forKey: key.key)
     logger.info("Deleted invite PSK for invite: \(inviteID)")
   }
 
@@ -390,8 +398,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   ///   - userDID: User's DID identifier
   /// - Throws: KeychainError if storage fails
   public func storeRejoinPSK(_ psk: Data, for conversationID: String, userDID: String) throws {
-    let key = "mls.rejoin.psk.\(conversationID).\(userDID)"
-    try store(psk, forKey: key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+    let key = KeychainKey.rejoinPSK(conversationID: conversationID, userDID: userDID)
+    try store(psk, forKey: key.key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
     logger.info("Stored rejoin PSK for conversation: \(conversationID, privacy: .private), user: \(userDID, privacy: .private)")
   }
 
@@ -401,8 +409,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   ///   - userDID: User's DID identifier
   /// - Returns: Pre-shared key data, or nil if not found
   public func retrieveRejoinPSK(for conversationID: String, userDID: String) -> Data? {
-    let key = "mls.rejoin.psk.\(conversationID).\(userDID)"
-    return try? retrieve(forKey: key)
+    let key = KeychainKey.rejoinPSK(conversationID: conversationID, userDID: userDID)
+    return try? retrieve(forKey: key.key)
   }
 
   /// Delete pre-shared key for rejoining a conversation
@@ -411,8 +419,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   ///   - userDID: User's DID identifier
   /// - Throws: KeychainError if deletion fails
   public func deleteRejoinPSK(for conversationID: String, userDID: String) throws {
-    let key = "mls.rejoin.psk.\(conversationID).\(userDID)"
-    try delete(forKey: key)
+    let key = KeychainKey.rejoinPSK(conversationID: conversationID, userDID: userDID)
+    try delete(forKey: key.key)
     logger.info("Deleted rejoin PSK for conversation: \(conversationID, privacy: .private), user: \(userDID, privacy: .private)")
   }
 
@@ -771,6 +779,76 @@ public final class MLSKeychainManager: @unchecked Sendable {
       throw KeychainError.storeFailed(status)
     }
   }
+  /// Atomic add-if-absent for clean-generation credentials with supplied value, adopting the winner on duplicate.
+  /// On `errSecDuplicateItem` or existing item, does not overwrite or fail; re-reads and returns the winner.
+  @discardableResult
+  func storeOrAdoptImmutableKey(
+    _ data: Data,
+    forKey key: String,
+    service: String? = nil,
+    expectedLength: Int? = nil,
+    accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+  ) throws -> Data {
+    let targetService = service ?? serviceName
+    if let expectedLength, data.count != expectedLength {
+      throw MLSStorageInitializationError.validationFailed(
+        details: "Supplied key \(key) length mismatch: expected \(expectedLength), got \(data.count)"
+      )
+    }
+
+    if let existing = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: expectedLength) {
+      return existing
+    }
+
+    if let fake = Self.activeFakeStorage {
+      let status = try fake.add(service: targetService, account: key, data: data)
+      if status == errSecSuccess {
+        return data
+      } else if status == errSecDuplicateItem {
+        guard let winner = try fake.get(service: targetService, account: key) else {
+          throw KeychainError.retrieveFailed(errSecItemNotFound)
+        }
+        return winner
+      } else {
+        throw KeychainError.storeFailed(status)
+      }
+    }
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrAccount as String: key,
+      kSecAttrService as String: targetService,
+      kSecValueData as String: data,
+    ]
+
+    if !skipDataProtection {
+      query[kSecAttrAccessible as String] = accessible
+      query[kSecAttrSynchronizable as String] = false
+    }
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
+    }
+    query[kSecAttrAccessGroup as String] = accessGroup
+
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecSuccess {
+      return data
+    } else if status == errSecDuplicateItem {
+      guard let winner = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: expectedLength) else {
+        throw KeychainError.retrieveFailed(errSecItemNotFound)
+      }
+      return winner
+    } else {
+      throw KeychainError.storeFailed(status)
+    }
+  }
 
   /// Strict retrieve that differentiates item absence (nil) from read/entitlement errors (throws).
   func retrieveKeyStrict(
@@ -1086,7 +1164,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     forConversationID conversationID: String,
     epoch: Int64
   ) throws {
-    let key = "mls.epoch.metadata.\(conversationID).epoch.\(epoch)"
+    let key = "mls.epoch.metadata.\(conversationID).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
     let data = try JSONEncoder().encode(metadata)
     try store(data, forKey: key, accessible: kSecAttrAccessibleAfterFirstUnlock)
     logger.debug("Stored epoch metadata for conversation: \(conversationID), epoch: \(epoch)")
@@ -1097,7 +1175,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     forConversationID conversationID: String,
     epoch: Int64
   ) throws -> EpochKeyMetadata? {
-    let key = "mls.epoch.metadata.\(conversationID).epoch.\(epoch)"
+    let key = "mls.epoch.metadata.\(conversationID).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
     guard let data = try retrieve(forKey: key) else {
       return nil
     }
@@ -1109,7 +1187,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     forConversationID conversationID: String,
     epoch: Int64
   ) throws {
-    let key = "mls.epoch.metadata.\(conversationID).epoch.\(epoch)"
+    let key = "mls.epoch.metadata.\(conversationID).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
     try delete(forKey: key)
     logger.debug("Deleted epoch metadata for conversation: \(conversationID), epoch: \(epoch)")
   }
@@ -1123,7 +1201,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     conversationID: String,
     epoch: Int64
   ) throws {
-    let archiveKey = "mls.archive.\(type).\(conversationID).epoch.\(epoch)"
+    let archiveKey = "mls.archive.\(type).\(conversationID).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
     try store(key, forKey: archiveKey, accessible: kSecAttrAccessibleAfterFirstUnlock)
     logger.info("Archived \(type) key for conversation: \(conversationID), epoch: \(epoch)")
   }
@@ -1134,9 +1212,18 @@ public final class MLSKeychainManager: @unchecked Sendable {
     conversationID: String,
     epoch: Int64
   ) throws -> Data? {
-    let archiveKey = "mls.archive.\(type).\(conversationID).epoch.\(epoch)"
+    let archiveKey = "mls.archive.\(type).\(conversationID).epoch.\(epoch).\(MLSStoragePaths.cleanSuffix)"
     return try retrieve(forKey: archiveKey)
   }
+
+  #if DEBUG
+  static func resetAccessGroupResolutionForTesting() {
+    resolvedGroupLock.lock()
+    defer { resolvedGroupLock.unlock() }
+    cachedResolvedGroup = nil
+    didResolveGroup = false
+  }
+  #endif
 
   // MARK: - Security Utilities
 
@@ -1154,7 +1241,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
   /// Verify keychain accessibility
   public func verifyKeychainAccess() throws {
-    let testKey = "mls.test.access"
+    let testKey = "mls.test.access.\(MLSStoragePaths.cleanSuffix)"
     let testData = Data("test".utf8)
 
     try store(testData, forKey: testKey)
