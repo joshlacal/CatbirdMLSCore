@@ -424,10 +424,8 @@ public actor MLSCoreContext {
   /// - Returns: MLS context for the user
   /// - Throws: MLSError if context creation fails
   public func getContext(for userDid: String) async throws -> MlsContext {
-    // CRITICAL: Check suspension flag FIRST - abort immediately if app is going to background
-    // This prevents the race condition where we start creating a context right before suspension
-    if Self.isSuspensionInProgress {
-      logger.warning("🚫 [0xdead10cc-FIX] getContext BLOCKED - suspension in progress")
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !isSuspended else {
       throw MLSError.contextCreationBlocked(reason: "App is transitioning to background - MLS operations suspended")
     }
 
@@ -454,21 +452,20 @@ public actor MLSCoreContext {
     // If diskVersion > memoryVersion, our cached context is stale and must be reloaded.
     // This is faster than waiting for Darwin notifications.
     // ═══════════════════════════════════════════════════════════════════════════
-    if let existingContext = contexts[userDid] {
-      let memoryVersion = contextVersions[userDid] ?? 0
-      let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
+    if let existingContext = contexts[normalized] {
+      let memoryVersion = contextVersions[normalized] ?? 0
+      let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
 
       if diskVersion > memoryVersion {
-        logger.warning("🔄 [CONTEXT] Stale context detected for \(userDid.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
+        logger.warning("🔄 [CONTEXT] Stale context detected for \(normalized.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
         logger.info("   NSE advanced the ratchet - reloading context from disk")
 
         // Close the stale context
         existingContext.clearContentRootKey()
         try? existingContext.flushAndPrepareClose()
-        contexts.removeValue(forKey: userDid)
-        contextVersions.removeValue(forKey: userDid)
-        Self.unregisterFromEmergencyClose(for: userDid)
-
+        contexts.removeValue(forKey: normalized)
+        contextVersions.removeValue(forKey: normalized)
+        Self.unregisterFromEmergencyClose(for: normalized)
         // Fall through to create fresh context below
       } else {
         return existingContext
@@ -484,7 +481,7 @@ public actor MLSCoreContext {
 
     // Check and coordinate storage state machine
     let coordinator = MLSStorageCoordinator.shared
-    let newContext = try await coordinator.coordinateOpen(for: .rustState, userDID: userDid) { attemptUUID, isFirstCreation in
+    let newContext = try await coordinator.coordinateOpen(for: .rustState, userDID: normalized) { attemptUUID, isFirstCreation in
       // Create storage path for this user
       let storagePath = try self.createStoragePath(for: userDid)
 
@@ -529,17 +526,17 @@ public actor MLSCoreContext {
     }
 
     // Track the current disk version at context creation time
-    let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
-    contexts[userDid] = newContext
-    contextVersions[userDid] = currentDiskVersion
+    let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
+    contexts[normalized] = newContext
+    contextVersions[normalized] = currentDiskVersion
 
     // Register for emergency close (0xdead10cc prevention)
-    Self.registerForEmergencyClose(newContext, for: userDid)
+    Self.registerForEmergencyClose(newContext, for: normalized)
 
     // Sync the version manager's cache
-    MLSStateVersionManager.shared.syncLastKnownVersion(for: userDid)
+    MLSStateVersionManager.shared.syncLastKnownVersion(for: normalized)
 
-    logger.info("Created MLS context for user: \(userDid, privacy: .private) at version \(currentDiskVersion)")
+    logger.info("Created MLS context for user: \(normalized, privacy: .private) at version \(currentDiskVersion)")
 
     return newContext
   }
@@ -569,18 +566,6 @@ public actor MLSCoreContext {
   // MARK: - Helper Methods
 
   private func createStoragePath(for userDid: String) throws -> String {
-    if let customDir = configuration.storageDirectory {
-      let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-      let didHash = normalized.data(using: .utf8)?.base64EncodedString()
-        .replacingOccurrences(of: "/", with: "_")
-        .replacingOccurrences(of: "+", with: "-")
-        .replacingOccurrences(of: "=", with: "")
-        .prefix(64).description ?? "default"
-      let dbURL = customDir.appendingPathComponent("\(didHash).db")
-      let dir = dbURL.deletingLastPathComponent()
-      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-      return dbURL.path
-    }
     let dbURL = try MLSStorageCoordinator.shared.databaseURL(for: .rustState, userDID: userDid)
     let dir = dbURL.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -612,16 +597,17 @@ public actor MLSCoreContext {
   /// - Returns: true if a cached context was removed
   @discardableResult
   public func removeContext(for userDid: String) -> Bool {
-    if let context = contexts.removeValue(forKey: userDid) {
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let context = contexts.removeValue(forKey: normalized) {
       context.clearContentRootKey()
       try? context.flushAndPrepareClose()
-      Self.unregisterFromEmergencyClose(for: userDid)
-      contextVersions.removeValue(forKey: userDid)
-      logger.info("Removed MLS context for user: \(userDid, privacy: .private)")
+      Self.unregisterFromEmergencyClose(for: normalized)
+      contextVersions.removeValue(forKey: normalized)
+      logger.info("Removed MLS context for user: \(normalized, privacy: .private)")
       return true
     }
-    contextVersions.removeValue(forKey: userDid)
-    logger.debug("No MLS context cached for user: \(userDid, privacy: .private)")
+    contextVersions.removeValue(forKey: normalized)
+    logger.debug("No MLS context cached for user: \(normalized, privacy: .private)")
     return false
   }
 

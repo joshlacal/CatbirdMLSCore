@@ -53,7 +53,7 @@ public class MLSKeychain {
         guard !key.isEmpty else {
             throw MLSKeychainError.invalidData
         }
-        let tag = "blue.catbird.mls.sig.\(identity)"
+        let tag = MLSStoragePaths.orchestratorSignerAccount(for: identity)
         do {
             try MLSKeychainManager.shared.storeImmutableKeyStrict(
                 key,
@@ -66,7 +66,7 @@ public class MLSKeychain {
     }
 
     static func retrieveSignatureKeyClean(forIdentity identity: String) throws -> Data? {
-        let tag = "blue.catbird.mls.sig.\(identity)"
+        let tag = MLSStoragePaths.orchestratorSignerAccount(for: identity)
         return try MLSKeychainManager.shared.retrieveKeyStrict(
             forKey: tag,
             service: signatureKeyService
@@ -74,7 +74,7 @@ public class MLSKeychain {
     }
 
     static func deleteSignatureKeyClean(forIdentity identity: String) throws {
-        let tag = "blue.catbird.mls.sig.\(identity)"
+        let tag = MLSStoragePaths.orchestratorSignerAccount(for: identity)
         try MLSKeychainManager.shared.deleteStrict(
             forKey: tag,
             service: signatureKeyService

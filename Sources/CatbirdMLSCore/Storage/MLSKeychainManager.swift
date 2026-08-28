@@ -844,6 +844,42 @@ public final class MLSKeychainManager: @unchecked Sendable {
   func hasKeyStrict(forKey key: String, service: String? = nil) throws -> Bool {
     try retrieveKeyStrict(forKey: key, service: service) != nil
   }
+  /// Strict query whether any items exist for a given service (e.g. per-DID clean hybrid signer service)
+  func hasAnyKeyStrict(forService service: String) throws -> Bool {
+    if let fake = Self.activeFakeStorage {
+      return try fake.hasAny(service: service)
+    }
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+      kSecReturnAttributes as String: true,
+    ]
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
+    }
+    query[kSecAttrAccessGroup as String] = accessGroup
+
+    var result: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    if status == errSecItemNotFound {
+      return false
+    }
+    guard status == errSecSuccess else {
+      logger.error("Failed to strictly query keychain service: \(service), status: \(status)")
+      throw KeychainError.retrieveFailed(status)
+    }
+    return true
+  }
+
 
   /// Strict exact delete
   func deleteStrict(forKey key: String, service: String? = nil) throws {
@@ -1210,6 +1246,17 @@ final class MLSKeychainFakeStorage: @unchecked Sendable {
     }
     return errSecSuccess
   }
+  func hasAny(service: String) throws -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if let err = injectedErrors["*"] {
+      if err == errSecItemNotFound { return false }
+      throw KeychainError.retrieveFailed(err)
+    }
+    let prefix = "\(service):::"
+    return storage.keys.contains { $0.hasPrefix(prefix) }
+  }
+
 
   func clearAll() {
     lock.lock()

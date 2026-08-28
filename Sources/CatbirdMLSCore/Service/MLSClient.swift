@@ -587,7 +587,7 @@ public actor MLSClient {
   /// Normalize user DID to ensure consistent context lookup
   /// Prevents multiple contexts for the same user due to whitespace/encoding differences
   private func normalizeUserDID(_ userDID: String) -> String {
-    return userDID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
   }
 
   private func currentGeneration(for normalizedDID: String) -> UInt64 {

@@ -126,7 +126,15 @@ public enum MLSStoragePaths {
 
   static func orchestratorSignerIdentity(for userDID: String) -> String {
     let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized.hasSuffix(cleanIdentifierSuffix) {
+      return normalized
+    }
     return "\(normalized).\(cleanSuffix)"
+  }
+
+  static func orchestratorSignerAccount(for userDID: String) -> String {
+    let identity = orchestratorSignerIdentity(for: userDID)
+    return "blue.catbird.mls.sig.\(identity)"
   }
   static let appGroupIdentifier = "group.blue.catbird.shared"
   private static let lock = NSLock()
@@ -377,9 +385,21 @@ final class MLSStorageCoordinator: @unchecked Sendable {
   func evaluateState(for kind: MLSDatabaseKind, userDID: String) throws -> MLSStorageStateEvaluation {
     _ = try MLSStoragePaths.requiredCleanContainerURL()
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let url = try leaseURL(for: kind, userDID: normalizedDID, type: "admission")
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-    let lease = try acquireAdmissionLease(for: kind, userDID: normalizedDID)
-    defer { lease.release() }
+    let fd = open(url.path, O_CREAT | O_RDWR, 0o666)
+    guard fd >= 0 else {
+      throw MLSStorageInitializationError.admissionDenied(details: "Failed to open admission lease file: \(errno)")
+    }
+    defer {
+      flock(fd, LOCK_UN)
+      close(fd)
+    }
+
+    if flock(fd, LOCK_SH) != 0 {
+      throw MLSStorageInitializationError.admissionDenied(details: "Failed to acquire shared admission lease: \(errno)")
+    }
 
     return try evaluateStateUnderLease(for: kind, userDID: normalizedDID)
   }
@@ -418,10 +438,13 @@ final class MLSStorageCoordinator: @unchecked Sendable {
           forKey: MLSStoragePaths.deviceUuidAccount(for: normalizedDID)
         )
         let orchestratorSigner = try MLSKeychainManager.shared.retrieveKeyStrict(
-          forKey: MLSStoragePaths.orchestratorSignerIdentity(for: normalizedDID),
+          forKey: MLSStoragePaths.orchestratorSignerAccount(for: normalizedDID),
           service: "blue.catbird.mls.signature"
         )
-        if contentRoot != nil || identityBackup != nil || mlsDid != nil || deviceUuid != nil || orchestratorSigner != nil {
+        let hasHybridKeys = try MLSKeychainManager.shared.hasAnyKeyStrict(
+          forService: MLSStoragePaths.hybridSignerService(for: normalizedDID)
+        )
+        if contentRoot != nil || identityBackup != nil || mlsDid != nil || deviceUuid != nil || orchestratorSigner != nil || hasHybridKeys {
           return .mixedState(details: "Optional clean slots present while Rust DB, MEK, and content root are absent")
         }
       }
@@ -519,7 +542,34 @@ final class MLSStorageCoordinator: @unchecked Sendable {
 
   // MARK: - Leases & Mutexes
 
-  func acquireAdmissionLease(for kind: MLSDatabaseKind, userDID: String) throws -> MLSLeaseToken {
+  private func acquireFlockAsync(fd: Int32, operation: Int32, timeoutSeconds: Double = 15.0) async throws {
+    let startTime = ContinuousClock.now
+    let deadline = startTime.advanced(by: .seconds(timeoutSeconds))
+    let nbOp = operation | LOCK_NB
+
+    while true {
+      try Task.checkCancellation()
+
+      if flock(fd, nbOp) == 0 {
+        return
+      }
+
+      let err = errno
+      if err != EWOULDBLOCK && err != EAGAIN && err != EINTR {
+        throw MLSStorageInitializationError.admissionDenied(details: "flock failed with errno: \(err)")
+      }
+
+      if ContinuousClock.now >= deadline {
+        throw MLSStorageInitializationError.admissionDenied(
+          details: "Timed out waiting for lock (operation \(operation)) after \(timeoutSeconds)s"
+        )
+      }
+
+      try await Task.sleep(for: .milliseconds(25))
+    }
+  }
+
+  func acquireAdmissionLease(for kind: MLSDatabaseKind, userDID: String) async throws -> MLSLeaseToken {
     let url = try leaseURL(for: kind, userDID: userDID, type: "admission")
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
@@ -528,15 +578,17 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       throw MLSStorageInitializationError.admissionDenied(details: "Failed to open admission lease file: \(errno)")
     }
 
-    if flock(fd, LOCK_SH) != 0 {
+    do {
+      try await acquireFlockAsync(fd: fd, operation: LOCK_SH, timeoutSeconds: 15.0)
+    } catch {
       close(fd)
-      throw MLSStorageInitializationError.admissionDenied(details: "Failed to acquire shared admission lease: \(errno)")
+      throw error
     }
 
     return MLSLeaseToken(fileDescriptor: fd, path: url.path)
   }
 
-  func acquireExclusiveResetLease(for kind: MLSDatabaseKind, userDID: String) throws -> MLSLeaseToken {
+  func acquireExclusiveResetLease(for kind: MLSDatabaseKind, userDID: String) async throws -> MLSLeaseToken {
     let url = try leaseURL(for: kind, userDID: userDID, type: "admission")
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
@@ -545,15 +597,17 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       throw MLSStorageInitializationError.admissionDenied(details: "Failed to open admission lease file for reset: \(errno)")
     }
 
-    if flock(fd, LOCK_EX) != 0 {
+    do {
+      try await acquireFlockAsync(fd: fd, operation: LOCK_EX, timeoutSeconds: 15.0)
+    } catch {
       close(fd)
-      throw MLSStorageInitializationError.admissionDenied(details: "Failed to acquire exclusive reset lease: \(errno)")
+      throw error
     }
 
     return MLSLeaseToken(fileDescriptor: fd, path: url.path)
   }
 
-  func acquireMutationMutex(for kind: MLSDatabaseKind, userDID: String) throws -> MLSLeaseToken {
+  func acquireMutationMutex(for kind: MLSDatabaseKind, userDID: String) async throws -> MLSLeaseToken {
     let url = try leaseURL(for: kind, userDID: userDID, type: "mutation")
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
@@ -562,9 +616,11 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       throw MLSStorageInitializationError.admissionDenied(details: "Failed to open mutation lock file: \(errno)")
     }
 
-    if flock(fd, LOCK_EX) != 0 {
+    do {
+      try await acquireFlockAsync(fd: fd, operation: LOCK_EX, timeoutSeconds: 15.0)
+    } catch {
       close(fd)
-      throw MLSStorageInitializationError.admissionDenied(details: "Failed to acquire mutation lock: \(errno)")
+      throw error
     }
 
     return MLSLeaseToken(fileDescriptor: fd, path: url.path)
@@ -583,7 +639,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
     // 1. Shared admission lease (retained across entire open/validation/completion/failure)
-    let admissionLease = try acquireAdmissionLease(for: kind, userDID: normalizedDID)
+    let admissionLease = try await acquireAdmissionLease(for: kind, userDID: normalizedDID)
     defer { admissionLease.release() }
 
     // 2. Pre-CAS evaluation under admission lease
@@ -630,7 +686,9 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     #endif
 
     let candidateData = try JSONEncoder().encode(candidateRecord)
-    let tempMarkerURL = markerDir.appendingPathComponent("tmp_\(candidateAttemptUUID)_\(ProcessInfo.processInfo.processIdentifier).json")
+    let pathHash = MLSStoragePaths.pathHash(for: normalizedDID)
+    let tempPrefix = "tmp_\(kind.rawValue)_\(pathHash.prefix(16))_"
+    let tempMarkerURL = markerDir.appendingPathComponent("\(tempPrefix)\(candidateAttemptUUID)_\(ProcessInfo.processInfo.processIdentifier).json")
     try candidateData.write(to: tempMarkerURL, options: .atomic)
     defer { try? FileManager.default.removeItem(at: tempMarkerURL) }
 
@@ -684,7 +742,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     }
 
     // 6. Acquire mutation mutex while still holding admission lease
-    let mutationMutex = try acquireMutationMutex(for: kind, userDID: normalizedDID)
+    let mutationMutex = try await acquireMutationMutex(for: kind, userDID: normalizedDID)
     defer { mutationMutex.release() }
 
     // 7. Re-read/revalidate under mutation mutex
@@ -778,10 +836,10 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     _ = try MLSStoragePaths.requiredCleanContainerURL()
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-    let resetLease = try acquireExclusiveResetLease(for: kind, userDID: normalizedDID)
+    let resetLease = try await acquireExclusiveResetLease(for: kind, userDID: normalizedDID)
     defer { resetLease.release() }
 
-    let mutationMutex = try acquireMutationMutex(for: kind, userDID: normalizedDID)
+    let mutationMutex = try await acquireMutationMutex(for: kind, userDID: normalizedDID)
     defer { mutationMutex.release() }
 
     // 1. Delete clean database files and sidecars
@@ -815,9 +873,11 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     // 3. Delete clean marker CAS temp files
     let markerURL = try self.markerURL(for: kind, userDID: normalizedDID)
     let markerDir = markerURL.deletingLastPathComponent()
+    let pathHash = MLSStoragePaths.pathHash(for: normalizedDID)
+    let tempPrefix = "tmp_\(kind.rawValue)_\(pathHash.prefix(16))_"
     if try MLSStoragePaths.fileExistsStrict(at: markerDir) {
       let markerEntries = try FileManager.default.contentsOfDirectory(atPath: markerDir.path)
-      for entry in markerEntries where entry.hasPrefix("tmp_") {
+      for entry in markerEntries where entry.hasPrefix(tempPrefix) {
         let tempURL = markerDir.appendingPathComponent(entry)
         try FileManager.default.removeItem(at: tempURL)
       }
@@ -836,7 +896,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       try MLSKeychainManager.shared.deleteStrict(forKey: mlsDidAccount)
       let deviceUuidAccount = MLSStoragePaths.deviceUuidAccount(for: normalizedDID)
       try MLSKeychainManager.shared.deleteStrict(forKey: deviceUuidAccount)
-      let orchestratorSigner = MLSStoragePaths.orchestratorSignerIdentity(for: normalizedDID)
+      let orchestratorSigner = MLSStoragePaths.orchestratorSignerAccount(for: normalizedDID)
       try MLSKeychainManager.shared.deleteStrict(forKey: orchestratorSigner, service: "blue.catbird.mls.signature")
       let hybridService = MLSStoragePaths.hybridSignerService(for: normalizedDID)
       try MLSKeychainManager.shared.deleteAllStrict(forService: hybridService)

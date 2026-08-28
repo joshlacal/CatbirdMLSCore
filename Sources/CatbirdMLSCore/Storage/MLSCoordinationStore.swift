@@ -34,12 +34,12 @@ public final class MLSCoordinationStore {
   private let queue = DispatchQueue(label: "blue.catbird.mls.coordination", qos: .userInitiated)
   
   private var fileURL: URL {
-    do {
-      let dir = try MLSStoragePaths.coordinationDirectory()
+    if let dir = try? MLSStoragePaths.coordinationDirectory() {
       return dir.appendingPathComponent(fileName)
-    } catch {
-      fatalError("Required App Group container unavailable for MLSCoordinationStore: \(error.localizedDescription)")
     }
+    let fallbackDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("blue.catbird.mls.coordination", isDirectory: true)
+    return fallbackDir.appendingPathComponent(fileName)
   }
 
   private init() {
@@ -81,7 +81,7 @@ public final class MLSCoordinationStore {
       let state = try JSONDecoder().decode(State.self, from: data)
       return state
     } catch {
-      logger.error("🚨 [COORD] Coordination state file exists but is corrupt: \(error.localizedDescription)")
+      logger.critical("🚨 [COORD] Coordination state file exists but is corrupt: \(error.localizedDescription)")
       throw MLSStorageInitializationError.unreadableState(
         details: "Corrupt coordination state JSON: \(error.localizedDescription)"
       )
@@ -93,7 +93,7 @@ public final class MLSCoordinationStore {
     do {
       return try fetchState()
     } catch {
-      logger.error("⚠️ [COORD] Failed to fetch coordination state: \(error.localizedDescription)")
+      logger.critical("⚠️ [COORD] Failed to fetch coordination state: \(error.localizedDescription)")
       return State.initial
     }
   }
@@ -102,12 +102,16 @@ public final class MLSCoordinationStore {
   /// Called when starting a "Stop-The-World" event like account switching
   public func incrementGeneration(for userDID: String?) {
     queue.sync {
-      var state = getState()
-      state.coordinationGeneration += 1
-      state.activeUserDID = userDID
-      state.updatedAt = Date()
-      save(state)
-      logger.info("🔢 [COORD] Generation incremented to \(state.coordinationGeneration) for user: \(userDID?.prefix(16) ?? "nil", privacy: .private)")
+      do {
+        var state = try fetchState()
+        state.coordinationGeneration += 1
+        state.activeUserDID = userDID
+        state.updatedAt = Date()
+        try saveStrict(state)
+        logger.info("🔢 [COORD] Generation incremented to \(state.coordinationGeneration) for user: \(userDID?.prefix(16) ?? "nil", privacy: .private)")
+      } catch {
+        logger.critical("🚨 [COORD] Refusing to increment generation from unreadable/unwritable state: \(error.localizedDescription)")
+      }
     }
   }
 
@@ -125,18 +129,28 @@ public final class MLSCoordinationStore {
   /// Update the coordination phase
   public func updatePhase(_ phase: Phase) {
     queue.sync {
-      var state = getState()
-      state.phase = phase
-      state.updatedAt = Date()
-      save(state)
-      logger.info("📡 [COORD] Phase updated to \(phase.rawValue)")
+      do {
+        var state = try fetchState()
+        state.phase = phase
+        state.updatedAt = Date()
+        try saveStrict(state)
+        logger.info("📡 [COORD] Phase updated to \(phase.rawValue)")
+      } catch {
+        logger.critical("🚨 [COORD] Refusing to update phase from unreadable/unwritable state: \(error.localizedDescription)")
+      }
     }
   }
   
   /// Validate that the provided generation still matches the current state.
   /// Throws an error if the generation has changed, indicating the task should cancel.
   public func validateGeneration(_ expectedGen: Int) throws {
-    let currentGen = getState().coordinationGeneration
+    let currentGen: Int
+    do {
+      currentGen = try fetchState().coordinationGeneration
+    } catch {
+      logger.critical("🚫 [COORD] Generation validation failed due to unreadable state: \(error.localizedDescription)")
+      throw MLSCoordinationError.generationMismatch(expected: expectedGen, current: -1)
+    }
     if expectedGen != currentGen {
       logger.warning("🚫 [COORD] Generation mismatch: expected \(expectedGen), current \(currentGen). Task must cancel.")
       throw MLSCoordinationError.generationMismatch(expected: expectedGen, current: currentGen)
@@ -147,12 +161,16 @@ public final class MLSCoordinationStore {
   func deleteState(for userDID: String) {
     queue.sync {
       let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-      var state = getState()
-      if state.activeUserDID?.lowercased() == normalized {
-        state.activeUserDID = nil
-        state.phase = .active
-        state.updatedAt = Date()
-        save(state)
+      do {
+        var state = try fetchState()
+        if state.activeUserDID?.lowercased() == normalized {
+          state.activeUserDID = nil
+          state.phase = .active
+          state.updatedAt = Date()
+          try saveStrict(state)
+        }
+      } catch {
+        logger.critical("🚨 [COORD] Refusing to delete state from unreadable/unwritable state: \(error.localizedDescription)")
       }
     }
   }
@@ -182,7 +200,7 @@ public final class MLSCoordinationStore {
     do {
       try saveStrict(state)
     } catch {
-      logger.error("❌ Failed to save coordination state: \(error.localizedDescription)")
+      logger.critical("❌ Failed to save coordination state: \(error.localizedDescription)")
     }
   }
 }

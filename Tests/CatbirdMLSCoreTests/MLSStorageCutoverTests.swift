@@ -398,21 +398,33 @@ final class MLSStorageCutoverTests: XCTestCase {
     let coordinator = MLSStorageCoordinator.shared
 
     // PART A: Two admitted entrants both observe absence and converge on one attemptUUID
-    let prePubCondition = NSCondition()
-    var arrivedAtPrePub = 0
-    let totalEntrants = 2
+    final class SendableBarrier: @unchecked Sendable {
+      let condition = NSCondition()
+      var arrived = 0
+      let total: Int
+
+      init(total: Int) {
+        self.total = total
+      }
+
+      func arriveAndWait() {
+        condition.lock()
+        arrived += 1
+        if arrived < total {
+          while arrived < total {
+            condition.wait()
+          }
+        } else {
+          condition.broadcast()
+        }
+        condition.unlock()
+      }
+    }
+
+    let barrier = SendableBarrier(total: 2)
 
     coordinator.testPrePublicationHook = {
-      prePubCondition.lock()
-      arrivedAtPrePub += 1
-      if arrivedAtPrePub < totalEntrants {
-        while arrivedAtPrePub < totalEntrants {
-          prePubCondition.wait()
-        }
-      } else {
-        prePubCondition.broadcast()
-      }
-      prePubCondition.unlock()
+      barrier.arriveAndWait()
     }
 
     async let appOpen = Task.detached { () -> String in
@@ -583,7 +595,9 @@ final class MLSStorageCutoverTests: XCTestCase {
 
     let markerURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
     let markerDir = markerURL.deletingLastPathComponent()
-    let tempMarker = markerDir.appendingPathComponent("tmp_test_attempt_12345.json")
+    let pathHash = MLSStoragePaths.pathHash(for: testDID)
+    let tempPrefix = "tmp_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(pathHash.prefix(16))_"
+    let tempMarker = markerDir.appendingPathComponent("\(tempPrefix)test_attempt_12345.json")
     try Data("temp-marker".utf8).write(to: tempMarker)
 
     // Verify setup
@@ -607,6 +621,15 @@ final class MLSStorageCutoverTests: XCTestCase {
     }
 
     // 3. Successful complete reset via clearStorage
+    // Re-seed Swift manifest (DB, sidecars, quarantine, temp marker, key/salt) so complete reset tests real deletion
+    try Data("swift-db-reseed".utf8).write(to: swiftDB)
+    try Data("swift-wal-reseed".utf8).write(to: URL(fileURLWithPath: swiftDB.path + "-wal"))
+    try FileManager.default.createDirectory(at: userQuarantineDir, withIntermediateDirectories: true)
+    try Data("quarantine-file-2".utf8).write(to: userQuarantineDir.appendingPathComponent("corrupt2.db"))
+    try Data("temp-marker-2".utf8).write(to: tempMarker)
+    _ = try await MLSSQLCipherEncryption.shared.getOrCreateKey(for: testDID)
+    _ = try await MLSSQLCipherEncryption.shared.getOrCreateSalt(for: testDID)
+
     try await MLSClient.shared.clearStorage(for: testDID)
 
     // 4. Assert full manifest is strictly deleted

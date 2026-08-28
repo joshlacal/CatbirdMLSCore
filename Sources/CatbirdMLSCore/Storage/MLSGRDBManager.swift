@@ -1698,7 +1698,6 @@ public actor MLSGRDBManager {
               reason: "MLS storage is busy while recycling an unhealthy pooled connection"
             )
           }
-          try? await repairDatabase(for: userDID)
         } else {
           // Connection is broken (e.g. SQLITE_MISUSE after emergency close) - discard and recreate
           logger.warning("⚠️ [Ephemeral] Cached connection failed validation (code=\((error as NSError).code)): \(error.localizedDescription) - discarding")
@@ -1888,9 +1887,7 @@ public actor MLSGRDBManager {
 
       let q = try DatabaseQueue(path: dbPath.path, configuration: config)
 
-      if isFirstCreation {
-        try Self.makeMigrator().migrate(q)
-      }
+      try Self.makeMigrator().migrate(q)
 
       let cipherVersion: String? = try await q.read { db in
         try String.fetchOne(db, sql: "PRAGMA cipher_version;")
@@ -3161,6 +3158,19 @@ public actor MLSGRDBManager {
   }
 
   func closeAndDrainDatabase(for userDID: String) async throws {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let queueInfo = cachedLightweightQueues.removeValue(forKey: normalized) {
+      Self.unregisterLightweightQueueFromEmergencyClose(for: normalized)
+      try queueInfo.queue.close()
+    }
+    if let pool = databases.removeValue(forKey: normalized) {
+      Self.unregisterFromEmergencyClose(for: normalized)
+      try pool.close()
+    }
+    if let pool = uncachedEphemeralPools.removeValue(forKey: normalized) {
+      Self.unregisterFromEmergencyClose(for: normalized)
+      try pool.close()
+    }
     if let queueInfo = cachedLightweightQueues.removeValue(forKey: userDID) {
       Self.unregisterLightweightQueueFromEmergencyClose(for: userDID)
       try queueInfo.queue.close()
@@ -3174,7 +3184,7 @@ public actor MLSGRDBManager {
       try pool.close()
     }
     activeUserDID = nil
-    updateConnectionState(.closed, for: userDID)
+    updateConnectionState(.closed, for: normalized)
   }
 
   @available(*, deprecated, message: "Use quarantineAndResetDatabase(for:) from Diagnostics")
@@ -3226,64 +3236,33 @@ public actor MLSGRDBManager {
       
       logger.warning("   Strategy: Wait and retry (NO database deletion)")
 
-      // Wait for lock to clear (500ms intervals, up to 5 attempts = 2.5s total)
-      for attempt in 1...5 {
-        try await Task.sleep(nanoseconds: 500_000_000)  // 500ms
-
+    // Wait for lock to clear (500ms intervals, up to 5 attempts = 2.5s total)
+    for attempt in 1...5 {
+      try await Task.sleep(nanoseconds: 500_000_000)  // 500ms
+      if let existingPool = databases[userDID] {
         do {
-          let db = try await createDatabase(for: userDID)
-          databases[userDID] = db
-          Self.registerForEmergencyClose(db, for: userDID)
-
-          // Verify it's actually working
-          _ = try await db.read { database in
+          _ = try await existingPool.read { database in
             try Int.fetchOne(database, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
           }
-
-          logger.info("✅ Database opened after waiting for lock (attempt \(attempt))")
-          return db
-        } catch let retryError {
-          if isTransientError(retryError) && attempt < 5 {
-            logger.debug("⏳ Still locked, waiting... (attempt \(attempt)/5)")
-            continue
-          }
-          // If it's no longer a transient error, fall through to normal repair
-          logger.warning("⚠️ Error changed from transient to: \(retryError.localizedDescription)")
-          break
-        }
-      }
-
-      // If we exhausted retries for a transient error, generally throw without deleting.
-      // Exception: SQLite error 7 during initial header reads can be SQLCipher header corruption (fake OOM).
-      let finalDesc = (lastError?.localizedDescription ?? "").lowercased()
-      let looksLikeFakeOOM =
-        (finalDesc.contains("out of memory") || finalDesc.contains("sqlite error 7"))
-        && finalDesc.contains("sqlite_master")
-
-      if looksLikeFakeOOM {
-        logger.critical("🚨 [progressiveRepair] Persistent SQLITE_NOMEM during sqlite_master read")
-        logger.critical("   Treating as suspected SQLCipher header corruption; attempting auto-heal")
-
-        // Step 1: Non-destructive cleanup (WAL/SHM only)
-        _ = await attemptSoftRecovery(for: userDID)
-
-        do {
-          let db = try await createDatabase(for: userDID)
-          databases[userDID] = db
-          Self.registerForEmergencyClose(db, for: userDID)
-          _ = try await db.read { database in
-            try Int.fetchOne(database, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
-          }
-          logger.info("✅ [progressiveRepair] Opened database after WAL/SHM cleanup")
-          return db
+          logger.info("✅ Existing database valid after waiting for lock (attempt \(attempt))")
+          return existingPool
         } catch {
-          // Fail-closed: never perform destructive reset automatically.
-          logger.critical("🚨 [progressiveRepair] WAL/SHM cleanup did not restore access")
-          throw MLSSQLCipherError.needsUserAction(
-            reason: "MLS storage could not be recovered automatically. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
-          )
+          // Keep waiting
         }
       }
+    }
+
+    let finalDesc = (lastError?.localizedDescription ?? "").lowercased()
+    let looksLikeFakeOOM =
+      (finalDesc.contains("out of memory") || finalDesc.contains("sqlite error 7"))
+      && finalDesc.contains("sqlite_master")
+
+    if looksLikeFakeOOM {
+      logger.critical("🚨 [progressiveRepair] Persistent SQLITE_NOMEM during sqlite_master read")
+      throw MLSSQLCipherError.needsUserAction(
+        reason: "MLS storage encountered a header error. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
+      )
+    }
 
       logger.error("❌ Database remained locked after 2.5s - aborting (preserving data)")
       throw MLSSQLCipherError.databaseCreationFailed(
@@ -3333,66 +3312,12 @@ public actor MLSGRDBManager {
     // Attempt 1: Try WAL/SHM repair
     // Attempt 2+: Coordinated Swift/Rust reset (ONLY for true corruption, not transient errors)
 
-    if attemptNumber == 1 {
-      // Try standard WAL/SHM repair
-      logger.info("📝 Strategy: WAL/SHM file repair (attempt \(attemptNumber))")
-      try? await repairDatabase(for: userDID)
-
-      // Try to open the database
-      do {
-        let db = try await createDatabase(for: userDID)
-        databases[userDID] = db
-        Self.registerForEmergencyClose(db, for: userDID)
-
-        // Verify it's actually working
-        _ = try await db.read { database in
-          try Int.fetchOne(database, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
-        }
-
-        // Success! Reset the counter
-        repairAttempts.removeValue(forKey: userDID)
-        walRepairState.removeValue(forKey: userDID)
-        logger.info("✅ Database recovered via WAL/SHM repair")
-        return db
-      } catch {
-        logger.error("❌ WAL/SHM repair failed: \(error.localizedDescription)")
-        // Continue to escalate on next attempt
-        throw error
-      }
-    } else {
-      // CRITICAL FIX: Before doing a full reset, verify this is TRUE corruption
-      // not a transient lock that persisted across attempts
-      if let error = lastError, isTransientError(error) {
-        logger.error("🛑 [progressiveRepair] BLOCKING FULL RESET - error is still transient!")
-        logger.error("   Transient errors should NOT cause data loss")
-        logger.error("   Error: \(error.localizedDescription)")
-        throw MLSSQLCipherError.databaseCreationFailed(
-          underlying: NSError(
-            domain: "MLSGRDBManager",
-            code: -5,
-            userInfo: [
-              NSLocalizedDescriptionKey:
-                "Database access blocked. Please restart the app to clear stale connections."
-            ]
-          ))
-      }
-
-      guard !isRunningInExtension else {
-        logger.critical(
-          "🚨 [progressiveRepair] Persistent corruption detected in extension for \(userDID.prefix(20), privacy: .private)"
-        )
-        throw MLSSQLCipherError.needsUserAction(
-          reason: "MLS storage requires main-app reset. Reopen the app to continue recovery."
-        )
-      }
-
-      logger.critical(
-        "🚨 [progressiveRepair] Persistent corruption detected for \(userDID.prefix(20), privacy: .private)"
-      )
-      throw MLSSQLCipherError.needsUserAction(
-        reason: "MLS storage is corrupt and requires user confirmation to reset. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
-      )
-    }
+    logger.critical(
+      "🚨 [progressiveRepair] Persistent corruption detected for \(userDID.prefix(20), privacy: .private)"
+    )
+    throw MLSSQLCipherError.needsUserAction(
+      reason: "MLS storage is corrupt and requires user confirmation to reset. Use Settings ▸ Diagnostics ▸ Reset MLS Storage."
+    )
   }
 
   /// Check if database is in a failed state requiring reset
@@ -3543,40 +3468,22 @@ public actor MLSGRDBManager {
     }
 
     logger.critical(
-      "💥 [HMAC] Forcing quarantine reset for \(userDID.prefix(20), privacy: .private)...")
+      "💥 [HMAC] Forcing reset for \(userDID.prefix(20), privacy: .private)...")
     logger.critical("   Context: \(context, privacy: .public)")
 
     let resetSucceeded = await performHardReset(for: userDID)
     guard resetSucceeded else {
       markNeedsHardReset(for: userDID)
       throw MLSSQLCipherError.storageUnavailable(
-        reason: "MLS storage locked; unable to quarantine corrupted files"
+        reason: "MLS storage locked; unable to reset storage"
       )
     }
 
-    updateConnectionState(.opening, for: userDID)
-    let database = try await createDatabase(for: userDID)
-
     switch mode {
     case .primary:
-      databases[userDID] = database
-      Self.registerForEmergencyClose(database, for: userDID)
-      updateConnectionState(.open, for: userDID)
-      if activeUserDID == nil {
-        activeUserDID = userDID
-      }
-      startPeriodicCheckpointingIfNeeded()
-      logger.info(
-        "✅ [HARD-RESET] Recreated primary database for user: \(userDID.prefix(20), privacy: .private)..."
-      )
-      return database
+      return try await getDatabasePool(for: userDID)
     case .ephemeral:
-      let cachedDatabase = await cacheEphemeralDatabase(database, for: userDID)
-      updateConnectionState(.open, for: userDID)
-      logger.info(
-        "✅ [HARD-RESET] Recreated ephemeral database for user: \(userDID.prefix(20), privacy: .private)..."
-      )
-      return cachedDatabase
+      return try await openOrCreateDatabase(for: userDID, mode: .ephemeral)
     }
   }
 
@@ -3640,108 +3547,18 @@ public actor MLSGRDBManager {
     }
 
     logger.critical(
-      "🔥 [HARD-RESET] Performing quarantine reset for: \(userDID.prefix(20), privacy: .private)")
-    logger.critical("   ⚠️ Preserving data by moving files into quarantine")
-
-    // 1. Ask NSE to release handles before quarantine
-    MLSStateChangeNotifier.postNSEStop()
-    try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms grace period
-
-    // 2. No advisory lock needed - SQLite WAL handles concurrent access
-    // NSE stop signal above gives grace period for extension to close handles
-    // `MLSStateChangeNotifier` publishes state changes after reset completes
-
-    // 3. Close any open connections
-    let released = await releaseConnectionWithoutCheckpoint(for: userDID)
-    if !released {
-      closeDatabase(for: userDID)
-    }
-
-    // 4. Close any ephemeral pools
-    if let ephemeralPool = uncachedEphemeralPools.removeValue(forKey: userDID) {
-      do {
-        try ephemeralPool.close()
-        logger.info("   Closed ephemeral pool")
-      } catch {
-        logger.warning("   Failed to close ephemeral pool: \(error.localizedDescription)")
-      }
-    }
-
-    // 5. Get database file paths
-    let dbPath = databasePath(for: userDID)
-    let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
-    let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
-    let journalPath = URL(fileURLWithPath: dbPath.path + "-journal")
-
-    var quarantinedFiles: [String] = []
-    var failedFiles: [String] = []
-
-    // 6. Quarantine ALL database files (main .db, -wal, -shm, -journal)
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [
-      .withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime,
-    ]
-
-    let timestamp = formatter.string(from: Date())
-    let didTag =
-      userDID.data(using: .utf8)?.base64EncodedString()
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "=", with: "")
-      .prefix(16) ?? "unknown"
-
-    let quarantineDir =
-      databaseDirectory
-      .appendingPathComponent("Quarantine", isDirectory: true)
-      .appendingPathComponent("\(timestamp)_\(didTag)", isDirectory: true)
+      "🔥 [HARD-RESET] Performing clean reset via clearStorage for: \(userDID.prefix(20), privacy: .private)")
 
     do {
-      try FileManager.default.createDirectory(
-        at: quarantineDir, withIntermediateDirectories: true, attributes: nil)
+      try await MLSClient.shared.clearStorage(for: userDID)
+      clearRepairState(for: userDID)
+      clearHardResetFlag(for: userDID)
+      clearDatabaseAccessSuspensionIfNeeded(for: userDID, operation: "performHardReset")
+      return true
     } catch {
-      logger.error("   ❌ Failed to create quarantine directory: \(error.localizedDescription)")
+      logger.critical("❌ [MLSGRDBManager] performHardReset failed: \(error.localizedDescription)")
       return false
     }
-
-    for path in [dbPath, walPath, shmPath, journalPath] {
-      guard FileManager.default.fileExists(atPath: path.path) else { continue }
-      do {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path.path)
-        let fileSize = (attrs?[.size] as? Int64) ?? 0
-        let destination = quarantineDir.appendingPathComponent(path.lastPathComponent)
-
-        try FileManager.default.moveItem(at: path, to: destination)
-        quarantinedFiles.append("\(path.lastPathComponent) (\(fileSize) bytes)")
-        logger.info("   📦 Quarantined: \(path.lastPathComponent) (\(fileSize) bytes)")
-      } catch {
-        failedFiles.append(path.lastPathComponent)
-        logger.error(
-          "   ❌ Failed to quarantine \(path.lastPathComponent): \(error.localizedDescription)")
-      }
-    }
-
-    // 7. Clear all state for this user
-    repairAttempts.removeValue(forKey: userDID)
-    walRepairState.removeValue(forKey: userDID)
-    usersNeedingHardReset.remove(userDID)
-    connectionStates.removeValue(forKey: userDID)
-    coordinationGeneration.removeValue(forKey: userDID)
-    keyFingerprints.removeValue(forKey: userDID)
-    if activeUserDID == userDID {
-      activeUserDID = nil
-    }
-
-    if !quarantinedFiles.isEmpty {
-      logger.critical("🔥 [HARD-RESET] Quarantined: \(quarantinedFiles.joined(separator: ", "))")
-    }
-
-    if !failedFiles.isEmpty {
-      logger.error("🔥 [HARD-RESET] Failed to quarantine: \(failedFiles.joined(separator: ", "))")
-      return false
-    }
-
-    logger.critical("🔥 [HARD-RESET] ✅ Complete - data preserved in quarantine")
-    return true
   }
 
   /// Force a WAL checkpoint to consolidate the WAL file into the main database

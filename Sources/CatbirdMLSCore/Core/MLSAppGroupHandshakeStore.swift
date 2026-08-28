@@ -52,7 +52,8 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
       if let number = obj as? NSNumber {
         current = number.uint64Value
       } else {
-        fatalError("Corrupt handshake counter in App Group defaults for key: \(counterKey)")
+        logger.critical("🚨 [Handshake] Non-numeric counter found in defaults for key: \(counterKey), treating as 0")
+        current = 0
       }
     } else {
       current = 0
@@ -95,12 +96,13 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
 
     for (key, value) in dict where key.hasPrefix("mls_handshake_request.") && key.hasSuffix(".\(MLSStoragePaths.cleanSuffix)") {
       guard let data = value as? Data else {
-        fatalError("Corrupt non-Data handshake request for key: \(key)")
+        logger.critical("🚨 [Handshake] Skipping non-Data handshake request for key: \(key)")
+        continue
       }
-      let record = decode(MLSNSEWillCloseRequest.self, from: data)
-      results.append(record)
+      if let record = decode(MLSNSEWillCloseRequest.self, from: data) {
+        results.append(record)
+      }
     }
-
     return results
   }
 
@@ -182,24 +184,26 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
       defaults.set(data, forKey: key)
       defaults.synchronize()
     } catch {
-      fatalError("Failed to encode handshake record: \(error.localizedDescription)")
+      logger.critical("🚨 [Handshake] Failed to encode handshake record for key \(key): \(error.localizedDescription)")
     }
   }
 
   private func get<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {
     guard let obj = defaults.object(forKey: key) else { return nil }
     guard let data = obj as? Data else {
-      fatalError("Corrupt non-Data object in defaults for key \(key)")
+      logger.critical("🚨 [Handshake] Non-Data object in defaults for key \(key)")
+      return nil
     }
     return decode(type, from: data)
   }
 
-  private func decode<T: Decodable>(_ type: T.Type, from data: Data) -> T {
+  private func decode<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
     let decoder = JSONDecoder()
     do {
       return try decoder.decode(type, from: data)
     } catch {
-      fatalError("Failed to decode handshake record: \(error.localizedDescription)")
+      logger.critical("🚨 [Handshake] Failed to decode handshake record: \(error.localizedDescription)")
+      return nil
     }
   }
 }

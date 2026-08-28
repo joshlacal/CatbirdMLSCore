@@ -1,5 +1,5 @@
 import Foundation
-
+import OSLog
 /// Cross-process authority-mode hint shared from the main app to extensions.
 ///
 /// The main Catbird process still owns mode parsing. Extensions read this narrow
@@ -7,6 +7,8 @@ import Foundation
 public enum MLSAuthorityModeSharedState {
   private static let suiteName = "group.blue.catbird.shared"
   public static let userDefaultsKey = "mls.protocol_authority_mode.\(MLSStoragePaths.cleanSuffix)"
+  private static let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSAuthorityMode")
+
 
   private static var defaults: UserDefaults {
     guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -27,7 +29,8 @@ public enum MLSAuthorityModeSharedState {
     guard let rawValue = obj as? String,
       let mode = MLSProtocolAuthorityMode(rawRuntimeValue: rawValue)
     else {
-      fatalError("Corrupt or invalid authority mode in shared defaults: \(obj)")
+      logger.critical("🚨 [AuthorityMode] Corrupt or invalid authority mode in shared defaults: \(String(describing: obj)), returning .defaultMode")
+      return .defaultMode
     }
     return mode
   }

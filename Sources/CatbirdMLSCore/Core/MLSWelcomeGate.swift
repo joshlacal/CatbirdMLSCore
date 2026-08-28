@@ -19,6 +19,8 @@ public actor MLSWelcomeGate {
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "WelcomeGate")
 
   private let gateDirectory: URL
+  private var unavailableUsers: Set<String> = []
+
 
   private init() {
     do {
@@ -33,12 +35,20 @@ public actor MLSWelcomeGate {
   public func beginWelcomeProcessing(for conversationID: String, userDID: String) {
     let url = markerURL(conversationID: conversationID, userDID: userDID)
 
-    // Ensure user directory exists
-    try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-
-    if !FileManager.default.fileExists(atPath: url.path) {
-      FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil)
-      logger.info("⏳ [WelcomeGate] Begin Welcome: convo=\(conversationID.prefix(16))..., user=\(userDID.prefix(20), privacy: .private)")
+    do {
+      try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+      let exists = try MLSStoragePaths.fileExistsStrict(at: url)
+      if !exists {
+        guard FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil) else {
+          logger.critical("🚨 [WelcomeGate] Failed to create welcome marker at \(url.path), marking gate unavailable for user \(userDID.prefix(20), privacy: .private)")
+          unavailableUsers.insert(userDID)
+          return
+        }
+        logger.info("⏳ [WelcomeGate] Begin Welcome: convo=\(conversationID.prefix(16))..., user=\(userDID.prefix(20), privacy: .private)")
+      }
+    } catch {
+      logger.critical("🚨 [WelcomeGate] Filesystem error beginning welcome for user \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)")
+      unavailableUsers.insert(userDID)
     }
   }
 
@@ -46,17 +56,29 @@ public actor MLSWelcomeGate {
   public func completeWelcomeProcessing(for conversationID: String, userDID: String) {
     let url = markerURL(conversationID: conversationID, userDID: userDID)
     do {
-      try FileManager.default.removeItem(at: url)
+      if try MLSStoragePaths.fileExistsStrict(at: url) {
+        try FileManager.default.removeItem(at: url)
+      }
+      unavailableUsers.remove(userDID)
+      logger.info("✅ [WelcomeGate] Complete Welcome: convo=\(conversationID.prefix(16))..., user=\(userDID.prefix(20), privacy: .private)")
     } catch {
-      // It's ok if it didn't exist.
+      logger.critical("🚨 [WelcomeGate] Failed to remove welcome marker at \(url.path): \(error.localizedDescription)")
     }
-    logger.info("✅ [WelcomeGate] Complete Welcome: convo=\(conversationID.prefix(16))..., user=\(userDID.prefix(20), privacy: .private)")
   }
 
   /// Cross-process check: is Welcome currently pending for this conversation?
   public func hasPendingWelcome(for conversationID: String, userDID: String) -> Bool {
+    if unavailableUsers.contains(userDID) {
+      return true
+    }
+
     let url = markerURL(conversationID: conversationID, userDID: userDID)
-    guard FileManager.default.fileExists(atPath: url.path) else { return false }
+    do {
+      guard try MLSStoragePaths.fileExistsStrict(at: url) else { return false }
+    } catch {
+      logger.critical("🚨 [WelcomeGate] Failed strict existence check for \(url.path): \(error.localizedDescription), failing closed")
+      return true
+    }
 
     // Safety: if we crashed mid-Welcome, don't block forever.
     if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
