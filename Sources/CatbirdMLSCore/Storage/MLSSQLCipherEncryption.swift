@@ -123,6 +123,13 @@ public actor MLSSQLCipherEncryption {
     return "x'\(hexString)'"
   }
 
+  /// Convert raw key and salt data to combined hex string for SQLCipher PRAGMA key
+  func keyToHexString(_ key: Data, salt: Data) -> String {
+    let combined = key + salt
+    let hexString = combined.map { String(format: "%02x", $0) }.joined()
+    return "x'\(hexString)'"
+  }
+
   // MARK: - Salt Management (for cipher_plaintext_header_size)
 
   /// Salt size for SQLCipher (16 bytes)
@@ -451,15 +458,8 @@ extension MLSSQLCipherEncryption {
 
         // PRAGMA key MUST be the first cipher operation
         let hexKey = key.map { String(format: "%02x", $0) }.joined()
-        try db.execute(sql: "PRAGMA key = \"x'\(hexKey)'\";")
-
-        // Plaintext header — MUST be after PRAGMA key
-        try db.execute(sql: "PRAGMA cipher_plaintext_header_size = 32;")
-
-        // Explicit salt (required with plaintext header)
         let hexSalt = salt.map { String(format: "%02x", $0) }.joined()
-        try db.execute(sql: "PRAGMA cipher_salt = \"x'\(hexSalt)'\";")
-
+        try db.execute(sql: "PRAGMA key = \"x'\(hexKey)\(hexSalt)'\";")
         // Match the SQLCipher 4 settings used by MLSGRDBManager
         try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
         try db.execute(sql: "PRAGMA kdf_iter = 256000;")

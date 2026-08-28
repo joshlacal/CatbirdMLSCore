@@ -3785,50 +3785,13 @@ public actor MLSClient {
     // ═══════════════════════════════════════════════════════════════════════════
     // PHASE 4: Perform the actual reset
     // ═══════════════════════════════════════════════════════════════════════════
-
     // Drop in-memory Rust context so it will reload from disk on next operation.
     await MLSCoreContext.shared.removeContext(for: normalizedDID)
+    await MLSGRDBManager.shared.closeDatabase(for: normalizedDID)
 
-    // Quarantine + reset the Swift SQLCipher database.
-    try await MLSGRDBManager.shared.quarantineAndResetDatabase(for: normalizedDID)
-
-    // Quarantine the Rust SQLite file so it can be recreated fresh.
-    let mlsStateDir = MLSStoragePaths.rustDatabaseDirectory()
-
-    let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "=", with: "")
-      .prefix(64).description ?? "default"
-
-    let storageFileURL = mlsStateDir.appendingPathComponent("\(didHash).db")
-    let wal = storageFileURL.appendingPathExtension("wal")
-    let shm = storageFileURL.appendingPathExtension("shm")
-
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
-    let timestamp = formatter.string(from: Date())
-
-    let quarantineDir = mlsStateDir
-      .appendingPathComponent("Quarantine", isDirectory: true)
-      .appendingPathComponent("\(timestamp)_\(didHash.prefix(16))", isDirectory: true)
-
-    try? FileManager.default.createDirectory(at: quarantineDir, withIntermediateDirectories: true)
-
-    for url in [storageFileURL, wal, shm] {
-      guard FileManager.default.fileExists(atPath: url.path) else { continue }
-      let dest = quarantineDir.appendingPathComponent(url.lastPathComponent)
-      do {
-        try FileManager.default.moveItem(at: url, to: dest)
-        logger.info("📦 [Diagnostics] Quarantined Rust storage file: \(url.lastPathComponent)")
-      } catch {
-        logger.warning("⚠️ [Diagnostics] Failed to quarantine \(url.lastPathComponent): \(error.localizedDescription)")
-      }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 5: Reopen the gate for fresh operations
-    // ═══════════════════════════════════════════════════════════════════════════
+    // Reset both clean Swift and Rust resource sets via coordinated reset
+    try await MLSStorageCoordinator.shared.coordinateReset(for: .swiftGRDB, userDID: normalizedDID)
+    try await MLSStorageCoordinator.shared.coordinateReset(for: .rustState, userDID: normalizedDID)
     await MLSDatabaseGate.shared.openGate(for: normalizedDID)
 
     logger.info("✅ [Diagnostics] MLS storage reset complete for \(normalizedDID)")
@@ -3857,72 +3820,21 @@ public actor MLSClient {
       await MLSDatabaseGate.shared.forceCloseGate(for: normalizedDID)
     }
 
-    // Phase 3: Destroy Swift SQLCipher database files (main, wal, shm, journal, quarantine)
-    await MLSGRDBManager.shared.destroyDatabaseFiles(for: normalizedDID)
+    await MLSGRDBManager.shared.closeDatabase(for: normalizedDID)
 
-    // Phase 4: Destroy Rust state database files (main, wal, shm, journal, quarantine)
-    let mlsStateDir = MLSStoragePaths.rustDatabaseDirectory()
-    let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "=", with: "")
-      .prefix(64).description ?? "default"
+    // Phase 3: Coordinated reset of clean Swift and Rust resources (DB, sidecars, quarantine, keys, markers)
+    try? await MLSStorageCoordinator.shared.coordinateReset(for: .swiftGRDB, userDID: normalizedDID)
+    try? await MLSStorageCoordinator.shared.coordinateReset(for: .rustState, userDID: normalizedDID)
 
-    let storageFileURL = mlsStateDir.appendingPathComponent("\(didHash).db")
-    let rustFileVariants = [
-      storageFileURL,
-      URL(fileURLWithPath: storageFileURL.path + "-wal"),
-      URL(fileURLWithPath: storageFileURL.path + "-shm"),
-      URL(fileURLWithPath: storageFileURL.path + "-journal"),
-      storageFileURL.appendingPathExtension("wal"),
-      storageFileURL.appendingPathExtension("shm"),
-      storageFileURL.appendingPathExtension("journal")
-    ]
-    for fileURL in rustFileVariants {
-      if FileManager.default.fileExists(atPath: fileURL.path) {
-        try? FileManager.default.removeItem(at: fileURL)
-        logger.info("🗑️ [MLSClient] Deleted Rust state file: \(fileURL.lastPathComponent)")
-      }
-    }
-
-    // Clean up any quarantine directories containing this didHash
-    let rustQuarantineDir = mlsStateDir.appendingPathComponent("Quarantine", isDirectory: true)
-    if let entries = try? FileManager.default.contentsOfDirectory(atPath: rustQuarantineDir.path) {
-      for entry in entries where entry.contains(String(didHash.prefix(16))) {
-        let entryURL = rustQuarantineDir.appendingPathComponent(entry)
-        try? FileManager.default.removeItem(at: entryURL)
-        logger.info("🗑️ [MLSClient] Deleted Rust quarantine entry: \(entry)")
-      }
-    }
-
-    // Delete clean storage initialization markers
-    let coordinator = MLSStorageCoordinator.shared
-    let markerGRDB = coordinator.markerURL(for: .swiftGRDB, userDID: normalizedDID)
-    let markerRust = coordinator.markerURL(for: .rustState, userDID: normalizedDID)
-    try? FileManager.default.removeItem(at: markerGRDB)
-    try? FileManager.default.removeItem(at: markerRust)
-
-    // Phase 5: Destroy Keychain materials
-    // 5a. SQLCipher DB key and salt
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: normalizedDID)
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: normalizedDID)
-    try? MLSKeychainManager.shared.deleteEncryptionKey(forUserDID: normalizedDID)
-
-    // 5b. Content-root key (field encryption)
+    // Phase 4: Destroy generation-scoped content-root key and credentials
     try? MLSContentRootKey.delete(for: normalizedDID)
-
-    // 5c. Identity and signing keys
-    try? MLSKeychain.deleteSignatureKey(forIdentity: normalizedDID)
     try? MLSKeychainManager.shared.delete(forKey: "mls_identity_key_\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
-
-    // 5d. Device credentials & orchestrator adapter keys
     try? MLSKeychainManager.shared.delete(forKey: "mls.credential.mlsDid.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
     try? MLSKeychainManager.shared.delete(forKey: "mls.credential.deviceUuid.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
-    MLSDeviceManager.removeStoredDeviceInfo(for: normalizedDID)
 
-    // Phase 6: Destroy clean version tracking (legacy migration flags are untouched)
+    // Phase 5: Destroy clean version tracking (legacy migration flags are untouched)
     MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
-    // Phase 7: Re-open database gate and clear activity shutdown state so re-adding this account works cleanly
+    // Phase 6: Re-open database gate and clear activity shutdown state so re-adding this account works cleanly
     await MLSDatabaseGate.shared.openGate(for: normalizedDID)
     MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
     logger.info("✅ [MLSClient] Complete destruction finished for user: \(normalizedDID)")

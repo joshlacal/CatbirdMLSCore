@@ -5,8 +5,8 @@ final class MLSAccountRemovalDestructionTests: XCTestCase {
 
   func testDestroyStorageCompletelyRemovesAllArtifacts() async throws {
     let testDID = "did:plc:remove_test_\(UUID().uuidString)"
-    let grdbDir = MLSStoragePaths.grdbDatabaseDirectory()
-    let rustDir = MLSStoragePaths.rustDatabaseDirectory()
+    let grdbDir = try MLSStoragePaths.grdbDatabaseDirectory()
+    let rustDir = try MLSStoragePaths.rustDatabaseDirectory()
     
     // 1. Create simulated Swift SQLCipher files
     try FileManager.default.createDirectory(at: grdbDir, withIntermediateDirectories: true)
@@ -83,6 +83,11 @@ final class MLSAccountRemovalDestructionTests: XCTestCase {
 
     let deviceUuidCred = try? MLSKeychainManager.shared.retrieve(forKey: "mls.credential.deviceUuid.\(testDID).\(MLSStoragePaths.cleanSuffix)")
     XCTAssertNil(deviceUuidCred, "Device UUID credential must be deleted")
+
+    // Legacy signature key must remain untouched
+    let legacySigKey = try? MLSKeychain.retrieveSignatureKey(forIdentity: testDID)
+    XCTAssertNotNil(legacySigKey, "Legacy unsuffixed signature key must remain untouched")
+    XCTAssertEqual(legacySigKey, Data(repeating: 0x55, count: 64))
 
     // 8. Assert Migration preferences are untouched
     let swiftMigration = appGroupDefaults?.object(forKey: "MLSPlaintextHeaderMigrationV1_\(sanitizedDID)")

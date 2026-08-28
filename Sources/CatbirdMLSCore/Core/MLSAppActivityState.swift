@@ -8,17 +8,19 @@ public enum MLSAppActivityState {
   private static let activeUserDIDKey = "mls_main_app_active_user_did.\(MLSStoragePaths.cleanSuffix)"
   private static let updatedAtKey = "mls_main_app_activity_updated_at.\(MLSStoragePaths.cleanSuffix)"
 
-  private static var defaults: UserDefaults? { UserDefaults(suiteName: suiteName) }
-
+  private static var defaults: UserDefaults {
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+      fatalError("Required App Group suite \(suiteName) unavailable for MLSAppActivityState")
+    }
+    return defaults
+  }
   public static func setMainAppActive(_ isActive: Bool, activeUserDID: String?) {
-    guard let defaults else { return }
     defaults.set(isActive, forKey: isActiveKey)
     defaults.set(activeUserDID, forKey: activeUserDIDKey)
     defaults.set(Date().timeIntervalSince1970, forKey: updatedAtKey)
   }
 
   public static func updateActiveUserDID(_ userDID: String?) {
-    guard let defaults else { return }
     defaults.set(userDID, forKey: activeUserDIDKey)
     defaults.set(Date().timeIntervalSince1970, forKey: updatedAtKey)
   }
@@ -29,8 +31,6 @@ public enum MLSAppActivityState {
     recipientUserDID: String,
     staleAfter seconds: TimeInterval = 30
   ) -> Bool {
-    guard let defaults else { return true }
-
     let isActive = defaults.bool(forKey: isActiveKey)
     let activeUser = defaults.string(forKey: activeUserDIDKey)
     let updatedAt = defaults.double(forKey: updatedAtKey)
@@ -49,7 +49,6 @@ public enum MLSAppActivityState {
   /// Signal that the main app is shutting down (starting account switch)
   /// NSE should yield database access during this period
   public static func setShuttingDown(_ isShuttingDown: Bool, userDID: String?) {
-    guard let defaults else { return }
     defaults.set(isShuttingDown, forKey: isShuttingDownKey)
     defaults.set(userDID, forKey: activeUserDIDKey)
     defaults.set(Date().timeIntervalSince1970, forKey: updatedAtKey)
@@ -60,8 +59,6 @@ public enum MLSAppActivityState {
   public static func isShuttingDown(for userDID: String, staleAfter seconds: TimeInterval = 30)
     -> Bool
   {
-    guard let defaults else { return false }
-
     let shuttingDown = defaults.bool(forKey: isShuttingDownKey)
     let activeUser = defaults.string(forKey: activeUserDIDKey)
     let updatedAt = defaults.double(forKey: updatedAtKey)
@@ -81,18 +78,13 @@ public enum MLSAppActivityState {
   private static let switchingToUserKey = "mls_switching_to_user.\(MLSStoragePaths.cleanSuffix)"
   private static let accountSwitchEpochKey = "mls_account_switch_epoch.\(MLSStoragePaths.cleanSuffix)"
 
-  /// Get the current account switch epoch counter.
-  /// This monotonically increases with each account switch.
-  /// Operations can check this before/after critical sections to detect concurrent switches.
   public static func getAccountSwitchEpoch() -> UInt64 {
-    guard let defaults else { return 0 }
     return defaults.object(forKey: accountSwitchEpochKey) as? UInt64 ?? 0
   }
 
   /// Increment the account switch epoch counter.
   /// Call this at the START of every account switch to signal other processes.
   private static func incrementAccountSwitchEpoch() {
-    guard let defaults else { return }
     let current = getAccountSwitchEpoch()
     defaults.set(current + 1, forKey: accountSwitchEpochKey)
   }
@@ -101,7 +93,6 @@ public enum MLSAppActivityState {
   /// This is set at the very beginning of account switch, before shutdown signals.
   /// NSE should yield database access for BOTH the old and new user during this period.
   public static func beginAccountSwitch(from fromDID: String?, to toDID: String) {
-    guard let defaults else { return }
     // Increment epoch FIRST to signal all processes immediately
     incrementAccountSwitchEpoch()
     defaults.set(true, forKey: isSwitchingKey)
@@ -113,7 +104,6 @@ public enum MLSAppActivityState {
   /// Signal that account switch is complete
   /// Call this after the new account is fully initialized and ready
   public static func endAccountSwitch() {
-    guard let defaults else { return }
     defaults.set(false, forKey: isSwitchingKey)
     defaults.removeObject(forKey: switchingFromUserKey)
     defaults.removeObject(forKey: switchingToUserKey)

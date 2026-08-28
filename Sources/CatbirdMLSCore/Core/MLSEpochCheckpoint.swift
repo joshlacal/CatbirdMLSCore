@@ -59,7 +59,7 @@ public actor MLSEpochCheckpoint {
   // MARK: - Initialization
   
   private init() {
-    checkpointDir = MLSStoragePaths.checkpointsDirectory()
+    checkpointDir = (try? MLSStoragePaths.checkpointsDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("epoch-checkpoints-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
     // Create directory if needed
     do {
       try FileManager.default.createDirectory(at: checkpointDir, withIntermediateDirectories: true)

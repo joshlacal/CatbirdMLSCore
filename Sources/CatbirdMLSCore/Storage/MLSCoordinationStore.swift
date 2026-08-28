@@ -33,30 +33,34 @@ public final class MLSCoordinationStore {
   
   private let queue = DispatchQueue(label: "blue.catbird.mls.coordination", qos: .userInitiated)
   
-  private var containerURL: URL {
-    MLSStoragePaths.baseContainerURL()
-  }
-  
   private var fileURL: URL {
-    containerURL.appendingPathComponent(fileName)
+    let dir = (try? MLSStoragePaths.coordinationDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("mls-coordination-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
+    return dir.appendingPathComponent(fileName)
   }
-  
+
   private init() {
     ensureStateExists()
   }
-  
+
   private func ensureStateExists() {
     guard !FileManager.default.fileExists(atPath: fileURL.path) else { return }
     save(State.initial)
   }
-  
+
   /// Get current coordination state
   public func getState() -> State {
-    guard let data = try? Data(contentsOf: fileURL),
-          let state = try? JSONDecoder().decode(State.self, from: data) else {
+    guard FileManager.default.fileExists(atPath: fileURL.path) else {
       return State.initial
     }
-    return state
+    do {
+      let data = try Data(contentsOf: fileURL)
+      let state = try JSONDecoder().decode(State.self, from: data)
+      return state
+    } catch {
+      logger.critical("🚨 [COORD] Coordination state file exists but is corrupt: \(error.localizedDescription)")
+      // Return initial with higher generation or fail
+      return State.initial
+    }
   }
   
   /// Increment the coordination generation
@@ -95,6 +99,8 @@ public final class MLSCoordinationStore {
   
   private func save(_ state: State) {
     do {
+      let dir = fileURL.deletingLastPathComponent()
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
       let data = try JSONEncoder().encode(state)
       try data.write(to: fileURL, options: .atomic)
     } catch {

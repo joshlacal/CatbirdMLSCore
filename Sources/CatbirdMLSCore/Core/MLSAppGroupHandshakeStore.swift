@@ -32,14 +32,14 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   private static let suiteName = "group.blue.catbird.shared"
 
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSHandshakeStore")
-  private let defaults: UserDefaults?
-
-  private init() {
-    self.defaults = UserDefaults(suiteName: Self.suiteName)
-    if defaults == nil {
-      logger.warning("⚠️ [Handshake] Shared UserDefaults suite not available")
+  private var defaults: UserDefaults {
+    guard let defaults = UserDefaults(suiteName: Self.suiteName) else {
+      fatalError("Required App Group suite \(Self.suiteName) unavailable for MLSAppGroupHandshakeStore")
     }
+    return defaults
   }
+
+  private init() {}
   // MARK: - Public API
 
   /// Issue (or replace) the current NSE will-close request for a user and return its token.
@@ -59,14 +59,14 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
     // ═══════════════════════════════════════════════════════════════════════════
     let counterKey = counterKey(for: userDID)
     let current: UInt64
-    if let number = defaults?.object(forKey: counterKey) as? NSNumber {
+    if let number = defaults.object(forKey: counterKey) as? NSNumber {
       current = number.uint64Value
     } else {
-      current = UInt64(defaults?.integer(forKey: counterKey) ?? 0)
+      current = UInt64(defaults.integer(forKey: counterKey))
     }
     let token = current &+ 1
-    defaults?.set(token, forKey: counterKey)
-    defaults?.synchronize()
+    defaults.set(token, forKey: counterKey)
+    defaults.synchronize()
     let request = MLSNSEWillCloseRequest(userDID: userDID, token: token, createdAt: now)
     set(request, forKey: requestKey(for: userDID))
     logger.debug("📌 [Handshake] Issued willClose token=\(token, privacy: .public) for \(userDID.prefix(20), privacy: .private)")
@@ -101,13 +101,11 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   ///
   /// This is used by the main app upon receiving the Darwin doorbell.
   public func allRequests() -> [MLSNSEWillCloseRequest] {
-    guard let defaults else { return [] }
     let dict = defaults.dictionaryRepresentation()
-    let prefix = Self.requestKeyPrefix
     var results: [MLSNSEWillCloseRequest] = []
     results.reserveCapacity(4)
 
-    for (key, value) in dict where key.hasPrefix(prefix) {
+    for (key, value) in dict where key.hasPrefix("mls_handshake_request.") && key.hasSuffix(".\(MLSStoragePaths.cleanSuffix)") {
       guard let data = value as? Data else { continue }
       if let record = decode(MLSNSEWillCloseRequest.self, from: data) {
         results.append(record)
@@ -179,21 +177,17 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
 
   // MARK: - Key Helpers
 
-  private static let counterKeyPrefix = "mls_handshake_counter.\(MLSStoragePaths.cleanSuffix)."
-  private static let requestKeyPrefix = "mls_handshake_request.\(MLSStoragePaths.cleanSuffix)."
-  private static let ackKeyPrefix = "mls_handshake_ack.\(MLSStoragePaths.cleanSuffix)."
   private func counterKey(for userDID: String) -> String {
-    "\(Self.counterKeyPrefix)\(userKeySuffix(for: userDID))"
+    "mls_handshake_counter.\(userKeySuffix(for: userDID)).\(MLSStoragePaths.cleanSuffix)"
   }
 
   private func requestKey(for userDID: String) -> String {
-    "\(Self.requestKeyPrefix)\(userKeySuffix(for: userDID))"
+    "mls_handshake_request.\(userKeySuffix(for: userDID)).\(MLSStoragePaths.cleanSuffix)"
   }
 
   private func ackKey(for userDID: String) -> String {
-    "\(Self.ackKeyPrefix)\(userKeySuffix(for: userDID))"
+    "mls_handshake_ack.\(userKeySuffix(for: userDID)).\(MLSStoragePaths.cleanSuffix)"
   }
-
   private func userKeySuffix(for userDID: String) -> String {
     let digest = SHA256.hash(data: Data(userDID.utf8))
     let hex = digest.compactMap { String(format: "%02x", $0) }.joined()
@@ -207,7 +201,6 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   }
 
   private func set<T: Encodable>(_ value: T, forKey key: String) {
-    guard let defaults else { return }
     let encoder = JSONEncoder()
     guard let data = try? encoder.encode(value) else { return }
     defaults.set(data, forKey: key)
@@ -215,7 +208,7 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   }
 
   private func get<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {
-    guard let defaults, let data = defaults.data(forKey: key) else { return nil }
+    guard let data = defaults.data(forKey: key) else { return nil }
     return decode(type, from: data)
   }
   private func decode<T: Decodable>(_ type: T.Type, from data: Data) -> T? {

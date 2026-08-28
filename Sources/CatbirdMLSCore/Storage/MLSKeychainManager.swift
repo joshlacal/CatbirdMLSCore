@@ -26,6 +26,20 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Format: "TeamID.com.example.group"
   public var accessGroup: String?
 
+  /// Effective access group used for keychain operations.
+  /// If not explicitly set, attempts resolution of the shared "blue.catbird.shared" group.
+  public var effectiveAccessGroup: String? {
+    if let accessGroup {
+      return accessGroup
+    }
+    if !skipDataProtection {
+      if let resolved = Self.resolvedAccessGroup(suffix: "blue.catbird.shared") {
+        self.accessGroup = resolved
+        return resolved
+      }
+    }
+    return nil
+  }
   /// The Keychain service name. Defaults to "blue.catbird.mls".
   /// Set to a different value for standalone daemons to avoid conflicts with the main app.
   public var serviceName: String = "blue.catbird.mls"
@@ -613,7 +627,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = accessGroup {
+    if let accessGroup = effectiveAccessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -650,7 +664,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = accessGroup {
+    if let accessGroup = effectiveAccessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -703,7 +717,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = accessGroup {
+    if let accessGroup = effectiveAccessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -720,7 +734,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
         updateQuery[kSecUseDataProtectionKeychain as String] = true
       }
       #endif
-      if let accessGroup = accessGroup {
+      if let accessGroup = effectiveAccessGroup {
         updateQuery[kSecAttrAccessGroup as String] = accessGroup
       }
       let updateAttributes: [String: Any] = [
@@ -757,7 +771,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = accessGroup {
+    if let accessGroup = effectiveAccessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -793,7 +807,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
     }
 
-    if let accessGroup = accessGroup {
+    if let accessGroup = effectiveAccessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 

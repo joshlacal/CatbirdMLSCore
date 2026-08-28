@@ -270,7 +270,7 @@ public actor MLSCoreContext {
       return customDir
     }
     
-    return MLSStoragePaths.rustDatabaseDirectory()
+    return (try? MLSStoragePaths.rustDatabaseDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("mls-state-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
   }
 
   // MARK: - Configuration
@@ -482,53 +482,52 @@ public actor MLSCoreContext {
 
     // Check and coordinate storage state machine
     let coordinator = MLSStorageCoordinator.shared
-    let state = try coordinator.evaluateState(for: .rustState, userDID: userDid)
-    let attemptUUID: String
-    let admissionLease: MLSLeaseToken
-    let isFirstCreation: Bool
+    let newContext = try await coordinator.coordinateOpen(for: .rustState, userDID: userDid) { attemptUUID, isFirstCreation in
+      // Create storage path for this user
+      let storagePath = try self.createStoragePath(for: userDid)
 
-    switch state {
-    case .allAbsent:
-      let (rec, lease) = try coordinator.beginCreation(for: .rustState, userDID: userDid)
-      attemptUUID = rec.attemptUUID
-      admissionLease = lease
-      isFirstCreation = true
-    case .complete(let record):
-      attemptUUID = record.attemptUUID
-      admissionLease = try coordinator.acquireAdmissionLease(for: .rustState, userDID: userDid)
-      isFirstCreation = false
-    case .incompleteAttempt(let record):
-      throw MLSStorageInitializationError.incompleteAttempt(details: "Restarted during creating attempt \(record.attemptUUID)")
-    case .mixedState(let details):
-      throw MLSStorageInitializationError.mixedState(details: details)
-    case .unreadableState(let details):
-      throw MLSStorageInitializationError.unreadableState(details: details)
-    }
-    defer { admissionLease.release() }
+      // Get or create encryption key
+      let encryptionKey = try await self.getEncryptionKey(for: userDid)
 
-    // Create storage path for this user
-    let storagePath = try createStoragePath(for: userDid)
+      // Create keychain access bridge
+      let keychainBridge = MLSKeychainAccessBridge()
 
-    // Get or create encryption key
-    let encryptionKey = try await getEncryptionKey(for: userDid)
+      // CRITICAL: Re-check suspension & cancellation right before opening Rust FFI / SQLCipher
+      if Self.isSuspensionInProgress || Task.isCancelled {
+        self.logger.warning("🚫 [0xdead10cc-FIX] getContext aborted right before MlsContext init - suspension or cancellation")
+        throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
+      }
 
-    // Create keychain access bridge
-    let keychainBridge = MLSKeychainAccessBridge()
+      let context = try MlsContext(
+        storagePath: storagePath,
+        encryptionKey: encryptionKey,
+        keychain: keychainBridge
+      )
 
-    // CRITICAL: Re-check suspension & cancellation right before opening Rust FFI / SQLCipher
-    if Self.isSuspensionInProgress || Task.isCancelled {
-      logger.warning("🚫 [0xdead10cc-FIX] getContext aborted right before MlsContext init - suspension or cancellation")
-      throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
-    }
+      // If suspension or cancellation intervened while MlsContext was constructing, immediately close it
+      if Self.isSuspensionInProgress || Task.isCancelled {
+        self.logger.warning("🚫 [0xdead10cc-FIX] Closing freshly created MlsContext due to suspension during init")
+        try? context.flushAndPrepareClose()
+        throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
+      }
 
-    let newContext = try MlsContext(
-      storagePath: storagePath,
-      encryptionKey: encryptionKey,
-      keychain: keychainBridge
-    )
+      // Set up external join authorizer
+      let authorizer = MLSExternalJoinAuthorizerBridge()
+      try context.setExternalJoinAuthorizer(authorizer: authorizer)
 
-    if isFirstCreation {
-      try coordinator.completeCreation(for: .rustState, userDID: userDid, attemptUUID: attemptUUID)
+      let epochStorage = MLSEpochSecretStorageBridge(userDID: userDid, databaseManager: .shared)
+      do {
+        try context.setEpochSecretStorage(storage: epochStorage)
+        self.logger.info("✅ Configured epoch secret storage for historical message decryption")
+      } catch {
+        self.logger.error("❌ Failed to configure epoch secret storage: \(error.localizedDescription)")
+      }
+
+      let contentRootKey = try MLSContentRootKey.loadOrCreate(for: userDid)
+      try context.setContentRootKey(key: contentRootKey)
+      self.logger.info("✅ Installed per-DID content root key on MLS context")
+
+      return context
     }
     // If suspension or cancellation intervened while MlsContext was constructing, immediately close it
     if Self.isSuspensionInProgress || Task.isCancelled {
