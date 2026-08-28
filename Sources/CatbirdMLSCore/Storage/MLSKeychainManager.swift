@@ -193,29 +193,26 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// - Returns: 32-byte encryption key (AES-256)
   /// - Throws: KeychainError if generation or storage fails
   public func getOrCreateEncryptionKey(forUserDID userDID: String) throws -> Data {
-    let key = "mls.encryption.key.\(userDID)"
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
+    return try getOrCreateImmutableKey(forKey: key, length: 32)
+  }
 
-    // Try to retrieve existing key
-    if let existingKey = try retrieve(forKey: key) {
-      logger.debug("Retrieved existing encryption key for user: \(userDID, privacy: .private)")
-      return existingKey
-    }
-
-    // Generate new 256-bit AES key
-    let newKey = try generateSecureRandomKey(length: 32)
-    try store(newKey, forKey: key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-    logger.info("🔑 Generated new encryption key for user: \(userDID, privacy: .private)")
-
-    return newKey
+  /// Retrieve encryption key for a user without mutating or generating a new key
+  public func retrieveEncryptionKey(forUserDID userDID: String) throws -> Data? {
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
+    return try retrieveKeyStrict(forKey: key)
   }
 
   /// Delete encryption key for a user (when logging out or clearing data)
   /// - Parameter userDID: User's DID identifier
   /// - Throws: KeychainError if deletion fails
   public func deleteEncryptionKey(forUserDID userDID: String) throws {
-    let key = "mls.encryption.key.\(userDID)"
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
     try delete(forKey: key)
-    logger.info("Deleted encryption key for user: \(userDID, privacy: .private)")
+    logger.info("Deleted encryption key for user: \(normalizedDID, privacy: .private)")
   }
 
   // MARK: - Group State Management
@@ -385,9 +382,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Retrieve a generic key by key ID (wrapper for FFI bridge)
   /// - Parameter keyId: Key identifier
   /// - Returns: Key data, or nil if not found
-  /// - Throws: KeychainError if retrieval fails
   public func retrieveKey(for keyId: String) throws -> Data? {
-    return try retrieve(forKey: keyId)
+    return try retrieveKeyStrict(forKey: keyId)
   }
 
   /// Store a generic key by key ID (wrapper for FFI bridge)
@@ -585,6 +581,98 @@ public final class MLSKeychainManager: @unchecked Sendable {
   }
 
   // MARK: - Core Keychain Operations
+  /// Atomic add-if-absent for clean-generation database key material.
+  /// On `errSecDuplicateItem`, discards the generated candidate, re-reads the winning item, and uses it.
+  /// Never overwrites or updates an existing item.
+  public func getOrCreateImmutableKey(
+    forKey key: String,
+    length: Int = 32,
+    accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+  ) throws -> Data {
+    if let existing = try retrieveKeyStrict(forKey: key) {
+      return existing
+    }
+
+    let candidate = try generateSecureRandomKey(length: length)
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrAccount as String: key,
+      kSecAttrService as String: serviceName,
+      kSecValueData as String: candidate,
+    ]
+
+    if !skipDataProtection {
+      query[kSecAttrAccessible as String] = accessible
+      query[kSecAttrSynchronizable as String] = false
+    }
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    if let accessGroup = accessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+    }
+
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecSuccess {
+      return candidate
+    } else if status == errSecDuplicateItem {
+      guard let winner = try retrieveKeyStrict(forKey: key) else {
+        throw KeychainError.retrieveFailed(errSecItemNotFound)
+      }
+      return winner
+    } else {
+      throw KeychainError.storeFailed(status)
+    }
+  }
+
+  /// Strict retrieve that differentiates item absence (nil) from read/entitlement errors (throws).
+  public func retrieveKeyStrict(forKey key: String, synchronizable: Bool = false) throws -> Data? {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrAccount as String: key,
+      kSecAttrService as String: serviceName,
+      kSecReturnData as String: true,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+
+    if !skipDataProtection {
+      query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
+    }
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    if let accessGroup = accessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+    }
+
+    var result: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+    if status == errSecItemNotFound {
+      return nil
+    }
+
+    guard status == errSecSuccess else {
+      logger.error("Failed to strictly retrieve keychain item: \(key), status: \(status)")
+      throw KeychainError.retrieveFailed(status)
+    }
+
+    return result as? Data
+  }
+
+  public func hasKeyStrict(forKey key: String) throws -> Bool {
+    try retrieveKeyStrict(forKey: key) != nil
+  }
+
 
   public func store(
     _ data: Data,

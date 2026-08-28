@@ -73,24 +73,8 @@ public actor MLSSQLCipherEncryption {
   /// - Throws: MLSSQLCipherError if key generation or retrieval fails
   func getOrCreateKey(for userDID: String) throws -> Data {
     let keychainKey = makeKeychainKey(for: userDID)
-    
-    logger.debug("[SQLCipher] getOrCreateKey for user: \(userDID.prefix(24), privacy: .private)..., accessGroup=\(self.keychainAccessGroup ?? "default")")
-
-    // Try to retrieve existing key from Keychain
-    if let existingKey = try? retrieveKey(keychainKey: keychainKey) {
-      guard existingKey.count == keySize else {
-        logger.error("[SQLCipher] Key size mismatch: expected \(self.keySize) bytes, got \(existingKey.count)")
-        throw MLSSQLCipherError.invalidEncryptionKey(reason: "Key size mismatch: expected \(keySize) bytes, got \(existingKey.count)")
-      }
-      logger.debug("[SQLCipher] Retrieved existing key for user")
-      return existingKey
-    }
-
-    // Generate new key if none exists
-    logger.info("[SQLCipher] No existing key found, generating new key for user: \(userDID.prefix(24), privacy: .private)...")
-    let newKey = try generateKey()
-    try storeKey(newKey, keychainKey: keychainKey)
-    return newKey
+    logger.debug("[SQLCipher] getOrCreateKey for user: \(userDID.prefix(24), privacy: .private)...")
+    return try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: keychainKey, length: keySize)
   }
 
   /// Retrieve existing encryption key for a user
@@ -99,7 +83,7 @@ public actor MLSSQLCipherEncryption {
   /// - Throws: MLSSQLCipherError if retrieval fails
   func getKey(for userDID: String) throws -> Data? {
     let keychainKey = makeKeychainKey(for: userDID)
-    return try? retrieveKey(keychainKey: keychainKey)
+    return try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keychainKey)
   }
 
   /// Delete encryption key for a user (when deleting account)
@@ -107,25 +91,7 @@ public actor MLSSQLCipherEncryption {
   /// - Throws: MLSSQLCipherError if deletion fails
   func deleteKey(for userDID: String) throws {
     let keychainKey = makeKeychainKey(for: userDID)
-
-    var query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: keychainService,
-      kSecAttrAccount as String: keychainKey
-    ]
-    
-    // Add shared access group for consistency
-    if let accessGroup = keychainAccessGroup {
-      query[kSecAttrAccessGroup as String] = accessGroup
-    }
-
-    let status = SecItemDelete(query as CFDictionary)
-
-    guard status == errSecSuccess || status == errSecItemNotFound else {
-      logger.error("[SQLCipher] Delete failed with status: \(status)")
-      throw MLSSQLCipherError.keychainAccessFailed(operation: "delete", status: status)
-    }
-    
+    try MLSKeychainManager.shared.delete(forKey: keychainKey)
     logger.debug("[SQLCipher] Key deleted for user: \(userDID.prefix(24), privacy: .private)...")
   }
 
@@ -170,75 +136,21 @@ public actor MLSSQLCipherEncryption {
   /// - Parameter userDID: User's decentralized identifier
   /// - Returns: 16-byte salt as Data
   /// - Throws: MLSSQLCipherError if salt generation or retrieval fails
-  func getOrCreateSalt(for userDID: String) throws -> Data {
+  func getOrCreateSalt(for userDID: String, dbPath: URL? = nil) throws -> Data {
     let keychainKey = makeSaltKeychainKey(for: userDID)
-
     logger.debug("[SQLCipher] getOrCreateSalt for user: \(userDID.prefix(24), privacy: .private)...")
-
-    // Try to retrieve existing salt from Keychain
-    if let existingSalt = try? retrieveSalt(keychainKey: keychainKey) {
-      guard existingSalt.count == saltSize else {
-        logger.error("[SQLCipher] Salt size mismatch: expected \(self.saltSize) bytes, got \(existingSalt.count)")
-        throw MLSSQLCipherError.invalidEncryptionKey(reason: "Salt size mismatch: expected \(saltSize) bytes, got \(existingSalt.count)")
-      }
-      logger.debug("[SQLCipher] Retrieved existing salt for user")
-      return existingSalt
-    }
-
-    // Generate new salt if none exists
-    logger.info("[SQLCipher] No existing salt found, generating new salt for user: \(userDID.prefix(24), privacy: .private)...")
-    let newSalt = try generateSalt()
-    try storeSalt(newSalt, keychainKey: keychainKey)
-    return newSalt
+    return try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: keychainKey, length: saltSize)
   }
 
-  /// Retrieve existing salt for a user
-  /// - Parameter userDID: User's decentralized identifier
-  /// - Returns: 16-byte salt as Data, or nil if not found
   func getSalt(for userDID: String) throws -> Data? {
     let keychainKey = makeSaltKeychainKey(for: userDID)
-    return try? retrieveSalt(keychainKey: keychainKey)
+    return try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keychainKey)
   }
 
-  /// Delete salt for a user (when deleting account)
-  /// - Parameter userDID: User's decentralized identifier
-  /// - Throws: MLSSQLCipherError if deletion fails
   func deleteSalt(for userDID: String) throws {
     let keychainKey = makeSaltKeychainKey(for: userDID)
-
-    var query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: keychainService,
-      kSecAttrAccount as String: keychainKey
-    ]
-
-    if let accessGroup = keychainAccessGroup {
-      query[kSecAttrAccessGroup as String] = accessGroup
-    }
-
-    let status = SecItemDelete(query as CFDictionary)
-
-    guard status == errSecSuccess || status == errSecItemNotFound else {
-      logger.error("[SQLCipher] Salt delete failed with status: \(status)")
-      throw MLSSQLCipherError.keychainAccessFailed(operation: "delete salt", status: status)
-    }
-
+    try MLSKeychainManager.shared.delete(forKey: keychainKey)
     logger.debug("[SQLCipher] Salt deleted for user: \(userDID.prefix(24), privacy: .private)...")
-  }
-
-  /// Generate cryptographically secure random salt
-  private func generateSalt() throws -> Data {
-    var saltData = Data(count: saltSize)
-
-    let result = saltData.withUnsafeMutableBytes { bufferPointer in
-      SecRandomCopyBytes(kSecRandomDefault, saltSize, bufferPointer.baseAddress!)
-    }
-
-    guard result == errSecSuccess else {
-      throw MLSSQLCipherError.keyGenerationFailed
-    }
-
-    return saltData
   }
 
   /// Store salt in Keychain
@@ -324,7 +236,8 @@ public actor MLSSQLCipherEncryption {
 
   /// Generate Keychain account identifier for user's salt
   private func makeSaltKeychainKey(for userDID: String) -> String {
-    "mls.sqlcipher.db.salt.\(userDID)"
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.sqlcipher.db.salt.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
   }
 
   // MARK: - Private Methods
@@ -485,7 +398,8 @@ public actor MLSSQLCipherEncryption {
 
   /// Generate Keychain account identifier for user
   private func makeKeychainKey(for userDID: String) -> String {
-    "mls.sqlcipher.db.key.\(userDID)"
+    let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.sqlcipher.db.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
   }
 }
 

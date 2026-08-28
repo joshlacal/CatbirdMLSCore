@@ -59,10 +59,7 @@ public actor MLSEpochCheckpoint {
   // MARK: - Initialization
   
   private init() {
-    // Use shared storage base for cross-process access when available
-    let baseDirectory = MLSStoragePaths.baseContainerURL()
-    checkpointDir = baseDirectory.appendingPathComponent("epoch-checkpoints", isDirectory: true)
-    
+    checkpointDir = MLSStoragePaths.checkpointsDirectory()
     // Create directory if needed
     do {
       try FileManager.default.createDirectory(at: checkpointDir, withIntermediateDirectories: true)

@@ -3792,15 +3792,14 @@ public actor MLSClient {
     // Quarantine + reset the Swift SQLCipher database.
     try await MLSGRDBManager.shared.quarantineAndResetDatabase(for: normalizedDID)
 
-    // Quarantine the Rust SQLite file (mls-state) so it can be recreated fresh.
-    let appSupport = MLSStoragePaths.baseContainerURL()
-    let mlsStateDir = appSupport.appendingPathComponent("mls-state", isDirectory: true)
+    // Quarantine the Rust SQLite file so it can be recreated fresh.
+    let mlsStateDir = MLSStoragePaths.rustDatabaseDirectory()
 
     let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()
       .replacingOccurrences(of: "/", with: "_")
       .replacingOccurrences(of: "+", with: "-")
       .replacingOccurrences(of: "=", with: "")
-      .prefix(64) ?? "default"
+      .prefix(64).description ?? "default"
 
     let storageFileURL = mlsStateDir.appendingPathComponent("\(didHash).db")
     let wal = storageFileURL.appendingPathExtension("wal")
@@ -3862,8 +3861,7 @@ public actor MLSClient {
     await MLSGRDBManager.shared.destroyDatabaseFiles(for: normalizedDID)
 
     // Phase 4: Destroy Rust state database files (main, wal, shm, journal, quarantine)
-    let appSupport = MLSStoragePaths.baseContainerURL()
-    let mlsStateDir = appSupport.appendingPathComponent("mls-state", isDirectory: true)
+    let mlsStateDir = MLSStoragePaths.rustDatabaseDirectory()
     let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()
       .replacingOccurrences(of: "/", with: "_")
       .replacingOccurrences(of: "+", with: "-")
@@ -3897,6 +3895,13 @@ public actor MLSClient {
       }
     }
 
+    // Delete clean storage initialization markers
+    let coordinator = MLSStorageCoordinator.shared
+    let markerGRDB = coordinator.markerURL(for: .swiftGRDB, userDID: normalizedDID)
+    let markerRust = coordinator.markerURL(for: .rustState, userDID: normalizedDID)
+    try? FileManager.default.removeItem(at: markerGRDB)
+    try? FileManager.default.removeItem(at: markerRust)
+
     // Phase 5: Destroy Keychain materials
     // 5a. SQLCipher DB key and salt
     try? await MLSSQLCipherEncryption.shared.deleteKey(for: normalizedDID)
@@ -3908,17 +3913,15 @@ public actor MLSClient {
 
     // 5c. Identity and signing keys
     try? MLSKeychain.deleteSignatureKey(forIdentity: normalizedDID)
-    try? MLSKeychainManager.shared.delete(forKey: "mls_identity_key_\(normalizedDID)")
+    try? MLSKeychainManager.shared.delete(forKey: "mls_identity_key_\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
 
     // 5d. Device credentials & orchestrator adapter keys
-    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.mlsDid.\(normalizedDID)")
-    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.deviceUuid.\(normalizedDID)")
+    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.mlsDid.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
+    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.deviceUuid.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
     MLSDeviceManager.removeStoredDeviceInfo(for: normalizedDID)
 
-    // Phase 6: Destroy Migration preferences and version tracking
-    MLSPlaintextHeaderMigration.clearMigrationFlags(for: normalizedDID)
+    // Phase 6: Destroy clean version tracking (legacy migration flags are untouched)
     MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
-
     // Phase 7: Re-open database gate and clear activity shutdown state so re-adding this account works cleanly
     await MLSDatabaseGate.shared.openGate(for: normalizedDID)
     MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
@@ -4477,15 +4480,22 @@ public actor MLSClient {
 /// This allows the Rust layer to store sensitive keys in the system Keychain
 /// while keeping bulk data in SQLite.
 public class MLSKeychainAdapter: KeychainAccess {
+  private func scopedKey(_ key: String) -> String {
+    if key.hasSuffix(MLSStoragePaths.cleanIdentifierSuffix) {
+      return key
+    }
+    return "\(key)\(MLSStoragePaths.cleanIdentifierSuffix)"
+  }
+
   public func read(key: String) throws -> Data? {
-    return try MLSKeychainManager.shared.retrieve(forKey: key)
+    return try MLSKeychainManager.shared.retrieve(forKey: scopedKey(key))
   }
 
   public func write(key: String, value: Data) throws {
-    try MLSKeychainManager.shared.store(value, forKey: key)
+    try MLSKeychainManager.shared.store(value, forKey: scopedKey(key))
   }
 
   public func delete(key: String) throws {
-    try MLSKeychainManager.shared.delete(forKey: key)
+    try MLSKeychainManager.shared.delete(forKey: scopedKey(key))
   }
 }

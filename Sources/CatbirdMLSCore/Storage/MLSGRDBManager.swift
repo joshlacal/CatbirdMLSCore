@@ -281,15 +281,6 @@ public actor MLSGRDBManager {
   /// This handles the case where a previous session was terminated before budget checkpoints ran.
   /// Safe to call from `init()` before any async work begins.
   public nonisolated static func syncTruncatingCheckpointAtLaunch() {
-    // Verify plaintext headers on all databases FIRST
-    // If any show encrypted headers, iOS won't recognize them as SQLite → 0xdead10cc
-    if let appGroup = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.blue.catbird.shared") {
-      let mlsDir = appGroup.appendingPathComponent("Application Support/MLS", isDirectory: true)
-      let rustDir = appGroup.appendingPathComponent("Application Support/mls-state", isDirectory: true)
-      verifyPlaintextHeaders(in: mlsDir)
-      verifyPlaintextHeaders(in: rustDir)
-    }
-
     emergencyDatabasesLock.lock()
     let pools = emergencyDatabases
     emergencyDatabasesLock.unlock()
@@ -1055,9 +1046,7 @@ public actor MLSGRDBManager {
   /// Initialize a new database manager instance (per-user ownership model)
   /// Each MLSConversationManager should create its own instance for proper lifecycle management
   public init() {
-    // Create base directory for MLS databases
-    let baseDirectory = MLSStoragePaths.baseContainerURL()
-    self.databaseDirectory = baseDirectory.appendingPathComponent("MLS", isDirectory: true)
+    self.databaseDirectory = MLSStoragePaths.grdbDatabaseDirectory()
 
     // Create directory if it doesn't exist
     do {
@@ -1527,37 +1516,42 @@ public actor MLSGRDBManager {
     }
 
     updateConnectionState(.opening, for: userDID)
+    // Check and coordinate storage state machine
+    let coordinator = MLSStorageCoordinator.shared
+    let state = try coordinator.evaluateState(for: .swiftGRDB, userDID: userDID)
+    let attemptUUID: String
+    let admissionLease: MLSLeaseToken
+    let isFirstCreation: Bool
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // CRITICAL: 0xdead10cc Migration - Check if database needs recreation
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Databases created before cipher_plaintext_header_size=32 was added have
-    // encrypted headers, causing iOS to fail to identify them as SQLite WAL
-    // databases. This prevents automatic checkpointing during suspension,
-    // leading to 0xdead10cc termination.
-    //
-    // This migration deletes old databases so they can be recreated with the
-    // plaintext header. MLS conversation history will be lost, but this is
-    // necessary to prevent 0xdead10cc crashes.
-    // ═══════════════════════════════════════════════════════════════════════════
-    let migrationPerformed = MLSPlaintextHeaderMigration.ensurePlaintextHeaderMigration(
-      for: userDID,
-      databaseType: .swiftGRDB
-    )
-    if migrationPerformed {
-      logger.warning("🔧 [0xdead10cc] GRDB database was recreated for plaintext header migration")
+    switch state {
+    case .allAbsent:
+      let (rec, lease) = try coordinator.beginCreation(for: .swiftGRDB, userDID: userDID)
+      attemptUUID = rec.attemptUUID
+      admissionLease = lease
+      isFirstCreation = true
+    case .complete(let record):
+      attemptUUID = record.attemptUUID
+      admissionLease = try coordinator.acquireAdmissionLease(for: .swiftGRDB, userDID: userDID)
+      isFirstCreation = false
+    case .incompleteAttempt(let record):
+      throw MLSStorageInitializationError.incompleteAttempt(details: "Restarted during creating attempt \(record.attemptUUID)")
+    case .mixedState(let details):
+      throw MLSStorageInitializationError.mixedState(details: details)
+    case .unreadableState(let details):
+      throw MLSStorageInitializationError.unreadableState(details: details)
     }
+    defer { admissionLease.release() }
 
-    // Check if database file already exists
     let dbPath = databasePath(for: userDID)
     let isNewDatabase = !FileManager.default.fileExists(atPath: dbPath.path)
-
-    // NOTE: Advisory lock removed (2026-02) - SQLite WAL handles concurrent access.
-    // `MLSStateChangeNotifier`/`MLSNotificationCoordinator` coordinate cache invalidation.
 
     // Create/open database (runs off main thread via actor isolation)
     do {
       let database = try await createDatabase(for: userDID)
+
+      if isFirstCreation {
+        try coordinator.completeCreation(for: .swiftGRDB, userDID: userDID, attemptUUID: attemptUUID)
+      }
 
       // Cache the database (actor isolation provides thread-safety)
       databases[userDID] = database
@@ -1577,32 +1571,6 @@ public actor MLSGRDBManager {
       return database
     } catch {
       updateConnectionState(.closed, for: userDID)
-      // SAFE RECOVERY LADDER: HMAC failures use configured policy, not auto-reset.
-      if isHMACFailure(error) {
-        logger.critical("🚨 MLS storage open failed with HMAC/NOTADB")
-        logger.critical("   Error: \(error.localizedDescription)")
-
-        return try await handleHMACFailure(
-          for: userDID,
-          error: error,
-          mode: .primary,
-          context: "database open"
-        )
-      }
-      
-      // If database creation fails with other corruption error, attempt progressive repair
-      // This will escalate from WAL/SHM repair to full reset if needed
-      if isRecoverableCodecError(error) {
-        logger.warning(
-          "⚠️ Database creation failed, attempting progressive repair: \(error.localizedDescription)"
-        )
-
-        // Use progressive repair which handles escalation automatically
-        // Pass the original error so it can distinguish transient vs corruption
-        return try await progressiveRepair(for: userDID, lastError: error)
-      }
-
-      // Re-throw if not a recoverable error
       throw error
     }
     } catch {
@@ -2045,12 +2013,22 @@ public actor MLSGRDBManager {
     // For NSE or non-active users, create a lightweight queue, use it, and close immediately
     logger.debug("   Creating lightweight DatabaseQueue (no caching)")
 
-    // CRITICAL: 0xdead10cc Migration - ensure database has plaintext header
-    _ = MLSPlaintextHeaderMigration.ensurePlaintextHeaderMigration(
-      for: userDID,
-      databaseType: .swiftGRDB
-    )
-
+    // Check and coordinate storage state machine for lightweight read
+    let coordinator = MLSStorageCoordinator.shared
+    let state = try coordinator.evaluateState(for: .swiftGRDB, userDID: userDID)
+    guard case .complete = state else {
+      if case .allAbsent = state {
+        // If all absent, allow lightweight read by initializing primary pool first
+        _ = try await getDatabasePool(for: userDID)
+      } else if case .incompleteAttempt(let record) = state {
+        throw MLSStorageInitializationError.incompleteAttempt(details: "Restarted during creating attempt \(record.attemptUUID)")
+      } else if case .mixedState(let details) = state {
+        throw MLSStorageInitializationError.mixedState(details: details)
+      } else if case .unreadableState(let details) = state {
+        throw MLSStorageInitializationError.unreadableState(details: details)
+      }
+      return try await nseRead(for: userDID, work)
+    }
     let dbPath = databasePath(for: userDID)
 
     // Get encryption key and salt
@@ -2173,12 +2151,21 @@ public actor MLSGRDBManager {
     // For NSE or non-active users, create a lightweight queue
     logger.debug("   Creating lightweight DatabaseQueue for write")
 
-    // CRITICAL: 0xdead10cc Migration - ensure database has plaintext header
-    _ = MLSPlaintextHeaderMigration.ensurePlaintextHeaderMigration(
-      for: userDID,
-      databaseType: .swiftGRDB
-    )
-
+    // Check and coordinate storage state machine for lightweight write
+    let coordinator = MLSStorageCoordinator.shared
+    let state = try coordinator.evaluateState(for: .swiftGRDB, userDID: userDID)
+    guard case .complete = state else {
+      if case .allAbsent = state {
+        _ = try await getDatabasePool(for: userDID)
+      } else if case .incompleteAttempt(let record) = state {
+        throw MLSStorageInitializationError.incompleteAttempt(details: "Restarted during creating attempt \(record.attemptUUID)")
+      } else if case .mixedState(let details) = state {
+        throw MLSStorageInitializationError.mixedState(details: details)
+      } else if case .unreadableState(let details) = state {
+        throw MLSStorageInitializationError.unreadableState(details: details)
+      }
+      return try await performLightweightWrite(for: userDID, work)
+    }
     let dbPath = databasePath(for: userDID)
 
     // Get encryption key and salt
@@ -4575,18 +4562,31 @@ public actor MLSGRDBManager {
       throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
     }
 
-    // Run migrations OUTSIDE NSFileCoordinator lock to prevent holding file coordination lock across DDL operations
+    // Validate that the database is actually SQLCipher
     do {
+      let cipherVersion: String? = try database.read { db in
+        try String.fetchOne(db, sql: "PRAGMA cipher_version;")
+      }
+      guard let cipherVersion, !cipherVersion.isEmpty else {
+        try? database.close()
+        throw MLSStorageInitializationError.validationFailed(details: "PRAGMA cipher_version returned empty or failed")
+      }
+
+      if let fileHandle = try? FileHandle(forReadingFrom: dbPath) {
+        defer { try? fileHandle.close() }
+        let headerData = fileHandle.readData(ofLength: 16)
+        if headerData == Data("SQLite format 3\0".utf8) {
+          try? database.close()
+          throw MLSStorageInitializationError.validationFailed(details: "Database file has plaintext SQLite header")
+        }
+      }
+
       try runMigrations(database)
       return database
     } catch {
       try? database.close()
-      if isHMACFailure(error) {
-        throw error
-      }
-      throw MLSSQLCipherError.databaseCreationFailed(underlying: error)
+      throw error
     }
-  }
 
   /// Ensure a key exists.
   ///
@@ -5695,13 +5695,11 @@ public actor MLSGRDBManager {
       return
     }
 
-    // Probe both GRDB and Rust databases
-    let grdbDir = appGroup.appendingPathComponent("Application Support/MLS", isDirectory: true)
-    let rustDir = appGroup.appendingPathComponent("Application Support/mls-state", isDirectory: true)
+    let grdbDir = MLSStoragePaths.grdbDatabaseDirectory()
+    let rustDir = MLSStoragePaths.rustDatabaseDirectory()
 
     probeWALFiles(in: grdbDir, dbType: "GRDB", userDID: didPrefix, label: label, processTag: processTag, pid: pid)
     probeWALFiles(in: rustDir, dbType: "Rust", userDID: didPrefix, label: label, processTag: processTag, pid: pid)
-  }
 
   private nonisolated static func probeWALFiles(
     in directory: URL,
@@ -5986,11 +5984,8 @@ public actor MLSGRDBManager {
   }
 
   internal nonisolated func rustStateDatabasePath(for userDID: String) -> URL {
-    let rustDirectory = MLSStoragePaths.baseContainerURL()
-      .appendingPathComponent("mls-state", isDirectory: true)
-    return rustDirectory.appendingPathComponent("\(rustStorageIdentifier(for: userDID)).db")
+    return MLSStoragePaths.rustDatabaseDirectory().appendingPathComponent("\(rustStorageIdentifier(for: userDID)).db")
   }
-
   /// Get database file path for user
   private nonisolated func databasePath(for userDID: String) -> URL {
     // Sanitize DID string for use in filesystem path (doesn't modify the actual DID)

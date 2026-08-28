@@ -33,7 +33,9 @@ public enum MLSContentRootKey {
       throw MLSContentRootKeyError.keyGenerationFailed
     }
     let data = Data(bytes)
-    try store(data, for: userDID)
+    if let winner = try store(data, for: userDID) {
+      return winner
+    }
     return data
   }
 
@@ -78,7 +80,7 @@ public enum MLSContentRootKey {
     }
   }
 
-  private static func store(_ data: Data, for userDID: String) throws {
+  private static func store(_ data: Data, for userDID: String) throws -> Data? {
     var attrs: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: service,
@@ -91,12 +93,21 @@ public enum MLSContentRootKey {
       attrs[kSecAttrAccessGroup as String] = group
     }
     let status = SecItemAdd(attrs as CFDictionary, nil)
-    guard status == errSecSuccess else {
+    if status == errSecSuccess {
+      return nil
+    } else if status == errSecDuplicateItem {
+      // Concurrent creator won; re-load and return the winner
+      guard let winner = try load(for: userDID) else {
+        throw MLSContentRootKeyError.keychainError(errSecItemNotFound)
+      }
+      return winner
+    } else {
       throw MLSContentRootKeyError.keychainError(status)
     }
   }
 
   private static func account(for userDID: String) -> String {
-    "mls.content.root.\(userDID)"
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.content.root.\(normalized).\(MLSStoragePaths.cleanSuffix)"
   }
 }

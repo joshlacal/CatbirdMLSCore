@@ -4,9 +4,9 @@ import Foundation
 /// from advancing the MLS ratchet while the main app is actively running for the same user.
 public enum MLSAppActivityState {
   private static let suiteName = "group.blue.catbird.shared"
-  private static let isActiveKey = "mls_main_app_is_active"
-  private static let activeUserDIDKey = "mls_main_app_active_user_did"
-  private static let updatedAtKey = "mls_main_app_activity_updated_at"
+  private static let isActiveKey = "mls_main_app_is_active.\(MLSStoragePaths.cleanSuffix)"
+  private static let activeUserDIDKey = "mls_main_app_active_user_did.\(MLSStoragePaths.cleanSuffix)"
+  private static let updatedAtKey = "mls_main_app_activity_updated_at.\(MLSStoragePaths.cleanSuffix)"
 
   private static var defaults: UserDefaults? { UserDefaults(suiteName: suiteName) }
 
@@ -44,7 +44,7 @@ public enum MLSAppActivityState {
 
   // MARK: - Shutdown Signaling (Cross-Process Coordination)
 
-  private static let isShuttingDownKey = "mls_main_app_is_shutting_down"
+  private static let isShuttingDownKey = "mls_main_app_is_shutting_down.\(MLSStoragePaths.cleanSuffix)"
 
   /// Signal that the main app is shutting down (starting account switch)
   /// NSE should yield database access during this period
@@ -76,10 +76,10 @@ public enum MLSAppActivityState {
 
   // MARK: - Account Switching Phase (Pre-Shutdown Coordination)
 
-  private static let isSwitchingKey = "mls_main_app_is_switching"
-  private static let switchingFromUserKey = "mls_switching_from_user"
-  private static let switchingToUserKey = "mls_switching_to_user"
-  private static let accountSwitchEpochKey = "mls_account_switch_epoch"
+  private static let isSwitchingKey = "mls_main_app_is_switching.\(MLSStoragePaths.cleanSuffix)"
+  private static let switchingFromUserKey = "mls_switching_from_user.\(MLSStoragePaths.cleanSuffix)"
+  private static let switchingToUserKey = "mls_switching_to_user.\(MLSStoragePaths.cleanSuffix)"
+  private static let accountSwitchEpochKey = "mls_account_switch_epoch.\(MLSStoragePaths.cleanSuffix)"
 
   /// Get the current account switch epoch counter.
   /// This monotonically increases with each account switch.
@@ -159,8 +159,8 @@ public enum MLSAppActivityState {
 
   // MARK: - NSE Ratchet Advancement Signal (Fix #3: Race Condition Prevention)
 
-  private static let nseProcessedMessageKey = "mls_nse_processed_message_for_user"
-  private static let nseProcessedAtKey = "mls_nse_processed_at"
+  private static let nseProcessedMessageKey = "mls_nse_processed_message_for_user.\(MLSStoragePaths.cleanSuffix)"
+  private static let nseProcessedAtKey = "mls_nse_processed_at.\(MLSStoragePaths.cleanSuffix)"
 
   /// Signal that NSE has processed (decrypted) a message for a user.
   /// The main app should reload MLS state from disk when it resumes.

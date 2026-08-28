@@ -21,9 +21,7 @@ public actor MLSWelcomeGate {
   private let gateDirectory: URL
 
   private init() {
-    let baseDirectory = MLSStoragePaths.baseContainerURL()
-    gateDirectory = baseDirectory.appendingPathComponent("mls_welcome_gate", isDirectory: true)
-
+    gateDirectory = MLSStoragePaths.welcomeGateDirectory()
     do {
       try FileManager.default.createDirectory(at: gateDirectory, withIntermediateDirectories: true)
     } catch {

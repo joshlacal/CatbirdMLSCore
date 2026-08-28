@@ -270,9 +270,7 @@ public actor MLSCoreContext {
       return customDir
     }
     
-    // Use shared storage base so main app + extensions align when available.
-    let baseDirectory = MLSStoragePaths.baseContainerURL()
-    return baseDirectory.appendingPathComponent("mls-state", isDirectory: true)
+    return MLSStoragePaths.rustDatabaseDirectory()
   }
 
   // MARK: - Configuration
@@ -482,6 +480,32 @@ public actor MLSCoreContext {
 
     logger.info("Creating new MLS context for user: \(userDid, privacy: .private)")
 
+    // Check and coordinate storage state machine
+    let coordinator = MLSStorageCoordinator.shared
+    let state = try coordinator.evaluateState(for: .rustState, userDID: userDid)
+    let attemptUUID: String
+    let admissionLease: MLSLeaseToken
+    let isFirstCreation: Bool
+
+    switch state {
+    case .allAbsent:
+      let (rec, lease) = try coordinator.beginCreation(for: .rustState, userDID: userDid)
+      attemptUUID = rec.attemptUUID
+      admissionLease = lease
+      isFirstCreation = true
+    case .complete(let record):
+      attemptUUID = record.attemptUUID
+      admissionLease = try coordinator.acquireAdmissionLease(for: .rustState, userDID: userDid)
+      isFirstCreation = false
+    case .incompleteAttempt(let record):
+      throw MLSStorageInitializationError.incompleteAttempt(details: "Restarted during creating attempt \(record.attemptUUID)")
+    case .mixedState(let details):
+      throw MLSStorageInitializationError.mixedState(details: details)
+    case .unreadableState(let details):
+      throw MLSStorageInitializationError.unreadableState(details: details)
+    }
+    defer { admissionLease.release() }
+
     // Create storage path for this user
     let storagePath = try createStoragePath(for: userDid)
 
@@ -503,6 +527,9 @@ public actor MLSCoreContext {
       keychain: keychainBridge
     )
 
+    if isFirstCreation {
+      try coordinator.completeCreation(for: .rustState, userDID: userDid, attemptUUID: attemptUUID)
+    }
     // If suspension or cancellation intervened while MlsContext was constructing, immediately close it
     if Self.isSuspensionInProgress || Task.isCancelled {
       logger.warning("🚫 [0xdead10cc-FIX] Closing freshly created MlsContext due to suspension during init")
@@ -576,27 +603,16 @@ public actor MLSCoreContext {
   // MARK: - Helper Methods
 
   private func createStoragePath(for userDid: String) throws -> String {
-    // CRITICAL: Use the exact same hashing scheme as MLSClient in the main app
-    // This ensures the NSE can find and decrypt from the same database
-
     // Create directory if needed
     try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
 
-    // Hash the DID using base64 (matching MLSClient.createContext)
+    let normalizedDID = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let didHash =
-      userDid.data(using: .utf8)?.base64EncodedString()
+      normalizedDID.data(using: .utf8)?.base64EncodedString()
       .replacingOccurrences(of: "/", with: "_")
       .replacingOccurrences(of: "+", with: "-")
       .replacingOccurrences(of: "=", with: "")
-      .prefix(64) ?? "default"
-
-    let migrationPerformed = MLSPlaintextHeaderMigration.ensurePlaintextHeaderMigration(
-      for: userDid,
-      databaseType: .rustFFI
-    )
-    if migrationPerformed {
-      logger.warning("🔧 [0xdead10cc] Rust FFI database was recreated for plaintext header migration")
-    }
+      .prefix(64).description ?? "default"
 
     // Return database path (matching MLSClient: {didHash}.db)
     return storageDirectory.appendingPathComponent("\(didHash).db").path

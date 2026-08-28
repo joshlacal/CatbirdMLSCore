@@ -9,8 +9,7 @@ public final class MLSCoordinationStore {
   
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSCoordination")
   
-  private let fileName = "coordination_state.json"
-  
+  private let fileName = "coordination_state.\(MLSStoragePaths.cleanSuffix).json"
   public var currentGeneration: Int {
     getState().coordinationGeneration
   }

@@ -401,9 +401,8 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let rustStoragePath = manager.rustStateDatabasePath(for: "did:plc:testuser")
 
     XCTAssertNotEqual(appContentPath, rustStoragePath)
-    XCTAssertTrue(appContentPath.path.contains("/MLS/"))
-    XCTAssertTrue(rustStoragePath.path.contains("/mls-state/"))
-
+    XCTAssertTrue(appContentPath.path.contains("/MLS-\(MLSStoragePaths.cleanSuffix)/"))
+    XCTAssertTrue(rustStoragePath.path.contains("/mls-state-\(MLSStoragePaths.cleanSuffix)/"))
     let context = try MlsContext(
       storagePath: rustStoragePath.path,
       encryptionKey: "test-key",

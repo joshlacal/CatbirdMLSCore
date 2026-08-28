@@ -310,49 +310,51 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   // MARK: - MLS DID
 
   public func storeMlsDid(userDid: String, mlsDid: String) throws {
-    let key = Self.mlsDidKeyPrefix + userDid
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "\(Self.mlsDidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
     let data = Data(mlsDid.utf8)
-    logger.debug("Storing MLS DID for user: \(userDid.prefix(20))...")
+    logger.debug("Storing MLS DID for user: \(normalized.prefix(20))...")
     try keychainManager.store(
       data,
       forKey: key,
       accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     )
-    logger.info("Stored MLS DID for user: \(userDid.prefix(20))...")
+    logger.info("Stored MLS DID for user: \(normalized.prefix(20))...")
   }
 
   public func getMlsDid(userDid: String) throws -> String? {
-    let key = Self.mlsDidKeyPrefix + userDid
-    logger.debug("Retrieving MLS DID for user: \(userDid.prefix(20))...")
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "\(Self.mlsDidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
+    logger.debug("Retrieving MLS DID for user: \(normalized.prefix(20))...")
     guard let data = try keychainManager.retrieve(forKey: key) else {
       return nil
     }
     return String(data: data, encoding: .utf8)
   }
-
   // MARK: - Device UUID
 
   public func storeDeviceUuid(userDid: String, uuid: String) throws {
-    let key = Self.deviceUuidKeyPrefix + userDid
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "\(Self.deviceUuidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
     let data = Data(uuid.utf8)
-    logger.debug("Storing device UUID for user: \(userDid.prefix(20))...")
+    logger.debug("Storing device UUID for user: \(normalized.prefix(20))...")
     try keychainManager.store(
       data,
       forKey: key,
       accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     )
-    logger.info("Stored device UUID for user: \(userDid.prefix(20))...")
+    logger.info("Stored device UUID for user: \(normalized.prefix(20))...")
   }
 
   public func getDeviceUuid(userDid: String) throws -> String? {
-    let key = Self.deviceUuidKeyPrefix + userDid
-    logger.debug("Retrieving device UUID for user: \(userDid.prefix(20))...")
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let key = "\(Self.deviceUuidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
+    logger.debug("Retrieving device UUID for user: \(normalized.prefix(20))...")
     guard let data = try keychainManager.retrieve(forKey: key) else {
       return nil
     }
     return String(data: data, encoding: .utf8)
   }
-
   // MARK: - Credential State
 
   public func hasCredentials(userDid: String) throws -> Bool {
@@ -373,7 +375,8 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     }
 
     // Delete MLS DID
-    let mlsDidKey = Self.mlsDidKeyPrefix + userDid
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let mlsDidKey = "\(Self.mlsDidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
     do {
       try keychainManager.delete(forKey: mlsDidKey)
     } catch {
@@ -381,13 +384,12 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     }
 
     // Delete device UUID
-    let deviceUuidKey = Self.deviceUuidKeyPrefix + userDid
+    let deviceUuidKey = "\(Self.deviceUuidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
     do {
       try keychainManager.delete(forKey: deviceUuidKey)
     } catch {
       logger.warning("Failed to delete device UUID during clearAll: \(error.localizedDescription)")
     }
-
     logger.info("Cleared all credentials for user: \(userDid.prefix(20))...")
   }
 

@@ -36,8 +36,7 @@ import OSLog
 
 /// Notification posted when MLS state version is incremented locally.
 /// Apps can observe this to trigger immediate state reload.
-public let MLSStateVersionDidChangeNotification = Notification.Name("MLSStateVersionDidChange")
-
+public let MLSStateVersionDidChangeNotification = Notification.Name("MLSStateVersionDidChange.clean-v2-openmls-v09")
 /// Manager for monotonic MLS state versioning across processes.
 ///
 /// This enables the main app to detect when NSE has advanced the MLS ratchet
@@ -63,16 +62,15 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   // MARK: - Constants
 
   private static let suiteName = "group.blue.catbird.shared"
-  private static let globalVersionKey = "mls_global_state_version"
-  private static let userVersionKeyPrefix = "mls_state_version."
-  private static let lastKnownVersionKeyPrefix = "mls_last_known_version."
-
+  private static let globalVersionKey = "mls_global_state_version.clean-v2-openmls-v09"
+  private static let userVersionKeyPrefix = "mls_state_version.clean-v2-openmls-v09."
+  private static let lastKnownVersionKeyPrefix = "mls_last_known_version.clean-v2-openmls-v09."
   // MARK: - Properties
 
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "StateVersionManager")
 
   /// Shared UserDefaults suite for cross-process access
-  private let sharedDefaults: UserDefaults
+  private let sharedDefaults: UserDefaults?
 
   /// In-memory cache of last known versions per user (for detecting changes)
   /// Key: userDID, Value: last version we observed
@@ -84,12 +82,9 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   // MARK: - Initialization
 
   private init() {
-    if let defaults = UserDefaults(suiteName: Self.suiteName) {
-      sharedDefaults = defaults
-    } else {
-      // Fallback to standard UserDefaults (won't work cross-process, but prevents crash)
-      sharedDefaults = UserDefaults.standard
-      logger.warning("⚠️ [StateVersion] Shared UserDefaults suite not available - versioning won't work cross-process")
+    self.sharedDefaults = UserDefaults(suiteName: Self.suiteName)
+    if sharedDefaults == nil {
+      logger.warning("⚠️ [StateVersion] Shared UserDefaults suite not available")
     }
     logger.debug("MLSStateVersionManager initialized")
   }
@@ -103,6 +98,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   /// - Parameter userDID: User's decentralized identifier
   /// - Returns: Current state version on disk (0 if never set)
   public func getDiskVersion(for userDID: String) -> Int {
+    guard let sharedDefaults else { return 0 }
     let key = versionKey(for: userDID)
     return sharedDefaults.integer(forKey: key)
   }
@@ -113,9 +109,9 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   ///
   /// - Returns: Global state version (0 if never set)
   public func getGlobalDiskVersion() -> Int {
+    guard let sharedDefaults else { return 0 }
     return sharedDefaults.integer(forKey: Self.globalVersionKey)
   }
-
   /// Get the last known version we observed for a user (in-memory).
   ///
   /// - Parameter userDID: User's decentralized identifier
@@ -192,18 +188,16 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     // Even if we read a slightly stale value, the version will still increase,
     // which is sufficient to trigger context reload on the other process.
     // ═══════════════════════════════════════════════════════════════════════════
-    let current = sharedDefaults.integer(forKey: key)
+    let current = sharedDefaults?.integer(forKey: key) ?? 0
     let newVersion = current + 1
-    sharedDefaults.set(newVersion, forKey: key)
+    sharedDefaults?.set(newVersion, forKey: key)
 
     // Also increment global version
-    let globalCurrent = sharedDefaults.integer(forKey: Self.globalVersionKey)
-    sharedDefaults.set(globalCurrent + 1, forKey: Self.globalVersionKey)
+    let globalCurrent = sharedDefaults?.integer(forKey: Self.globalVersionKey) ?? 0
+    sharedDefaults?.set(globalCurrent + 1, forKey: Self.globalVersionKey)
 
     // Force synchronize to ensure cross-process visibility
-    sharedDefaults.synchronize()
-
-    // Update our local cache
+    sharedDefaults?.synchronize()
     cacheLock.lock()
     lastKnownVersions[userDID] = newVersion
     cacheLock.unlock()
@@ -227,9 +221,8 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   ///   - userDID: User's decentralized identifier
   public func setVersion(_ version: Int, for userDID: String) {
     let key = versionKey(for: userDID)
-    sharedDefaults.set(version, forKey: key)
-    sharedDefaults.synchronize()
-
+    sharedDefaults?.set(version, forKey: key)
+    sharedDefaults?.synchronize()
     cacheLock.lock()
     lastKnownVersions[userDID] = version
     cacheLock.unlock()
@@ -275,9 +268,8 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   /// - Parameter userDID: User's decentralized identifier
   public func clearVersion(for userDID: String) {
     let key = versionKey(for: userDID)
-    sharedDefaults.removeObject(forKey: key)
-    sharedDefaults.synchronize()
-
+    sharedDefaults?.removeObject(forKey: key)
+    sharedDefaults?.synchronize()
     cacheLock.lock()
     lastKnownVersions.removeValue(forKey: userDID)
     cacheLock.unlock()
@@ -288,6 +280,7 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   /// Clear all version data (e.g., on app reset).
   public func clearAllVersions() {
     // Remove all per-user versions
+    guard let sharedDefaults else { return }
     let allKeys = sharedDefaults.dictionaryRepresentation().keys
     for key in allKeys where key.hasPrefix(Self.userVersionKeyPrefix) {
       sharedDefaults.removeObject(forKey: key)
@@ -296,7 +289,6 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     // Remove global version
     sharedDefaults.removeObject(forKey: Self.globalVersionKey)
     sharedDefaults.synchronize()
-
     cacheLock.lock()
     lastKnownVersions.removeAll()
     cacheLock.unlock()
