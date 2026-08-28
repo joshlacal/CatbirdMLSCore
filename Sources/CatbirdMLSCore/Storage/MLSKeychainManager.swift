@@ -8,17 +8,29 @@
 import Foundation
 import Security
 import OSLog
-
+import Synchronization
 /// Manages secure storage of MLS cryptographic materials in Keychain
 public final class MLSKeychainManager: @unchecked Sendable {
 
   // MARK: - Singleton
 
   public static let shared = MLSKeychainManager()
+  private static let fakeStorageMutex = Mutex<MLSKeychainFakeStorage?>(nil)
 
+  /// Internal in-memory test override seam for deterministic testing without host entitlements
+  static func setFakeStorageOverrideForTesting(_ override: MLSKeychainFakeStorage?) {
+    fakeStorageMutex.withLock { storage in
+      storage = override
+    }
+  }
+
+  static var activeFakeStorage: MLSKeychainFakeStorage? {
+    fakeStorageMutex.withLock { storage in
+      storage
+    }
+  }
   private static let probeLogger = Logger(subsystem: "blue.catbird.mls", category: "KeychainProbe")
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSKeychainManager")
-
   // MARK: - Configuration
 
   /// The Keychain Access Group to use for shared storage.
@@ -26,17 +38,30 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Format: "TeamID.com.example.group"
   public var accessGroup: String?
 
+  private static let resolvedGroupLock = NSLock()
+  private static var cachedResolvedGroup: String?
+  private static var didResolveGroup = false
+
+  internal static func sharedAccessGroup() -> String? {
+    resolvedGroupLock.lock()
+    defer { resolvedGroupLock.unlock() }
+    if didResolveGroup {
+      return cachedResolvedGroup
+    }
+    let resolved = resolvedAccessGroup(suffix: "blue.catbird.shared")
+    cachedResolvedGroup = resolved
+    didResolveGroup = true
+    return resolved
+  }
+
   /// Effective access group used for keychain operations.
   /// If not explicitly set, attempts resolution of the shared "blue.catbird.shared" group.
-  public var effectiveAccessGroup: String? {
+  internal var effectiveAccessGroup: String? {
     if let accessGroup {
       return accessGroup
     }
     if !skipDataProtection {
-      if let resolved = Self.resolvedAccessGroup(suffix: "blue.catbird.shared") {
-        self.accessGroup = resolved
-        return resolved
-      }
+      return Self.sharedAccessGroup()
     }
     return nil
   }
@@ -213,7 +238,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
   }
 
   /// Retrieve encryption key for a user without mutating or generating a new key
-  public func retrieveEncryptionKey(forUserDID userDID: String) throws -> Data? {
+  func retrieveEncryptionKey(forUserDID userDID: String) throws -> Data? {
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let key = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
     return try retrieveKeyStrict(forKey: key)
@@ -594,25 +619,127 @@ public final class MLSKeychainManager: @unchecked Sendable {
     logger.info("Deleted all keys for conversation: \(conversationID)")
   }
 
-  // MARK: - Core Keychain Operations
-  /// Atomic add-if-absent for clean-generation database key material.
-  /// On `errSecDuplicateItem`, discards the generated candidate, re-reads the winning item, and uses it.
-  /// Never overwrites or updates an existing item.
-  public func getOrCreateImmutableKey(
+  // MARK: - Core Clean Keychain Operations
+
+  /// Atomic add-if-absent for clean-generation database key material with supplied value.
+  /// If the item already exists, verifies it has the same value; different value fails.
+  func storeImmutableKeyStrict(
+    _ data: Data,
     forKey key: String,
+    service: String? = nil,
+    expectedLength: Int? = nil,
+    accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+  ) throws {
+    let targetService = service ?? serviceName
+    if let expectedLength, data.count != expectedLength {
+      throw MLSStorageInitializationError.validationFailed(
+        details: "Supplied key \(key) length mismatch: expected \(expectedLength), got \(data.count)"
+      )
+    }
+
+    if let existing = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: expectedLength) {
+      if existing == data {
+        return
+      } else {
+        throw MLSStorageInitializationError.validationFailed(
+          details: "Keychain item \(key) already exists with different content"
+        )
+      }
+    }
+
+    if let fake = Self.activeFakeStorage {
+      let status = try fake.add(service: targetService, account: key, data: data)
+      if status == errSecSuccess {
+        return
+      } else if status == errSecDuplicateItem {
+        guard let winner = try fake.get(service: targetService, account: key) else {
+          throw KeychainError.retrieveFailed(errSecItemNotFound)
+        }
+        if winner == data {
+          return
+        }
+        throw MLSStorageInitializationError.validationFailed(
+          details: "Concurrent Keychain item \(key) created with different content"
+        )
+      } else {
+        throw KeychainError.storeFailed(status)
+      }
+    }
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrAccount as String: key,
+      kSecAttrService as String: targetService,
+      kSecValueData as String: data,
+    ]
+
+    if !skipDataProtection {
+      query[kSecAttrAccessible as String] = accessible
+      query[kSecAttrSynchronizable as String] = false
+    }
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
+    }
+    query[kSecAttrAccessGroup as String] = accessGroup
+
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecSuccess {
+      return
+    } else if status == errSecDuplicateItem {
+      guard let winner = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: expectedLength) else {
+        throw KeychainError.retrieveFailed(errSecItemNotFound)
+      }
+      if winner == data {
+        return
+      }
+      throw MLSStorageInitializationError.validationFailed(
+        details: "Concurrent Keychain item \(key) created with different content"
+      )
+    } else {
+      throw KeychainError.storeFailed(status)
+    }
+  }
+
+  /// Atomic add-if-absent for clean-generation database key material with generated value.
+  /// On `errSecDuplicateItem`, discards candidate, strictly re-reads winner, validates length, and returns it.
+  func getOrCreateImmutableKey(
+    forKey key: String,
+    service: String? = nil,
     length: Int = 32,
     accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
   ) throws -> Data {
-    if let existing = try retrieveKeyStrict(forKey: key) {
+    let targetService = service ?? serviceName
+    if let existing = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: length) {
       return existing
     }
 
     let candidate = try generateSecureRandomKey(length: length)
 
+    if let fake = Self.activeFakeStorage {
+      let status = try fake.add(service: targetService, account: key, data: candidate)
+      if status == errSecSuccess {
+        return candidate
+      } else if status == errSecDuplicateItem {
+        guard let winner = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: length) else {
+          throw KeychainError.retrieveFailed(errSecItemNotFound)
+        }
+        return winner
+      } else {
+        throw KeychainError.storeFailed(status)
+      }
+    }
+
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: serviceName,
+      kSecAttrService as String: targetService,
       kSecValueData as String: candidate,
     ]
 
@@ -627,15 +754,16 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = effectiveAccessGroup {
-      query[kSecAttrAccessGroup as String] = accessGroup
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
     }
+    query[kSecAttrAccessGroup as String] = accessGroup
 
     let status = SecItemAdd(query as CFDictionary, nil)
     if status == errSecSuccess {
       return candidate
     } else if status == errSecDuplicateItem {
-      guard let winner = try retrieveKeyStrict(forKey: key) else {
+      guard let winner = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: length) else {
         throw KeychainError.retrieveFailed(errSecItemNotFound)
       }
       return winner
@@ -645,11 +773,30 @@ public final class MLSKeychainManager: @unchecked Sendable {
   }
 
   /// Strict retrieve that differentiates item absence (nil) from read/entitlement errors (throws).
-  public func retrieveKeyStrict(forKey key: String, synchronizable: Bool = false) throws -> Data? {
+  func retrieveKeyStrict(
+    forKey key: String,
+    service: String? = nil,
+    expectedLength: Int? = nil,
+    synchronizable: Bool = false
+  ) throws -> Data? {
+    let targetService = service ?? serviceName
+
+    if let fake = Self.activeFakeStorage {
+      if let data = try fake.get(service: targetService, account: key) {
+        if let expectedLength, data.count != expectedLength {
+          throw MLSStorageInitializationError.validationFailed(
+            details: "Keychain item \(key) length mismatch: expected \(expectedLength), got \(data.count)"
+          )
+        }
+        return data
+      }
+      return nil
+    }
+
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: serviceName,
+      kSecAttrService as String: targetService,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
     ]
@@ -664,9 +811,10 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = effectiveAccessGroup {
-      query[kSecAttrAccessGroup as String] = accessGroup
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
     }
+    query[kSecAttrAccessGroup as String] = accessGroup
 
     var result: AnyObject?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -680,14 +828,89 @@ public final class MLSKeychainManager: @unchecked Sendable {
       throw KeychainError.retrieveFailed(status)
     }
 
-    return result as? Data
+    guard let data = result as? Data else {
+      throw MLSStorageInitializationError.validationFailed(details: "Keychain item \(key) is not Data")
+    }
+
+    if let expectedLength, data.count != expectedLength {
+      throw MLSStorageInitializationError.validationFailed(
+        details: "Keychain item \(key) length mismatch: expected \(expectedLength), got \(data.count)"
+      )
+    }
+
+    return data
   }
 
-  public func hasKeyStrict(forKey key: String) throws -> Bool {
-    try retrieveKeyStrict(forKey: key) != nil
+  func hasKeyStrict(forKey key: String, service: String? = nil) throws -> Bool {
+    try retrieveKeyStrict(forKey: key, service: service) != nil
   }
 
+  /// Strict exact delete
+  func deleteStrict(forKey key: String, service: String? = nil) throws {
+    let targetService = service ?? serviceName
 
+    if let fake = Self.activeFakeStorage {
+      let status = try fake.delete(service: targetService, account: key)
+      if status == errSecSuccess || status == errSecItemNotFound {
+        return
+      }
+      throw KeychainError.deleteFailed(status)
+    }
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrAccount as String: key,
+      kSecAttrService as String: targetService,
+    ]
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
+    }
+    query[kSecAttrAccessGroup as String] = accessGroup
+
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw KeychainError.deleteFailed(status)
+    }
+  }
+
+  /// Strict delete-all for an entire service (e.g. per-DID clean hybrid signer service)
+  func deleteAllStrict(forService service: String) throws {
+    if let fake = Self.activeFakeStorage {
+      let status = try fake.deleteAll(service: service)
+      if status == errSecSuccess || status == errSecItemNotFound {
+        return
+      }
+      throw KeychainError.deleteFailed(status)
+    }
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+    ]
+
+    #if os(macOS) || targetEnvironment(macCatalyst)
+    if !skipDataProtection {
+      query[kSecUseDataProtectionKeychain as String] = true
+    }
+    #endif
+
+    guard let accessGroup = effectiveAccessGroup else {
+      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
+    }
+    query[kSecAttrAccessGroup as String] = accessGroup
+
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw KeychainError.deleteFailed(status)
+    }
+  }
   public func store(
     _ data: Data,
     forKey key: String,
@@ -717,7 +940,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = effectiveAccessGroup {
+    if let accessGroup = self.accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -734,7 +957,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
         updateQuery[kSecUseDataProtectionKeychain as String] = true
       }
       #endif
-      if let accessGroup = effectiveAccessGroup {
+      if let accessGroup = self.accessGroup {
         updateQuery[kSecAttrAccessGroup as String] = accessGroup
       }
       let updateAttributes: [String: Any] = [
@@ -771,7 +994,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
     #endif
 
-    if let accessGroup = effectiveAccessGroup {
+    if let accessGroup = self.accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -807,7 +1030,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
     }
 
-    if let accessGroup = effectiveAccessGroup {
+    if let accessGroup = self.accessGroup {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
@@ -908,6 +1131,91 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     try delete(forKey: testKey)
     logger.info("Keychain access verified successfully")
+  }
+}
+
+/// In-memory fake Keychain storage for deterministic isolated testing
+final class MLSKeychainFakeStorage: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: [String: Data] = [:]
+  private var injectedErrors: [String: OSStatus] = [:]
+
+  init() {}
+
+  private func storageKey(service: String, account: String) -> String {
+    "\(service):::\(account)"
+  }
+
+  func setInjectedError(_ status: OSStatus?, forService service: String? = nil, account: String? = nil) {
+    lock.lock()
+    defer { lock.unlock() }
+    let k: String
+    if let service, let account {
+      k = storageKey(service: service, account: account)
+    } else {
+      k = "*"
+    }
+    if let status {
+      injectedErrors[k] = status
+    } else {
+      injectedErrors.removeValue(forKey: k)
+    }
+  }
+
+  func get(service: String, account: String) throws -> Data? {
+    lock.lock()
+    defer { lock.unlock() }
+    let k = storageKey(service: service, account: account)
+    if let err = injectedErrors[k] ?? injectedErrors["*"] {
+      if err == errSecItemNotFound { return nil }
+      throw KeychainError.retrieveFailed(err)
+    }
+    return storage[k]
+  }
+
+  func add(service: String, account: String, data: Data) throws -> OSStatus {
+    lock.lock()
+    defer { lock.unlock() }
+    let k = storageKey(service: service, account: account)
+    if let err = injectedErrors[k] ?? injectedErrors["*"] {
+      return err
+    }
+    if storage[k] != nil {
+      return errSecDuplicateItem
+    }
+    storage[k] = data
+    return errSecSuccess
+  }
+
+  func delete(service: String, account: String) throws -> OSStatus {
+    lock.lock()
+    defer { lock.unlock() }
+    let k = storageKey(service: service, account: account)
+    if let err = injectedErrors[k] ?? injectedErrors["*"] {
+      return err
+    }
+    if storage.removeValue(forKey: k) != nil {
+      return errSecSuccess
+    }
+    return errSecItemNotFound
+  }
+
+  func deleteAll(service: String) throws -> OSStatus {
+    lock.lock()
+    defer { lock.unlock() }
+    let prefix = "\(service):::"
+    let keysToRemove = storage.keys.filter { $0.hasPrefix(prefix) }
+    for k in keysToRemove {
+      storage.removeValue(forKey: k)
+    }
+    return errSecSuccess
+  }
+
+  func clearAll() {
+    lock.lock()
+    defer { lock.unlock() }
+    storage.removeAll()
+    injectedErrors.removeAll()
   }
 }
 

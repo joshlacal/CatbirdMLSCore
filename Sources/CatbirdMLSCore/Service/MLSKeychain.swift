@@ -44,7 +44,44 @@ public class MLSKeychain {
     /// Service name used when storing group keys as GenericPassword (daemon / non-sandboxed CLI mode).
     private static let groupKeyService = "blue.catbird.mls.groupkey"
 
-    // MARK: - Keychain Storage
+    // MARK: - Clean Generation (OpenMLS 0.9)
+
+    static func storeSignatureKeyClean(
+        _ key: Data,
+        forIdentity identity: String
+    ) throws {
+        guard !key.isEmpty else {
+            throw MLSKeychainError.invalidData
+        }
+        let tag = "blue.catbird.mls.sig.\(identity)"
+        do {
+            try MLSKeychainManager.shared.storeImmutableKeyStrict(
+                key,
+                forKey: tag,
+                service: signatureKeyService
+            )
+        } catch {
+            throw MLSKeychainError.storeFailed(-1)
+        }
+    }
+
+    static func retrieveSignatureKeyClean(forIdentity identity: String) throws -> Data? {
+        let tag = "blue.catbird.mls.sig.\(identity)"
+        return try MLSKeychainManager.shared.retrieveKeyStrict(
+            forKey: tag,
+            service: signatureKeyService
+        )
+    }
+
+    static func deleteSignatureKeyClean(forIdentity identity: String) throws {
+        let tag = "blue.catbird.mls.sig.\(identity)"
+        try MLSKeychainManager.shared.deleteStrict(
+            forKey: tag,
+            service: signatureKeyService
+        )
+    }
+    // MARK: - Legacy / General Keychain Storage
+    
     
     /// Store a signature key in the Keychain
     /// - Parameters:

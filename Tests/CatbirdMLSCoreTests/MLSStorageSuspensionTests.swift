@@ -4,6 +4,7 @@ import XCTest
 final class MLSStorageSuspensionTests: XCTestCase {
   private var manager: MLSGRDBManager!
   private var tempBaseDirectory: URL!
+  private var fakeKeychain: MLSKeychainFakeStorage!
 
   override func setUp() async throws {
     try await super.setUp()
@@ -11,12 +12,15 @@ final class MLSStorageSuspensionTests: XCTestCase {
       .appendingPathComponent("MLSStorageSuspensionTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempBaseDirectory, withIntermediateDirectories: true)
     MLSStoragePaths.setBaseDirectoryOverride(tempBaseDirectory)
+    fakeKeychain = MLSKeychainFakeStorage()
+    MLSKeychainManager.setFakeStorageOverrideForTesting(fakeKeychain)
     manager = MLSGRDBManager()
   }
 
   override func tearDown() async throws {
     manager = nil
     MLSStoragePaths.setBaseDirectoryOverride(nil)
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
     if let tempBaseDirectory {
       try? FileManager.default.removeItem(at: tempBaseDirectory)
     }

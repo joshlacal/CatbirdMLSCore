@@ -116,8 +116,6 @@ public enum MLSAppActivityState {
   public static func isSwitchingAffecting(userDID: String, staleAfter seconds: TimeInterval = 30)
     -> Bool
   {
-    guard let defaults else { return false }
-
     let switching = defaults.bool(forKey: isSwitchingKey)
     let fromUser = defaults.string(forKey: switchingFromUserKey)
     let toUser = defaults.string(forKey: switchingToUserKey)
@@ -134,8 +132,6 @@ public enum MLSAppActivityState {
   /// Check if any account switch is in progress (regardless of which users)
   /// Useful for blocking all MLS operations globally during transitions
   public static func isAnySwitchInProgress(staleAfter seconds: TimeInterval = 30) -> Bool {
-    guard let defaults else { return false }
-
     let switching = defaults.bool(forKey: isSwitchingKey)
     let updatedAt = defaults.double(forKey: updatedAtKey)
 
@@ -156,7 +152,6 @@ public enum MLSAppActivityState {
   /// The main app should reload MLS state from disk when it resumes.
   /// - Parameter userDID: The user whose MLS ratchet was advanced
   public static func signalNSEProcessed(for userDID: String) {
-    guard let defaults else { return }
     defaults.set(userDID, forKey: nseProcessedMessageKey)
     defaults.set(Date().timeIntervalSince1970, forKey: nseProcessedAtKey)
   }
@@ -169,8 +164,6 @@ public enum MLSAppActivityState {
   public static func hasNSEProcessed(for userDID: String, staleAfter seconds: TimeInterval = 60)
     -> Bool
   {
-    guard let defaults else { return false }
-
     let processedUser = defaults.string(forKey: nseProcessedMessageKey)
     let processedAt = defaults.double(forKey: nseProcessedAtKey)
 
@@ -185,7 +178,6 @@ public enum MLSAppActivityState {
   /// Clear the NSE-processed flag after the main app has reloaded state.
   /// Call this after successfully calling reloadStateFromDisk().
   public static func clearNSEProcessedFlag() {
-    guard let defaults else { return }
     defaults.removeObject(forKey: nseProcessedMessageKey)
     defaults.removeObject(forKey: nseProcessedAtKey)
   }

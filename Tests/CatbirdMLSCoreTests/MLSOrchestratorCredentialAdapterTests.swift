@@ -5,6 +5,19 @@ import XCTest
 @testable import CatbirdMLSCore
 
 final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
+  private var fakeKeychain: MLSKeychainFakeStorage!
+
+  override func setUpWithError() throws {
+    try super.setUpWithError()
+    fakeKeychain = MLSKeychainFakeStorage()
+    MLSKeychainManager.setFakeStorageOverrideForTesting(fakeKeychain)
+  }
+
+  override func tearDownWithError() throws {
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
+    try super.tearDownWithError()
+  }
+
   func testAuthorizedDeviceKeysReturnsNilWhenNoResolverIsConfigured() throws {
     let adapter = MLSOrchestratorCredentialAdapter()
 
@@ -30,19 +43,19 @@ final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
   func testCleanChatTranscriptUsesDeviceSignerWithoutReturningPrivateKey() throws {
     let identity = "did:plc:signing-test-\(UUID().uuidString.lowercased())"
     let privateKey = Curve25519.Signing.PrivateKey()
-    try MLSKeychain.storeSignatureKey(privateKey.rawRepresentation, forIdentity: identity)
-    defer { try? MLSKeychain.deleteSignatureKey(forIdentity: identity) }
-
-    let transcript = Data("clean-chat-transcript".utf8)
-    let keyID = MLSOrchestratorCredentialAdapter.keyIdentifier(
-      forPublicKey: privateKey.publicKey.rawRepresentation
-    )
     let adapter = MLSOrchestratorCredentialAdapter(
       signingBindingResolver: { did in
         did == identity
           ? .init(deviceId: "device-1", dpopJkt: "jkt-1", authGeneration: 3)
           : nil
       }
+    )
+    try adapter.storeSigningKey(userDid: identity, keyData: privateKey.rawRepresentation)
+    defer { try? adapter.deleteSigningKey(userDid: identity) }
+
+    let transcript = Data("clean-chat-transcript".utf8)
+    let keyID = MLSOrchestratorCredentialAdapter.keyIdentifier(
+      forPublicKey: privateKey.publicKey.rawRepresentation
     )
 
     let authority = try XCTUnwrap(

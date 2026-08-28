@@ -135,22 +135,16 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   // MARK: - Signing Keys
 
   public func storeSigningKey(userDid: String, keyData: Data) throws {
+    let cleanIdentity = MLSStoragePaths.orchestratorSignerIdentity(for: userDid)
     logger.debug("Storing signing key for user: \(userDid.prefix(20))...")
-    try MLSKeychain.storeSignatureKey(keyData, forIdentity: userDid)
+    try MLSKeychain.storeSignatureKeyClean(keyData, forIdentity: cleanIdentity)
     logger.info("Stored signing key for user: \(userDid.prefix(20))...")
   }
 
   public func getSigningKey(userDid: String) throws -> Data? {
+    let cleanIdentity = MLSStoragePaths.orchestratorSignerIdentity(for: userDid)
     logger.debug("Retrieving signing key for user: \(userDid.prefix(20))...")
-    do {
-      let keyData = try MLSKeychain.retrieveSignatureKey(forIdentity: userDid)
-      logger.debug("Retrieved signing key for user: \(userDid.prefix(20))...")
-      return keyData
-    } catch MLSKeychainError.retrieveFailed(let status) where status == errSecItemNotFound {
-      // Key does not exist yet - this is expected for new users
-      logger.debug("No signing key found for user: \(userDid.prefix(20))...")
-      return nil
-    }
+    return try MLSKeychain.retrieveSignatureKeyClean(forIdentity: cleanIdentity)
   }
 
   public func signCleanChatTranscript(
@@ -302,59 +296,60 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   }
 
   public func deleteSigningKey(userDid: String) throws {
+    let cleanIdentity = MLSStoragePaths.orchestratorSignerIdentity(for: userDid)
     logger.debug("Deleting signing key for user: \(userDid.prefix(20))...")
-    try MLSKeychain.deleteSignatureKey(forIdentity: userDid)
+    try MLSKeychain.deleteSignatureKeyClean(forIdentity: cleanIdentity)
     logger.info("Deleted signing key for user: \(userDid.prefix(20))...")
   }
 
   // MARK: - MLS DID
 
   public func storeMlsDid(userDid: String, mlsDid: String) throws {
-    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let key = "\(Self.mlsDidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
-    let data = Data(mlsDid.utf8)
-    logger.debug("Storing MLS DID for user: \(normalized.prefix(20))...")
-    try keychainManager.store(
-      data,
-      forKey: key,
-      accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    )
-    logger.info("Stored MLS DID for user: \(normalized.prefix(20))...")
+    let key = MLSStoragePaths.mlsDidAccount(for: userDid)
+    guard let data = mlsDid.data(using: .utf8) else {
+      throw MLSKeychainError.invalidData
+    }
+    logger.debug("Storing MLS DID for user: \(userDid.prefix(20))...")
+    try MLSKeychainManager.shared.storeImmutableKeyStrict(data, forKey: key)
+    logger.info("Stored MLS DID for user: \(userDid.prefix(20))...")
   }
 
   public func getMlsDid(userDid: String) throws -> String? {
-    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let key = "\(Self.mlsDidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
-    logger.debug("Retrieving MLS DID for user: \(normalized.prefix(20))...")
-    guard let data = try keychainManager.retrieve(forKey: key) else {
+    let key = MLSStoragePaths.mlsDidAccount(for: userDid)
+    logger.debug("Retrieving MLS DID for user: \(userDid.prefix(20))...")
+    guard let data = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: key) else {
       return nil
     }
-    return String(data: data, encoding: .utf8)
+    guard let str = String(data: data, encoding: .utf8) else {
+      throw MLSStorageInitializationError.validationFailed(details: "Corrupt non-UTF8 MLS DID")
+    }
+    return str
   }
+
   // MARK: - Device UUID
 
   public func storeDeviceUuid(userDid: String, uuid: String) throws {
-    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let key = "\(Self.deviceUuidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
-    let data = Data(uuid.utf8)
-    logger.debug("Storing device UUID for user: \(normalized.prefix(20))...")
-    try keychainManager.store(
-      data,
-      forKey: key,
-      accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    )
-    logger.info("Stored device UUID for user: \(normalized.prefix(20))...")
+    let key = MLSStoragePaths.deviceUuidAccount(for: userDid)
+    guard let data = uuid.data(using: .utf8) else {
+      throw MLSKeychainError.invalidData
+    }
+    logger.debug("Storing device UUID for user: \(userDid.prefix(20))...")
+    try MLSKeychainManager.shared.storeImmutableKeyStrict(data, forKey: key)
+    logger.info("Stored device UUID for user: \(userDid.prefix(20))...")
   }
 
   public func getDeviceUuid(userDid: String) throws -> String? {
-    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let key = "\(Self.deviceUuidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
-    logger.debug("Retrieving device UUID for user: \(normalized.prefix(20))...")
-    guard let data = try keychainManager.retrieve(forKey: key) else {
+    let key = MLSStoragePaths.deviceUuidAccount(for: userDid)
+    logger.debug("Retrieving device UUID for user: \(userDid.prefix(20))...")
+    guard let data = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: key) else {
       return nil
     }
-    return String(data: data, encoding: .utf8)
+    guard let str = String(data: data, encoding: .utf8) else {
+      throw MLSStorageInitializationError.validationFailed(details: "Corrupt non-UTF8 device UUID")
+    }
+    return str
   }
+
   // MARK: - Credential State
 
   public func hasCredentials(userDid: String) throws -> Bool {
@@ -368,28 +363,16 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     logger.info("Clearing all credentials for user: \(userDid.prefix(20))...")
 
     // Delete signing key
-    do {
-      try deleteSigningKey(userDid: userDid)
-    } catch {
-      logger.warning("Failed to delete signing key during clearAll: \(error.localizedDescription)")
-    }
+    try deleteSigningKey(userDid: userDid)
 
     // Delete MLS DID
-    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let mlsDidKey = "\(Self.mlsDidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
-    do {
-      try keychainManager.delete(forKey: mlsDidKey)
-    } catch {
-      logger.warning("Failed to delete MLS DID during clearAll: \(error.localizedDescription)")
-    }
+    let mlsDidKey = MLSStoragePaths.mlsDidAccount(for: userDid)
+    try MLSKeychainManager.shared.deleteStrict(forKey: mlsDidKey)
 
     // Delete device UUID
-    let deviceUuidKey = "\(Self.deviceUuidKeyPrefix)\(normalized).\(MLSStoragePaths.cleanSuffix)"
-    do {
-      try keychainManager.delete(forKey: deviceUuidKey)
-    } catch {
-      logger.warning("Failed to delete device UUID during clearAll: \(error.localizedDescription)")
-    }
+    let deviceUuidKey = MLSStoragePaths.deviceUuidAccount(for: userDid)
+    try MLSKeychainManager.shared.deleteStrict(forKey: deviceUuidKey)
+
     logger.info("Cleared all credentials for user: \(userDid.prefix(20))...")
   }
 

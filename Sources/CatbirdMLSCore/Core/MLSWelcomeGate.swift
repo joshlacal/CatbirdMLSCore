@@ -21,11 +21,11 @@ public actor MLSWelcomeGate {
   private let gateDirectory: URL
 
   private init() {
-    gateDirectory = (try? MLSStoragePaths.welcomeGateDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("mls_welcome_gate-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
     do {
+      gateDirectory = try MLSStoragePaths.welcomeGateDirectory()
       try FileManager.default.createDirectory(at: gateDirectory, withIntermediateDirectories: true)
     } catch {
-      logger.error("❌ [WelcomeGate] Failed to create gate directory: \(error.localizedDescription)")
+      fatalError("Required App Group container unavailable for MLSWelcomeGate: \(error.localizedDescription)")
     }
   }
 

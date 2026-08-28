@@ -8,10 +8,21 @@
 import Foundation
 import Security
 
-public enum MLSContentRootKeyError: Error {
+public enum MLSContentRootKeyError: Error, LocalizedError {
   case keychainError(OSStatus)
   case invalidStoredKey
   case keyGenerationFailed
+
+  public var errorDescription: String? {
+    switch self {
+    case .keychainError(let status):
+      return "Keychain error for content root key: \(status)"
+    case .invalidStoredKey:
+      return "Invalid content root key in Keychain (wrong length or format)"
+    case .keyGenerationFailed:
+      return "Failed to generate random content root key"
+    }
+  }
 }
 
 /// Per-DID content-root key used by the field-level encryption layer in
@@ -20,94 +31,51 @@ public enum MLSContentRootKeyError: Error {
 /// expose the content root.
 public enum MLSContentRootKey {
   private static let service = "blue.catbird.mls.content"
-  private static let accessGroupSuffix = "blue.catbird.shared"
   private static let keyLength = 32
 
   public static func loadOrCreate(for userDID: String) throws -> Data {
-    if let existing = try load(for: userDID) {
-      return existing
-    }
-    var bytes = [UInt8](repeating: 0, count: keyLength)
-    let status = SecRandomCopyBytes(kSecRandomDefault, keyLength, &bytes)
-    guard status == errSecSuccess else {
+    let acc = MLSStoragePaths.contentRootAccount(for: userDID)
+    do {
+      return try MLSKeychainManager.shared.getOrCreateImmutableKey(
+        forKey: acc,
+        service: service,
+        length: keyLength
+      )
+    } catch {
       throw MLSContentRootKeyError.keyGenerationFailed
     }
-    let data = Data(bytes)
-    if let winner = try store(data, for: userDID) {
-      return winner
+  }
+
+  static func loadStrict(for userDID: String) throws -> Data {
+    let acc = MLSStoragePaths.contentRootAccount(for: userDID)
+    guard let data = try MLSKeychainManager.shared.retrieveKeyStrict(
+      forKey: acc,
+      service: service,
+      expectedLength: keyLength
+    ) else {
+      throw MLSContentRootKeyError.invalidStoredKey
     }
     return data
   }
 
   public static func delete(for userDID: String) throws {
-    var query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account(for: userDID),
-    ]
-    if let group = MLSKeychainManager.resolvedAccessGroup(suffix: accessGroupSuffix) {
-      query[kSecAttrAccessGroup as String] = group
-    }
-    let status = SecItemDelete(query as CFDictionary)
-    if status != errSecSuccess && status != errSecItemNotFound {
-      throw MLSContentRootKeyError.keychainError(status)
+    let acc = MLSStoragePaths.contentRootAccount(for: userDID)
+    do {
+      try MLSKeychainManager.shared.deleteStrict(forKey: acc, service: service)
+    } catch {
+      if let kcErr = error as? KeychainError, case .deleteFailed(let status) = kcErr {
+        throw MLSContentRootKeyError.keychainError(status)
+      }
+      throw error
     }
   }
 
   private static func load(for userDID: String) throws -> Data? {
-    var query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account(for: userDID),
-      kSecReturnData as String: true,
-      kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
-    if let group = MLSKeychainManager.resolvedAccessGroup(suffix: accessGroupSuffix) {
-      query[kSecAttrAccessGroup as String] = group
-    }
-    var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
-    switch status {
-    case errSecSuccess:
-      guard let data = result as? Data, data.count == keyLength else {
-        throw MLSContentRootKeyError.invalidStoredKey
-      }
-      return data
-    case errSecItemNotFound:
-      return nil
-    default:
-      throw MLSContentRootKeyError.keychainError(status)
-    }
-  }
-
-  private static func store(_ data: Data, for userDID: String) throws -> Data? {
-    var attrs: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account(for: userDID),
-      kSecValueData as String: data,
-      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-      kSecAttrSynchronizable as String: false,
-    ]
-    if let group = MLSKeychainManager.resolvedAccessGroup(suffix: accessGroupSuffix) {
-      attrs[kSecAttrAccessGroup as String] = group
-    }
-    let status = SecItemAdd(attrs as CFDictionary, nil)
-    if status == errSecSuccess {
-      return nil
-    } else if status == errSecDuplicateItem {
-      // Concurrent creator won; re-load and return the winner
-      guard let winner = try load(for: userDID) else {
-        throw MLSContentRootKeyError.keychainError(errSecItemNotFound)
-      }
-      return winner
-    } else {
-      throw MLSContentRootKeyError.keychainError(status)
-    }
-  }
-
-  private static func account(for userDID: String) -> String {
-    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    return "mls.content.root.\(normalized).\(MLSStoragePaths.cleanSuffix)"
+    let acc = MLSStoragePaths.contentRootAccount(for: userDID)
+    return try MLSKeychainManager.shared.retrieveKeyStrict(
+      forKey: acc,
+      service: service,
+      expectedLength: keyLength
+    )
   }
 }

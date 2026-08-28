@@ -40,29 +40,22 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   }
 
   private init() {}
+
   // MARK: - Public API
 
-  /// Issue (or replace) the current NSE will-close request for a user and return its token.
-  ///
-  /// Tokens are per-user and monotonic. If a newer token is acknowledged, it implicitly
-  /// acknowledges all older tokens for the same user.
   @discardableResult
   public func issueWillCloseRequest(for userDID: String) -> MLSNSEWillCloseRequest {
     let now = Date().timeIntervalSince1970
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // ADVISORY LOCKS REMOVED (2026-02): Signal-style 0xdead10cc prevention
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Advisory locks cause 0xdead10cc crashes. Token increment is now best-effort
-    // with UserDefaults atomic operations. Monotonicity is preserved by using
-    // incrementing counters - even if we read a stale value, we'll increment it.
-    // ═══════════════════════════════════════════════════════════════════════════
     let counterKey = counterKey(for: userDID)
     let current: UInt64
-    if let number = defaults.object(forKey: counterKey) as? NSNumber {
-      current = number.uint64Value
+    if let obj = defaults.object(forKey: counterKey) {
+      if let number = obj as? NSNumber {
+        current = number.uint64Value
+      } else {
+        fatalError("Corrupt handshake counter in App Group defaults for key: \(counterKey)")
+      }
     } else {
-      current = UInt64(defaults.integer(forKey: counterKey))
+      current = 0
     }
     let token = current &+ 1
     defaults.set(token, forKey: counterKey)
@@ -73,8 +66,6 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
     return request
   }
 
-  /// Record an app acknowledgment for a token. This is idempotent and monotonic:
-  /// the stored acknowledgment token only ever increases.
   public func acknowledge(userDID: String, token: UInt64) {
     let now = Date().timeIntervalSince1970
     let key = ackKey(for: userDID)
@@ -97,27 +88,22 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
     (currentAckToken(for: userDID) ?? 0) >= token
   }
 
-  /// Enumerate all current will-close requests written by the NSE.
-  ///
-  /// This is used by the main app upon receiving the Darwin doorbell.
   public func allRequests() -> [MLSNSEWillCloseRequest] {
     let dict = defaults.dictionaryRepresentation()
     var results: [MLSNSEWillCloseRequest] = []
     results.reserveCapacity(4)
 
     for (key, value) in dict where key.hasPrefix("mls_handshake_request.") && key.hasSuffix(".\(MLSStoragePaths.cleanSuffix)") {
-      guard let data = value as? Data else { continue }
-      if let record = decode(MLSNSEWillCloseRequest.self, from: data) {
-        results.append(record)
+      guard let data = value as? Data else {
+        fatalError("Corrupt non-Data handshake request for key: \(key)")
       }
+      let record = decode(MLSNSEWillCloseRequest.self, from: data)
+      results.append(record)
     }
 
     return results
   }
 
-  /// Wait until the app acknowledgment token is >= the requested token.
-  ///
-  /// This is intended for the NSE after posting the doorbell notification.
   public func waitForAcknowledgment(
     userDID: String,
     token: UInt64,
@@ -141,38 +127,26 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
       if isAcknowledged(userDID: userDID, token: token) {
         let waited = started.duration(to: clock.now)
         if waited > .milliseconds(50) {
-          logger.debug(
-            "✅ [Handshake] Ack observed for token=\(token, privacy: .public) in \(String(describing: waited)) (attempts=\(attempts, privacy: .public))"
-          )
+          logger.info("🤝 [Handshake] Acknowledged after \(String(describing: waited), privacy: .public) (\(attempts, privacy: .public) polls)")
         }
         return true
       }
 
-      do {
-        try Task.checkCancellation()
-      } catch {
-        return false
-      }
-
-      let remaining = clock.now.duration(to: deadline)
-      if remaining <= .zero {
-        break
-      }
-
-      let jittered = delay + .milliseconds(Int.random(in: 0...30))
-      do {
-        try await Task.sleep(for: min(jittered, remaining))
-      } catch {
-        return false
-      }
-
-      delay = min(delay + delay, maxDelay)
+      try? await Task.sleep(for: delay)
+      delay = min(delay * 2, maxDelay)
     }
 
     let waited = started.duration(to: clock.now)
-    logger.warning("⏱️ [Handshake] Ack wait timed out for token=\(token, privacy: .public) \(userDID.prefix(20), privacy: .private)")
+    logger.warning("⚠️ [Handshake] Timed out waiting for app ack (token=\(token, privacy: .public), user=\(userDID.prefix(20), privacy: .private))")
     logger.warning("   waited=\(String(describing: waited), privacy: .public) attempts=\(attempts, privacy: .public)")
     return false
+  }
+
+  func clearAll(for userDID: String) {
+    defaults.removeObject(forKey: counterKey(for: userDID))
+    defaults.removeObject(forKey: requestKey(for: userDID))
+    defaults.removeObject(forKey: ackKey(for: userDID))
+    defaults.synchronize()
   }
 
   // MARK: - Key Helpers
@@ -188,6 +162,7 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
   private func ackKey(for userDID: String) -> String {
     "mls_handshake_ack.\(userKeySuffix(for: userDID)).\(MLSStoragePaths.cleanSuffix)"
   }
+
   private func userKeySuffix(for userDID: String) -> String {
     let digest = SHA256.hash(data: Data(userDID.utf8))
     let hex = digest.compactMap { String(format: "%02x", $0) }.joined()
@@ -202,17 +177,29 @@ public final class MLSAppGroupHandshakeStore: @unchecked Sendable {
 
   private func set<T: Encodable>(_ value: T, forKey key: String) {
     let encoder = JSONEncoder()
-    guard let data = try? encoder.encode(value) else { return }
-    defaults.set(data, forKey: key)
-    defaults.synchronize()
+    do {
+      let data = try encoder.encode(value)
+      defaults.set(data, forKey: key)
+      defaults.synchronize()
+    } catch {
+      fatalError("Failed to encode handshake record: \(error.localizedDescription)")
+    }
   }
 
   private func get<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {
-    guard let data = defaults.data(forKey: key) else { return nil }
+    guard let obj = defaults.object(forKey: key) else { return nil }
+    guard let data = obj as? Data else {
+      fatalError("Corrupt non-Data object in defaults for key \(key)")
+    }
     return decode(type, from: data)
   }
-  private func decode<T: Decodable>(_ type: T.Type, from data: Data) -> T? {
+
+  private func decode<T: Decodable>(_ type: T.Type, from data: Data) -> T {
     let decoder = JSONDecoder()
-    return try? decoder.decode(type, from: data)
+    do {
+      return try decoder.decode(type, from: data)
+    } catch {
+      fatalError("Failed to decode handshake record: \(error.localizedDescription)")
+    }
   }
 }

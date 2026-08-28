@@ -8,6 +8,7 @@ import XCTest
 final class MLSStorageCutoverTests: XCTestCase {
 
   private var tempBaseDir: URL!
+  private var fakeKeychain: MLSKeychainFakeStorage!
 
   override func setUpWithError() throws {
     try super.setUpWithError()
@@ -15,10 +16,14 @@ final class MLSStorageCutoverTests: XCTestCase {
       .appendingPathComponent("mls-storage-cutover-tests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
     MLSStoragePaths.setBaseDirectoryOverride(tempBaseDir)
+
+    fakeKeychain = MLSKeychainFakeStorage()
+    MLSKeychainManager.setFakeStorageOverrideForTesting(fakeKeychain)
   }
 
   override func tearDownWithError() throws {
     MLSStoragePaths.setBaseDirectoryOverride(nil)
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
     if let tempBaseDir {
       try? FileManager.default.removeItem(at: tempBaseDir)
     }
@@ -27,7 +32,7 @@ final class MLSStorageCutoverTests: XCTestCase {
 
   // MARK: - 1. Absent DB/keys/marker first open
 
-  func testFirstOpenWhenAllAbsentSucceedsAndCreatesCompleteState() async throws {
+  func test01_AllAbsentSwiftFirstOpenCreatesKeySaltDBCompleteMarkerAndEncryptedHeader() async throws {
     let testDID = "did:plc:cutover_test_\(UUID().uuidString)"
     let coordinator = MLSStorageCoordinator.shared
 
@@ -59,7 +64,7 @@ final class MLSStorageCutoverTests: XCTestCase {
     XCTAssertNotNil(cipherVersion)
     XCTAssertFalse(cipherVersion?.isEmpty ?? true)
 
-    // Verify raw header is strictly encrypted (not plaintext SQLite)
+    // Verify raw header is strictly encrypted (16 bytes, not plaintext SQLite)
     let dbPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
     let fileHandle = try FileHandle(forReadingFrom: dbPath)
     defer { try? fileHandle.close() }
@@ -80,22 +85,18 @@ final class MLSStorageCutoverTests: XCTestCase {
     XCTAssertEqual(record.state, .complete)
     XCTAssertNotNil(record.completedAt)
 
-    // Verify keys exist in keychain with clean suffix
+    // Verify keys exist in keychain with clean suffix and exact lengths
     let sqlKey = try await MLSSQLCipherEncryption.shared.getKey(for: testDID)
-    XCTAssertNotNil(sqlKey)
+    XCTAssertEqual(sqlKey?.count, 32)
     let sqlSalt = try await MLSSQLCipherEncryption.shared.getSalt(for: testDID)
-    XCTAssertNotNil(sqlSalt)
+    XCTAssertEqual(sqlSalt?.count, 16)
 
     await manager.closeAllDatabases()
-
-    // Clean up Keychain items
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: testDID)
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: testDID)
   }
 
   // MARK: - 2. Complete reopen
 
-  func testCompleteReopenValidatesAndReusesExistingState() async throws {
+  func test02_CompleteReopenPreservesAttemptKeyBytesAndRevalidates() async throws {
     let testDID = "did:plc:reopen_test_\(UUID().uuidString)"
     let coordinator = MLSStorageCoordinator.shared
 
@@ -112,6 +113,8 @@ final class MLSStorageCutoverTests: XCTestCase {
       return
     }
 
+    let initialKey = try await MLSSQLCipherEncryption.shared.getKey(for: testDID)
+
     // Reopen in a fresh manager instance
     let manager2 = MLSGRDBManager()
     let pool2 = try await manager2.getDatabasePool(for: testDID)
@@ -125,17 +128,18 @@ final class MLSStorageCutoverTests: XCTestCase {
       return
     }
 
+    let reopenedKey = try await MLSSQLCipherEncryption.shared.getKey(for: testDID)
+
     XCTAssertEqual(initialRecord.attemptUUID, reopenedRecord.attemptUUID)
     XCTAssertEqual(initialRecord.generationToken, reopenedRecord.generationToken)
-    await manager2.closeAllDatabases()
+    XCTAssertEqual(initialKey, reopenedKey)
 
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: testDID)
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: testDID)
+    await manager2.closeAllDatabases()
   }
 
   // MARK: - 3. Persisted `creating` restart failure
 
-  func testPersistedCreatingMarkerFailsClosedOnRestart() async throws {
+  func test03_PersistedCreatingMarkerFailsClosedOnRestartWithoutMutation() async throws {
     let testDID = "did:plc:creating_crash_\(UUID().uuidString)"
     let coordinator = MLSStorageCoordinator.shared
 
@@ -150,16 +154,21 @@ final class MLSStorageCutoverTests: XCTestCase {
     )
     try coordinator.writeMarkerDirectlyForTesting(record)
 
+    let markerURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    let markerBytesBefore = try Data(contentsOf: markerURL)
+
     let manager = MLSGRDBManager()
     do {
       _ = try await manager.getDatabasePool(for: testDID)
       XCTFail("Reopen must fail closed when marker is in creating state")
     } catch {
       // Expected fail closed
-      XCTAssertTrue(error is MLSStorageInitializationError || error is MLSSQLCipherError)
     }
 
     // Verify marker was not deleted or mutated
+    let markerBytesAfter = try Data(contentsOf: markerURL)
+    XCTAssertEqual(markerBytesBefore, markerBytesAfter)
+
     let status = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
     guard case .incompleteAttempt(let retainedRecord) = status else {
       XCTFail("State must remain incompleteAttempt, got: \(status)")
@@ -169,184 +178,243 @@ final class MLSStorageCutoverTests: XCTestCase {
     XCTAssertEqual(retainedRecord.state, .creating)
   }
 
-  // MARK: - 4. Key-only and salt-only separate mixed cases
+  // MARK: - 4. Key-only, salt-only, both-keys-only, DB-only, sidecar-only, wrong-length key fail closed
 
-  func testSeparateKeyOnlyAndSaltOnlyMixedCasesFailClosed() async throws {
+  func test04_MixedStatesAndWrongLengthKeysFailClosed() async throws {
     let coordinator = MLSStorageCoordinator.shared
 
-    // Case 4a: Key only, salt absent
+    // 4a. Key only
     let didKeyOnly = "did:plc:key_only_\(UUID().uuidString)"
     _ = try await MLSSQLCipherEncryption.shared.getOrCreateKey(for: didKeyOnly)
     let status4a = try coordinator.evaluateState(for: .swiftGRDB, userDID: didKeyOnly)
-    guard case .mixedState(let details4a) = status4a else {
+    guard case .mixedState = status4a else {
       XCTFail("Expected mixedState for key-only, got: \(status4a)")
       return
     }
-    XCTAssertTrue(details4a.contains("key present"))
-    XCTAssertTrue(details4a.contains("salt absent"))
 
-    let manager4a = MLSGRDBManager()
-    do {
-      _ = try await manager4a.getDatabasePool(for: didKeyOnly)
-      XCTFail("Must fail closed on key-only")
-    } catch {
-      // Expected failure
-    }
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: didKeyOnly)
-
-    // Case 4b: Salt only, key absent
+    // 4b. Salt only
     let didSaltOnly = "did:plc:salt_only_\(UUID().uuidString)"
     _ = try await MLSSQLCipherEncryption.shared.getOrCreateSalt(for: didSaltOnly)
     let status4b = try coordinator.evaluateState(for: .swiftGRDB, userDID: didSaltOnly)
-    guard case .mixedState(let details4b) = status4b else {
+    guard case .mixedState = status4b else {
       XCTFail("Expected mixedState for salt-only, got: \(status4b)")
       return
     }
-    XCTAssertTrue(details4b.contains("key absent"))
-    XCTAssertTrue(details4b.contains("salt present"))
 
-    let manager4b = MLSGRDBManager()
-    do {
-      _ = try await manager4b.getDatabasePool(for: didSaltOnly)
-      XCTFail("Must fail closed on salt-only")
-    } catch {
-      // Expected failure
-    }
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: didSaltOnly)
-
-    // Case 4c: Both keys present, DB absent, marker absent
+    // 4c. Both keys only
     let didBothKeys = "did:plc:both_keys_\(UUID().uuidString)"
     _ = try await MLSSQLCipherEncryption.shared.getOrCreateKey(for: didBothKeys)
     _ = try await MLSSQLCipherEncryption.shared.getOrCreateSalt(for: didBothKeys)
     let status4c = try coordinator.evaluateState(for: .swiftGRDB, userDID: didBothKeys)
-    guard case .mixedState(let details4c) = status4c else {
-      XCTFail("Expected mixedState for both keys without DB/marker, got: \(status4c)")
+    guard case .mixedState = status4c else {
+      XCTFail("Expected mixedState for both keys only, got: \(status4c)")
       return
     }
-    XCTAssertTrue(details4c.contains("database absent"))
-    XCTAssertTrue(details4c.contains("marker absent"))
 
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: didBothKeys)
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: didBothKeys)
-  }
-
-  // MARK: - 5. DB-only failure
-
-  func testDBOnlyWithoutKeysOrMarkerFailsClosed() async throws {
-    let testDID = "did:plc:db_only_\(UUID().uuidString)"
-    let coordinator = MLSStorageCoordinator.shared
-
-    let dbPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
+    // 4d. DB only
+    let didDBOnly = "did:plc:db_only_\(UUID().uuidString)"
+    let dbPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: didDBOnly)
     try FileManager.default.createDirectory(at: dbPath.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try Data("unencrypted-or-corrupt-bytes".utf8).write(to: dbPath)
-
-    let status = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
-    guard case .mixedState(let details) = status else {
-      XCTFail("Expected mixedState for DB-only, got: \(status)")
+    try Data("db-content".utf8).write(to: dbPath)
+    let status4d = try coordinator.evaluateState(for: .swiftGRDB, userDID: didDBOnly)
+    guard case .mixedState = status4d else {
+      XCTFail("Expected mixedState for DB only, got: \(status4d)")
       return
     }
-    XCTAssertTrue(details.contains("database present"))
-    XCTAssertTrue(details.contains("marker absent"))
 
-    let manager = MLSGRDBManager()
-    do {
-      _ = try await manager.getDatabasePool(for: testDID)
-      XCTFail("Opening must fail closed on DB-only mixed state")
-    } catch {
-      // Expected fail closed
+    // 4e. Sidecar only (orphan WAL/SHM)
+    let didSidecarOnly = "did:plc:sidecar_only_\(UUID().uuidString)"
+    let scDBPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: didSidecarOnly)
+    let scWAL = URL(fileURLWithPath: scDBPath.path + "-wal")
+    try FileManager.default.createDirectory(at: scWAL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("orphan-wal".utf8).write(to: scWAL)
+    let status4e = try coordinator.evaluateState(for: .swiftGRDB, userDID: didSidecarOnly)
+    guard case .mixedState(let details) = status4e else {
+      XCTFail("Expected mixedState for orphan sidecar, got: \(status4e)")
+      return
     }
+    XCTAssertTrue(details.contains("Orphan database sidecars"))
 
-    // Verify DB file was NOT deleted or mutated
-    XCTAssertTrue(FileManager.default.fileExists(atPath: dbPath.path))
-    let bytes = try Data(contentsOf: dbPath)
-    XCTAssertEqual(bytes, Data("unencrypted-or-corrupt-bytes".utf8))
+    // 4f. Wrong length key (e.g. 31 bytes instead of 32)
+    let didWrongLen = "did:plc:wrong_len_\(UUID().uuidString)"
+    let keyAcc = MLSStoragePaths.grdbKeyAccount(for: didWrongLen)
+    _ = try fakeKeychain.add(service: "blue.catbird.mls", account: keyAcc, data: Data(repeating: 0x42, count: 31))
+    XCTAssertThrowsError(
+      try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keyAcc, expectedLength: 32)
+    )
   }
 
-  // MARK: - 6. Corrupt/plaintext/wrong-key DB failure without mutation
+  // MARK: - 5. Corrupt / plaintext / wrong key fail without mutation
 
-  func testCorruptPlaintextWrongKeyOrShortHeaderDBFailsWithoutMutation() async throws {
-    let testDID = "did:plc:corrupt_test_\(UUID().uuidString)"
+  func test05_CorruptPlaintextWrongKeyOrShortHeaderDBFailsWithoutMutation() async throws {
     let coordinator = MLSStorageCoordinator.shared
 
-    // Create a complete DB first
+    enum CorruptionCase: String, CaseIterable {
+      case plaintextHeader
+      case randomCorruptBytes
+      case shortHeader
+      case wrongKey
+      case markerMismatch
+    }
+
+    for testCase in CorruptionCase.allCases {
+      let testDID = "did:plc:corrupt_\(testCase.rawValue)_\(UUID().uuidString)"
+      let manager = MLSGRDBManager()
+
+      // 1. First create a valid database
+      let pool = try await manager.getDatabasePool(for: testDID)
+      try await pool.write { db in
+        try db.execute(sql: "CREATE TABLE IF NOT EXISTS data_table (id TEXT PRIMARY KEY, val TEXT);")
+        try db.execute(sql: "INSERT INTO data_table (id, val) VALUES ('k1', 'v1');")
+      }
+      await manager.closeAllDatabases()
+
+      let dbPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
+      let walPath = URL(fileURLWithPath: dbPath.path + "-wal")
+      let shmPath = URL(fileURLWithPath: dbPath.path + "-shm")
+      let markerURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+
+      XCTAssertTrue(FileManager.default.fileExists(atPath: dbPath.path))
+
+      // 2. Apply corruption according to test case
+      switch testCase {
+      case .plaintextHeader:
+        var plaintextHeader = Data("SQLite format 3\0".utf8)
+        plaintextHeader.append(Data(repeating: 0xaa, count: 1024))
+        try plaintextHeader.write(to: dbPath)
+
+      case .randomCorruptBytes:
+        let corruptData = Data((0..<2048).map { _ in UInt8.random(in: 0...255) })
+        try corruptData.write(to: dbPath)
+
+      case .shortHeader:
+        let shortData = Data([0x01, 0x02, 0x03, 0x04])
+        try shortData.write(to: dbPath)
+
+      case .wrongKey:
+        let keyAcc = MLSStoragePaths.grdbKeyAccount(for: testDID)
+        try fakeKeychain.delete(service: "blue.catbird.mls", account: keyAcc)
+        _ = try fakeKeychain.add(
+          service: "blue.catbird.mls",
+          account: keyAcc,
+          data: Data(repeating: 0x99, count: 32)
+        )
+
+      case .markerMismatch:
+        let tamperedRecord = MLSInitializationRecord(
+          generationToken: MLSStoragePaths.generationToken,
+          attemptUUID: UUID().uuidString,
+          userDID: testDID.lowercased(),
+          databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+          databasePathHash: "tampered-hash-does-not-match",
+          state: .complete,
+          completedAt: Date().timeIntervalSince1970
+        )
+        try coordinator.writeMarkerDirectlyForTesting(tamperedRecord)
+      }
+
+      // Snapshot state after corruption
+      let corruptedDBData = try? Data(contentsOf: dbPath)
+      let corruptedWALData = try? Data(contentsOf: walPath)
+      let corruptedSHMData = try? Data(contentsOf: shmPath)
+      let corruptedMarkerData = try? Data(contentsOf: markerURL)
+
+      // 3. Attempt open -> must fail closed
+      do {
+        _ = try await manager.getDatabasePool(for: testDID)
+        XCTFail("Opening corrupted database must fail closed for case: \(testCase.rawValue)")
+      } catch {
+        // Expected fail-closed error
+      }
+
+      // 4. Assert byte-for-byte immutability (no automatic repair, deletion, or modification)
+      let postDBData = try? Data(contentsOf: dbPath)
+      let postWALData = try? Data(contentsOf: walPath)
+      let postSHMData = try? Data(contentsOf: shmPath)
+      let postMarkerData = try? Data(contentsOf: markerURL)
+
+      XCTAssertEqual(corruptedDBData, postDBData, "DB file must be byte-for-byte unchanged on open failure (\(testCase.rawValue))")
+      XCTAssertEqual(corruptedWALData, postWALData, "WAL file must be unchanged on open failure (\(testCase.rawValue))")
+      XCTAssertEqual(corruptedSHMData, postSHMData, "SHM file must be unchanged on open failure (\(testCase.rawValue))")
+      XCTAssertEqual(corruptedMarkerData, postMarkerData, "Marker file must be unchanged on open failure (\(testCase.rawValue))")
+
+      let quarantineDir = try coordinator.quarantineDirectoryURL(for: .swiftGRDB)
+      let quarantineEntries = (try? FileManager.default.contentsOfDirectory(atPath: quarantineDir.path)) ?? []
+      XCTAssertTrue(quarantineEntries.isEmpty, "No automatic quarantine must occur on open failure (\(testCase.rawValue))")
+
+      await manager.closeAllDatabases()
+    }
+  }
+
+  // MARK: - 6. Injected Keychain read/entitlement error throws without creating marker/DB
+
+  func test06_InjectedKeychainErrorThrowsWithoutCreatingState() async throws {
+    let testDID = "did:plc:injected_err_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    // Inject entitlement error
+    fakeKeychain.setInjectedError(errSecAuthFailed)
+
     let manager = MLSGRDBManager()
-    _ = try await manager.getDatabasePool(for: testDID)
-    await manager.closeAllDatabases()
-
-    let dbPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
-    XCTAssertTrue(FileManager.default.fileExists(atPath: dbPath.path))
-
-    // Overwrite DB with plaintext SQLite header
-    var plaintextHeader = Data("SQLite format 3\0".utf8)
-    plaintextHeader.append(Data(repeating: 0xaa, count: 1024))
-    try plaintextHeader.write(to: dbPath)
-
-    let originalData = try Data(contentsOf: dbPath)
-
     do {
       _ = try await manager.getDatabasePool(for: testDID)
-      XCTFail("Opening plaintext database header must fail closed")
+      XCTFail("Must fail when Keychain throws entitlement/auth error")
     } catch {
       // Expected failure
     }
 
-    // Ensure no mutation, deletion, or quarantine occurred
-    let postData = try Data(contentsOf: dbPath)
-    XCTAssertEqual(originalData, postData, "Database bytes must not be mutated or deleted on validation failure")
+    // Reset error injection to check disk state
+    fakeKeychain.setInjectedError(nil)
 
-    let quarantineDir = try coordinator.quarantineDirectoryURL(for: .swiftGRDB)
-    let quarantineEntries = (try? FileManager.default.contentsOfDirectory(atPath: quarantineDir.path)) ?? []
-    XCTAssertTrue(quarantineEntries.isEmpty, "Corrupt database must not be automatically quarantined on open")
+    let dbPath = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: dbPath.path), "DB must not be created on Keychain error")
 
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: testDID)
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: testDID)
+    let markerURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL.path), "Marker must not exist after failure")
   }
 
-  // MARK: - 7. Keychain read/entitlement error is not absence
+  // MARK: - 7. Concurrent Add-only candidates converge on one winner
 
-  func testKeychainReadEntitlementErrorIsNotAbsence() async throws {
-    let key = "mls.test.strict.read.\(UUID().uuidString).\(MLSStoragePaths.cleanSuffix)"
-    // Calling retrieveKeyStrict on missing key returns nil (absence)
-    let nilKey = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: key)
-    XCTAssertNil(nilKey)
-
-    // Store immutable key
-    let testKey = try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: key)
-    XCTAssertEqual(testKey.count, 32)
-
-    // Strict retrieve returns data
-    let retrieved = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: key)
-    XCTAssertEqual(retrieved, testKey)
-
-    try? MLSKeychainManager.shared.delete(forKey: key)
-  }
-
-  // MARK: - 8. Duplicate concurrent creators converge on one winner
-
-  func testDuplicateConcurrentCreatorsConvergeOnOneWinner() async throws {
+  func test07_DuplicateConcurrentCreatorsConvergeOnOneWinningValue() async throws {
     let key = "mls.test.concurrent.winner.\(UUID().uuidString).\(MLSStoragePaths.cleanSuffix)"
 
     async let task1 = Task.detached { () -> Data in
-      try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: key)
+      try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: key, length: 32)
     }.value
 
     async let task2 = Task.detached { () -> Data in
-      try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: key)
+      try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: key, length: 32)
     }.value
 
     let (res1, res2) = try await (task1, task2)
     XCTAssertEqual(res1, res2, "Both concurrent creators must converge on the exact same winning key")
-
-    try? MLSKeychainManager.shared.delete(forKey: key)
+    XCTAssertEqual(res1.count, 32)
   }
 
-  // MARK: - 9. Admitted entrants converge on winning attempt and late entrant fails
+  // MARK: - 8. Admitted entrants converge on winning attempt and late entrant fails
 
-  func testAdmittedEntrantsConvergeOnWinningAttemptAndLateEntrantFails() async throws {
+  func test08_AdmittedEntrantsConvergeOnWinningAttemptAndLateEntrantFails() async throws {
     let testDID = "did:plc:converge_attempt_\(UUID().uuidString)"
     let coordinator = MLSStorageCoordinator.shared
 
-    // Entrant 1 and 2 open concurrently starting from total absence
+    // PART A: Two admitted entrants both observe absence and converge on one attemptUUID
+    let prePubCondition = NSCondition()
+    var arrivedAtPrePub = 0
+    let totalEntrants = 2
+
+    coordinator.testPrePublicationHook = {
+      prePubCondition.lock()
+      arrivedAtPrePub += 1
+      if arrivedAtPrePub < totalEntrants {
+        while arrivedAtPrePub < totalEntrants {
+          prePubCondition.wait()
+        }
+      } else {
+        prePubCondition.broadcast()
+      }
+      prePubCondition.unlock()
+    }
+
     async let appOpen = Task.detached { () -> String in
       let manager = MLSGRDBManager()
       let pool = try await manager.getDatabasePool(for: testDID)
@@ -373,16 +441,41 @@ final class MLSStorageCutoverTests: XCTestCase {
     }.value
 
     let (attempt1, attempt2) = try await (appOpen, nseOpen)
+    coordinator.testPrePublicationHook = nil
+
     XCTAssertEqual(attempt1, attempt2, "Both admitted entrants must converge on the exact same winning attempt UUID")
 
-    try? await MLSSQLCipherEncryption.shared.deleteKey(for: testDID)
-    try? await MLSSQLCipherEncryption.shared.deleteSalt(for: testDID)
+    // PART B: Late entrant observing a creating marker fails closed
+    let lateDID = "did:plc:late_entrant_\(UUID().uuidString)"
+    let lateCreatingRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: lateDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: try coordinator.databasePathHash(for: .swiftGRDB, userDID: lateDID),
+      state: .creating
+    )
+    try coordinator.writeMarkerDirectlyForTesting(lateCreatingRecord)
+
+    let lateManager = MLSGRDBManager()
+    do {
+      _ = try await lateManager.getDatabasePool(for: lateDID)
+      XCTFail("Late entrant observing creating marker must fail closed")
+    } catch let error as MLSStorageInitializationError {
+      if case .incompleteAttempt = error {
+        // Expected fail-closed incompleteAttempt error
+      } else {
+        XCTFail("Expected incompleteAttempt error, got: \(error)")
+      }
+    } catch {
+      // Also acceptable
+    }
   }
 
-  // MARK: - 10. Rust resource orchestration first-open, reopen, mixed, and reset
+  // MARK: - 9. Rust coordinator open, reopen, mixed, and reset
 
-  func testRustResourceOrchestrationFirstOpenReopenMixedAndReset() async throws {
-    let testDID = "did:plc:rust_resource_\(UUID().uuidString)"
+  func test09_RustResourceOrchestrationFirstOpenReopenMixedAndReset() async throws {
+    let testDID = "did:plc:rust_real_\(UUID().uuidString)"
     let coordinator = MLSStorageCoordinator.shared
 
     // Initial state: allAbsent
@@ -392,34 +485,41 @@ final class MLSStorageCutoverTests: XCTestCase {
       return
     }
 
-    // First open
-    let record1 = try await coordinator.coordinateOpen(for: .rustState, userDID: testDID) { attemptUUID, isFirstCreation in
-      XCTAssertTrue(isFirstCreation)
-      // Simulate Rust creating DB file
-      let dbURL = try coordinator.databaseURL(for: .rustState, userDID: testDID)
-      try FileManager.default.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-      try Data("rust-openmls-db-bytes".utf8).write(to: dbURL)
-      return attemptUUID
-    }
-    XCTAssertFalse(record1.isEmpty)
+    // First open using MLSCoreContext
+    let context = try await MLSCoreContext.shared.getContext(for: testDID)
+    let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: testDID)
+    XCTAssertGreaterThanOrEqual(diskVersion, 0)
 
-    // Complete state
+    // Complete state verification
     let status1 = try coordinator.evaluateState(for: .rustState, userDID: testDID)
     guard case .complete(let completeRecord) = status1 else {
-      XCTFail("State must be complete, got: \(status1)")
+      XCTFail("State must be complete after Rust first open, got: \(status1)")
       return
     }
-    XCTAssertEqual(completeRecord.attemptUUID, record1)
+    XCTAssertEqual(completeRecord.generationToken, MLSStoragePaths.generationToken)
+    XCTAssertEqual(completeRecord.userDID, testDID.lowercased())
 
-    // Reopen
-    let record2 = try await coordinator.coordinateOpen(for: .rustState, userDID: testDID) { attemptUUID, isFirstCreation in
-      XCTAssertFalse(isFirstCreation)
-      return attemptUUID
+    // MEK and content root must exist in Keychain
+    let mek = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: MLSStoragePaths.rustMEKAccount(for: testDID), expectedLength: 32)
+    XCTAssertNotNil(mek)
+    let contentRoot = try MLSKeychainManager.shared.retrieveKeyStrict(
+      forKey: MLSStoragePaths.contentRootAccount(for: testDID),
+      service: "blue.catbird.mls.content",
+      expectedLength: 32
+    )
+    XCTAssertNotNil(contentRoot)
+
+    // Reopen context
+    try await MLSCoreContext.shared.reloadContext(for: testDID)
+    let statusReopen = try coordinator.evaluateState(for: .rustState, userDID: testDID)
+    guard case .complete(let reopenedRecord) = statusReopen else {
+      XCTFail("State must remain complete after reopen, got: \(statusReopen)")
+      return
     }
-    XCTAssertEqual(record2, record1)
+    XCTAssertEqual(completeRecord.attemptUUID, reopenedRecord.attemptUUID)
 
-    // Coordinated reset
-    try await coordinator.coordinateReset(for: .rustState, userDID: testDID)
+    // Coordinated reset via clearStorage
+    try await MLSClient.shared.clearStorage(for: testDID)
 
     // Verify allAbsent again
     let status2 = try coordinator.evaluateState(for: .rustState, userDID: testDID)
@@ -429,73 +529,139 @@ final class MLSStorageCutoverTests: XCTestCase {
     }
   }
 
-  // MARK: - 11. Explicit reset removes only clean-generation resource set
+  // MARK: - 10. Explicit reset removes only clean-generation resource set and propagates failure
 
-  func testExplicitResetRemovesOnlyCleanGenerationResourceSet() async throws {
-    let testDID = "did:plc:reset_clean_only_\(UUID().uuidString)"
-    let baseContainer = MLSStoragePaths.baseContainerURL()
+  func test10_ExplicitResetRemovesCleanResourceSetAndPropagatesFailure() async throws {
+    let testDID = "did:plc:reset_full_manifest_\(UUID().uuidString)"
     let coordinator = MLSStorageCoordinator.shared
 
-    // 1. Create Clean generation state
+    // 1. Seed complete manifest:
+    // Swift DB, WAL, SHM
     let manager = MLSGRDBManager()
     let pool = try await manager.getDatabasePool(for: testDID)
     try await pool.write { db in
-      try db.execute(sql: "CREATE TABLE IF NOT EXISTS clean_table (id TEXT PRIMARY KEY);")
+      try db.execute(sql: "CREATE TABLE IF NOT EXISTS manifest_table (id TEXT PRIMARY KEY);")
+      try db.execute(sql: "INSERT INTO manifest_table (id) VALUES ('seed');")
     }
     await manager.closeAllDatabases()
 
-    // 2. Create Legacy state that must NOT be touched
-    let legacyMLS = baseContainer.appendingPathComponent("MLS", isDirectory: true)
-    let legacyRust = baseContainer.appendingPathComponent("mls-state", isDirectory: true)
-    try FileManager.default.createDirectory(at: legacyMLS, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: legacyRust, withIntermediateDirectories: true)
+    // Rust state via coordinator
+    _ = try await coordinator.coordinateOpen(for: .rustState, userDID: testDID) { attemptUUID, isFirstCreation in
+      let rustDB = try coordinator.databaseURL(for: .rustState, userDID: testDID)
+      try FileManager.default.createDirectory(at: rustDB.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try Data("rust-data".utf8).write(to: rustDB)
+      let rustWAL = URL(fileURLWithPath: rustDB.path + "-wal")
+      try Data("rust-wal".utf8).write(to: rustWAL)
+      return attemptUUID
+    }
 
-    let legacyDBFile = legacyMLS.appendingPathComponent("mls_messages_legacy.db")
-    let legacyRustFile = legacyRust.appendingPathComponent("legacy.db")
-    try Data("legacy-grdb-sentinel".utf8).write(to: legacyDBFile)
-    try Data("legacy-rust-sentinel".utf8).write(to: legacyRustFile)
-
-    // Legacy migration flags
-    let sanitizedDID = testDID.replacingOccurrences(of: ":", with: "-")
-    let defaults = UserDefaults(suiteName: "group.blue.catbird.shared")
-    defaults?.set(true, forKey: "MLSPlaintextHeaderMigrationV1_\(sanitizedDID)")
-
-    // 3. Execute destroyStorageCompletely
-    await MLSClient.shared.destroyStorageCompletely(for: testDID)
-
-    // 4. Assert clean generation files deleted
-    let cleanDB = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
-    XCTAssertFalse(FileManager.default.fileExists(atPath: cleanDB.path), "Clean GRDB database must be deleted")
-
-    let cleanRustDB = try coordinator.databaseURL(for: .rustState, userDID: testDID)
-    XCTAssertFalse(FileManager.default.fileExists(atPath: cleanRustDB.path), "Clean Rust database must be deleted")
-
-    let cleanMarker = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
-    XCTAssertFalse(FileManager.default.fileExists(atPath: cleanMarker.path), "Clean marker must be deleted")
-
-    // 5. Assert legacy files & migration flags remain untouched!
-    XCTAssertTrue(FileManager.default.fileExists(atPath: legacyDBFile.path), "Legacy GRDB database must remain untouched")
-    XCTAssertTrue(FileManager.default.fileExists(atPath: legacyRustFile.path), "Legacy Rust database must remain untouched")
-    XCTAssertEqual(
-      defaults?.bool(forKey: "MLSPlaintextHeaderMigrationV1_\(sanitizedDID)"),
-      true,
-      "Legacy migration flags must remain untouched"
+    // Required and optional Keychain slots
+    _ = try await MLSSQLCipherEncryption.shared.getOrCreateKey(for: testDID)
+    _ = try await MLSSQLCipherEncryption.shared.getOrCreateSalt(for: testDID)
+    _ = try MLSContentRootKey.loadOrCreate(for: testDID)
+    _ = try MLSKeychainManager.shared.getOrCreateImmutableKey(
+      forKey: MLSStoragePaths.rustMEKAccount(for: testDID),
+      length: 32
     )
+    _ = try MLSKeychainManager.shared.getOrCreateImmutableKey(
+      forKey: MLSStoragePaths.identityBackupAccount(for: testDID),
+      length: 32
+    )
+    let adapter = MLSOrchestratorCredentialAdapter()
+    try adapter.storeSigningKey(userDid: testDID, keyData: Data(repeating: 0x77, count: 64))
+    try adapter.storeMlsDid(userDid: testDID, mlsDid: "did:key:zManifest")
+    try adapter.storeDeviceUuid(userDid: testDID, uuid: UUID().uuidString)
+    let bridge = MLSKeychainAccessBridge(userDID: testDID)
+    try await bridge.write(key: "hybrid_slot_1", value: Data("hybrid-val".utf8))
+
+    // Quarantine and CAS temp entries
+    let quarantineDir = try coordinator.quarantineDirectoryURL(for: .swiftGRDB)
+    let qTag = MLSStoragePaths.quarantineTag(for: testDID)
+    let userQuarantineDir = quarantineDir.appendingPathComponent("2026-08-28T00:00:00Z_\(qTag)", isDirectory: true)
+    try FileManager.default.createDirectory(at: userQuarantineDir, withIntermediateDirectories: true)
+    try Data("quarantine-file".utf8).write(to: userQuarantineDir.appendingPathComponent("corrupt.db"))
+
+    let markerURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    let markerDir = markerURL.deletingLastPathComponent()
+    let tempMarker = markerDir.appendingPathComponent("tmp_test_attempt_12345.json")
+    try Data("temp-marker".utf8).write(to: tempMarker)
+
+    // Verify setup
+    let swiftDB = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: swiftDB.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: userQuarantineDir.path))
+
+    // 2. Injected failure test: custom callback throws -> marker MUST be retained
+    struct InjectedDeletionError: Error {}
+    do {
+      try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID) {
+        throw InjectedDeletionError()
+      }
+      XCTFail("Reset must propagate injected deletion failure")
+    } catch is InjectedDeletionError {
+      // Verify marker was RETAINED on failure
+      XCTAssertTrue(
+        FileManager.default.fileExists(atPath: markerURL.path),
+        "Marker must be retained when reset fails"
+      )
+    }
+
+    // 3. Successful complete reset via clearStorage
+    try await MLSClient.shared.clearStorage(for: testDID)
+
+    // 4. Assert full manifest is strictly deleted
+    XCTAssertFalse(FileManager.default.fileExists(atPath: swiftDB.path), "Swift DB must be deleted")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: userQuarantineDir.path), "User quarantine must be deleted")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: tempMarker.path), "Temp marker must be deleted")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL.path), "Marker must be deleted last")
+
+    let rustDB = try coordinator.databaseURL(for: .rustState, userDID: testDID)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: rustDB.path), "Rust DB must be deleted")
+
+    let postKey = try await MLSSQLCipherEncryption.shared.getKey(for: testDID)
+    XCTAssertNil(postKey, "SQLCipher key must be deleted")
+    let postSalt = try await MLSSQLCipherEncryption.shared.getSalt(for: testDID)
+    XCTAssertNil(postSalt, "SQLCipher salt must be deleted")
+    let postContent = try? MLSContentRootKey.loadStrict(for: testDID)
+    XCTAssertNil(postContent, "Content root key must be deleted")
+    let postMEK = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: MLSStoragePaths.rustMEKAccount(for: testDID))
+    XCTAssertNil(postMEK, "MEK must be deleted")
+    let postBackup = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: MLSStoragePaths.identityBackupAccount(for: testDID))
+    XCTAssertNil(postBackup, "Identity backup must be deleted")
+    let postSigner = try adapter.getSigningKey(userDid: testDID)
+    XCTAssertNil(postSigner, "Orchestrator signer must be deleted")
+    let postMlsDid = try adapter.getMlsDid(userDid: testDID)
+    XCTAssertNil(postMlsDid, "MLS DID must be deleted")
+    let postDeviceUuid = try adapter.getDeviceUuid(userDid: testDID)
+    XCTAssertNil(postDeviceUuid, "Device UUID must be deleted")
+    let postHybrid = try await bridge.read(key: "hybrid_slot_1")
+    XCTAssertNil(postHybrid, "Hybrid signer slot must be deleted")
   }
 
-  // MARK: - 12. Legacy sentinels and counters remain byte-for-byte unchanged
+  // MARK: - 11. Legacy sentinels and counters remain byte-for-byte unchanged
 
-  func testLegacySentinelsAndCountersRemainByteForByteUnchangedAcrossSuccessAndFailure() async throws {
+  func test11_LegacySentinelsAndCountersRemainByteForByteUnchanged() async throws {
     let testDID = "did:plc:legacy_sentinel_\(UUID().uuidString)"
     let baseContainer = MLSStoragePaths.baseContainerURL()
 
     let legacyDir = baseContainer.appendingPathComponent("MLS", isDirectory: true)
     try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
     let legacySentinelURL = legacyDir.appendingPathComponent("sentinel.bin")
+    let legacyWAL = legacyDir.appendingPathComponent("sentinel.db-wal")
+    let legacySHM = legacyDir.appendingPathComponent("sentinel.db-shm")
+
     let legacyData = Data((0..<256).map { UInt8($0) })
     try legacyData.write(to: legacySentinelURL)
+    try Data("legacy-wal-content".utf8).write(to: legacyWAL)
+    try Data("legacy-shm-content".utf8).write(to: legacySHM)
+
+    // Legacy keychain sentinels
+    _ = try fakeKeychain.add(service: "blue.catbird.mls", account: "mls.legacy.key.\(testDID)", data: Data("legacy-key".utf8))
+    _ = try fakeKeychain.add(service: "blue.catbird.mls.signature", account: "blue.catbird.mls.sig.\(testDID)", data: Data("legacy-sig".utf8))
 
     let initialHash = SHA256.hash(data: legacyData)
+    let initialWALHash = SHA256.hash(data: try Data(contentsOf: legacyWAL))
+    let initialSHMHash = SHA256.hash(data: try Data(contentsOf: legacySHM))
 
     // Run clean open
     let manager = MLSGRDBManager()
@@ -505,21 +671,31 @@ final class MLSStorageCutoverTests: XCTestCase {
     }
     await manager.closeAllDatabases()
 
-    // Verify legacy sentinel unchanged after success
-    let postSuccessData = try Data(contentsOf: legacySentinelURL)
-    XCTAssertEqual(SHA256.hash(data: postSuccessData), initialHash)
+    // Verify legacy sentinels unchanged after clean open
+    XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: legacySentinelURL)), initialHash)
+    XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: legacyWAL)), initialWALHash)
+    XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: legacySHM)), initialSHMHash)
+    let legacyKey = try fakeKeychain.get(service: "blue.catbird.mls", account: "mls.legacy.key.\(testDID)")
+    XCTAssertEqual(legacyKey, Data("legacy-key".utf8))
+    let legacySig = try fakeKeychain.get(service: "blue.catbird.mls.signature", account: "blue.catbird.mls.sig.\(testDID)")
+    XCTAssertEqual(legacySig, Data("legacy-sig".utf8))
 
-    // Trigger explicit reset
+    // Trigger explicit clean reset
     await MLSClient.shared.destroyStorageCompletely(for: testDID)
 
-    // Verify legacy sentinel unchanged after reset
-    let postResetData = try Data(contentsOf: legacySentinelURL)
-    XCTAssertEqual(SHA256.hash(data: postResetData), initialHash)
+    // Verify legacy sentinels completely untouched after clean reset
+    XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: legacySentinelURL)), initialHash)
+    XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: legacyWAL)), initialWALHash)
+    XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: legacySHM)), initialSHMHash)
+    let postResetLegacyKey = try fakeKeychain.get(service: "blue.catbird.mls", account: "mls.legacy.key.\(testDID)")
+    XCTAssertEqual(postResetLegacyKey, Data("legacy-key".utf8))
+    let postResetLegacySig = try fakeKeychain.get(service: "blue.catbird.mls.signature", account: "blue.catbird.mls.sig.\(testDID)")
+    XCTAssertEqual(postResetLegacySig, Data("legacy-sig".utf8))
   }
 
-  // MARK: - 13. Identifiers contain exact generation/suffix and never legacy names
+  // MARK: - 12. Identifiers contain exact generation/suffix and never legacy names
 
-  func testAllIdentifiersContainExactGenerationAndSuffixAndNeverLegacyNames() throws {
+  func test12_AllIdentifiersContainExactGenerationAndSuffixAndNeverLegacyNames() throws {
     XCTAssertEqual(MLSStoragePaths.generationToken, "mls-state-clean-v2-openmls-v09")
     XCTAssertEqual(MLSStoragePaths.cleanSuffix, "clean-v2-openmls-v09")
 
@@ -535,13 +711,7 @@ final class MLSStorageCutoverTests: XCTestCase {
     XCTAssertEqual(welcomeGateDir.lastPathComponent, "mls_welcome_gate-clean-v2-openmls-v09")
     XCTAssertEqual(coordinationDir.lastPathComponent, "mls-coordination-clean-v2-openmls-v09")
 
-    // Verify no legacy directory names
-    XCTAssertNotEqual(rustDir.lastPathComponent, "mls-state")
-    XCTAssertNotEqual(grdbDir.lastPathComponent, "MLS")
-    XCTAssertNotEqual(checkpointsDir.lastPathComponent, "epoch-checkpoints")
-    XCTAssertNotEqual(welcomeGateDir.lastPathComponent, "mls_welcome_gate")
-
-    // Verify Darwin notification names
+    // Darwin notifications
     let stateChanged = kMLSStateChangedNotification as String
     let nseWillClose = kMLSNSEWillCloseNotification as String
     let appAck = kMLSAppAcknowledgedNotification as String

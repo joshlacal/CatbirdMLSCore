@@ -59,12 +59,11 @@ public actor MLSEpochCheckpoint {
   // MARK: - Initialization
   
   private init() {
-    checkpointDir = (try? MLSStoragePaths.checkpointsDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("epoch-checkpoints-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
-    // Create directory if needed
     do {
+      checkpointDir = try MLSStoragePaths.checkpointsDirectory()
       try FileManager.default.createDirectory(at: checkpointDir, withIntermediateDirectories: true)
     } catch {
-      logger.error("❌ [MLSEpochCheckpoint] Failed to create checkpoint directory: \(error.localizedDescription)")
+      fatalError("Required App Group container unavailable for MLSEpochCheckpoint: \(error.localizedDescription)")
     }
     
     logger.info("✅ [MLSEpochCheckpoint] Initialized at \(self.checkpointDir.path)")
@@ -122,17 +121,16 @@ public actor MLSEpochCheckpoint {
         // Double-check disk state before writing (Atomic Swap + Guard)
         // We read the disk file to ensure we don't overwrite a newer file written by another process
         var shouldWrite = true
-        if let diskData = try? Data(contentsOf: fileURL),
-           let diskRecord = try? JSONDecoder().decode(EpochRecord.self, from: diskData) {
-          
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+          let diskData = try Data(contentsOf: fileURL)
+          let diskRecord = try JSONDecoder().decode(EpochRecord.self, from: diskData)
           if epoch < diskRecord.epoch {
-             logger.warning("🛡️ [MONOTONIC-GUARD] REJECTED disk write: New \(epoch) < Disk \(diskRecord.epoch). Other process won.")
-             shouldWrite = false
+            logger.warning("🛡️ [MONOTONIC-GUARD] REJECTED disk write: New \(epoch) < Disk \(diskRecord.epoch). Other process won.")
+            shouldWrite = false
           } else {
-             logger.debug("🔍 [EPOCH-TRIO] Disk Check: Disk=\(diskRecord.epoch) | New=\(epoch)")
+            logger.debug("🔍 [EPOCH-TRIO] Disk Check: Disk=\(diskRecord.epoch) | New=\(epoch)")
           }
         }
-        
         if shouldWrite {
           let data = try JSONEncoder().encode(record)
           // Use atomic writing to prevent partial writes

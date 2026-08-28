@@ -34,8 +34,12 @@ public final class MLSCoordinationStore {
   private let queue = DispatchQueue(label: "blue.catbird.mls.coordination", qos: .userInitiated)
   
   private var fileURL: URL {
-    let dir = (try? MLSStoragePaths.coordinationDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("mls-coordination-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
-    return dir.appendingPathComponent(fileName)
+    do {
+      let dir = try MLSStoragePaths.coordinationDirectory()
+      return dir.appendingPathComponent(fileName)
+    } catch {
+      fatalError("Required App Group container unavailable for MLSCoordinationStore: \(error.localizedDescription)")
+    }
   }
 
   private init() {
@@ -43,22 +47,53 @@ public final class MLSCoordinationStore {
   }
 
   private func ensureStateExists() {
-    guard !FileManager.default.fileExists(atPath: fileURL.path) else { return }
-    save(State.initial)
+    let url = fileURL
+    var statBuf = stat()
+    if lstat(url.path, &statBuf) == 0 {
+      return
+    }
+    do {
+      let dir = url.deletingLastPathComponent()
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let data = try JSONEncoder().encode(State.initial)
+      try data.write(to: url, options: .withoutOverwriting)
+    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+      // Created by peer concurrently; fine
+    } catch {
+      logger.error("❌ Failed to create initial coordination state: \(error.localizedDescription)")
+    }
+  }
+
+  /// Strict fetch that differentiates absent file from corrupt/unreadable JSON
+  func fetchState() throws -> State {
+    let url = fileURL
+    var statBuf = stat()
+    if lstat(url.path, &statBuf) != 0 {
+      if errno == ENOENT {
+        return State.initial
+      }
+      throw MLSStorageInitializationError.unreadableState(
+        details: "Filesystem error accessing coordination state: errno \(errno)"
+      )
+    }
+    do {
+      let data = try Data(contentsOf: url)
+      let state = try JSONDecoder().decode(State.self, from: data)
+      return state
+    } catch {
+      logger.error("🚨 [COORD] Coordination state file exists but is corrupt: \(error.localizedDescription)")
+      throw MLSStorageInitializationError.unreadableState(
+        details: "Corrupt coordination state JSON: \(error.localizedDescription)"
+      )
+    }
   }
 
   /// Get current coordination state
   public func getState() -> State {
-    guard FileManager.default.fileExists(atPath: fileURL.path) else {
-      return State.initial
-    }
     do {
-      let data = try Data(contentsOf: fileURL)
-      let state = try JSONDecoder().decode(State.self, from: data)
-      return state
+      return try fetchState()
     } catch {
-      logger.critical("🚨 [COORD] Coordination state file exists but is corrupt: \(error.localizedDescription)")
-      // Return initial with higher generation or fail
+      logger.error("⚠️ [COORD] Failed to fetch coordination state: \(error.localizedDescription)")
       return State.initial
     }
   }
@@ -73,6 +108,17 @@ public final class MLSCoordinationStore {
       state.updatedAt = Date()
       save(state)
       logger.info("🔢 [COORD] Generation incremented to \(state.coordinationGeneration) for user: \(userDID?.prefix(16) ?? "nil", privacy: .private)")
+    }
+  }
+
+  func incrementGenerationStrict(for userDID: String?) throws {
+    try queue.sync {
+      var state = try fetchState()
+      state.coordinationGeneration += 1
+      state.activeUserDID = userDID
+      state.updatedAt = Date()
+      try saveStrict(state)
+      logger.info("🔢 [COORD] Generation incremented strictly to \(state.coordinationGeneration) for user: \(userDID?.prefix(16) ?? "nil", privacy: .private)")
     }
   }
   
@@ -96,13 +142,45 @@ public final class MLSCoordinationStore {
       throw MLSCoordinationError.generationMismatch(expected: expectedGen, current: currentGen)
     }
   }
-  
+
+  /// Reset state for specific user on account removal
+  func deleteState(for userDID: String) {
+    queue.sync {
+      let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      var state = getState()
+      if state.activeUserDID?.lowercased() == normalized {
+        state.activeUserDID = nil
+        state.phase = .active
+        state.updatedAt = Date()
+        save(state)
+      }
+    }
+  }
+
+  func deleteStateStrict(for userDID: String) throws {
+    try queue.sync {
+      let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      var state = try fetchState()
+      if state.activeUserDID?.lowercased() == normalized {
+        state.activeUserDID = nil
+        state.phase = .active
+        state.updatedAt = Date()
+        try saveStrict(state)
+      }
+    }
+  }
+
+  func saveStrict(_ state: State) throws {
+    let url = fileURL
+    let dir = url.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let data = try JSONEncoder().encode(state)
+    try data.write(to: url, options: .atomic)
+  }
+
   private func save(_ state: State) {
     do {
-      let dir = fileURL.deletingLastPathComponent()
-      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-      let data = try JSONEncoder().encode(state)
-      try data.write(to: fileURL, options: .atomic)
+      try saveStrict(state)
     } catch {
       logger.error("❌ Failed to save coordination state: \(error.localizedDescription)")
     }

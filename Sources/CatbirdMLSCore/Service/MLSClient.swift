@@ -323,18 +323,10 @@ public actor MLSClient {
 
     // Configure keychain access group for shared access between app and extensions
     // This allows NotificationServiceExtension to access MLS encryption keys
-    #if os(iOS)
-      #if targetEnvironment(simulator)
-        // Simulator bug: Keychain access groups don't work reliably
-        // Use nil to fall back to default keychain (no sharing, but prevents -34018 error)
-        MLSKeychainManager.shared.accessGroup = nil
-        logger.warning("⚠️ Running on simulator - keychain access group disabled (sharing won't work)")
-      #else
-        // Device: shared access between app and extensions (must match Keychain Sharing entitlement).
-        let accessGroup = MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
-        MLSKeychainManager.shared.accessGroup = accessGroup
-        logger.debug("🔑 Configured keychain access group: \(accessGroup ?? "nil")")
-      #endif
+    #if !os(Linux) && !os(Windows)
+      let accessGroup = MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
+      MLSKeychainManager.shared.accessGroup = accessGroup
+      logger.debug("🔑 Configured keychain access group: \(accessGroup ?? "nil")")
     #endif
 
     // Lifecycle observers are handled by AppState/AuthManager, not here
@@ -746,21 +738,8 @@ public actor MLSClient {
 
     let identityBytes = Data(identity.utf8)
 
-    // RECOVERY CHECK (once per batch, mirroring createKeyPackage(for:identity:)):
-    // a saved identity key in Keychain but not in the Rust context means a
-    // reinstall — import it so the batch reuses the original signer instead of
-    // minting a new one (signature key mismatch otherwise).
-    let identityKeyKey = "mls_identity_key_\(userDID)"
-    if let savedKeyData = try? MLSKeychainManager.shared.retrieve(forKey: identityKeyKey) {
-      do {
-        try await runFFIWithRecovery(for: userDID) { ctx in
-          try ctx.importIdentityKey(identity: identity, keyData: savedKeyData)
-        }
-      } catch {
-        logger.error("❌ Failed to restore identity key before batch: \(error.localizedDescription)")
-        // Continue - will generate new key, but this is suboptimal
-      }
-    }
+    // RECOVERY CHECK: restore identity key if present
+    try await restoreIdentityKeyIfNeeded(for: userDID, identity: identity)
 
     // Single FFI batch call: the Rust side resolves the signer once, persists
     // all bundles in one row transaction, and performs ONE WAL checkpoint at
@@ -777,11 +756,7 @@ public actor MLSClient {
     }
 
     // BACKUP (once per batch): export and save the identity key for future recovery
-    if let identityKeyData = try? await runFFIWithRecovery(for: userDID, operation: { ctx in
-      try ctx.exportIdentityKey(identity: identity)
-    }) {
-      try? MLSKeychainManager.shared.store(identityKeyData, forKey: identityKeyKey)
-    }
+    try await backupIdentityKeyIfNeeded(for: userDID, identity: identity)
 
     return packages
   }
@@ -2295,23 +2270,7 @@ public actor MLSClient {
     // logger.debug("[MLSClient.createKeyPackage] Full identity: '\(identity)' (length: \(identity.count))")
 
     // RECOVERY CHECK: Check if we have a saved identity key in Keychain but not in Rust context
-    // This happens on reinstall. If found, import it before creating key package.
-    let identityKeyKey = "mls_identity_key_\(userDID)"
-    if let savedKeyData = try? MLSKeychainManager.shared.retrieve(forKey: identityKeyKey) {
-      let keyData = savedKeyData
-      // logger.info("♻️ Found saved identity key in Keychain. Importing to restore identity...")
-      do {
-        try await runFFIWithRecovery(for: userDID) { ctx in
-          try ctx.importIdentityKey(identity: identity, keyData: keyData)
-        }
-        // logger.info("✅ Identity key restored successfully")
-      } catch let error as MlsError {
-        logger.error("❌ Failed to restore identity key: \(error.localizedDescription)")
-        // Continue - will generate new key, but this is suboptimal
-      } catch {
-        logger.error("❌ Failed to restore identity key: \(error.localizedDescription)")
-      }
-    }
+    try await restoreIdentityKeyIfNeeded(for: userDID, identity: identity)
 
     let identityBytes = Data(identity.utf8)
     do {
@@ -2320,12 +2279,7 @@ public actor MLSClient {
       }
 
       // BACKUP: Export and save the identity key to Keychain for future recovery
-      if let identityKeyData = try? await runFFIWithRecovery(for: userDID, operation: { ctx in
-        try ctx.exportIdentityKey(identity: identity)
-      }) {
-        try? MLSKeychainManager.shared.store(identityKeyData, forKey: identityKeyKey)
-        // logger.debug("💾 Identity key backed up to Keychain for recovery")
-      }
+      try await backupIdentityKeyIfNeeded(for: userDID, identity: identity)
 
       // Log bundle count after creation
       if let bundleCount = try? await runFFIWithRecovery(for: userDID, operation: { ctx in
@@ -2347,18 +2301,7 @@ public actor MLSClient {
   public func createLastResortKeyPackage(for userDID: String, identity: String) async throws -> Data {
     try throwIfRustFullSwiftKeyPackageMutation("createLastResortKeyPackage")
 
-    let identityKeyKey = "mls_identity_key_\(userDID)"
-    if let savedKeyData = try? MLSKeychainManager.shared.retrieve(forKey: identityKeyKey) {
-      do {
-        try await runFFIWithRecovery(for: userDID) { ctx in
-          try ctx.importIdentityKey(identity: identity, keyData: savedKeyData)
-        }
-      } catch let error as MlsError {
-        logger.error("❌ Failed to restore identity key before last-resort KP: \(error.localizedDescription)")
-      } catch {
-        logger.error("❌ Failed to restore identity key before last-resort KP: \(error.localizedDescription)")
-      }
-    }
+    try await restoreIdentityKeyIfNeeded(for: userDID, identity: identity)
 
     let identityBytes = Data(identity.utf8)
     do {
@@ -2366,11 +2309,7 @@ public actor MLSClient {
         try ctx.createLastResortKeyPackage(identityBytes: identityBytes)
       }
 
-      if let identityKeyData = try? await runFFIWithRecovery(for: userDID, operation: { ctx in
-        try ctx.exportIdentityKey(identity: identity)
-      }) {
-        try? MLSKeychainManager.shared.store(identityKeyData, forKey: identityKeyKey)
-      }
+      try await backupIdentityKeyIfNeeded(for: userDID, identity: identity)
 
       return result.keyPackageData
     } catch let error as MlsError {
@@ -3736,108 +3675,97 @@ public actor MLSClient {
     let normalizedDID = normalizeUserDID(userDID)
     logger.info("🧰 [Diagnostics] Resetting MLS storage for user: \(normalizedDID)")
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 1: Signal globally that this user is under maintenance
-    // ═══════════════════════════════════════════════════════════════════════════
-    // This tells ALL processes (main app, NSE) to stop touching this user's data.
-    // We increment generation to invalidate any in-flight tasks.
-    // ═══════════════════════════════════════════════════════════════════════════
-    MLSAppActivityState.setShuttingDown(true, userDID: normalizedDID)
-    MLSCoordinationStore.shared.incrementGeneration(for: normalizedDID)
-    bumpGeneration(for: normalizedDID)
-
-    // Ensure we clear the shutdown flag when done
-    defer {
-      MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
-    }
-
-    if let coordinator = storageMaintenanceCoordinator {
+    let coordinator = storageMaintenanceCoordinator
+    if let coordinator {
       await coordinator.beginStorageMaintenance(for: normalizedDID)
-      defer {
-        Task { await coordinator.endStorageMaintenance(for: normalizedDID) }
-      }
       await coordinator.prepareMLSStorageReset(for: normalizedDID)
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 2: Wait for in-flight operations to notice and cancel
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Give any active operations a moment to check their generation and bail out.
-    // This is a safety buffer, not a hard synchronization point.
-    // ═══════════════════════════════════════════════════════════════════════════
-    try? await Task.sleep(nanoseconds: 300_000_000)  // 300ms
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 3: Close the database gate and wait for drain
-    // ═══════════════════════════════════════════════════════════════════════════
-    // This is the authoritative point where we block new connections and wait
-    // for existing ones to finish. If drain times out, we force close.
-    // ═══════════════════════════════════════════════════════════════════════════
+    var resetError: Error?
     do {
+      // ═══════════════════════════════════════════════════════════════════════════
+      // PHASE 1: Signal globally that this user is under maintenance
+      // ═══════════════════════════════════════════════════════════════════════════
+      MLSAppActivityState.setShuttingDown(true, userDID: normalizedDID)
+      try MLSCoordinationStore.shared.incrementGenerationStrict(for: normalizedDID)
+      bumpGeneration(for: normalizedDID)
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // PHASE 2: Close the database gate and wait for drain (failure aborts reset)
+      // ═══════════════════════════════════════════════════════════════════════════
       try await MLSDatabaseGate.shared.closeGateAndDrain(for: normalizedDID, timeout: .seconds(5))
       logger.info("✅ [Diagnostics] Database gate closed and drained")
+
+      // Invalidate and remove in-memory clients
+      apiClients.removeValue(forKey: normalizedDID)
+      deviceManagers.removeValue(forKey: normalizedDID)
+      recoveryManagers.removeValue(forKey: normalizedDID)
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // PHASE 3: Close / flush Rust context and GRDB databases before deletion
+      // ═══════════════════════════════════════════════════════════════════════════
+      try await MLSCoreContext.shared.resetAndCloseContext(for: normalizedDID)
+      try await MLSGRDBManager.shared.closeAndDrainDatabase(for: normalizedDID)
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // PHASE 4: Perform coordinated reset of clean Swift and Rust resources
+      // ═══════════════════════════════════════════════════════════════════════════
+      try await MLSStorageCoordinator.shared.coordinateReset(for: .swiftGRDB, userDID: normalizedDID)
+      try await MLSStorageCoordinator.shared.coordinateReset(for: .rustState, userDID: normalizedDID)
+
+      // ═══════════════════════════════════════════════════════════════════════════
+      // PHASE 5: Clear generation-scoped per-user coordination metadata
+      // ═══════════════════════════════════════════════════════════════════════════
+      MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
+      try MLSCoordinationStore.shared.deleteStateStrict(for: normalizedDID)
+      MLSAppGroupHandshakeStore.shared.clearAll(for: normalizedDID)
+
+      logger.info("✅ [Diagnostics] MLS storage reset complete for \(normalizedDID)")
     } catch {
-      logger.warning(
-        "⚠️ [Diagnostics] Gate drain timed out - force closing: \(error.localizedDescription)")
-      await MLSDatabaseGate.shared.forceCloseGate(for: normalizedDID)
+      resetError = error
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PHASE 4: Perform the actual reset
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Drop in-memory Rust context so it will reload from disk on next operation.
-    await MLSCoreContext.shared.removeContext(for: normalizedDID)
-    await MLSGRDBManager.shared.closeDatabase(for: normalizedDID)
-
-    // Reset both clean Swift and Rust resource sets via coordinated reset
-    try await MLSStorageCoordinator.shared.coordinateReset(for: .swiftGRDB, userDID: normalizedDID)
-    try await MLSStorageCoordinator.shared.coordinateReset(for: .rustState, userDID: normalizedDID)
+    // Structured await cleanup on both success and failure
+    MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
     await MLSDatabaseGate.shared.openGate(for: normalizedDID)
+    if let coordinator {
+      await coordinator.endStorageMaintenance(for: normalizedDID)
+    }
 
-    logger.info("✅ [Diagnostics] MLS storage reset complete for \(normalizedDID)")
+    if let resetError {
+      throw resetError
+    }
   }
 
-  /// Completely destroy all MLS storage, databases, WAL/SHM/journal files,
-  /// Keychain cryptographic materials, content-root keys, signing credentials,
-  /// device registration records, and migration flags for a user.
-  ///
-  /// CRITICAL: Gated exclusively to the explicit "remove account completely" user action.
-  /// NEVER call on logout, account switch, or failure recovery.
+  /// Completely destroy all MLS storage for a user (explicit user action)
   public func destroyStorageCompletely(for userDID: String) async {
     let normalizedDID = normalizeUserDID(userDID)
     logger.info("💥 [MLSClient] Completely destroying all MLS data for user: \(normalizedDID)")
-
-    // Phase 1: Invalidate and remove in-memory contexts and clients
-    apiClients.removeValue(forKey: normalizedDID)
-    deviceManagers.removeValue(forKey: normalizedDID)
-    recoveryManagers.removeValue(forKey: normalizedDID)
-    await MLSCoreContext.shared.removeContext(for: normalizedDID)
-
-    // Phase 2: Close and drain database gate
     do {
-      try await MLSDatabaseGate.shared.closeGateAndDrain(for: normalizedDID, timeout: .seconds(3))
+      try await clearStorage(for: normalizedDID)
+      logger.info("✅ [MLSClient] Complete destruction finished for user: \(normalizedDID)")
     } catch {
-      await MLSDatabaseGate.shared.forceCloseGate(for: normalizedDID)
+      logger.critical("❌ [MLSClient] Complete destruction failed for user: \(normalizedDID): \(error.localizedDescription)")
     }
+  }
 
-    await MLSGRDBManager.shared.closeDatabase(for: normalizedDID)
+  // MARK: - Identity Key Backup Helpers
 
-    // Phase 3: Coordinated reset of clean Swift and Rust resources (DB, sidecars, quarantine, keys, markers)
-    try? await MLSStorageCoordinator.shared.coordinateReset(for: .swiftGRDB, userDID: normalizedDID)
-    try? await MLSStorageCoordinator.shared.coordinateReset(for: .rustState, userDID: normalizedDID)
+  private func restoreIdentityKeyIfNeeded(for userDID: String, identity: String) async throws {
+    let key = MLSStoragePaths.identityBackupAccount(for: userDID)
+    if let savedKeyData = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: key) {
+      try await runFFIWithRecovery(for: userDID) { ctx in
+        try ctx.importIdentityKey(identity: identity, keyData: savedKeyData)
+      }
+    }
+  }
 
-    // Phase 4: Destroy generation-scoped content-root key and credentials
-    try? MLSContentRootKey.delete(for: normalizedDID)
-    try? MLSKeychainManager.shared.delete(forKey: "mls_identity_key_\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
-    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.mlsDid.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
-    try? MLSKeychainManager.shared.delete(forKey: "mls.credential.deviceUuid.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)")
-
-    // Phase 5: Destroy clean version tracking (legacy migration flags are untouched)
-    MLSStateVersionManager.shared.clearVersion(for: normalizedDID)
-    // Phase 6: Re-open database gate and clear activity shutdown state so re-adding this account works cleanly
-    await MLSDatabaseGate.shared.openGate(for: normalizedDID)
-    MLSAppActivityState.setShuttingDown(false, userDID: normalizedDID)
-    logger.info("✅ [MLSClient] Complete destruction finished for user: \(normalizedDID)")
+  private func backupIdentityKeyIfNeeded(for userDID: String, identity: String) async throws {
+    let key = MLSStoragePaths.identityBackupAccount(for: userDID)
+    let identityKeyData = try await runFFIWithRecovery(for: userDID) { ctx in
+      try ctx.exportIdentityKey(identity: identity)
+    }
+    try MLSKeychainManager.shared.storeImmutableKeyStrict(identityKeyData, forKey: key)
   }
 
   /// Delete specific consumed key package bundles from storage

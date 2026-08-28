@@ -21,12 +21,14 @@ public enum MLSAuthorityModeSharedState {
   }
 
   public static func currentMode() -> MLSProtocolAuthorityMode {
-    guard let rawValue = defaults.string(forKey: userDefaultsKey),
-      let mode = MLSProtocolAuthorityMode(rawRuntimeValue: rawValue)
-    else {
+    guard let obj = defaults.object(forKey: userDefaultsKey) else {
       return .defaultMode
     }
-
+    guard let rawValue = obj as? String,
+      let mode = MLSProtocolAuthorityMode(rawRuntimeValue: rawValue)
+    else {
+      fatalError("Corrupt or invalid authority mode in shared defaults: \(obj)")
+    }
     return mode
   }
 

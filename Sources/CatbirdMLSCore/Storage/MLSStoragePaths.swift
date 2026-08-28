@@ -42,6 +42,92 @@ public enum MLSStoragePaths {
   static let cleanSuffix = "clean-v2-openmls-v09"
   static let cleanIdentifierSuffix = ".clean-v2-openmls-v09"
 
+  static func sanitize(_ did: String) -> String {
+    let normalized = did.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized
+      .replacingOccurrences(of: ":", with: "-")
+      .replacingOccurrences(of: "/", with: "-")
+      .replacingOccurrences(of: "#", with: "-")
+      .replacingOccurrences(of: "?", with: "-")
+  }
+
+  static func quarantineTag(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let didHash = normalized.data(using: .utf8)?.base64EncodedString()
+      .replacingOccurrences(of: "/", with: "_")
+      .replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "=", with: "")
+      .prefix(16) ?? "unknown"
+    return String(didHash)
+  }
+
+  static func fileExistsStrict(at url: URL) throws -> Bool {
+    var statBuf = stat()
+    let result = lstat(url.path, &statBuf)
+    if result == 0 {
+      return true
+    }
+    if errno == ENOENT {
+      return false
+    }
+    throw MLSStorageInitializationError.unreadableState(
+      details: "Filesystem error accessing \(url.path): errno \(errno)"
+    )
+  }
+
+  // MARK: - Centralized Account & Service Identifiers
+
+  static func rustMEKAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.encryption.key.\(normalized).\(cleanSuffix)"
+  }
+
+  static func grdbKeyAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.sqlcipher.db.key.\(normalized).\(cleanSuffix)"
+  }
+
+  static func grdbSaltAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.sqlcipher.db.salt.\(normalized).\(cleanSuffix)"
+  }
+
+  static func contentRootAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.content.root.\(normalized).\(cleanSuffix)"
+  }
+
+  static func identityBackupAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.identity.backup.\(normalized).\(cleanSuffix)"
+  }
+
+  static func mlsDidAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.credential.mlsDid.\(normalized).\(cleanSuffix)"
+  }
+
+  static func deviceUuidAccount(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "mls.credential.deviceUuid.\(normalized).\(cleanSuffix)"
+  }
+
+  static func hybridSignerService(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "blue.catbird.mls.hybrid.\(normalized).\(cleanSuffix)"
+  }
+
+  static func hybridSignerSlot(key: String) -> String {
+    if key.hasSuffix(cleanIdentifierSuffix) {
+      return key
+    }
+    return "\(key)\(cleanIdentifierSuffix)"
+  }
+
+  static func orchestratorSignerIdentity(for userDID: String) -> String {
+    let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return "\(normalized).\(cleanSuffix)"
+  }
   static let appGroupIdentifier = "group.blue.catbird.shared"
   private static let lock = NSLock()
   private static var overrideURL: URL?
@@ -202,26 +288,41 @@ final class MLSStorageCoordinator: @unchecked Sendable {
   static let shared = MLSStorageCoordinator()
 
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "StorageCoordinator")
-  private let localLock = NSLock()
-  private var resourceLocks: [String: NSLock] = [:]
 
   /// Seam for test barriers
-  var testBarrierHook: (@Sendable () -> Void)?
+  #if DEBUG
+  private let testLock = NSLock()
+  private var _testBarrierHook: (@Sendable () -> Void)?
+  private var _testPrePublicationHook: (@Sendable () -> Void)?
 
-  private init() {}
-
-  private func resourceLock(for kind: MLSDatabaseKind, userDID: String) -> NSLock {
-    localLock.lock()
-    defer { localLock.unlock() }
-    let key = "\(kind.rawValue):\(userDID)"
-    if let existing = resourceLocks[key] {
-      return existing
+  var testBarrierHook: (@Sendable () -> Void)? {
+    get {
+      testLock.lock()
+      defer { testLock.unlock() }
+      return _testBarrierHook
     }
-    let newLock = NSLock()
-    resourceLocks[key] = newLock
-    return newLock
+    set {
+      testLock.lock()
+      defer { testLock.unlock() }
+      _testBarrierHook = newValue
+    }
   }
 
+  var testPrePublicationHook: (@Sendable () -> Void)? {
+    get {
+      testLock.lock()
+      defer { testLock.unlock() }
+      return _testPrePublicationHook
+    }
+    set {
+      testLock.lock()
+      defer { testLock.unlock() }
+      _testPrePublicationHook = newValue
+    }
+  }
+  #endif
+
+  private init() {}
   // MARK: - Paths & Identifiers
 
   func databaseURL(for kind: MLSDatabaseKind, userDID: String) throws -> URL {
@@ -236,11 +337,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       return try MLSStoragePaths.rustDatabaseDirectory().appendingPathComponent("\(didHash).db")
 
     case .swiftGRDB:
-      let sanitized = normalizedDID
-        .replacingOccurrences(of: ":", with: "-")
-        .replacingOccurrences(of: "/", with: "-")
-        .replacingOccurrences(of: "#", with: "-")
-        .replacingOccurrences(of: "?", with: "-")
+      let sanitized = MLSStoragePaths.sanitize(normalizedDID)
       return try MLSStoragePaths.grdbDatabaseDirectory().appendingPathComponent("mls_messages_\(sanitized).db")
     }
   }
@@ -290,12 +387,44 @@ final class MLSStorageCoordinator: @unchecked Sendable {
   private func evaluateStateUnderLease(for kind: MLSDatabaseKind, userDID: String) throws -> MLSStorageStateEvaluation {
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let dbURL = try databaseURL(for: kind, userDID: normalizedDID)
-    let dbExists = FileManager.default.fileExists(atPath: dbURL.path)
+    let dbExists = try MLSStoragePaths.fileExistsStrict(at: dbURL)
+
+    // Strict orphan sidecar detection: sidecar present without main DB is mixed state
+    let sidecarExtensions = ["-wal", "-shm", "-journal", ".wal", ".shm", ".journal"]
+    let hasSidecars = try sidecarExtensions.contains { ext in
+      try MLSStoragePaths.fileExistsStrict(at: URL(fileURLWithPath: dbURL.path + ext))
+    }
+    if !dbExists && hasSidecars {
+      return .mixedState(details: "Orphan database sidecars present without main database")
+    }
 
     let keyState = try checkRequiredKeys(for: kind, userDID: normalizedDID)
     let marker = try readMarker(for: kind, userDID: normalizedDID)
 
     if !dbExists && keyState.allAbsent && marker == nil {
+      if kind == .rustState {
+        let contentRoot = try MLSKeychainManager.shared.retrieveKeyStrict(
+          forKey: MLSStoragePaths.contentRootAccount(for: normalizedDID),
+          service: "blue.catbird.mls.content",
+          expectedLength: 32
+        )
+        let identityBackup = try MLSKeychainManager.shared.retrieveKeyStrict(
+          forKey: MLSStoragePaths.identityBackupAccount(for: normalizedDID)
+        )
+        let mlsDid = try MLSKeychainManager.shared.retrieveKeyStrict(
+          forKey: MLSStoragePaths.mlsDidAccount(for: normalizedDID)
+        )
+        let deviceUuid = try MLSKeychainManager.shared.retrieveKeyStrict(
+          forKey: MLSStoragePaths.deviceUuidAccount(for: normalizedDID)
+        )
+        let orchestratorSigner = try MLSKeychainManager.shared.retrieveKeyStrict(
+          forKey: MLSStoragePaths.orchestratorSignerIdentity(for: normalizedDID),
+          service: "blue.catbird.mls.signature"
+        )
+        if contentRoot != nil || identityBackup != nil || mlsDid != nil || deviceUuid != nil || orchestratorSigner != nil {
+          return .mixedState(details: "Optional clean slots present while Rust DB, MEK, and content root are absent")
+        }
+      }
       return .allAbsent
     }
 
@@ -324,6 +453,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       if keyState.hasSalt { mixedDetails.append("salt present") } else { mixedDetails.append("salt absent") }
     } else {
       if keyState.hasKey { mixedDetails.append("key present") } else { mixedDetails.append("key absent") }
+      if keyState.hasSalt { mixedDetails.append("contentRoot present") } else { mixedDetails.append("contentRoot absent") }
     }
     if let marker { mixedDetails.append("marker=\(marker.state.rawValue)") } else { mixedDetails.append("marker absent") }
 
@@ -341,16 +471,21 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     switch kind {
     case .rustState:
-      let keyAccount = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      let key = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keyAccount)
-      let exists = (key != nil)
-      return KeyPresence(hasKey: exists, hasSalt: exists)
+      let keyAccount = MLSStoragePaths.rustMEKAccount(for: normalizedDID)
+      let contentRootAccount = MLSStoragePaths.contentRootAccount(for: normalizedDID)
+      let hasKey = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keyAccount, expectedLength: 32) != nil
+      let hasContentRoot = try MLSKeychainManager.shared.retrieveKeyStrict(
+        forKey: contentRootAccount,
+        service: "blue.catbird.mls.content",
+        expectedLength: 32
+      ) != nil
+      return KeyPresence(hasKey: hasKey, hasSalt: hasContentRoot)
 
     case .swiftGRDB:
-      let keyAccount = "mls.sqlcipher.db.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      let saltAccount = "mls.sqlcipher.db.salt.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      let hasKey = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keyAccount) != nil
-      let hasSalt = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: saltAccount) != nil
+      let keyAccount = MLSStoragePaths.grdbKeyAccount(for: normalizedDID)
+      let saltAccount = MLSStoragePaths.grdbSaltAccount(for: normalizedDID)
+      let hasKey = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keyAccount, expectedLength: 32) != nil
+      let hasSalt = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: saltAccount, expectedLength: 16) != nil
       return KeyPresence(hasKey: hasKey, hasSalt: hasSalt)
     }
   }
@@ -359,7 +494,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
 
   func readMarker(for kind: MLSDatabaseKind, userDID: String) throws -> MLSInitializationRecord? {
     let url = try markerURL(for: kind, userDID: userDID)
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    guard try MLSStoragePaths.fileExistsStrict(at: url) else { return nil }
 
     do {
       let data = try Data(contentsOf: url)
@@ -370,13 +505,17 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     }
   }
 
+  #if DEBUG
   func writeMarkerDirectlyForTesting(_ record: MLSInitializationRecord) throws {
-    guard let kind = MLSDatabaseKind(rawValue: record.databaseKind) else { return }
+    guard let kind = MLSDatabaseKind(rawValue: record.databaseKind) else {
+      throw MLSStorageInitializationError.validationFailed(details: "Invalid database kind: \(record.databaseKind)")
+    }
     let url = try markerURL(for: kind, userDID: record.userDID)
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     let data = try JSONEncoder().encode(record)
     try data.write(to: url, options: .atomic)
   }
+  #endif
 
   // MARK: - Leases & Mutexes
 
@@ -443,16 +582,11 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     _ = try MLSStoragePaths.requiredCleanContainerURL()
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-    // 1. Process-local lock serialization
-    let rLock = resourceLock(for: kind, userDID: normalizedDID)
-    rLock.lock()
-    defer { rLock.unlock() }
-
-    // 2. Shared admission lease (retained across entire open/validation)
+    // 1. Shared admission lease (retained across entire open/validation/completion/failure)
     let admissionLease = try acquireAdmissionLease(for: kind, userDID: normalizedDID)
     defer { admissionLease.release() }
 
-    // 3. Pre-CAS evaluation under admission lease
+    // 2. Pre-CAS evaluation under admission lease
     let preState = try evaluateStateUnderLease(for: kind, userDID: normalizedDID)
 
     switch preState {
@@ -476,7 +610,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       break
     }
 
-    // 4. Participant observed total absence: attempt atomic no-overwrite marker publish
+    // 3. Participant observed total absence: attempt atomic no-overwrite marker publish via link
     let expectedHash = try databasePathHash(for: kind, userDID: normalizedDID)
     let candidateAttemptUUID = UUID().uuidString
     let candidateRecord = MLSInitializationRecord(
@@ -488,17 +622,24 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       state: .creating
     )
     let markerURL = try self.markerURL(for: kind, userDID: normalizedDID)
-    try FileManager.default.createDirectory(at: markerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let markerDir = markerURL.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: markerDir, withIntermediateDirectories: true)
+
+    #if DEBUG
+    testPrePublicationHook?()
+    #endif
 
     let candidateData = try JSONEncoder().encode(candidateRecord)
-    let winningAttemptUUID: String
+    let tempMarkerURL = markerDir.appendingPathComponent("tmp_\(candidateAttemptUUID)_\(ProcessInfo.processInfo.processIdentifier).json")
+    try candidateData.write(to: tempMarkerURL, options: .atomic)
+    defer { try? FileManager.default.removeItem(at: tempMarkerURL) }
 
-    do {
-      // Atomic create-if-absent (fails if file already exists)
-      try candidateData.write(to: markerURL, options: .withoutOverwriting)
+    let winningAttemptUUID: String
+    let linkResult = link(tempMarkerURL.path, markerURL.path)
+    if linkResult == 0 {
       winningAttemptUUID = candidateAttemptUUID
       logger.info("📝 [StorageCoordinator] Published creating marker for \(kind.rawValue): \(normalizedDID.prefix(20), privacy: .private) (attempt \(winningAttemptUUID))")
-    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+    } else if errno == EEXIST {
       // Lost CAS race to a concurrent total-absence entrant. Read and validate winning marker
       guard let winningData = try? Data(contentsOf: markerURL),
             let winningRecord = try? JSONDecoder().decode(MLSInitializationRecord.self, from: winningData)
@@ -515,29 +656,38 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       }
       winningAttemptUUID = winningRecord.attemptUUID
       logger.info("🤝 [StorageCoordinator] Admitted entrant joined winning creating attempt \(winningAttemptUUID)")
+    } else {
+      throw MLSStorageInitializationError.unreadableState(details: "Failed to create marker via link (errno: \(errno))")
     }
 
-    // 5. Test barrier hook for deterministic concurrency testing
+    #if DEBUG
     testBarrierHook?()
+    #endif
 
-    // 6. Keychain Add-only first-winner creation
+    // 5. Keychain Add-only first-winner creation
     switch kind {
     case .rustState:
-      let keyAccount = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
+      let keyAccount = MLSStoragePaths.rustMEKAccount(for: normalizedDID)
       _ = try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: keyAccount, length: 32)
+      let contentRootAccount = MLSStoragePaths.contentRootAccount(for: normalizedDID)
+      _ = try MLSKeychainManager.shared.getOrCreateImmutableKey(
+        forKey: contentRootAccount,
+        service: "blue.catbird.mls.content",
+        length: 32
+      )
 
     case .swiftGRDB:
-      let keyAccount = "mls.sqlcipher.db.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      let saltAccount = "mls.sqlcipher.db.salt.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
+      let keyAccount = MLSStoragePaths.grdbKeyAccount(for: normalizedDID)
+      let saltAccount = MLSStoragePaths.grdbSaltAccount(for: normalizedDID)
       _ = try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: keyAccount, length: 32)
       _ = try MLSKeychainManager.shared.getOrCreateImmutableKey(forKey: saltAccount, length: 16)
     }
 
-    // 7. Acquire mutation mutex while still holding admission lease
+    // 6. Acquire mutation mutex while still holding admission lease
     let mutationMutex = try acquireMutationMutex(for: kind, userDID: normalizedDID)
     defer { mutationMutex.release() }
 
-    // 8. Re-read/revalidate under mutation mutex
+    // 7. Re-read/revalidate under mutation mutex
     guard let currentMarkerData = try? Data(contentsOf: markerURL),
           let currentMarker = try? JSONDecoder().decode(MLSInitializationRecord.self, from: currentMarkerData)
     else {
@@ -555,12 +705,35 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       )
     }
 
+    let dbURL = try databaseURL(for: kind, userDID: normalizedDID)
+    let dbExists = try MLSStoragePaths.fileExistsStrict(at: dbURL)
+    let sidecarExtensions = ["-wal", "-shm", "-journal", ".wal", ".shm", ".journal"]
+    let hasSidecars = try sidecarExtensions.contains { ext in
+      try MLSStoragePaths.fileExistsStrict(at: URL(fileURLWithPath: dbURL.path + ext))
+    }
+
     if currentMarker.state == .complete {
       // Peer on same winning attempt already completed creation
+      guard dbExists else {
+        throw MLSStorageInitializationError.mixedState(details: "Complete marker found but database file missing")
+      }
       return try await createOrOpen(winningAttemptUUID, false)
     } else if currentMarker.state == .creating {
+      // Database and sidecars must still be absent before first creation
+      if dbExists || hasSidecars {
+        throw MLSStorageInitializationError.mixedState(details: "Partial database or sidecars already exist before creation completed")
+      }
       // First participant creates and validates DB
       let result = try await createOrOpen(winningAttemptUUID, true)
+
+      // 8. Strictly prove DB exists and required keys remain valid before completing marker
+      guard try MLSStoragePaths.fileExistsStrict(at: dbURL) else {
+        throw MLSStorageInitializationError.validationFailed(details: "Database file was not created on disk")
+      }
+      let keyPresence = try checkRequiredKeys(for: kind, userDID: normalizedDID)
+      guard keyPresence.allPresent else {
+        throw MLSStorageInitializationError.validationFailed(details: "Required keys missing after database creation")
+      }
 
       // 9. Atomically complete marker under mutation mutex
       guard let recheckData = try? Data(contentsOf: markerURL),
@@ -582,10 +755,7 @@ final class MLSStorageCoordinator: @unchecked Sendable {
         completedAt: Date().timeIntervalSince1970
       )
       let completeData = try JSONEncoder().encode(completeRecord)
-      let tempURL = markerURL.deletingLastPathComponent().appendingPathComponent("tmp_complete_\(winningAttemptUUID).json")
-      try completeData.write(to: tempURL, options: .atomic)
-      _ = try? FileManager.default.removeItem(at: markerURL)
-      try FileManager.default.moveItem(at: tempURL, to: markerURL)
+      try completeData.write(to: markerURL, options: .atomic)
 
       logger.info("✅ [StorageCoordinator] Completed creation for \(kind.rawValue): \(normalizedDID.prefix(20), privacy: .private)")
       return result
@@ -608,10 +778,6 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     _ = try MLSStoragePaths.requiredCleanContainerURL()
     let normalizedDID = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-    let rLock = resourceLock(for: kind, userDID: normalizedDID)
-    rLock.lock()
-    defer { rLock.unlock() }
-
     let resetLease = try acquireExclusiveResetLease(for: kind, userDID: normalizedDID)
     defer { resetLease.release() }
 
@@ -630,53 +796,65 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       dbURL.appendingPathExtension("journal")
     ]
     for fileURL in sidecars {
-      if FileManager.default.fileExists(atPath: fileURL.path) {
+      if try MLSStoragePaths.fileExistsStrict(at: fileURL) {
         try FileManager.default.removeItem(at: fileURL)
       }
     }
 
     // 2. Delete clean quarantine entries
     let quarantineDir = try quarantineDirectoryURL(for: kind)
-    if let entries = try? FileManager.default.contentsOfDirectory(atPath: quarantineDir.path) {
-      let filterTag: String
-      switch kind {
-      case .rustState:
-        let didHash = normalizedDID.data(using: .utf8)?.base64EncodedString()
-          .replacingOccurrences(of: "/", with: "_")
-          .replacingOccurrences(of: "+", with: "-")
-          .replacingOccurrences(of: "=", with: "")
-          .prefix(64).description ?? "default"
-        filterTag = String(didHash.prefix(16))
-      case .swiftGRDB:
-        filterTag = normalizedDID.replacingOccurrences(of: ":", with: "-")
-      }
+    if try MLSStoragePaths.fileExistsStrict(at: quarantineDir) {
+      let entries = try FileManager.default.contentsOfDirectory(atPath: quarantineDir.path)
+      let filterTag = MLSStoragePaths.quarantineTag(for: normalizedDID)
       for entry in entries where entry.contains(filterTag) {
         let entryURL = quarantineDir.appendingPathComponent(entry)
-        try? FileManager.default.removeItem(at: entryURL)
+        try FileManager.default.removeItem(at: entryURL)
       }
     }
 
-    // 3. Delete clean Keychain keys
-    switch kind {
-    case .rustState:
-      let keyAccount = "mls.encryption.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      try MLSKeychainManager.shared.delete(forKey: keyAccount)
-
-    case .swiftGRDB:
-      let keyAccount = "mls.sqlcipher.db.key.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      let saltAccount = "mls.sqlcipher.db.salt.\(normalizedDID).\(MLSStoragePaths.cleanSuffix)"
-      try MLSKeychainManager.shared.delete(forKey: keyAccount)
-      try MLSKeychainManager.shared.delete(forKey: saltAccount)
+    // 3. Delete clean marker CAS temp files
+    let markerURL = try self.markerURL(for: kind, userDID: normalizedDID)
+    let markerDir = markerURL.deletingLastPathComponent()
+    if try MLSStoragePaths.fileExistsStrict(at: markerDir) {
+      let markerEntries = try FileManager.default.contentsOfDirectory(atPath: markerDir.path)
+      for entry in markerEntries where entry.hasPrefix("tmp_") {
+        let tempURL = markerDir.appendingPathComponent(entry)
+        try FileManager.default.removeItem(at: tempURL)
+      }
     }
 
-    // 4. Custom deletion callback if provided
+    // 4. Delete clean Keychain keys
+    switch kind {
+    case .rustState:
+      let keyAccount = MLSStoragePaths.rustMEKAccount(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: keyAccount)
+      let contentRootAccount = MLSStoragePaths.contentRootAccount(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: contentRootAccount, service: "blue.catbird.mls.content")
+      let identityBackup = MLSStoragePaths.identityBackupAccount(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: identityBackup)
+      let mlsDidAccount = MLSStoragePaths.mlsDidAccount(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: mlsDidAccount)
+      let deviceUuidAccount = MLSStoragePaths.deviceUuidAccount(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: deviceUuidAccount)
+      let orchestratorSigner = MLSStoragePaths.orchestratorSignerIdentity(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: orchestratorSigner, service: "blue.catbird.mls.signature")
+      let hybridService = MLSStoragePaths.hybridSignerService(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteAllStrict(forService: hybridService)
+
+    case .swiftGRDB:
+      let keyAccount = MLSStoragePaths.grdbKeyAccount(for: normalizedDID)
+      let saltAccount = MLSStoragePaths.grdbSaltAccount(for: normalizedDID)
+      try MLSKeychainManager.shared.deleteStrict(forKey: keyAccount)
+      try MLSKeychainManager.shared.deleteStrict(forKey: saltAccount)
+    }
+
+    // 5. Custom deletion callback if provided
     if let customDelete {
       try await customDelete()
     }
 
-    // 5. Remove marker file ONLY after all other deletions succeed
-    let markerURL = try self.markerURL(for: kind, userDID: normalizedDID)
-    if FileManager.default.fileExists(atPath: markerURL.path) {
+    // 6. Remove marker file ONLY after all other deletions succeed
+    if try MLSStoragePaths.fileExistsStrict(at: markerURL) {
       try FileManager.default.removeItem(at: markerURL)
     }
 

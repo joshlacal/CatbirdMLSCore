@@ -185,16 +185,16 @@ public final class MLSStateVersionManager: @unchecked Sendable {
     // Even if we read a slightly stale value, the version will still increase,
     // which is sufficient to trigger context reload on the other process.
     // ═══════════════════════════════════════════════════════════════════════════
-    let current = sharedDefaults?.integer(forKey: key) ?? 0
+    let current = sharedDefaults.integer(forKey: key)
     let newVersion = current + 1
-    sharedDefaults?.set(newVersion, forKey: key)
+    sharedDefaults.set(newVersion, forKey: key)
 
     // Also increment global version
-    let globalCurrent = sharedDefaults?.integer(forKey: Self.globalVersionKey) ?? 0
-    sharedDefaults?.set(globalCurrent + 1, forKey: Self.globalVersionKey)
+    let globalCurrent = sharedDefaults.integer(forKey: Self.globalVersionKey)
+    sharedDefaults.set(globalCurrent + 1, forKey: Self.globalVersionKey)
 
     // Force synchronize to ensure cross-process visibility
-    sharedDefaults?.synchronize()
+    sharedDefaults.synchronize()
     cacheLock.lock()
     lastKnownVersions[userDID] = newVersion
     cacheLock.unlock()
@@ -218,8 +218,8 @@ public final class MLSStateVersionManager: @unchecked Sendable {
   ///   - userDID: User's decentralized identifier
   public func setVersion(_ version: Int, for userDID: String) {
     let key = versionKey(for: userDID)
-    sharedDefaults?.set(version, forKey: key)
-    sharedDefaults?.synchronize()
+    sharedDefaults.set(version, forKey: key)
+    sharedDefaults.synchronize()
     cacheLock.lock()
     lastKnownVersions[userDID] = version
     cacheLock.unlock()

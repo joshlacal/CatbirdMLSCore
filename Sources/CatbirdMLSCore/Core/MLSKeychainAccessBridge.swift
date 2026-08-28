@@ -9,69 +9,43 @@ import Foundation
 import CatbirdMLS
 import Security
 
-/// Bridges iOS Keychain access for Rust FFI
+/// Bridges iOS Keychain access for Rust FFI using per-DID scoped clean service
 final class MLSKeychainAccessBridge: KeychainAccess {
-    private func scopedKey(_ key: String) -> String {
-        if key.hasSuffix(MLSStoragePaths.cleanIdentifierSuffix) {
-            return key
+    let userDID: String
+    let service: String
+
+    init(userDID: String = "") {
+        let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.userDID = normalized
+        if !normalized.isEmpty {
+            self.service = MLSStoragePaths.hybridSignerService(for: normalized)
+        } else {
+            self.service = MLSKeychainManager.shared.serviceName
         }
-        return "\(key)\(MLSStoragePaths.cleanIdentifierSuffix)"
+    }
+
+    private func scopedKey(_ key: String) -> String {
+        MLSStoragePaths.hybridSignerSlot(key: key)
     }
 
     func read(key: String) async throws -> Data? {
-        return try MLSKeychainManager.shared.retrieveKey(for: scopedKey(key))
+        try MLSKeychainManager.shared.retrieveKeyStrict(forKey: scopedKey(key), service: service)
     }
 
     func write(key: String, value: Data) async throws {
-        let scoped = scopedKey(key)
-        if let existing = try MLSKeychainManager.shared.retrieveKey(for: scoped) {
-            if existing == value {
-                return
-            } else {
-                throw MLSStorageInitializationError.keychainError(errSecDuplicateItem)
-            }
-        }
-
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: scoped,
-            kSecAttrService as String: MLSKeychainManager.shared.serviceName,
-            kSecValueData as String: value,
-        ]
-
-        if !MLSKeychainManager.shared.skipDataProtection {
-            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            query[kSecAttrSynchronizable as String] = false
-        }
-
-        #if os(macOS) || targetEnvironment(macCatalyst)
-        if !MLSKeychainManager.shared.skipDataProtection {
-            query[kSecUseDataProtectionKeychain as String] = true
-        }
-        #endif
-
-        if let accessGroup = MLSKeychainManager.shared.effectiveAccessGroup {
-            query[kSecAttrAccessGroup as String] = accessGroup
-        }
-
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecSuccess {
-            return
-        } else if status == errSecDuplicateItem {
-            guard let winner = try MLSKeychainManager.shared.retrieveKey(for: scoped) else {
-                throw KeychainError.retrieveFailed(errSecItemNotFound)
-            }
-            if winner == value {
-                return
-            } else {
-                throw MLSStorageInitializationError.keychainError(errSecDuplicateItem)
-            }
-        } else {
-            throw KeychainError.storeFailed(status)
-        }
+        try MLSKeychainManager.shared.storeImmutableKeyStrict(
+            value,
+            forKey: scopedKey(key),
+            service: service
+        )
     }
 
     func delete(key: String) async throws {
-        try MLSKeychainManager.shared.deleteKey(for: scopedKey(key))
+        try MLSKeychainManager.shared.deleteStrict(forKey: scopedKey(key), service: service)
+    }
+
+    static func deleteServiceAll(for userDID: String) throws {
+        let service = MLSStoragePaths.hybridSignerService(for: userDID)
+        try MLSKeychainManager.shared.deleteAllStrict(forService: service)
     }
 }

@@ -269,10 +269,13 @@ public actor MLSCoreContext {
     if let customDir = configuration.storageDirectory {
       return customDir
     }
-    
-    return (try? MLSStoragePaths.rustDatabaseDirectory()) ?? MLSStoragePaths.baseContainerURL().appendingPathComponent("mls-state-\(MLSStoragePaths.cleanSuffix)", isDirectory: true)
-  }
 
+    do {
+      return try MLSStoragePaths.rustDatabaseDirectory()
+    } catch {
+      fatalError("Required App Group container unavailable for MLSCoreContext: \(error.localizedDescription)")
+    }
+  }
   // MARK: - Configuration
 
   /// Configuration for stress testing and non-singleton usage
@@ -362,20 +365,19 @@ public actor MLSCoreContext {
     self.configuration = .production
     logger.info("MLSCoreContext initialized")
     
-    // Log storage and keychain configuration immediately
-    #if targetEnvironment(simulator)
-      logger.warning("⚠️ [MLSCoreContext] Running on SIMULATOR - keychain sharing disabled")
-    #else
-      if let accessGroup = keychainAccessGroup {
-        logger.info("✅ [MLSCoreContext] Keychain access group: \(accessGroup)")
-      } else {
-        logger.error("⚠️ [MLSCoreContext] Failed to resolve keychain access group!")
-      }
-    #endif
+    let accessGroup = MLSKeychainManager.resolvedAccessGroup(suffix: "blue.catbird.shared")
+    if let accessGroup {
+      logger.info("✅ [MLSCoreContext] Keychain access group: \(accessGroup)")
+    } else {
+      logger.error("⚠️ [MLSCoreContext] Failed to resolve keychain access group!")
+    }
 
-    let baseDirectory = MLSStoragePaths.baseContainerURL()
-    logger.info("✅ [MLSCoreContext] Storage base: \(baseDirectory.path)")
-
+    do {
+      let baseDirectory = try MLSStoragePaths.requiredCleanContainerURL()
+      logger.info("✅ [MLSCoreContext] Storage base: \(baseDirectory.path)")
+    } catch {
+      logger.error("⚠️ [MLSCoreContext] App Group container unavailable at init: \(error.localizedDescription)")
+    }
     Task {
       await configureKeychainAccess()
     }
@@ -486,11 +488,11 @@ public actor MLSCoreContext {
       // Create storage path for this user
       let storagePath = try self.createStoragePath(for: userDid)
 
-      // Get or create encryption key
+      // Strictly retrieve encryption key (coordinator created it during admission)
       let encryptionKey = try await self.getEncryptionKey(for: userDid)
 
-      // Create keychain access bridge
-      let keychainBridge = MLSKeychainAccessBridge()
+      // Create keychain access bridge bound to userDID
+      let keychainBridge = MLSKeychainAccessBridge(userDID: userDid)
 
       // CRITICAL: Re-check suspension & cancellation right before opening Rust FFI / SQLCipher
       if Self.isSuspensionInProgress || Task.isCancelled {
@@ -516,50 +518,15 @@ public actor MLSCoreContext {
       try context.setExternalJoinAuthorizer(authorizer: authorizer)
 
       let epochStorage = MLSEpochSecretStorageBridge(userDID: userDid, databaseManager: .shared)
-      do {
-        try context.setEpochSecretStorage(storage: epochStorage)
-        self.logger.info("✅ Configured epoch secret storage for historical message decryption")
-      } catch {
-        self.logger.error("❌ Failed to configure epoch secret storage: \(error.localizedDescription)")
-      }
+      try context.setEpochSecretStorage(storage: epochStorage)
+      self.logger.info("✅ Configured epoch secret storage for historical message decryption")
 
-      let contentRootKey = try MLSContentRootKey.loadOrCreate(for: userDid)
+      let contentRootKey = try MLSContentRootKey.loadStrict(for: userDid)
       try context.setContentRootKey(key: contentRootKey)
       self.logger.info("✅ Installed per-DID content root key on MLS context")
 
       return context
     }
-    // If suspension or cancellation intervened while MlsContext was constructing, immediately close it
-    if Self.isSuspensionInProgress || Task.isCancelled {
-      logger.warning("🚫 [0xdead10cc-FIX] Closing freshly created MlsContext due to suspension during init")
-      try? newContext.flushAndPrepareClose()
-      throw MLSError.contextCreationBlocked(reason: "App is transitioning to background or task cancelled")
-    }
-    
-    // Set up external join authorizer
-    // This allows the application to validate external join requests
-    let authorizer = MLSExternalJoinAuthorizerBridge()
-    try newContext.setExternalJoinAuthorizer(authorizer: authorizer)
-
-    let epochStorage = MLSEpochSecretStorageBridge(userDID: userDid, databaseManager: .shared)
-    do {
-      try newContext.setEpochSecretStorage(storage: epochStorage)
-      logger.info("✅ Configured epoch secret storage for historical message decryption")
-    } catch {
-      logger.error("❌ Failed to configure epoch secret storage: \(error.localizedDescription)")
-    }
-
-    // Load (or create) the per-DID content root key from Keychain and install
-    // it on the freshly-built MlsContext. The field-level encryption layer
-    // (MLSFieldEncryption / MLSStorage.savePayloadForMessage) requires this
-    // key to derive per-conversation encryption + HMAC keys.
-    //
-    // Bring-up MUST fail loud if the key cannot be loaded — otherwise every
-    // subsequent encrypt/decrypt call would fail with rootKeyMissing and the
-    // user would see silent message-cache corruption.
-    let contentRootKey = try MLSContentRootKey.loadOrCreate(for: userDid)
-    try newContext.setContentRootKey(key: contentRootKey)
-    logger.info("✅ Installed per-DID content root key on MLS context")
 
     // Track the current disk version at context creation time
     let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: userDid)
@@ -602,27 +569,42 @@ public actor MLSCoreContext {
   // MARK: - Helper Methods
 
   private func createStoragePath(for userDid: String) throws -> String {
-    // Create directory if needed
-    try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
-
-    let normalizedDID = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let didHash =
-      normalizedDID.data(using: .utf8)?.base64EncodedString()
-      .replacingOccurrences(of: "/", with: "_")
-      .replacingOccurrences(of: "+", with: "-")
-      .replacingOccurrences(of: "=", with: "")
-      .prefix(64).description ?? "default"
-
-    // Return database path (matching MLSClient: {didHash}.db)
-    return storageDirectory.appendingPathComponent("\(didHash).db").path
+    if let customDir = configuration.storageDirectory {
+      let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      let didHash = normalized.data(using: .utf8)?.base64EncodedString()
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "=", with: "")
+        .prefix(64).description ?? "default"
+      let dbURL = customDir.appendingPathComponent("\(didHash).db")
+      let dir = dbURL.deletingLastPathComponent()
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      return dbURL.path
+    }
+    let dbURL = try MLSStorageCoordinator.shared.databaseURL(for: .rustState, userDID: userDid)
+    let dir = dbURL.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dbURL.path
   }
 
   private func getEncryptionKey(for userDid: String) async throws -> String {
-    // CRITICAL: Use the exact same keychain manager and encoding as MLSClient
-    // MLSClient uses MLSKeychainManager.getOrCreateEncryptionKey() and hexEncodedString()
-    // Using a different source or encoding will fail to decrypt the database
-    let keyData = try MLSKeychainManager.shared.getOrCreateEncryptionKey(forUserDID: userDid)
+    let keyAccount = MLSStoragePaths.rustMEKAccount(for: userDid)
+    guard let keyData = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: keyAccount, expectedLength: 32) else {
+      throw MLSStorageInitializationError.validationFailed(details: "Rust MEK missing in Keychain for \(userDid)")
+    }
     return keyData.hexEncodedString()
+  }
+
+  /// Reset and close context for explicit full storage destruction
+  func resetAndCloseContext(for userDid: String) async throws {
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let context = contexts.removeValue(forKey: normalized) {
+      context.clearContentRootKey()
+      try context.flushAndPrepareClose()
+      Self.unregisterFromEmergencyClose(for: normalized)
+    }
+    contextVersions.removeValue(forKey: normalized)
+    try await databaseManager.closeAndDrainDatabase(for: normalized)
   }
 
   /// Remove context for a user (e.g., on logout)
