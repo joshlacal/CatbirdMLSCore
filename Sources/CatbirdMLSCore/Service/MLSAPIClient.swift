@@ -1418,7 +1418,24 @@ public final class MLSAPIClient {
         deviceId: String? = nil
     ) async throws -> Data {
         logger.debug("Fetching Welcome message for conversation: \(convoId)")
-        return Data()
+        let acceptedHashes = Set((keyPackageHashes ?? []).map { $0.lowercased() })
+        let snapshot = try await getCanonicalInventoryAggregateSnapshot()
+        let welcome = snapshot.pendingWelcomeItems
+            .filter {
+                $0.conversationId == convoId
+                    && $0.status == .value_pending
+                    && (deviceId == nil || $0.recipientDeviceId == deviceId)
+                    && (acceptedHashes.isEmpty
+                        || acceptedHashes.contains($0.provenance.keyPackageRef.data.hexEncodedString()))
+            }
+            .max { $0.transitionSeq < $1.transitionSeq }
+        guard let welcome else {
+            throw MLSAPIError.httpError(statusCode: 404, message: "Welcome not found")
+        }
+        guard Data(SHA256.hash(data: welcome.opaqueWelcome.data)) == welcome.sha256.data else {
+            throw MLSAPIError.invalidResponse(message: "Welcome digest mismatch")
+        }
+        return welcome.opaqueWelcome.data
     }
 
     static let maxWelcomeKeyPackageHashesForQuery = 48
