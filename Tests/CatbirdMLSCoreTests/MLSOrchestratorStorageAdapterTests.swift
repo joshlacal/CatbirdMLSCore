@@ -190,4 +190,43 @@ final class MLSOrchestratorStorageAdapterTests: XCTestCase {
     }
     XCTAssertEqual(rows.map(\.conversationID), [stableID])
   }
+
+  func testPendingDeleteHandoffPreservesRawAndStableIntentKeysWithoutConversationRows() throws {
+    let userDID = "did:plc:receiver"
+    let rawGroupID = "deadbeef"
+    let adapter = MLSOrchestratorStorageAdapter(
+      dbPool: dbPool,
+      userDID: userDID,
+      mlsContext: context
+    )
+
+    try adapter.markPendingLocalDelete(
+      conversationId: rawGroupID,
+      groupIdHex: rawGroupID
+    )
+    try adapter.markPendingLocalDelete(
+      conversationId: stableConversationID,
+      groupIdHex: rawGroupID
+    )
+
+    let afterMark = try adapter.listPendingLocalDeletes().map(\.conversationId)
+    XCTAssertEqual(Set(afterMark), [rawGroupID, stableConversationID])
+
+    try adapter.clearPendingLocalDelete(conversationId: rawGroupID)
+    let afterClear = try adapter.listPendingLocalDeletes().map(\.conversationId)
+    XCTAssertEqual(afterClear, [stableConversationID])
+
+    let rejectedIDs = [
+      "DEADBEEF",                             // uppercase hex
+      "+1",                                   // decodable but noncanonical hex
+      "not-a-conversation-id",                // non-hex
+      "550e8400-e29b-11d4-a716-446655440000", // UUIDv1 lookalike, not v4
+    ]
+    for rejected in rejectedIDs {
+      XCTAssertThrowsError(
+        try adapter.markPendingLocalDelete(conversationId: rejected, groupIdHex: rawGroupID),
+        rejected
+      )
+    }
+  }
 }

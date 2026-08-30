@@ -172,6 +172,21 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     throw MLSStorageError.invalidConversationID(requestedID)
   }
 
+  /// Pending-delete rows are crash-recovery intent keys, not conversation
+  /// foreign keys. Preserve the orchestrator's raw-to-stable handoff exactly.
+  private func validatedPendingLocalDeleteID(_ requestedID: String) throws -> String {
+    if MLSStorageHelpers.isCanonicalUUIDv4(requestedID) {
+      return requestedID
+    }
+    guard let rawID = Data(hexEncoded: requestedID),
+          !rawID.isEmpty,
+          rawID.hexEncodedString() == requestedID
+    else {
+      throw MLSStorageError.invalidConversationID(requestedID)
+    }
+    return requestedID
+  }
+
   // MARK: - Conversation Operations
 
   public func ensureConversationExists(
@@ -1073,11 +1088,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func markPendingLocalDelete(conversationId: String, groupIdHex: String?) throws {
     try dbPool.write { db in
       ensurePendingLocalDeleteTableExists(db)
-      let effectiveID = try resolvedConversationID(
-        in: db,
-        requestedID: conversationId,
-        groupID: groupIdHex
-      )
+      let effectiveID = try validatedPendingLocalDeleteID(conversationId)
       try db.execute(
         sql: """
           INSERT INTO mls_orchestrator_pending_local_deletes (conversation_id, user_did, group_id_hex, created_at)
@@ -1094,7 +1105,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   public func clearPendingLocalDelete(conversationId: String) throws {
     try dbPool.write { db in
       ensurePendingLocalDeleteTableExists(db)
-      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
+      let effectiveID = try validatedPendingLocalDeleteID(conversationId)
       try db.execute(
         sql: """
           DELETE FROM mls_orchestrator_pending_local_deletes
@@ -1127,11 +1138,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         let requestedID: String = row["conversation_id"]
         let groupID: String? = row["group_id_hex"]
         return FfiPendingLocalDelete(
-          conversationId: try self.resolvedConversationID(
-            in: db,
-            requestedID: requestedID,
-            groupID: groupID
-          ),
+          conversationId: try self.validatedPendingLocalDeleteID(requestedID),
           groupIdHex: groupID
         )
       }
