@@ -719,8 +719,8 @@ final class MLSStorageCutoverTests: XCTestCase {
   // MARK: - 12. Identifiers contain exact generation/suffix and never legacy names
 
   func test12_AllIdentifiersContainExactGenerationAndSuffixAndNeverLegacyNames() throws {
-    XCTAssertEqual(MLSStoragePaths.generationToken, "mls-state-clean-v2-openmls-v09")
-    XCTAssertEqual(MLSStoragePaths.cleanSuffix, "clean-v2-openmls-v09")
+    XCTAssertEqual(MLSStoragePaths.generationToken, "mls-state-clean-v2-openmls-v09-r2")
+    XCTAssertEqual(MLSStoragePaths.cleanSuffix, "clean-v2-openmls-v09-r2")
 
     let rustDir = try MLSStoragePaths.rustDatabaseDirectory()
     let grdbDir = try MLSStoragePaths.grdbDatabaseDirectory()
@@ -728,11 +728,11 @@ final class MLSStorageCutoverTests: XCTestCase {
     let welcomeGateDir = try MLSStoragePaths.welcomeGateDirectory()
     let coordinationDir = try MLSStoragePaths.coordinationDirectory()
 
-    XCTAssertEqual(rustDir.lastPathComponent, "mls-state-clean-v2-openmls-v09")
-    XCTAssertEqual(grdbDir.lastPathComponent, "MLS-clean-v2-openmls-v09")
-    XCTAssertEqual(checkpointsDir.lastPathComponent, "epoch-checkpoints-clean-v2-openmls-v09")
-    XCTAssertEqual(welcomeGateDir.lastPathComponent, "mls_welcome_gate-clean-v2-openmls-v09")
-    XCTAssertEqual(coordinationDir.lastPathComponent, "mls-coordination-clean-v2-openmls-v09")
+    XCTAssertEqual(rustDir.lastPathComponent, "mls-state-clean-v2-openmls-v09-r2")
+    XCTAssertEqual(grdbDir.lastPathComponent, "MLS-clean-v2-openmls-v09-r2")
+    XCTAssertEqual(checkpointsDir.lastPathComponent, "epoch-checkpoints-clean-v2-openmls-v09-r2")
+    XCTAssertEqual(welcomeGateDir.lastPathComponent, "mls_welcome_gate-clean-v2-openmls-v09-r2")
+    XCTAssertEqual(coordinationDir.lastPathComponent, "mls-coordination-clean-v2-openmls-v09-r2")
 
     // Darwin notifications
     let stateChanged = kMLSStateChangedNotification as String
@@ -740,10 +740,10 @@ final class MLSStorageCutoverTests: XCTestCase {
     let appAck = kMLSAppAcknowledgedNotification as String
     let nseStop = kMLSNSEStopNotification as String
 
-    XCTAssertTrue(stateChanged.hasSuffix(".clean-v2-openmls-v09"))
-    XCTAssertTrue(nseWillClose.hasSuffix(".clean-v2-openmls-v09"))
-    XCTAssertTrue(appAck.hasSuffix(".clean-v2-openmls-v09"))
-    XCTAssertTrue(nseStop.hasSuffix(".clean-v2-openmls-v09"))
+    XCTAssertTrue(stateChanged.hasSuffix(".clean-v2-openmls-v09-r2"))
+    XCTAssertTrue(nseWillClose.hasSuffix(".clean-v2-openmls-v09-r2"))
+    XCTAssertTrue(appAck.hasSuffix(".clean-v2-openmls-v09-r2"))
+    XCTAssertTrue(nseStop.hasSuffix(".clean-v2-openmls-v09-r2"))
   }
 
   // MARK: - 13. Coordination store fails closed without process-local fallback

@@ -36,7 +36,7 @@ import OSLog
 
 /// Notification posted when MLS state version is incremented locally.
 /// Apps can observe this to trigger immediate state reload.
-public let MLSStateVersionDidChangeNotification = Notification.Name("MLSStateVersionDidChange.clean-v2-openmls-v09")
+public let MLSStateVersionDidChangeNotification = Notification.Name("MLSStateVersionDidChange.clean-v2-openmls-v09-r2")
 /// Manager for monotonic MLS state versioning across processes.
 ///
 /// This enables the main app to detect when NSE has advanced the MLS ratchet

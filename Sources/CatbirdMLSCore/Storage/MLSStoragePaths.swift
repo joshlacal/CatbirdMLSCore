@@ -38,9 +38,9 @@ enum MLSStorageInitializationError: Error, LocalizedError, Sendable, Equatable {
 
 /// Shared storage path resolver for clean MLS components (OpenMLS 0.9 generation).
 public enum MLSStoragePaths {
-  static let generationToken = "mls-state-clean-v2-openmls-v09"
-  static let cleanSuffix = "clean-v2-openmls-v09"
-  static let cleanIdentifierSuffix = ".clean-v2-openmls-v09"
+  static let generationToken = "mls-state-clean-v2-openmls-v09-r2"
+  static let cleanSuffix = "clean-v2-openmls-v09-r2"
+  static let cleanIdentifierSuffix = ".clean-v2-openmls-v09-r2"
   @inlinable
   public static func normalizeDID(_ did: String) -> String {
     did.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

@@ -52,18 +52,18 @@ import OSLog
 
 /// Notification name for MLS state changes (Darwin Notification)
 /// This must match EXACTLY between the main app and NSE
-public let kMLSStateChangedNotification = "blue.catbird.mls.stateChanged.clean-v2-openmls-v09" as CFString
+public let kMLSStateChangedNotification = "blue.catbird.mls.stateChanged.clean-v2-openmls-v09-r2" as CFString
 
 /// Notification name for NSE will close (Darwin Notification - Phase 5)
 /// Posted by NSE before it starts the checkpoint/close sequence
-public let kMLSNSEWillCloseNotification = "blue.catbird.mls.nseWillClose.clean-v2-openmls-v09" as CFString
+public let kMLSNSEWillCloseNotification = "blue.catbird.mls.nseWillClose.clean-v2-openmls-v09-r2" as CFString
 
 /// Notification name for app acknowledged (Darwin Notification - Phase 5)
 /// Posted by main app after it releases database readers
-public let kMLSAppAcknowledgedNotification = "blue.catbird.mls.appAcknowledged.clean-v2-openmls-v09" as CFString
+public let kMLSAppAcknowledgedNotification = "blue.catbird.mls.appAcknowledged.clean-v2-openmls-v09-r2" as CFString
 
 /// Notification name for main app requesting NSE to stop and release DB handles.
-public let kMLSNSEStopNotification = "blue.catbird.nse.stop.clean-v2-openmls-v09" as CFString
+public let kMLSNSEStopNotification = "blue.catbird.nse.stop.clean-v2-openmls-v09-r2" as CFString
 
 /// Manager for cross-process MLS state change notifications using Darwin Notifications.
 ///
