@@ -80,16 +80,23 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     toEpoch: UInt32?
   ) throws -> FfiMessagesPage {
     let result = try blocking {
-      let page = try await self.apiClient.getCanonicalMessagePage(
+      let output = try await self.apiClient.getCanonicalEntries(
         conversationId: convoId,
         afterSeq: cursor.flatMap(Int.init) ?? 0,
-        limit: Int(limit),
-        messageType: messageType
+        limit: Int(limit)
       )
-      return (messages: page.messages, lastSeq: page.lastSeq)
+      return (
+        entries: output.entries,
+        lastSeq: MLSAPIClient.canonicalContinuationAfterSeq(
+          hasMore: output.hasMore,
+          nextAfterSeq: output.nextAfterSeq
+        )
+      )
     }
     return FfiMessagesPage(
-      envelopes: result.messages.map(Self.incomingEnvelope),
+      envelopes: result.entries.compactMap {
+        Self.incomingEnvelope($0, messageType: messageType)
+      },
       cursor: result.lastSeq.map(String.init)
     )
   }
@@ -271,23 +278,86 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     )
   }
 
-  private static func incomingEnvelope(_ message: BlueCatbirdChatDefs.ApplicationEntry) -> FfiIncomingEnvelope {
-    let ciphertextData: Data
-    let senderDid: String
-    switch message.signedRequest.body {
-    case .blueCatbirdChatDefsApplicationSendBody(let body):
-      ciphertextData = body.applicationMessage.bytes.data
-      senderDid = body.actorDid.description
-    case .unexpected:
-      ciphertextData = Data()
-      senderDid = ""
+  /// Project a canonical entry into the FFI envelope shape. `messageType`
+  /// mirrors the orchestrator's filter: `"app"` keeps only application
+  /// entries, `"commit"` keeps every commit-bearing entry, and `nil` keeps
+  /// both. Any other entry kind, or an unexpected union body, projects to nil.
+  static func incomingEnvelope(
+    _ entry: BlueCatbirdChatDefs.ConversationEntry,
+    messageType: String? = nil
+  ) -> FfiIncomingEnvelope? {
+    let wantsApplication = messageType == nil || messageType == "app"
+    let wantsCommit = messageType == nil || messageType == "commit"
+
+    switch entry {
+    case let .blueCatbirdChatDefsApplicationEntry(message) where wantsApplication:
+      guard case let .blueCatbirdChatDefsApplicationSendBody(body) = message.signedRequest.body else {
+        return nil
+      }
+      return envelope(
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        ciphertext: body.applicationMessage.bytes.data,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId
+      )
+
+    case let .blueCatbirdChatDefsCommitEntry(message) where wantsCommit:
+      guard case let .blueCatbirdChatDefsCommitTransitionBody(body) = message.signedRequest.body else {
+        return nil
+      }
+      return envelope(
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        ciphertext: body.commit.bytes.data,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId
+      )
+
+    case let .blueCatbirdChatDefsLeafRecoveryFulfillmentEntry(message) where wantsCommit:
+      guard case let .blueCatbirdChatDefsLeafRecoveryFulfillmentBody(body) = message.signedRequest.body else {
+        return nil
+      }
+      return envelope(
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        ciphertext: body.commit.bytes.data,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId
+      )
+
+    case let .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(message) where wantsCommit:
+      guard case let .blueCatbirdChatDefsLeaveCommitFulfillmentBody(body) = message.signedRequest.body else {
+        return nil
+      }
+      return envelope(
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        ciphertext: body.commit.bytes.data,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId
+      )
+
+    default:
+      return nil
     }
-    return FfiIncomingEnvelope(
-      conversationId: message.conversationId,
-      senderDid: senderDid,
-      ciphertext: ciphertextData,
-      timestamp: iso8601Formatter.string(from: message.receivedAt.date),
-      serverMessageId: message.entryId
+  }
+
+  /// The fields every supported canonical entry contributes to an envelope.
+  /// The entry kinds differ only in which union body carries the ciphertext.
+  private static func envelope(
+    conversationId: BlueCatbirdChatDefs.OperationId,
+    senderDid: BlueCatbirdChatDefs.BareDid,
+    ciphertext: Data,
+    receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
+    entryId: BlueCatbirdChatDefs.OperationId
+  ) -> FfiIncomingEnvelope {
+    FfiIncomingEnvelope(
+      conversationId: conversationId,
+      senderDid: senderDid.description,
+      ciphertext: ciphertext,
+      timestamp: iso8601Formatter.string(from: receivedAt.date),
+      serverMessageId: entryId
     )
   }
 }

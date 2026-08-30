@@ -78,6 +78,16 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       "blue.catbird.chat.subscribeEvents"
     )
   }
+  func testCanonicalMessagePaginationOmitsTerminalCursor() {
+    XCTAssertEqual(
+      MLSAPIClient.canonicalContinuationAfterSeq(hasMore: true, nextAfterSeq: 3),
+      3
+    )
+    XCTAssertNil(
+      MLSAPIClient.canonicalContinuationAfterSeq(hasMore: false, nextAfterSeq: 3)
+    )
+  }
+
   func testResumeCursorReconcilesPersistedCursorWithInventorySnapshot() {
     XCTAssertEqual(
       MLSCanonicalTransportAdapter.reconciledResumeCursor(
@@ -206,71 +216,23 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     )
   }
 
-  func testCanonicalApplicationEntryProjectsMessageView() throws {
-    let did = try DID(didString: "did:plc:abc123")
-    let prior = BlueCatbirdChatDefs.MlsAadPriorContext(
-      conversationId: Bytes(data: Data([0x01])),
-      generation: 1,
-      stateVersion: 1,
-      groupId: Bytes(data: Data([0x02])),
-      epoch: 7,
-      groupContextHash: Bytes(data: Data([0x03])),
-      confirmationTag: Bytes(data: Data([0x04])),
-      lifecycle: "active"
-    )
-    let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
-      conversationId: "convo-1",
-      generation: 1,
-      stateVersion: 1,
-      groupId: Bytes(data: Data([0x02])),
-      epoch: 7,
-      groupContextHash: Bytes(data: Data([0x03])),
-      confirmationTag: Bytes(data: Data([0x04])),
-      lifecycle: .value_active
-    )
-    let message = BlueCatbirdChatDefs.PrivateApplicationMessage(
-      framing: "mls",
-      contentType: "application/octet-stream",
-      bytes: Bytes(data: Data([0xAA, 0xBB])),
-      sha256: Bytes(data: Data([0x05]))
-    )
-    let body = BlueCatbirdChatDefs.ApplicationSendBody(
-      signatureDomain: "blue.catbird.chat.application",
-      messageId: "message-1",
-      actorDid: did,
-      actorDeviceId: "device-1",
-      keyId: "key-1",
-      authGeneration: 1,
-      prior: coordinates,
-      aad: BlueCatbirdChatDefs.ApplicationAad(
-        protocolVersion: .value_1,
-        conversationId: Bytes(data: Data([0x01])),
-        generation: 1,
-        messageId: Bytes(data: Data([0x06])),
-        prior: prior
-      ),
-      applicationMessage: message,
-      blobBindings: [],
-      signedAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_000))
-    )
-    let entry = BlueCatbirdChatDefs.ConversationEntry.blueCatbirdChatDefsApplicationEntry(
-      BlueCatbirdChatDefs.ApplicationEntry(
-        entryId: "entry-1",
-        conversationId: "convo-1",
-        seq: 4,
-        signedRequest: BlueCatbirdChatDefs.SignedApplicationSend(
-          body: .blueCatbirdChatDefsApplicationSendBody(body),
-          signature: Bytes(data: Data([0x07]))
-        ),
-        receivedAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_001))
-      )
-    )
+  func testCanonicalApplicationEntryProjectsMessageView() {
+    let entry = makeApplicationEntry()
+
     XCTAssertTrue(entry.isApplication)
     XCTAssertFalse(entry.isCommit)
     XCTAssertEqual(entry.entryID, "entry-1")
     XCTAssertEqual(entry.conversationIdString, "convo-1")
     XCTAssertEqual(entry.applicationEntry?.ciphertext, Data([0xAA, 0xBB]))
     XCTAssertEqual(entry.sequenceNumber, 4)
+
+    let envelope = MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app")
+    XCTAssertEqual(envelope?.conversationId, "convo-1")
+    XCTAssertEqual(envelope?.senderDid, actorDID.description)
+    XCTAssertEqual(envelope?.ciphertext, Data([0xAA, 0xBB]))
+    XCTAssertEqual(envelope?.serverMessageId, "entry-1")
+    XCTAssertNil(MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit"))
+    XCTAssertEqual(MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xAA, 0xBB]))
   }
   func testUnexpectedCanonicalEntryDoesNotProjectAsCiphertext() {
     let entry = BlueCatbirdChatDefs.ConversationEntry.unexpected(.object([:]))
@@ -279,8 +241,8 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertNil(entry.applicationEntry)
     XCTAssertNil(entry.commitEntry)
   }
-  func testCanonicalCommitEntryProjectsRealCommitBytesAndType() throws {
-    let did = try DID(didString: "did:plc:abc123")
+  func testCanonicalCommitEntryProjectsRealCommitBytesAndType() {
+    let did = actorDID
     let prior = BlueCatbirdChatDefs.MlsAadPriorContext(
       conversationId: Bytes(data: Data([0x01])),
       generation: 1,
@@ -378,11 +340,19 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertEqual(entry.commitEntry?.commitData, Data([0xCC, 0xDD]))
     XCTAssertEqual(entry.entryID, "commit-entry-1")
     XCTAssertEqual(entry.sequenceNumber, 5)
+    let envelope = MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit")
+    XCTAssertEqual(envelope?.conversationId, "convo-1")
+    XCTAssertEqual(envelope?.senderDid, did.description)
+    XCTAssertEqual(envelope?.ciphertext, Data([0xCC, 0xDD]))
+    XCTAssertEqual(envelope?.serverMessageId, "commit-entry-1")
+    XCTAssertNil(MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app"))
+    XCTAssertEqual(MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xCC, 0xDD]))
   }
 
+  private let actorDID = try! DID(didString: "did:plc:abc123")
 
   private func makeApplicationEntry() -> BlueCatbirdChatDefs.ConversationEntry {
-    let did = try! DID(didString: "did:plc:abc123")
+    let did = actorDID
     let prior = BlueCatbirdChatDefs.MlsAadPriorContext(
       conversationId: Bytes(data: Data([0x01])),
       generation: 1,

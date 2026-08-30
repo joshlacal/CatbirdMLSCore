@@ -670,12 +670,15 @@ public final class MLSAPIClient {
         return (states, output.nextPageCursor)
     }
 
+    static func canonicalContinuationAfterSeq(hasMore: Bool, nextAfterSeq: Int) -> Int? {
+        hasMore ? nextAfterSeq : nil
+    }
+
     /// Read canonical entries and extract valid application-send entries.
     public func getCanonicalMessagePage(
         conversationId: String,
         afterSeq: Int,
-        limit: Int = 100,
-        messageType: String? = nil
+        limit: Int = 100
     ) async throws -> (
         messages: [BlueCatbirdChatDefs.ApplicationEntry],
         lastSeq: Int?
@@ -691,7 +694,13 @@ public final class MLSAPIClient {
             }
             return app
         }
-        return (messages, output.nextAfterSeq)
+        return (
+            messages,
+            Self.canonicalContinuationAfterSeq(
+                hasMore: output.hasMore,
+                nextAfterSeq: output.nextAfterSeq
+            )
+        )
     }
 
     /// Mint a one-use ticket bound to the exact inventory snapshot cursor.
