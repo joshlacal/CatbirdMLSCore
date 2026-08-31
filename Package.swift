@@ -22,12 +22,12 @@ let package = Package(
         // no manifest records and no other machine reproduces.
         .package(
             url: "https://github.com/joshlacal/Petrel.git",
-            revision: "a4caf64fd837e72ded5f6843c630a4d032c9d872"
+            revision: "7c02d80b9aa10cab32f9134658162738bb7447b1"
         ),
         // Published PetrelCatbird, pinned by revision.
         .package(
             url: "https://github.com/joshlacal/PetrelCatbird.git",
-            revision: "a7c789bd5a2b6b6033dc5aece54cfd49d1480f0d"
+            revision: "e29a1281ea377093fdf42455806b594980816244"
         )
     ],
     targets: [
