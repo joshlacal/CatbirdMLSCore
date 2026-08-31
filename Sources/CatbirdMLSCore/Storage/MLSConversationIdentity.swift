@@ -150,11 +150,11 @@ extension MLSStorageHelpers {
     let nonRaw = rows.filter { $0.conversationID != rawGroupHex }
     let invalid = nonRaw.filter { !isCanonicalUUIDv4($0.conversationID) }
     if !invalid.isEmpty {
-      let isSoleLegacyDirect = invalid.count == 1
-        && nonRaw.count == 1
-        && rows.count == 1
-        && direct?.conversationID == invalid[0].conversationID
-        && direct?.conversationID == requestedID
+      let directID: String? = direct?.conversationID
+      let singleRow: Bool = invalid.count == 1 && nonRaw.count == 1 && rows.count == 1
+      let directMatchesInvalid: Bool = directID == invalid[0].conversationID
+      let directMatchesRequested: Bool = directID == requestedID
+      let isSoleLegacyDirect = singleRow && directMatchesInvalid && directMatchesRequested
       if !isSoleLegacyDirect {
         throw MLSStorageError.invalidConversationID(invalid[0].conversationID)
       }
