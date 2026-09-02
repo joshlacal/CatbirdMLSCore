@@ -1789,4 +1789,751 @@ final class MLSStorageCutoverTests: XCTestCase {
     // Reset succeeds immediately without blocking
     try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
   }
+
+  // MARK: - 37. Canonical marker and lease filenames stable across base-directory overrides
+
+  func test37_CanonicalMarkerAndLeaseFilenamesAreStableAcrossBaseDirectoryOverrides() throws {
+    let testDID = "did:plc:stable_paths_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir1 = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-storage-override-1-\(UUID().uuidString)", isDirectory: true)
+    let tempDir2 = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-storage-override-2-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir1)
+      try? FileManager.default.removeItem(at: tempDir2)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir1)
+    let hash1_swift = try coordinator.databasePathHash(for: .swiftGRDB, userDID: testDID)
+    let marker1_swift = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    let lease1_admission = try coordinator.leaseURL(for: .swiftGRDB, userDID: testDID, type: "admission")
+    let lease1_mutation = try coordinator.leaseURL(for: .swiftGRDB, userDID: testDID, type: "mutation")
+    let marker1_rust = try coordinator.markerURL(for: .rustState, userDID: testDID)
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir2)
+    let hash2_swift = try coordinator.databasePathHash(for: .swiftGRDB, userDID: testDID)
+    let marker2_swift = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    let lease2_admission = try coordinator.leaseURL(for: .swiftGRDB, userDID: testDID, type: "admission")
+    let lease2_mutation = try coordinator.leaseURL(for: .swiftGRDB, userDID: testDID, type: "mutation")
+    let marker2_rust = try coordinator.markerURL(for: .rustState, userDID: testDID)
+
+    // Base directories are different
+    XCTAssertNotEqual(marker1_swift.path, marker2_swift.path)
+
+    // Identity (hash, marker filename, lease filename) must be stable
+    XCTAssertEqual(hash1_swift, hash2_swift, "databasePathHash must be stable across base-directory overrides")
+    XCTAssertEqual(marker1_swift.lastPathComponent, marker2_swift.lastPathComponent, "Marker filename must be identical across base-directory overrides")
+    XCTAssertEqual(lease1_admission.lastPathComponent, lease2_admission.lastPathComponent, "Admission lease filename must be identical across base-directory overrides")
+    XCTAssertEqual(lease1_mutation.lastPathComponent, lease2_mutation.lastPathComponent, "Mutation lease filename must be identical across base-directory overrides")
+    XCTAssertEqual(marker1_rust.lastPathComponent, marker2_rust.lastPathComponent, "Rust marker filename must be identical across base-directory overrides")
+  }
+
+  // MARK: - 38. Legacy absolute-path marker discoverable after relocation & reopened
+
+  func test38_LegacyAbsolutePathMarkerDiscoverableAfterRelocationAndReopened() async throws {
+    let testDID = "did:plc:legacy_reloc_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir1 = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-legacy-reloc-1-\(UUID().uuidString)", isDirectory: true)
+    let tempDir2 = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-legacy-reloc-2-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir1)
+      try? FileManager.default.removeItem(at: tempDir2)
+    }
+
+    // 1. Initialize clean database and keys under tempDir1
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir1)
+    let manager1 = MLSGRDBManager()
+    let pool1 = try await manager1.getDatabasePool(for: testDID)
+    try await pool1.write { db in
+      try db.execute(sql: "CREATE TABLE legacy_test (id TEXT PRIMARY KEY);")
+      try db.execute(sql: "INSERT INTO legacy_test VALUES ('val1');")
+    }
+    await manager1.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+    // 2. Replace the canonical marker in tempDir1 with a legacy absolute-path-hash marker
+    let dbURL1 = try coordinator.databaseURL(for: .swiftGRDB, userDID: testDID)
+    let legacyAbsHash = SHA256.hash(data: Data(dbURL1.standardizedFileURL.path.utf8))
+      .compactMap { String(format: "%02x", $0) }.joined()
+    let legacyRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: legacyAbsHash,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 100,
+      completedAt: Date().timeIntervalSince1970 - 50
+    )
+
+    let markersDir1 = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+    // Remove canonical marker(s) from tempDir1
+    if let entries = try? FileManager.default.contentsOfDirectory(atPath: markersDir1.path) {
+      for entry in entries {
+        try FileManager.default.removeItem(at: markersDir1.appendingPathComponent(entry))
+      }
+    }
+    // Write legacy marker
+    let legacyMarkerName = "marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(legacyAbsHash).json"
+    let legacyMarkerURL1 = markersDir1.appendingPathComponent(legacyMarkerName)
+    let legacyData = try JSONEncoder().encode(legacyRecord)
+    try legacyData.write(to: legacyMarkerURL1, options: .atomic)
+
+    // 2b. Write a stale legacy marker in tempDir1 to prove exact-current match is preferred
+    let staleHash1 = "1111111111111111111111111111111111111111111111111111111111111111"
+    let staleRecord1 = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: staleHash1,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 200,
+      completedAt: Date().timeIntervalSince1970 - 150
+    )
+    let staleURL1 = markersDir1.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(staleHash1).json")
+    try JSONEncoder().encode(staleRecord1).write(to: staleURL1, options: .atomic)
+
+    // In tempDir1 (no relocation yet), legacyAbsHash matches the CURRENT container path.
+    // Even though a stale candidate coexists, the exact-current match is preferred!
+    let evalBeforeReloc = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .complete(let exactRecord) = evalBeforeReloc else {
+      XCTFail("Exact-current legacy marker must be preferred over stale candidate, got: \(evalBeforeReloc)")
+      return
+    }
+    XCTAssertEqual(exactRecord.attemptUUID, legacyRecord.attemptUUID)
+    XCTAssertEqual(exactRecord.databasePathHash, legacyAbsHash)
+
+    // Remove stale marker before testing unique relocated adoption
+    try FileManager.default.removeItem(at: staleURL1)
+
+    // 3. Simulate container relocation: copy entire tempDir1 contents to tempDir2
+    try FileManager.default.createDirectory(at: tempDir2, withIntermediateDirectories: true)
+    let items = try FileManager.default.contentsOfDirectory(atPath: tempDir1.path)
+    for item in items {
+      try FileManager.default.copyItem(
+        at: tempDir1.appendingPathComponent(item),
+        to: tempDir2.appendingPathComponent(item)
+      )
+    }
+
+    // Switch container override to tempDir2
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir2)
+
+    // In tempDir2, the marker file is still named with legacyAbsHash.
+    // Canonical marker is absent. The legacy marker should be uniquely discovered and adopted!
+    let evalAfterRelocation = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .complete(let adoptedRecord) = evalAfterRelocation else {
+      XCTFail("Expected complete evaluation with adopted legacy marker, got: \(evalAfterRelocation)")
+      return
+    }
+    XCTAssertEqual(adoptedRecord.attemptUUID, legacyRecord.attemptUUID)
+    XCTAssertEqual(adoptedRecord.databasePathHash, legacyAbsHash)
+
+    // Reopen through MLSGRDBManager and read the seeded row
+    let manager2 = MLSGRDBManager()
+    let pool2 = try await manager2.getDatabasePool(for: testDID)
+    let fetchedVal = try await pool2.read { db in
+      try String.fetchOne(db, sql: "SELECT id FROM legacy_test WHERE id = 'val1'")
+    }
+    XCTAssertEqual(fetchedVal, "val1", "Reopened pool must be able to read existing data")
+    await manager2.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+    // 4. Coordinated reset must delete the adopted legacy marker and leave state allAbsent
+    let markersDir2 = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+    let legacyMarkerURL2 = markersDir2.appendingPathComponent(legacyMarkerName)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: legacyMarkerURL2.path), "Legacy marker must exist prior to reset")
+
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+
+    XCTAssertFalse(FileManager.default.fileExists(atPath: legacyMarkerURL2.path), "Legacy marker must be deleted by coordinateReset")
+    let finalEval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+  }
+
+  // MARK: - 39. Ambiguous legacy markers return mixed and coordinateReset cleans all
+
+  func test39_AmbiguousLegacyMarkersReturnMixedAndCoordinateResetCleansAll() async throws {
+    let testDID = "did:plc:ambig_reloc_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-ambig-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir)
+
+    // 1. Initialize clean database and keys
+    let manager = MLSGRDBManager()
+    let pool = try await manager.getDatabasePool(for: testDID)
+    try await pool.write { db in
+      try db.execute(sql: "CREATE TABLE ambig_test (id TEXT PRIMARY KEY);")
+      try db.execute(sql: "INSERT INTO ambig_test VALUES ('seeded');")
+    }
+    await manager.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+    let markersDir = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+
+    // Remove canonical marker
+    let canonicalURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    if FileManager.default.fileExists(atPath: canonicalURL.path) {
+      try FileManager.default.removeItem(at: canonicalURL)
+    }
+
+    // 2. Create TWO distinct full 64-char lowercase hex legacy markers
+    // (Simulating two past container paths that relocated, neither matching current container)
+    let fakePath1 = "/private/var/mobile/Containers/Data/Application/11111111-1111-1111-1111-111111111111/mls.db"
+    let fakePath2 = "/private/var/mobile/Containers/Data/Application/22222222-2222-2222-2222-222222222222/mls.db"
+    let hash1 = SHA256.hash(data: Data(fakePath1.utf8)).compactMap { String(format: "%02x", $0) }.joined()
+    let hash2 = SHA256.hash(data: Data(fakePath2.utf8)).compactMap { String(format: "%02x", $0) }.joined()
+
+    XCTAssertEqual(hash1.count, 64)
+    XCTAssertEqual(hash2.count, 64)
+    XCTAssertNotEqual(hash1, hash2)
+
+    let record1 = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: hash1,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 200,
+      completedAt: Date().timeIntervalSince1970 - 150
+    )
+    let record2 = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: hash2,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 100,
+      completedAt: Date().timeIntervalSince1970 - 50
+    )
+
+    let markerURL1 = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(hash1).json")
+    let markerURL2 = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(hash2).json")
+
+    try JSONEncoder().encode(record1).write(to: markerURL1, options: .atomic)
+    try JSONEncoder().encode(record2).write(to: markerURL2, options: .atomic)
+
+    // 3. Prove readers return mixedState and fail closed
+    let eval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState(let details) = eval else {
+      XCTFail("Expected mixedState for ambiguous legacy markers, got: \(eval)")
+      return
+    }
+    XCTAssertTrue(details.contains("Ambiguous") || details.contains("Multiple"), "Details should mention ambiguity: \(details)")
+
+    XCTAssertThrowsError(try coordinator.readMarker(for: .swiftGRDB, userDID: testDID)) { error in
+      guard case MLSStorageInitializationError.mixedState = error else {
+        XCTFail("Expected mixedState error from readMarker, got: \(error)")
+        return
+      }
+    }
+
+    let reopenManager = MLSGRDBManager()
+    do {
+      _ = try await reopenManager.getDatabasePool(for: testDID)
+      XCTFail("Reopen must fail closed when markers are ambiguous")
+    } catch {
+      // Expected failure
+    }
+    await reopenManager.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+    // 4. Reset must succeed, erase ALL validated markers, and transition state to allAbsent
+    // Both candidates remain present before reset
+    XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL1.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL2.path))
+
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+
+    XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL1.path), "marker1 must be removed by reset")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: markerURL2.path), "marker2 must be removed by reset")
+
+    let finalEval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+  }
+
+  // MARK: - 40. Canonical and stale-legacy markers reset removes both
+
+  func test40_CanonicalAndStaleLegacyMarkersResetRemovesBoth() async throws {
+    let testDID = "did:plc:canon_stale_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-canon-stale-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir)
+
+    // 1. Initialize clean database and keys (this writes the canonical marker)
+    let manager = MLSGRDBManager()
+    let pool = try await manager.getDatabasePool(for: testDID)
+    try await pool.write { db in
+      try db.execute(sql: "CREATE TABLE canon_test (id TEXT PRIMARY KEY);")
+      try db.execute(sql: "INSERT INTO canon_test VALUES ('canon_val');")
+    }
+    await manager.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+    let canonicalURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalURL.path), "Canonical marker must exist")
+
+    // 2. Also write a stale legacy marker into the markers directory
+    let stalePath = "/private/var/mobile/Containers/Data/Application/stale-uuid-12345/mls.db"
+    let staleHash = SHA256.hash(data: Data(stalePath.utf8)).compactMap { String(format: "%02x", $0) }.joined()
+    let staleRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: staleHash,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 200,
+      completedAt: Date().timeIntervalSince1970 - 150
+    )
+
+    let markersDir = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+    let staleMarkerURL = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(staleHash).json")
+    try JSONEncoder().encode(staleRecord).write(to: staleMarkerURL, options: .atomic)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: staleMarkerURL.path))
+
+    // 3. Verify canonical precedence: readers see complete state via canonical marker
+    let evalBefore = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .complete(let recordBefore) = evalBefore else {
+      XCTFail("Canonical marker must have precedence for readers, got: \(evalBefore)")
+      return
+    }
+    let expectedCanonicalHash = try coordinator.databasePathHash(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(recordBefore.databasePathHash, expectedCanonicalHash)
+
+    // 4. Coordinated reset must remove BOTH the canonical marker AND the stale legacy marker!
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: canonicalURL.path),
+      "Canonical marker must be removed by coordinateReset"
+    )
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: staleMarkerURL.path),
+      "Stale legacy marker must be removed by coordinateReset even though canonical had precedence"
+    )
+
+    let finalEval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+  }
+
+  // MARK: - 41. Malformed, unrelated, and self-inconsistent legacy markers not adopted
+
+  func test41_MalformedUnrelatedAndInconsistentLegacyMarkersNotAdopted() async throws {
+    let testDID = "did:plc:negative_legacy_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-negative-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir)
+
+    // 1. Initialize clean database and keys
+    let manager = MLSGRDBManager()
+    let pool = try await manager.getDatabasePool(for: testDID)
+    try await pool.write { db in
+      try db.execute(sql: "CREATE TABLE neg_test (id TEXT PRIMARY KEY);")
+    }
+    await manager.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+    // 2. Remove canonical marker so only candidate markers are considered
+    let canonicalURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    if FileManager.default.fileExists(atPath: canonicalURL.path) {
+      try FileManager.default.removeItem(at: canonicalURL)
+    }
+
+    let markersDir = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+
+    // 2a. 16-character legacy name alone must NOT be adopted (r2 never wrote 16-char names)
+    let shortHash = "1234567890abcdef"
+    let shortRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: shortHash,
+      state: .complete,
+      completedAt: Date().timeIntervalSince1970 - 50
+    )
+    let shortURL = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(shortHash).json")
+    try JSONEncoder().encode(shortRecord).write(to: shortURL)
+
+    let evalShort = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState = evalShort else {
+      XCTFail("16-character legacy marker must NOT be adopted, got: \(evalShort)")
+      return
+    }
+    try FileManager.default.removeItem(at: shortURL)
+
+    // 2b. Missing completedAt alone must NOT be adopted as complete
+    let incompleteHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    let incompleteRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: incompleteHash,
+      state: .complete,
+      completedAt: nil
+    )
+    let incompleteURL = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(incompleteHash).json")
+    try JSONEncoder().encode(incompleteRecord).write(to: incompleteURL)
+
+    let evalIncomplete = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState = evalIncomplete else {
+      XCTFail("Legacy marker without completedAt must NOT be adopted as complete, got: \(evalIncomplete)")
+      return
+    }
+    try FileManager.default.removeItem(at: incompleteURL)
+
+    // 2c. Plant malformed and unrelated markers:
+    let malformedURL = markersDir.appendingPathComponent(
+      "marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+    )
+    try Data("not valid json".utf8).write(to: malformedURL)
+
+    let unrelatedDIDHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    let unrelatedDIDRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: "did:plc:other_user_\(UUID().uuidString)",
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: unrelatedDIDHash,
+      state: .complete,
+      completedAt: Date().timeIntervalSince1970 - 50
+    )
+    let unrelatedDIDURL = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(unrelatedDIDHash).json")
+    try JSONEncoder().encode(unrelatedDIDRecord).write(to: unrelatedDIDURL)
+
+    let evalRemaining = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState = evalRemaining else {
+      XCTFail("State must remain mixedState because no valid marker exists for present DB+keys, got: \(evalRemaining)")
+      return
+    }
+
+    // 3. Reset must succeed for testDID but MUST NOT delete unrelated or malformed markers
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+
+    XCTAssertTrue(FileManager.default.fileExists(atPath: malformedURL.path), "Malformed marker must not be deleted by reset")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: unrelatedDIDURL.path), "Unrelated DID marker must not be deleted by reset")
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+
+    let finalEval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+  }
+
+  // MARK: - 42. Corrupted or mismatched canonical marker removed by coordinateReset
+
+  func test42_CorruptedOrMismatchedCanonicalMarkerRemovedByCoordinateResetAndLeavesAllAbsent() async throws {
+    let testDID = "did:plc:canon_corrupt_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-canon-corrupt-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir)
+
+    // Case A: Mismatched canonical marker record fields
+    let managerA = MLSGRDBManager()
+    let poolA = try await managerA.getDatabasePool(for: testDID)
+    try await poolA.write { db in
+      try db.execute(sql: "CREATE TABLE corrupt_test_a (id TEXT PRIMARY KEY);")
+    }
+    await managerA.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+
+    let canonicalURL = try coordinator.markerURL(for: .swiftGRDB, userDID: testDID)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalURL.path), "Canonical marker must exist")
+
+    // Mismatch canonical marker record hash
+    let mismatchedHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    let mismatchedRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: mismatchedHash,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 100,
+      completedAt: Date().timeIntervalSince1970 - 50
+    )
+    try JSONEncoder().encode(mismatchedRecord).write(to: canonicalURL, options: .atomic)
+
+    let evalBeforeA = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState = evalBeforeA else {
+      XCTFail("Mismatched canonical marker must yield mixedState, got: \(evalBeforeA)")
+      return
+    }
+
+    // CoordinateReset must remove the canonical marker slot even though record contents are mismatched
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: canonicalURL.path),
+      "Canonical marker file must be deleted by coordinateReset even when contents are mismatched"
+    )
+
+    let finalEvalA = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEvalA, .allAbsent, "State after reset must be allAbsent")
+
+    // Case B: Undecodable / corrupted bytes in canonical marker slot
+    let testDIDB = "did:plc:canon_undecodable_\(UUID().uuidString)"
+    let managerB = MLSGRDBManager()
+    let poolB = try await managerB.getDatabasePool(for: testDIDB)
+    try await poolB.write { db in
+      try db.execute(sql: "CREATE TABLE corrupt_test_b (id TEXT PRIMARY KEY);")
+    }
+    await managerB.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDIDB))
+
+    let canonicalURLB = try coordinator.markerURL(for: .swiftGRDB, userDID: testDIDB)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: canonicalURLB.path))
+
+    // Overwrite with undecodable garbage
+    try Data("corrupted marker payload not json".utf8).write(to: canonicalURLB, options: .atomic)
+
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDIDB)
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDIDB))
+
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: canonicalURLB.path),
+      "Canonical marker file must be deleted by coordinateReset even when bytes do not decode"
+    )
+
+    let finalEvalB = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDIDB)
+    XCTAssertEqual(finalEvalB, .allAbsent, "State after reset must be allAbsent")
+  }
+
+  // MARK: - 43. Orphan valid legacy marker with absent DB and keys remains mixedState until reset
+
+  func test43_OrphanValidLegacyMarkerWithAbsentDatabaseAndKeysRemainsMixedStateUntilReset() async throws {
+    let testDID = "did:plc:orphan_legacy_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-orphan-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir)
+
+    // DB and keys are completely absent: do not initialize a pool or create keys.
+    let markersDir = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+    try FileManager.default.createDirectory(at: markersDir, withIntermediateDirectories: true)
+
+    // Plant exactly one valid, complete legacy marker
+    let legacyPath = "/private/var/mobile/Containers/Data/Application/orphan-uuid-99999/mls.db"
+    let legacyHash = SHA256.hash(data: Data(legacyPath.utf8)).compactMap { String(format: "%02x", $0) }.joined()
+    let legacyRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: legacyHash,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 100,
+      completedAt: Date().timeIntervalSince1970 - 50
+    )
+    let legacyMarkerURL = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(legacyHash).json")
+    try JSONEncoder().encode(legacyRecord).write(to: legacyMarkerURL, options: .atomic)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: legacyMarkerURL.path))
+
+    // 1. Fail-closed contract: evaluateState must report mixedState
+    let eval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState(let details) = eval else {
+      XCTFail("Orphan valid legacy marker without DB and keys must be mixedState, got: \(eval)")
+      return
+    }
+    XCTAssertTrue(details.contains("database absent"), "Details should mention database absent: \(details)")
+    XCTAssertTrue(details.contains("marker=complete"), "Details should mention marker=complete: \(details)")
+
+    // 2. Open attempt fails closed
+    let manager = MLSGRDBManager()
+    do {
+      _ = try await manager.getDatabasePool(for: testDID)
+      XCTFail("Reopen must fail closed when legacy marker is orphaned with absent DB and keys")
+    } catch {
+      // Expected failure
+    }
+    await manager.closeAllDatabases()
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+
+    // 3. CoordinateReset clears the orphaned legacy marker and restores state to allAbsent
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: legacyMarkerURL.path),
+      "Orphaned legacy marker must be deleted by coordinateReset"
+    )
+
+    let finalEval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+  }
+
+  // MARK: - 44. Attributable legacy marker internally ineligible fails closed as mixedState
+
+  func test44_AttributableLegacyMarkerInternallyIneligibleFailsClosedAsMixedStateAndResetCleans() async throws {
+    let testDID = "did:plc:ineligible_legacy_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-ineligible-legacy-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir)
+
+    // Database and required keys are completely absent.
+    let markersDir = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+    try FileManager.default.createDirectory(at: markersDir, withIntermediateDirectories: true)
+
+    // Plant a fully attributable legacy marker whose record is internally ineligible (state=complete with completedAt=nil)
+    let legacyHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    let legacyRecord = MLSInitializationRecord(
+      generationToken: MLSStoragePaths.generationToken,
+      attemptUUID: UUID().uuidString,
+      userDID: testDID.lowercased(),
+      databaseKind: MLSDatabaseKind.swiftGRDB.rawValue,
+      databasePathHash: legacyHash,
+      state: .complete,
+      createdAt: Date().timeIntervalSince1970 - 100,
+      completedAt: nil
+    )
+    let legacyMarkerURL = markersDir.appendingPathComponent("marker_\(MLSDatabaseKind.swiftGRDB.rawValue)_\(legacyHash).json")
+    try JSONEncoder().encode(legacyRecord).write(to: legacyMarkerURL, options: .atomic)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: legacyMarkerURL.path))
+
+    // 1. EvaluateState must fail closed as mixedState, never absent
+    let eval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    guard case .mixedState = eval else {
+      XCTFail("Attributable legacy marker with state=complete but completedAt=nil must fail closed as mixedState, got: \(eval)")
+      return
+    }
+
+    // 2. Explicit reset must remove that attributable marker
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .swiftGRDB, userDID: testDID))
+
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: legacyMarkerURL.path),
+      "Attributable legacy marker must be removed by coordinateReset"
+    )
+
+    // 3. Final evaluation is allAbsent
+    let finalEval = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+  }
+
+  // MARK: - 45. RustState legacy-relocation marker discovered, complete, and reset reaches allAbsent
+
+  func test45_RustStateLegacyAbsolutePathMarkerDiscoverableAfterRelocationAndReset() async throws {
+    let testDID = "did:plc:rust_legacy_reloc_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+
+    let tempDir1 = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-rust-legacy-reloc-1-\(UUID().uuidString)", isDirectory: true)
+    let tempDir2 = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-rust-legacy-reloc-2-\(UUID().uuidString)", isDirectory: true)
+    defer {
+      try? FileManager.default.removeItem(at: tempDir1)
+      try? FileManager.default.removeItem(at: tempDir2)
+    }
+
+    // 1. Initialize complete rust state under tempDir1
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir1)
+    _ = try await coordinator.coordinateOpen(for: .rustState, userDID: testDID) { attemptUUID, isFirstCreation in
+      let dbURL = try coordinator.databaseURL(for: .rustState, userDID: testDID)
+      try FileManager.default.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+      let header = Data("SQLite format 3\0".utf8) + Data(repeating: 0x00, count: 16)
+      try header.write(to: dbURL)
+    }
+    coordinator.releaseAdmissionLease(for: .rustState, userDID: testDID)
+
+    // 2. Rename its canonical marker to the legacy absolute-path hash location
+    let dbURL1 = try coordinator.databaseURL(for: .rustState, userDID: testDID)
+    let legacyAbsHash = SHA256.hash(data: Data(dbURL1.standardizedFileURL.path.utf8))
+      .compactMap { String(format: "%02x", $0) }.joined()
+
+    let canonicalMarkerURL = try coordinator.markerURL(for: .rustState, userDID: testDID)
+    let canonicalData = try Data(contentsOf: canonicalMarkerURL)
+    let canonicalRecord = try JSONDecoder().decode(MLSInitializationRecord.self, from: canonicalData)
+
+    let legacyRecord = MLSInitializationRecord(
+      generationToken: canonicalRecord.generationToken,
+      attemptUUID: canonicalRecord.attemptUUID,
+      userDID: canonicalRecord.userDID,
+      databaseKind: canonicalRecord.databaseKind,
+      databasePathHash: legacyAbsHash,
+      state: canonicalRecord.state,
+      createdAt: canonicalRecord.createdAt,
+      completedAt: canonicalRecord.completedAt
+    )
+
+    let markersDir1 = try MLSStoragePaths.coordinationDirectory().appendingPathComponent("markers", isDirectory: true)
+    let legacyMarkerName = "marker_\(MLSDatabaseKind.rustState.rawValue)_\(legacyAbsHash).json"
+    let legacyMarkerURL1 = markersDir1.appendingPathComponent(legacyMarkerName)
+    try JSONEncoder().encode(legacyRecord).write(to: legacyMarkerURL1, options: .atomic)
+    try FileManager.default.removeItem(at: canonicalMarkerURL)
+
+    // 3. Change base-directory override while preserving state directory (copy tempDir1 to tempDir2)
+    try FileManager.default.createDirectory(at: tempDir2, withIntermediateDirectories: true)
+    let items = try FileManager.default.contentsOfDirectory(atPath: tempDir1.path)
+    for item in items {
+      try FileManager.default.copyItem(
+        at: tempDir1.appendingPathComponent(item),
+        to: tempDir2.appendingPathComponent(item)
+      )
+    }
+
+    MLSStoragePaths.setBaseDirectoryOverride(tempDir2)
+
+    // 4. Assert evaluateState and coordinateOpen treat it complete
+    let evalAfterRelocation = try coordinator.evaluateState(for: .rustState, userDID: testDID)
+    guard case .complete(let adoptedRecord) = evalAfterRelocation else {
+      XCTFail("Expected complete evaluation with adopted rust legacy marker, got: \(evalAfterRelocation)")
+      return
+    }
+    XCTAssertEqual(adoptedRecord.attemptUUID, canonicalRecord.attemptUUID)
+    XCTAssertEqual(adoptedRecord.databasePathHash, legacyAbsHash)
+
+    _ = try await coordinator.coordinateOpen(for: .rustState, userDID: testDID) { attemptUUID, isFirstCreation in
+      XCTAssertFalse(isFirstCreation, "Reopen of existing relocated rust state must not be first creation")
+    }
+    coordinator.releaseAdmissionLease(for: .rustState, userDID: testDID)
+
+    // 5. Reset reaches allAbsent
+    try await coordinator.coordinateReset(for: .rustState, userDID: testDID)
+    XCTAssertFalse(coordinator.hasActiveAdmissionLease(for: .rustState, userDID: testDID))
+
+    let finalEval = try coordinator.evaluateState(for: .rustState, userDID: testDID)
+    XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
+  }
 }

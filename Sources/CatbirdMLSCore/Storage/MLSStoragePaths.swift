@@ -531,11 +531,18 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     }
   }
 
-  func databasePathHash(for kind: MLSDatabaseKind, userDID: String) throws -> String {
+  private func logicalDatabasePath(for kind: MLSDatabaseKind, userDID: String) throws -> String {
     let url = try databaseURL(for: kind, userDID: userDID)
-    let standardPath = url.standardizedFileURL.path
-    let digest = SHA256.hash(data: Data(standardPath.utf8))
-    return digest.compactMap { String(format: "%02x", $0) }.joined()
+    return "\(url.deletingLastPathComponent().lastPathComponent)/\(url.lastPathComponent)"
+  }
+
+  private static func sha256Hex(_ value: String) -> String {
+    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+  }
+
+  func databasePathHash(for kind: MLSDatabaseKind, userDID: String) throws -> String {
+    let logicalPath = try logicalDatabasePath(for: kind, userDID: userDID)
+    return Self.sha256Hex(logicalPath)
   }
 
   func markerURL(for kind: MLSDatabaseKind, userDID: String) throws -> URL {
@@ -600,7 +607,24 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     }
 
     let keyState = try checkRequiredKeys(for: kind, userDID: normalizedDID)
-    let marker = try readMarker(for: kind, userDID: normalizedDID)
+
+    let marker: MLSInitializationRecord?
+    let isLegacy: Bool
+    switch try resolveMarker(for: kind, userDID: normalizedDID) {
+    case .canonical(let record):
+      marker = record
+      isLegacy = false
+    case .legacy(let record):
+      marker = record
+      isLegacy = true
+    case .ambiguous(let count):
+      return .mixedState(details: "Ambiguous legacy markers: multiple eligible markers found (\(count))")
+    case .ineligible(let details):
+      return .mixedState(details: "Ineligible legacy marker candidate(s): \(details)")
+    case .absent:
+      marker = nil
+      isLegacy = false
+    }
 
     // Check owner mapping in App Group defaults
     let ownerKey = MLSStoragePaths.databaseOwnerMappingKey(for: userDID)
@@ -665,14 +689,18 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       guard ownerObj != nil else {
         return .mixedState(details: "Database and marker complete but database owner mapping is missing")
       }
-      // Validate marker binding
-      let expectedHash = try databasePathHash(for: kind, userDID: normalizedDID)
-      guard marker.generationToken == MLSStoragePaths.generationToken,
-            marker.userDID == normalizedDID,
-            marker.databaseKind == kind.rawValue,
-            marker.databasePathHash == expectedHash
-      else {
-        return .mixedState(details: "Marker binding mismatch for complete database")
+      // Canonical markers must bind to the current logical path hash. Legacy markers were already
+      // bound to DID + kind + generation + their own filename hash during resolution, and their
+      // absolute-path hash is expected to differ from the canonical one.
+      if !isLegacy {
+        let expectedHash = try databasePathHash(for: kind, userDID: normalizedDID)
+        guard marker.generationToken == MLSStoragePaths.generationToken,
+              marker.userDID == normalizedDID,
+              marker.databaseKind == kind.rawValue,
+              marker.databasePathHash == expectedHash
+        else {
+          return .mixedState(details: "Marker binding mismatch for complete database")
+        }
       }
 
       if kind == .rustState {
@@ -748,17 +776,161 @@ final class MLSStorageCoordinator: @unchecked Sendable {
 
   // MARK: - Marker I/O
 
-  func readMarker(for kind: MLSDatabaseKind, userDID: String) throws -> MLSInitializationRecord? {
-    let url = try markerURL(for: kind, userDID: userDID)
-    guard try MLSStoragePaths.fileExistsStrict(at: url) else { return nil }
+  private enum MarkerResolution {
+    case canonical(MLSInitializationRecord)
+    case legacy(MLSInitializationRecord)
+    case ambiguous(count: Int)
+    case ineligible(details: String)
+    case absent
+  }
 
-    do {
-      let data = try Data(contentsOf: url)
-      let record = try JSONDecoder().decode(MLSInitializationRecord.self, from: data)
-      return record
-    } catch {
-      throw MLSStorageInitializationError.unreadableState(details: "Failed to decode marker: \(error.localizedDescription)")
+  private struct LegacyMarkerCandidate {
+    let record: MLSInitializationRecord
+    let url: URL
+  }
+
+  /// True only for a full r2 path hash: exactly 64 ASCII lowercase hex bytes.
+  private static func isFullPathHash(_ value: String) -> Bool {
+    value.utf8.count == 64 && value.utf8.allSatisfy {
+      ($0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9")) ||
+      ($0 >= UInt8(ascii: "a") && $0 <= UInt8(ascii: "f"))
     }
+  }
+
+  /// Legacy (absolute-path-hash) marker files for this kind + DID, excluding the canonical slot.
+  ///
+  /// A file becomes a candidate only when its filename suffix is a full path hash, its payload
+  /// decodes, and the record binds to this DID, kind, generation, and that exact suffix. Malformed,
+  /// unrelated, and self-inconsistent files are skipped, so they are never adopted nor deleted.
+  private func legacyMarkerCandidates(
+    for kind: MLSDatabaseKind,
+    normalizedDID: String,
+    excludingCanonical canonicalURL: URL
+  ) throws -> [LegacyMarkerCandidate] {
+    let markersDir = canonicalURL.deletingLastPathComponent()
+    guard try MLSStoragePaths.fileExistsStrict(at: markersDir) else { return [] }
+
+    let prefix = "marker_\(kind.rawValue)_"
+    let ext = ".json"
+    var candidates: [LegacyMarkerCandidate] = []
+
+    for entry in try FileManager.default.contentsOfDirectory(atPath: markersDir.path) {
+      guard entry.hasPrefix(prefix), entry.hasSuffix(ext) else { continue }
+      let suffix = String(entry.dropFirst(prefix.count).dropLast(ext.count))
+      guard Self.isFullPathHash(suffix) else { continue }
+
+      let fileURL = markersDir.appendingPathComponent(entry)
+      guard fileURL.standardizedFileURL != canonicalURL.standardizedFileURL else { continue }
+
+      guard let data = try? Data(contentsOf: fileURL),
+            let record = try? JSONDecoder().decode(MLSInitializationRecord.self, from: data)
+      else {
+        continue
+      }
+
+      guard record.userDID == normalizedDID,
+            record.databaseKind == kind.rawValue,
+            record.generationToken == MLSStoragePaths.generationToken,
+            record.databasePathHash == suffix,
+            Self.isFullPathHash(record.databasePathHash)
+      else {
+        continue
+      }
+
+      candidates.append(LegacyMarkerCandidate(record: record, url: fileURL))
+    }
+
+    return candidates
+  }
+
+  private func resolveMarker(for kind: MLSDatabaseKind, userDID: String) throws -> MarkerResolution {
+    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let canonicalURL = try markerURL(for: kind, userDID: normalizedDID)
+
+    // The canonical slot has absolute precedence; bytes that fail to decode fail closed.
+    if try MLSStoragePaths.fileExistsStrict(at: canonicalURL) {
+      do {
+        let data = try Data(contentsOf: canonicalURL)
+        let record = try JSONDecoder().decode(MLSInitializationRecord.self, from: data)
+        return .canonical(record)
+      } catch {
+        throw MLSStorageInitializationError.unreadableState(details: "Failed to decode marker: \(error.localizedDescription)")
+      }
+    }
+
+    let candidates = try legacyMarkerCandidates(
+      for: kind,
+      normalizedDID: normalizedDID,
+      excludingCanonical: canonicalURL
+    )
+    guard !candidates.isEmpty else { return .absent }
+
+    // A complete legacy record requires completedAt != nil.
+    // A creating legacy record may be recognized only as incomplete/fail-closed, never opened.
+    let eligibleComplete = candidates.filter { $0.record.state == .complete && $0.record.completedAt != nil }
+    let eligibleCreating = candidates.filter { $0.record.state == .creating && $0.record.completedAt == nil }
+
+    // The record hashing to the CURRENT container's absolute path is fully verifiable, so prefer it
+    // even when stale candidates coexist.
+    let currentDbURL = try databaseURL(for: kind, userDID: normalizedDID)
+    let currentAbsHash = Self.sha256Hex(currentDbURL.standardizedFileURL.path)
+    if let exactCurrent = eligibleComplete.first(where: { $0.record.databasePathHash == currentAbsHash }) {
+      return .legacy(exactCurrent.record)
+    }
+
+    // Without an exact-current match, accept only one eligible relocated record; multiple remain mixed for readers.
+    let totalEligibleCount = eligibleComplete.count + eligibleCreating.count
+    if totalEligibleCount > 1 {
+      return .ambiguous(count: totalEligibleCount)
+    }
+    if let single = eligibleComplete.first ?? eligibleCreating.first {
+      return .legacy(single.record)
+    }
+    return .ineligible(details: "found \(candidates.count) attributable candidate(s) but none are eligible")
+  }
+
+  func readMarker(for kind: MLSDatabaseKind, userDID: String) throws -> MLSInitializationRecord? {
+    switch try resolveMarker(for: kind, userDID: userDID) {
+    case .canonical(let record), .legacy(let record):
+      return record
+    case .ambiguous(let count):
+      throw MLSStorageInitializationError.mixedState(details: "Multiple eligible legacy markers found (\(count))")
+    case .ineligible(let details):
+      throw MLSStorageInitializationError.mixedState(details: "Ineligible legacy marker candidate(s): \(details)")
+    case .absent:
+      return nil
+    }
+  }
+
+  /// Marker files an explicit reset owns for this kind + DID, plus the path hashes whose CAS temp
+  /// files it may remove.
+  private func collectMarkersForReset(
+    for kind: MLSDatabaseKind,
+    userDID: String
+  ) throws -> (markerURLs: [URL], pathHashes: Set<String>) {
+    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let canonicalURL = try markerURL(for: kind, userDID: normalizedDID)
+    let canonicalHash = try databasePathHash(for: kind, userDID: normalizedDID)
+    var markerURLs: [URL] = []
+    var pathHashes: Set<String> = [canonicalHash]
+
+    // The canonical marker filename is a pure function of normalized DID + kind + generation, and
+    // explicit coordinateReset is authoritative for that slot: remove it on existence alone,
+    // whether or not its contents decode or validate.
+    if try MLSStoragePaths.fileExistsStrict(at: canonicalURL) {
+      markerURLs.append(canonicalURL)
+    }
+
+    for candidate in try legacyMarkerCandidates(
+      for: kind,
+      normalizedDID: normalizedDID,
+      excludingCanonical: canonicalURL
+    ) {
+      markerURLs.append(candidate.url)
+      pathHashes.insert(candidate.record.databasePathHash)
+    }
+
+    return (markerURLs, pathHashes)
   }
 
   #if DEBUG
@@ -1222,14 +1394,10 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     let mutationMutex = try await acquireMutationMutex(for: kind, userDID: normalizedDID)
     defer { mutationMutex.release() }
 
-    // Ownership check before deletion: if marker exists, verify it matches normalizedDID
-    let markerURL = try self.markerURL(for: kind, userDID: normalizedDID)
-    let expectedHash = try databasePathHash(for: kind, userDID: normalizedDID)
-    if let marker = try readMarker(for: kind, userDID: normalizedDID) {
-      guard marker.userDID == normalizedDID && marker.databasePathHash == expectedHash else {
-        throw MLSStorageInitializationError.validationFailed(details: "Marker binding mismatch: refusing to delete unowned database URL")
-      }
-    }
+    // Decide up front which markers this reset owns: the canonical slot by existence, legacy
+    // markers only when fully validated. Deletion happens last, after everything else succeeds.
+    let (collectedMarkerURLs, collectedHashes) = try collectMarkersForReset(for: kind, userDID: normalizedDID)
+
     // 1. Delete clean database files and sidecars
     let dbURL = try databaseURL(for: kind, userDID: normalizedDID)
     let sidecars = [
@@ -1259,14 +1427,14 @@ final class MLSStorageCoordinator: @unchecked Sendable {
       }
     }
 
-    // 3. Delete clean marker CAS temp files matching exact pathHash
-    let markerDir = markerURL.deletingLastPathComponent()
-    let tempPrefix = "tmp_\(kind.rawValue)_\(expectedHash)_"
+    // 3. Delete clean marker CAS temp files matching canonical + validated legacy hashes
+    let markerDir = try self.markerURL(for: kind, userDID: normalizedDID).deletingLastPathComponent()
     if try MLSStoragePaths.fileExistsStrict(at: markerDir) {
+      let tempPrefixes = collectedHashes.map { "tmp_\(kind.rawValue)_\($0)_" }
       let markerEntries = try FileManager.default.contentsOfDirectory(atPath: markerDir.path)
-      for entry in markerEntries where entry.hasPrefix(tempPrefix) {
-        let tempURL = markerDir.appendingPathComponent(entry)
-        try FileManager.default.removeItem(at: tempURL)
+      for entry in markerEntries
+      where tempPrefixes.contains(where: { entry.hasPrefix($0) }) {
+        try FileManager.default.removeItem(at: markerDir.appendingPathComponent(entry))
       }
     }
 
@@ -1309,9 +1477,11 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     // 8. Remove clean welcome gate markers for this user
     try await MLSWelcomeGate.shared.clearAll(for: normalizedDID)
     try await MLSEpochCheckpoint.shared.clearAllCheckpoints(userDID: normalizedDID)
-    // 10. Remove marker file ONLY after all other deletions succeed
-    if try MLSStoragePaths.fileExistsStrict(at: markerURL) {
-      try FileManager.default.removeItem(at: markerURL)
+    // 10. Remove marker file(s) ONLY after all other deletions succeed
+    for markerURL in collectedMarkerURLs {
+      if try MLSStoragePaths.fileExistsStrict(at: markerURL) {
+        try FileManager.default.removeItem(at: markerURL)
+      }
     }
 
     // 11. Only after the reset reaches a clean authority/marker state, resume writes.
