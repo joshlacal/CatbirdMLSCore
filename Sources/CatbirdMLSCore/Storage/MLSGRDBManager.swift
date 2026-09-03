@@ -4318,6 +4318,11 @@ public actor MLSGRDBManager {
 
   /// Create new encrypted database with GRDB DatabasePool (runs off main thread via actor isolation)
   private func createDatabase(for userDID: String, isFirstCreation: Bool = true) async throws -> DatabasePool {
+    if isFirstCreation {
+      // A fresh creation (post-reset) legitimately gets a new key; the fingerprint
+      // cached from the deleted database must not be compared against it.
+      keyFingerprints.removeValue(forKey: userDID)
+    }
     let encryptionKey = try await ensureKeyForDatabase(for: userDID)
 
     // Generate key fingerprint for logging (first 8 bytes, base64 encoded - NEVER log full key!)

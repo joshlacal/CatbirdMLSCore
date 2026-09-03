@@ -2536,4 +2536,37 @@ final class MLSStorageCutoverTests: XCTestCase {
     let finalEval = try coordinator.evaluateState(for: .rustState, userDID: testDID)
     XCTAssertEqual(finalEval, .allAbsent, "State after reset must be allAbsent")
   }
+
+  // MARK: - 46. Same-process reset then re-create must accept the fresh key
+
+  /// Regression: MLSGRDBManager cached the pre-reset key fingerprint, so the
+  /// post-reset first creation threw "Encryption key changed" and stranded a
+  /// `.creating` marker, wedging every subsequent open with `incompleteAttempt`.
+  func test46_SameManagerRecreatesAfterClearStorageWithFreshKey() async throws {
+    let testDID = "did:plc:reset_recreate_\(UUID().uuidString)"
+    let coordinator = MLSStorageCoordinator.shared
+    let manager = MLSGRDBManager()
+
+    _ = try await manager.getDatabasePool(for: testDID)
+    let keyBefore = try await MLSSQLCipherEncryption.shared.getKey(for: testDID)
+    let drained = await manager.closeDatabaseAndDrain(for: testDID)
+    XCTAssertTrue(drained)
+
+    try await MLSClient.shared.clearStorage(for: testDID)
+    XCTAssertEqual(try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID), .allAbsent)
+
+    // Same manager instance, fresh key: must create cleanly, not report a key change.
+    _ = try await manager.getDatabasePool(for: testDID)
+    let keyAfter = try await MLSSQLCipherEncryption.shared.getKey(for: testDID)
+    XCTAssertNotNil(keyAfter)
+    XCTAssertNotEqual(keyBefore, keyAfter, "Reset must have rotated the SQLCipher key")
+
+    guard case .complete = try coordinator.evaluateState(for: .swiftGRDB, userDID: testDID) else {
+      XCTFail("Marker must be complete after post-reset creation")
+      return
+    }
+
+    _ = await manager.closeDatabaseAndDrain(for: testDID)
+    try await coordinator.coordinateReset(for: .swiftGRDB, userDID: testDID)
+  }
 }
