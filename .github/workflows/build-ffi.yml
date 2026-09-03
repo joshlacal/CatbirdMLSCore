@@ -109,6 +109,18 @@ jobs:
             aarch64-apple-darwin \
             x86_64-apple-darwin
 
+      - name: Free runner disk space
+        # A cold 7-target Rust build plus the ~4 GB xcframework exhausts the
+        # runner (v1.5.14 attempt 1 died with ENOSPC in the verify step).
+        run: |
+          df -h / | tail -1
+          selected="$(xcode-select -p | sed -E 's#(/Applications/[^/]+\.app).*#\1#')"
+          for app in /Applications/Xcode*.app; do
+            [ "$app" = "$selected" ] || sudo rm -rf "$app"
+          done
+          sudo rm -rf /Users/runner/Library/Android /usr/local/lib/android /usr/local/share/dotnet || true
+          df -h / | tail -1
+
       - name: Cache Cargo registry and build outputs
         uses: actions/cache@v4
         with:
@@ -126,7 +138,23 @@ jobs:
 
       - name: Verify Swift package consumes generated FFI
         working-directory: CatbirdMLSCore
-        run: swift build
+        # Build against the framework just produced, not the previous release
+        # the committed URL binary target points at.
+        run: |
+          cp Package.swift /tmp/Package.swift.committed
+          python3 - <<'EOF'
+          import re
+          manifest = open("Package.swift").read()
+          patched, n = re.subn(
+              r'\.binaryTarget\(\s*name: "CatbirdMLSFFI",\s*url: "[^"]+",\s*checksum: "[^"]+"\s*\)',
+              '.binaryTarget(name: "CatbirdMLSFFI", path: "Sources/CatbirdMLSFFI.xcframework")',
+              manifest,
+          )
+          assert n == 1, "expected exactly one CatbirdMLSFFI url binary target"
+          open("Package.swift", "w").write(patched)
+          EOF
+          swift build
+          cp /tmp/Package.swift.committed Package.swift
 
       - name: Create release archive
         working-directory: CatbirdMLSCore
