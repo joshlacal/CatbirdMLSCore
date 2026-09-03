@@ -81,6 +81,28 @@ final class MLSAPIClientGroupInfoVerificationTests: XCTestCase {
       XCTFail("Expected MLSAPIError, got \(error)")
     }
   }
+
+  /// Regression: this used to return the 32-byte group id as "GroupInfo",
+  /// which made Rust believe External Commit was possible, burn a rejoin
+  /// attempt on a malformed payload every sync, and lock the conversation
+  /// out for 24h. Clean-chat has no GroupInfo read; it must fail like one.
+  func testGetGroupInfoFailsClosedWithoutNetwork() async {
+    let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let client = await MLSAPIClient(client: atProtoClient)
+    do {
+      _ = try await client.getGroupInfo(convoId: "018f3f6a-7b2c-4d91-8a5e-0f123456789a")
+      XCTFail("getGroupInfo must fail closed under clean-chat")
+    } catch let error as MLSAPIError {
+      guard case let .httpError(statusCode, message) = error else {
+        XCTFail("Expected .httpError, got \(error)")
+        return
+      }
+      XCTAssertEqual(statusCode, 404)
+      XCTAssertTrue(message.contains("leaf recovery or reset"))
+    } catch {
+      XCTFail("Expected MLSAPIError, got \(error)")
+    }
+  }
 }
 
 final class MLSClientHTTPStatusExtractionTests: XCTestCase {

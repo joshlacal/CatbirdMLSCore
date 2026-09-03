@@ -309,6 +309,13 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return MLSConversationReadyResult(ffiResult: result)
   }
 
+  /// User-confirmed clean-chat reset: `requestReset` + (as an admin)
+  /// `activateReset` from server state alone, then clears local quarantine.
+  /// Works from a device with no local MLS group.
+  public func resetConversation(conversationId: String) throws {
+    try bridge.userConfirmedManualReset(convoId: conversationId)
+  }
+
   public func debugWipeLocalGroupForRecovery(
     conversationId: String
   ) throws -> MLSDebugWipeLocalGroupResult {

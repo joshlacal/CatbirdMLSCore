@@ -84,6 +84,24 @@ public extension MLSConversationManager {
     return result
   }
 
+  /// Reset a conversation this device can no longer decrypt (lost local MLS
+  /// state, nobody left to add us back). Rust requests and, as an admin,
+  /// activates the successor generation from server state; the Swift caches
+  /// are refreshed from the resulting Rust snapshots.
+  func resetConversation(conversationId: String) async throws {
+    guard protocolAuthorityMode == .rustFull else {
+      throw MLSConversationError.operationFailed(
+        "Conversation reset requires the Rust protocol authority")
+    }
+    try await withRustAuthoritativeRuntime(operation: "resetConversation") { runtime in
+      try runtime.resetConversation(conversationId: conversationId)
+    }
+    logger.info(
+      "✅ [MLS-AUTHORITY] resetConversation completed for \(conversationId.prefix(16), privacy: .private)"
+    )
+    try await syncWithServer()
+  }
+
   func conversationDiagnosticsProjection(
     conversationId: String,
     ensureReady: Bool = false

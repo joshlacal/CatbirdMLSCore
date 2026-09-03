@@ -1372,13 +1372,22 @@ public final class MLSAPIClient {
 
     // MARK: Epoch Synchronization
 
-    /// Get GroupInfo for external commit
+    /// GroupInfo for an External Commit.
+    ///
+    /// The clean-chat protocol exposes no GroupInfo read: it exists only as
+    /// `genesisGroupInfo` inside creation/reset bodies. Failing here is what
+    /// tells the Rust orchestrator to skip External Commit and go straight to
+    /// leaf recovery / reset. Returning anything else (this used to hand back
+    /// the 32-byte group id) made every rejoin burn an attempt on a doomed
+    /// External Commit and lock the conversation out for 24h.
     public func getGroupInfo(convoId: String, maxRetries: Int = 3) async throws -> (
         groupInfo: Data, epoch: Int, expiresAt: Date?
     ) {
-        logger.info("📥 [MLSAPIClient.getGroupInfo] START - convoId: \(convoId)")
-        let output = try await getCanonicalConversationState(conversationId: convoId)
-        return (output.state.coordinates.groupId.data, output.state.coordinates.epoch, nil)
+        logger.info("📥 [MLSAPIClient.getGroupInfo] unavailable under clean-chat - convoId: \(convoId)")
+        throw MLSAPIError.httpError(
+            statusCode: 404,
+            message: "GroupInfo is not retrievable under blue.catbird.chat; recover via leaf recovery or reset"
+        )
     }
 
     /// Update GroupInfo
