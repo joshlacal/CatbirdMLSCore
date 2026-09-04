@@ -62,8 +62,8 @@ let package = Package(
         ),
         .binaryTarget(
             name: "CatbirdMLSFFI",
-            url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.15/CatbirdMLSFFI.xcframework.zip",
-            checksum: "6e2b6ab90f84e05ce69ed5c51bc01c1f88c6471c61b96c2453501ea4b52f95bf"
+            url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.16/CatbirdMLSFFI.xcframework.zip",
+            checksum: "596ff23e7097d8b8ba902c4f32bf3f0f0e863b6e3c38b8667fb3a2b3f65c1513"
         ),
         .testTarget(
             name: "CatbirdMLSCoreTests",
