@@ -2079,9 +2079,6 @@ public extension MLSConversationManager {
     userDid: String,
     attemptID: String
   ) async throws -> MessageProcessingOutcome {
-    let runtime = try await withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
-      runtime
-    }
 
     let (_, outcome) = try await withMLSUserPermit(for: userDid) { [self] in
       try await self.messageProcessingCoordinator.withQueuedSection(conversationID: message.convoId) { queueIndex in
@@ -2097,8 +2094,10 @@ public extension MLSConversationManager {
           "🦀 [MLS-AUTHORITY] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
         )
 
-        let ffiMessage = try runtime.processIncoming(envelope: envelope)
-        let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        let outcome = try await self.withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
+          let ffiMessage = try runtime.processIncoming(envelope: envelope)
+          return try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        }
         try await self.handleRustAuthoritativePayloadSideEffects(
           outcome,
           message: message,
@@ -2118,9 +2117,6 @@ public extension MLSConversationManager {
     userDid: String,
     attemptID: String
   ) async throws -> MessageProcessingOutcome {
-    let runtime = try await withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
-      runtime
-    }
 
     let serverEpoch = message.epoch >= 0 ? UInt64(message.epoch) : nil
     let (_, outcome) = try await withMLSUserPermit(for: userDid) { [self] in
@@ -2137,12 +2133,15 @@ public extension MLSConversationManager {
           "🦀 [MLS-FULL-RUST] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
         )
 
-        let result = try runtime.processIncomingMessage(
-          envelope: envelope,
-          serverEpoch: serverEpoch
-        )
+        let (result, outcome) = try await self.withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
+          let result = try runtime.processIncomingMessage(
+            envelope: envelope,
+            serverEpoch: serverEpoch
+          )
+          let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: result.message)
+          return (result, outcome)
+        }
         await self.handleRustEngineEvents(result.events, source: "processServerMessage")
-        let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: result.message)
         try await self.handleRustAuthoritativePayloadSideEffects(
           outcome,
           message: message,

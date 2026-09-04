@@ -42,7 +42,6 @@ public enum MLSChatEndpointCatalog {
     route("getSubscriptionTicket", requiresSignedRequest: false),
     route("prepareBlobUpload", requiresSignedRequest: false),
     route("publishTyping", requiresSignedRequest: false),
-    route("rebindDeviceAuthentication", requiresSignedRequest: true),
     route("rejectWelcome", requiresSignedRequest: true),
     route("replenishKeyPackages", requiresSignedRequest: true),
     route("requestLeafRecovery", requiresSignedRequest: true),

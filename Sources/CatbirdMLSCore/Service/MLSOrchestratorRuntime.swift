@@ -665,7 +665,7 @@ private func decodeConversationSnapshot(
 
   let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
     conversationId: ffiConversation.conversationId,
-    generation: 1,
+    generation: 0,
     stateVersion: 1,
     groupId: Bytes(data: Data(hexEncoded: ffiConversation.groupId) ?? Data()),
     epoch: Int(ffiConversation.epoch),
@@ -677,7 +677,7 @@ private func decodeConversationSnapshot(
   let metadataSnapshot = BlueCatbirdChatDefs.MetadataSnapshot(
     coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
       conversationId: Bytes(data: Data(ffiConversation.conversationId.utf8)),
-      generation: 1,
+      generation: 0,
       groupId: Bytes(data: Data(hexEncoded: ffiConversation.groupId) ?? Data()),
       epoch: Int(ffiConversation.epoch),
       groupContextHash: Bytes(data: Data()),
