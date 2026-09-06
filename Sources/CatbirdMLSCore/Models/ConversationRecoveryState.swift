@@ -6,7 +6,7 @@
 //
 //  Implements S1 ("Welcome-first. External Commit is the escape hatch, never the
 //  hot path") and S1.1 ("Recovery precedence pyramid") from the 2026 Q2 Ship
-//  Program invariants. Every conversation must be in exactly one of these seven
+//  Program invariants. Every conversation must be in exactly one of these
 //  states at any given time.
 //
 
@@ -34,6 +34,10 @@ import Foundation
 ///   introduced — the mapping is a computed property on the model
 ///   (`MLSConversationModel.persistedRecoveryState`). This avoids a schema
 ///   migration and keeps a single source of truth.
+///
+/// - **Terminal access states** (`.deviceRemoved`, `.closed`) are persisted in
+///   the account-scoped orchestrator access table. Inventory changes cannot
+///   clear them; a verified Welcome can restore only a removed device.
 ///
 /// - **Transient states** (`.epochBehind`, `.groupMissing`, `.recovering`) live
 ///   only in an in-memory dictionary inside `MLSRecoveryManager`. They are
@@ -109,16 +113,23 @@ public enum ConversationRecoveryState: String, Codable, Equatable, Sendable, Cas
   /// rejoin on the same conversation.
   case resetPending
 
+  /// The exact device leaf was removed. History is retained; only a verified
+  /// fresh Welcome can restore access. Persisted by the Rust storage adapter.
+  case deviceRemoved
+
+  /// The conversation has been permanently closed. History remains readable.
+  case closed
+
   // MARK: - Classification
 
-  /// Whether this state survives app restart via a GRDB column.
+  /// Whether this state survives app restart in GRDB.
   ///
   /// Matches the "Persisted?" column in the §8.1 state table:
   /// - `.needsRejoin`, `.unrecoverableLocal`, `.resetPending`: persisted
   /// - everything else: transient (derived at runtime)
   public var isPersisted: Bool {
     switch self {
-    case .needsRejoin, .unrecoverableLocal, .resetPending:
+    case .needsRejoin, .unrecoverableLocal, .resetPending, .deviceRemoved, .closed:
       return true
     case .healthy, .epochBehind, .groupMissing, .recovering:
       return false
@@ -137,7 +148,7 @@ public enum ConversationRecoveryState: String, Codable, Equatable, Sendable, Cas
     switch self {
     case .needsRejoin, .resetPending, .groupMissing, .epochBehind:
       return true
-    case .healthy, .recovering, .unrecoverableLocal:
+    case .healthy, .recovering, .unrecoverableLocal, .deviceRemoved, .closed:
       return false
     }
   }
@@ -171,7 +182,13 @@ public extension ConversationRecoveryState {
   func canTransition(to next: ConversationRecoveryState) -> Bool {
     if self == next { return true }  // self-transitions always legal
 
+    if next == .deviceRemoved || next == .closed { return self != .closed }
+
     switch self {
+    case .deviceRemoved:
+      return next == .healthy // Rust verified-Welcome path only.
+    case .closed:
+      return false
     case .healthy:
       return next == .epochBehind
         || next == .needsRejoin

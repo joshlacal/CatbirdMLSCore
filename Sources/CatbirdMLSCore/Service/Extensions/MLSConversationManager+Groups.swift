@@ -870,45 +870,45 @@ extension MLSConversationManager {
     }
 
     if protocolAuthorityMode == .rustFull {
+      let capturedGeneration = sessionGeneration
       do {
         let result = try await withRustAuthoritativeRuntime(operation: "leaveConversation") { runtime in
           try runtime.leaveConversation(conversationId: convoId)
         }
-        try await removeRustConversationSnapshot(
-          conversationId: result.conversationId,
-          groupId: result.groupId
-        )
+        try validateSessionGeneration(capturedGeneration: capturedGeneration)
+        guard result.conversationId == convoId else {
+          throw MLSConversationError.operationFailed("Could not verify the completed leave.")
+        }
+        let terminal = try await database.read { db in
+          try String.fetchOne(db,
+            sql: """
+              SELECT terminal.state FROM mls_orchestrator_terminal_access terminal
+              JOIN MLSConversationModel conversation
+                ON conversation.currentUserDID = terminal.user_did
+                AND conversation.conversationID = terminal.conversation_id
+                AND conversation.groupID = terminal.group_id
+              WHERE terminal.user_did = ? AND terminal.conversation_id = ?
+              """,
+            arguments: [userDid, result.conversationId])
+        }
+        try validateSessionGeneration(capturedGeneration: capturedGeneration)
+        guard terminal == "closed" || terminal == "device_removed" else {
+          // A transport success cannot establish departure or authorize deleting history.
+          throw MLSConversationError.operationFailed("Your leave is still being confirmed. Please try again.")
+        }
+        try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "confirmed leave")
+        try await MLSPendingLeaveHintStore.shared.replace(nil, userDID: userDid, conversationID: result.conversationId)
         notifyObservers(.conversationLeft(result.conversationId))
         logger.info("✅ [MLSConversationManager.leaveConversation] rustFull complete: \(result.conversationId)")
         return
       } catch {
-        // GHOST/ZOMBIE RECOVERY (rustFull parity with the legacy orphan path below).
-        // The Rust authority threw on leave — typically because it has no live group
-        // for this conversation (group state was never initialized or was lost).
-        // Without this fallback the local snapshot is permanently undeletable in
-        // rustFull mode: the throw aborts before any cleanup runs. Tear it down
-        // locally so the user can clear the ghost; if they are in fact still a
-        // healthy server-side member, the next sync re-creates the snapshot.
-        logger.warning(
-          "⚠️ [leaveConversation] rustFull leave threw for \(convoId.prefix(16))...: \(error.localizedDescription) — tearing down local snapshot as a ghost"
-        )
-        let groupIdHex: String?
-        if let memoryGroupId = conversations[convoId]?.groupId {
-          groupIdHex = memoryGroupId
-        } else {
-          let dbConvo = try? await database.read { db in
-            try MLSConversationModel
-              .filter(MLSConversationModel.Columns.conversationID == convoId)
-              .filter(MLSConversationModel.Columns.currentUserDID == userDid)
-              .fetchOne(db)
-          }
-          groupIdHex = dbConvo?.groupID.hexEncodedString()
+        // Rust returns success only after departure is confirmed. A pending request
+        // or failed server operation must retain messages, keys, and membership.
+        logger.warning("Conversation leave was not completed: \(error.localizedDescription)")
+        if let lifecycle = error as? MLSConversationLifecycleError, case .leavePending = lifecycle {
+          _ = await conversationLeavePresentation(conversationID: convoId, refresh: true)
         }
-        try await removeRustConversationSnapshot(conversationId: convoId, groupId: groupIdHex)
-        notifyObservers(.conversationLeft(convoId))
-        logger.info(
-          "✅ [leaveConversation] Cleaned up ghost conversation (rustFull): \(convoId.prefix(16))...")
-        return
+        throw error
       }
     }
 
@@ -1104,34 +1104,85 @@ extension MLSConversationManager {
     notifyObservers(.conversationLeft(convoId))
   }
 
+  @discardableResult
   internal func applyRustConversationSnapshot(
     _ convo: BlueCatbirdChatDefs.ConversationState,
     metadata: MLSConversationSnapshotMetadata? = nil,
-    titleOverride: String? = nil
-  ) async throws {
+    titleOverride: String? = nil,
+    publishCache: Bool = true
+  ) async throws -> Bool {
+    try throwIfShuttingDown("applyRustConversationSnapshot")
+    guard userDid != nil else { throw MLSConversationError.noAuthentication }
+    let capturedGeneration = sessionGeneration
     let convoId = convo.coordinates.conversationId.description
     let groupIdHex = convo.coordinates.groupId.data.hexEncodedString()
     var effectiveConversationID = convoId
 
     if let userDid = userDid {
       let normalizedUserDID = MLSStorageHelpers.normalizeDID(userDid)
+      if let json = metadata?.canonicalStateJson {
+        let policy = try MLSCanonicalPolicyProjection.decode(json, conversationID: convoId,
+          groupID: convo.coordinates.groupId.data,
+          maximumEpoch: metadata?.nativeDisplayEpoch.flatMap { Int64(exactly: $0) })
+        guard policy == convo,
+              policy.participants.contains(where: { $0.userDid.description == normalizedUserDID }) else {
+          throw MLSCanonicalPolicyProjection.ValidationError.invalidSnapshot
+        }
+      }
       effectiveConversationID = try await storage.ensureConversationExists(
         userDID: userDid,
         conversationID: convoId,
         groupID: groupIdHex,
         database: database
       )
+      try validateSessionGeneration(capturedGeneration: capturedGeneration)
+      try throwIfShuttingDown("applyRustConversationSnapshot")
+      guard self.userDid == userDid else { throw MLSConversationError.noAuthentication }
       let persistedConversationID = effectiveConversationID
-      try await database.write { db in
+      let applied = try await database.write { db -> Bool in
+        try self.validateSessionGeneration(capturedGeneration: capturedGeneration)
+        try self.throwIfShuttingDown("applyRustConversationSnapshot")
+        guard self.userDid == userDid else { throw MLSConversationError.noAuthentication }
         let existing = try MLSConversationModel
           .filter(MLSConversationModel.Columns.conversationID == persistedConversationID)
           .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
           .fetchOne(db)
+        let terminal = try String.fetchOne(db,
+          sql: "SELECT state FROM mls_orchestrator_terminal_access WHERE user_did = ? AND conversation_id = ?",
+          arguments: [normalizedUserDID, persistedConversationID])
+        guard terminal != "closed",
+              Self.shouldApplyRustSnapshot(convo, over: existing, nativeDisplayEpoch: metadata?.nativeDisplayEpoch) else { return false }
+        let policyUpdate: MLSCanonicalPolicyProjection.Update?
+        if let json = metadata?.canonicalStateJson {
+          guard let existing,
+                let update = try MLSCanonicalPolicyProjection.prepare(json, existing: existing, in: db) else {
+            return false
+          }
+          guard update.state == convo else {
+            throw MLSCanonicalPolicyProjection.ValidationError.invalidSnapshot
+          }
+          policyUpdate = update
+        } else {
+          if let existing,
+             try MLSCanonicalPolicyProjection.storedState(userDID: normalizedUserDID,
+               conversationID: persistedConversationID, in: db) != nil { return false }
+          policyUpdate = nil
+        }
+        if terminal == "device_removed" {
+          guard metadata?.isNativePolicyProjection == true, let policyUpdate, let existing else { return false }
+          // A policy overlay can present a verified reinvitation or acceptance
+          // while local crypto access remains terminal until a verified Welcome.
+          try existing.withRequestState(policyUpdate.requestState).update(db)
+          try MLSCanonicalPolicyProjection.persist(policyUpdate, userDID: normalizedUserDID,
+            terminalInvitationAuthorized: policyUpdate.requestState == .pendingInbound, in: db)
+          return true
+        }
         let model = MLSConversationModel.mergedRustSnapshot(
           state: convo,
           currentUserDID: normalizedUserDID,
           existing: existing
-        )
+        ).withRequestState(policyUpdate?.requestState ?? existing?.requestState ?? .none)
+          .withEpoch(Int64(metadata?.nativeDisplayEpoch ?? UInt64(convo.coordinates.epoch)))
         // The Rust id is normally already canonical.  If a validated alias
         // migration redirected it, persist the merged projection under that
         // effective key instead of recreating the raw row.
@@ -1167,6 +1218,9 @@ extension MLSConversationManager {
               pendingResetGeneration: model.pendingResetGeneration
             )
         try persistedModel.save(db)
+        if let policyUpdate {
+          try MLSCanonicalPolicyProjection.persist(policyUpdate, userDID: normalizedUserDID, in: db)
+        }
 
         // An empty Rust roster can be a transient projection; retain any
         // already-hydrated rows until a non-empty snapshot is authoritative.
@@ -1216,37 +1270,45 @@ extension MLSConversationManager {
             )
           }
         }
-      }
-    }
-
-    conversations.removeValue(forKey: convoId)
-    conversations[effectiveConversationID] = convo
-    conversationStates.removeValue(forKey: convoId)
-    conversationStates[effectiveConversationID] = .active
-    groupStates[groupIdHex] = MLSGroupState(
-      groupId: groupIdHex,
-      convoId: effectiveConversationID,
-      epoch: UInt64(clamping: convo.coordinates.epoch),
-      members: Set(convo.participants.map { $0.userDid.description }),
-      knownServerEpoch: UInt64(clamping: convo.coordinates.epoch)
-    )
-
-    let metadataTitle = metadata?.title ?? MLSConversationSnapshotMetadata.nonEmpty(titleOverride)
-    let metadataDescription = metadata?.description
-    let metadataAvatarURL = metadata?.avatarUrl
-    if let userDid, metadataTitle != nil || metadataDescription != nil || metadataAvatarURL != nil {
-      let metadataConversationID = effectiveConversationID
-      try await database.write { db in
-        try db.execute(
-          sql: """
+        let metadataTitle = metadata?.title ?? MLSConversationSnapshotMetadata.nonEmpty(titleOverride)
+        if metadataTitle != nil || metadata?.description != nil || metadata?.avatarUrl != nil {
+          try db.execute(sql: """
             UPDATE MLSConversationModel
             SET title = COALESCE(?, title), description = COALESCE(?, description), avatarURL = COALESCE(?, avatarURL), updatedAt = ?
             WHERE conversationID = ? AND currentUserDID = ?
-            """,
-          arguments: [metadataTitle, metadataDescription, metadataAvatarURL, Date(), metadataConversationID, MLSStorageHelpers.normalizeDID(userDid)]
-        )
+            """, arguments: [metadataTitle, metadata?.description, metadata?.avatarUrl, Date(), persistedConversationID, normalizedUserDID])
+        }
+        return true
       }
+      try validateSessionGeneration(capturedGeneration: capturedGeneration)
+      guard applied else { return false }
     }
+
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    if publishCache {
+      try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "Rust conversation mutation")
+      try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    }
+    return true
+  }
+
+  /// Snapshot refresh must not undo a durable reset fence or move the same group backwards.
+  internal static func shouldApplyRustSnapshot(
+    _ snapshot: BlueCatbirdChatDefs.ConversationState,
+    over existing: MLSConversationModel?,
+    nativeDisplayEpoch: UInt64? = nil
+  ) -> Bool {
+    guard snapshot.coordinates.epoch >= 0 else { return false }
+    let displayEpoch = nativeDisplayEpoch ?? UInt64(snapshot.coordinates.epoch)
+    guard displayEpoch <= 9_007_199_254_740_991,
+          displayEpoch >= UInt64(snapshot.coordinates.epoch) else { return false }
+    guard let existing else { return true }
+    if existing.needsReset || existing.pendingNewGroupId != nil || !existing.isActive { return false }
+    // Native verified Welcome/reset storage must establish a changed group binding
+    // before a display snapshot can refresh it. A snapshot alone is not proof.
+    guard existing.groupID == snapshot.coordinates.groupId.data else { return false }
+    if existing.epoch > Int64(displayEpoch) { return false }
+    return true
   }
 
   internal func removeRustConversationSnapshot(
@@ -1305,17 +1367,36 @@ extension MLSConversationManager {
   /// - Parameter convoId: The conversation ID to accept
   /// - Throws: MLSConversationError if the operation fails
   public func acceptConversationRequest(convoId: String) async throws {
+    let capturedGeneration = sessionGeneration
     guard let userDid = userDid else {
       throw MLSConversationError.contextNotInitialized
     }
 
     logger.info("✅ Accepting chat request: \(convoId.prefix(16))...")
 
-    if protocolAuthorityMode.usesRustForDecisions {
+    if protocolAuthorityMode == .rustFull {
+      let snapshots = try await withRustAuthoritativeRuntime(operation: "acceptConversationRequest") { runtime in
+        try runtime.acceptConversation(conversationId: convoId)
+        return try? runtime.listConversationSnapshots()
+      }
+      try validateSessionGeneration(capturedGeneration: capturedGeneration)
+      try throwIfShuttingDown("acceptConversationRequest")
+      guard self.userDid == userDid else { throw MLSConversationError.noAuthentication }
+      // Accepted transport is not undone if display refresh fails. Keep the
+      // durable pending UI until a newer canonical active policy is available.
+      if let snapshots {
+        do { try await persistRustConversationSnapshots(snapshots, reason: "invitation acceptance") }
+        catch { logger.warning("Accepted invitation policy will refresh on the next sync: \(error.localizedDescription)") }
+      }
+      notifyObservers(.conversationRequestAccepted(convoId))
+      return
+    } else if protocolAuthorityMode.usesRustForDecisions {
       try await withRustAuthoritativeRuntime(operation: "acceptConversationRequest") { runtime in
         try runtime.acceptConversation(conversationId: convoId)
       }
     }
+
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
 
     try await storage.acceptConversationRequest(
       conversationID: convoId,

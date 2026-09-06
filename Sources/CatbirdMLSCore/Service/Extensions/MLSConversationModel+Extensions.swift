@@ -28,7 +28,7 @@ public extension MLSConversationModel {
       lastMessageAt: existing?.lastMessageAt,
       lastMembershipChangeAt: existing?.lastMembershipChangeAt,
       unacknowledgedMemberChanges: existing?.unacknowledgedMemberChanges ?? 0,
-      isActive: true,
+      isActive: existing?.isActive ?? true,
       needsRejoin: existing?.needsRejoin ?? false,
       needsReset: existing?.needsReset ?? false,
       isUnrecoverable: existing?.isUnrecoverable ?? false,

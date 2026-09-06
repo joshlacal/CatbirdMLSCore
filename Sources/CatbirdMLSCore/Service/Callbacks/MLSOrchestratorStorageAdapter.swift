@@ -66,6 +66,16 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     // never need to issue DDL on a WAL snapshot connection.
     do {
       try dbPool.write { db in
+        try MLSCanonicalPolicyProjection.createTable(in: db)
+        try db.execute(sql: """
+          CREATE TABLE IF NOT EXISTS mls_orchestrator_terminal_access (
+            user_did TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            group_id BLOB NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('device_removed', 'closed')),
+            PRIMARY KEY (user_did, conversation_id)
+          )
+          """)
         try db.execute(sql: """
           CREATE TABLE IF NOT EXISTS mls_orchestrator_sync_cursors (
             user_did TEXT PRIMARY KEY NOT NULL,
@@ -147,12 +157,14 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   /// Read-only callback identity resolution. A missing exact raw group id may
   /// remain on its normalized raw id for legacy insertion paths; a missing
-  /// stable id fails closed so an auxiliary child cannot be stranded beside a
-  /// canonical parent that the projection callback has not adopted yet.
+  /// stable id fails closed for mutations so an auxiliary child cannot be
+  /// stranded before adoption. Optional reads may inspect an absent canonical
+  /// UUID and return their normal nil/empty result without inserting anything.
   private func resolvedConversationID(
     in db: Database,
     requestedID: String,
-    groupID: String? = nil
+    groupID: String? = nil,
+    allowMissingCanonicalRead: Bool = false
   ) throws -> String {
     if let resolved = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
       in: db,
@@ -161,6 +173,10 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       groupID: groupID
     ) {
       return resolved
+    }
+
+    if allowMissingCanonicalRead, groupID == nil, MLSStorageHelpers.isCanonicalUUIDv4(requestedID) {
+      return requestedID
     }
 
     if groupID == nil,
@@ -242,9 +258,12 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     conversationId: String
   ) throws -> FfiConversationView? {
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDid)
+    guard normalizedDID == MLSStorageHelpers.normalizeDID(userDID) else {
+      throw MLSStorageError.invalidConversationID(conversationId)
+    }
 
     return try dbPool.read { db in
-      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId, allowMissingCanonicalRead: true)
       guard let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == effectiveID)
         .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
@@ -260,7 +279,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         .filter(MLSMemberModel.Columns.isActive == true)
         .fetchAll(db)
 
-      return self.conversationToFfi(conversation, members: members)
+      return try self.conversationToFfi(conversation, members: members, in: db)
     }
   }
 
@@ -286,9 +305,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
       let membersByConvoID = Dictionary(grouping: allMembers) { $0.conversationID }
 
-      return conversations.map { convo in
+      return try conversations.map { convo in
         let members = membersByConvoID[convo.conversationID] ?? []
-        return self.conversationToFfi(convo, members: members)
+        return try self.conversationToFfi(convo, members: members, in: db)
       }
     }
   }
@@ -325,12 +344,37 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       {
+        let requestedState = state.lowercased()
+        let terminalState = try String.fetchOne(db,
+          sql: "SELECT state FROM mls_orchestrator_terminal_access WHERE user_did = ? AND conversation_id = ?",
+          arguments: [userDID, effectiveID])
+        if requestedState == "device_removed" || requestedState == "closed" {
+          // Closing is terminal for this conversation ID; a late removal hint
+          // cannot downgrade it. Keep history, keys, and the last proven epoch.
+          if terminalState != "closed" {
+            try db.execute(sql: """
+              INSERT INTO mls_orchestrator_terminal_access (user_did, conversation_id, group_id, state)
+              VALUES (?, ?, ?, ?)
+              ON CONFLICT(user_did, conversation_id) DO UPDATE SET group_id = excluded.group_id, state = excluded.state
+              """, arguments: [userDID, effectiveID, conversation.groupID, requestedState])
+          }
+          try conversation.withRejoinState(needsRejoin: false, rejoinRequestedAt: nil).withRequestState(.none).update(db)
+          try MLSCanonicalPolicyProjection.clearTerminalInvitation(userDID: userDID, conversationID: effectiveID, in: db)
+          return
+        }
+        if let terminalState {
+          // Only the Rust verified-Welcome path may restore device access.
+          // Server inventory, epoch changes and generic Active writes are not proof.
+          guard terminalState == "device_removed", requestedState == "active_after_welcome" else { return }
+          try db.execute(sql: "DELETE FROM mls_orchestrator_terminal_access WHERE user_did = ? AND conversation_id = ?",
+            arguments: [userDID, effectiveID])
+        }
         let updated: MLSConversationModel
-        switch state.lowercased() {
+        switch requestedState {
         case "left", "inactive":
           updated = conversation.withActiveStatus(false)
-        case "active":
-          updated = conversation.withActiveStatus(true)
+        case "active", "active_after_welcome":
+          updated = conversation.withActiveStatus(true).withRejoinState(needsRejoin: false, rejoinRequestedAt: nil)
         case "needs_rejoin":
           updated = conversation.withRejoinState(needsRejoin: true, rejoinRequestedAt: Date())
         default:
@@ -347,13 +391,20 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func getConversationState(conversationId: String) throws -> FfiConversationState? {
     try dbPool.read { db in
-      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId, allowMissingCanonicalRead: true)
       guard let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == effectiveID)
         .filter(MLSConversationModel.Columns.currentUserDID == userDID)
         .fetchOne(db)
       else {
         return nil
+      }
+
+      if let state = try String.fetchOne(db,
+        sql: "SELECT state FROM mls_orchestrator_terminal_access WHERE user_did = ? AND conversation_id = ?",
+        arguments: [userDID, effectiveID]) {
+        return FfiConversationState(state: state, newGroupId: nil, resetGeneration: nil,
+          notifiedAtMs: nil, quarantineReason: nil, quarantinedSinceMs: nil)
       }
 
       if let quarantine = try Row.fetchOne(
@@ -531,6 +582,92 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  /// Project a verified, accepted own account-exit proof. Rust archives the
+  /// exact pending reset evidence before this callback. This transaction retires
+  /// only its matching live reset and never deletes history, keys, or old aliases.
+  public func completeAccountExit(
+    conversationId: String,
+    expectedGroupIdHex: String,
+    expectedResetGeneration: Int32?,
+    terminalEpoch: UInt64,
+    terminalState: String
+  ) throws -> Bool {
+    guard MLSSystemMessagePresentation.canonicalUUID(conversationId),
+          expectedGroupIdHex.utf8.count == 64,
+          expectedGroupIdHex.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+          let groupData = Data(hexEncoded: expectedGroupIdHex),
+          terminalEpoch <= 9_007_199_254_740_991,
+          terminalState == "closed" || terminalState == "device_removed",
+          expectedResetGeneration.map({ $0 > 0 }) ?? true else { return false }
+
+    return try dbPool.write { db in
+      // Do not resolve aliases or create a parent row at this proof boundary.
+      guard let conversation = try MLSConversationModel
+        .filter(MLSConversationModel.Columns.conversationID == conversationId)
+        .filter(MLSConversationModel.Columns.currentUserDID == userDID)
+        .fetchOne(db) else { return false }
+      let terminal = try Row.fetchOne(db,
+        sql: "SELECT group_id, state FROM mls_orchestrator_terminal_access WHERE user_did = ? AND conversation_id = ?",
+        arguments: [userDID, conversationId])
+      let savedTerminalState: String? = terminal?["state"]
+      let savedTerminalGroup: Data? = terminal?["group_id"]
+      let matchingTerminal = savedTerminalState == terminalState && savedTerminalGroup == groupData
+        && conversation.groupID == groupData && conversation.epoch == Int64(terminalEpoch)
+      let hasLiveReset = conversation.needsReset || conversation.pendingNewGroupId != nil
+
+      let exactRetry = matchingTerminal && !hasLiveReset && !conversation.needsRejoin
+        && !conversation.isUnrecoverable && conversation.rejoinRequestedAt == nil
+        && (expectedResetGeneration.map { conversation.pendingResetGeneration == Int64($0) } ?? true)
+      if savedTerminalState == "closed" && !exactRetry { return false }
+      if exactRetry {
+        // A newly accepted zero-leaf exit can share this crypto tuple with an
+        // earlier device removal. Native validates the distinct current intent.
+        try MLSCanonicalPolicyProjection.retireConsent(userDID: userDID, conversationID: conversationId, in: db)
+        return true
+      }
+      guard savedTerminalState == nil || savedTerminalState == "device_removed" else { return false }
+      // DeviceRemoved describes local access, not account membership. A new
+      // accepted own close/zero-leaf request can supersede it. Rust has durably
+      // verified that request and the old intent scope before this specialized
+      // callback; generic state writes carry no such authority.
+      if let expectedResetGeneration {
+        guard conversation.pendingResetGeneration == Int64(expectedResetGeneration),
+              hasLiveReset, conversation.needsReset,
+              conversation.pendingNewGroupId == expectedGroupIdHex,
+              conversation.groupID != groupData || conversation.epoch <= Int64(terminalEpoch) else { return false }
+      } else {
+        // A historical high-water alone is not a live reset. It is preserved.
+        guard !hasLiveReset, conversation.groupID == groupData,
+              savedTerminalGroup == nil || savedTerminalGroup == groupData,
+              conversation.epoch <= Int64(terminalEpoch) else { return false }
+      }
+
+      // Both writes commit together. Observers never see an Active adoption of
+      // a reset target that this account has already left or closed.
+      if terminal == nil {
+        try db.execute(sql: """
+          INSERT INTO mls_orchestrator_terminal_access (user_did, conversation_id, group_id, state)
+          VALUES (?, ?, ?, ?)
+          """, arguments: [userDID, conversationId, groupData, terminalState])
+      } else {
+        try db.execute(sql: """
+          UPDATE mls_orchestrator_terminal_access SET group_id = ?, state = ?
+          WHERE user_did = ? AND conversation_id = ? AND state = 'device_removed'
+          """, arguments: [groupData, terminalState, userDID, conversationId])
+        guard db.changesCount == 1 else { return false }
+      }
+      try db.execute(sql: """
+        UPDATE MLSConversationModel
+        SET groupID = ?, epoch = ?, needsReset = 0, needsRejoin = 0,
+            isUnrecoverable = 0, rejoinRequestedAt = NULL, pendingNewGroupId = NULL, requestState = 'none', updatedAt = ?
+        WHERE conversationID = ? AND currentUserDID = ?
+        """, arguments: [groupData, Int64(terminalEpoch), Date(), conversationId, userDID])
+      let updated = db.changesCount == 1
+      try MLSCanonicalPolicyProjection.clearTerminalInvitation(userDID: userDID, conversationID: conversationId, in: db)
+      return updated
+    }
+  }
+
   public func completeResetPending(
     conversationId: String,
     expectedGeneration: Int32,
@@ -615,7 +752,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
 
   public func needsRejoin(conversationId: String) throws -> Bool {
     try dbPool.read { db in
-      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId, allowMissingCanonicalRead: true)
       let conversation = try MLSConversationModel
         .filter(MLSConversationModel.Columns.conversationID == effectiveID)
         .filter(MLSConversationModel.Columns.currentUserDID == userDID)
@@ -715,7 +852,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
 
     let models: [MLSMessageModel] = try dbPool.read { db in
-      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId, allowMissingCanonicalRead: true)
       var request = MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == effectiveID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedDID)
@@ -735,7 +872,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
 
     // Return in chronological order (oldest first), matching the MLSStorage convention
-    return models.reversed().map { messageToFfi($0) }
+    return try models.reversed().map { try messageToFfi($0) }
   }
 
   public func messageExists(messageId: String) throws -> Bool {
@@ -810,7 +947,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     sinceEpoch: Int32?
   ) throws -> [FfiSequencerReceipt] {
     try dbPool.read { db in
-      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId)
+      let effectiveID = try resolvedConversationID(in: db, requestedID: conversationId, allowMissingCanonicalRead: true)
       var sql = """
         SELECT conversation_id, epoch, sequencer_term, commit_hash, sequencer_did, issued_at, signature
         FROM mls_orchestrator_sequencer_receipts
@@ -1205,8 +1342,9 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   /// Convert an MLSConversationModel + members to the FFI representation.
   private func conversationToFfi(
     _ model: MLSConversationModel,
-    members: [MLSMemberModel]
-  ) -> FfiConversationView {
+    members: [MLSMemberModel],
+    in db: Database
+  ) throws -> FfiConversationView {
     let ffiMembers = members.map { member in
       FfiMemberView(
         did: member.did,
@@ -1215,6 +1353,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
 
     return FfiConversationView(
+      canonicalStateJson: try MLSCanonicalPolicyProjection.json(for: model, in: db),
       groupId: model.groupID.hexEncodedString(),
       conversationId: model.conversationID,
       epoch: UInt64(model.epoch),
@@ -1228,7 +1367,21 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   }
 
   /// Convert an MLSMessageModel to the FFI representation.
-  private func messageToFfi(_ model: MLSMessageModel) -> FfiMessage {
+  private func messageToFfi(_ model: MLSMessageModel) throws -> FfiMessage {
+    let payloadData: Data?
+    if let encrypted = model.payloadEncrypted {
+      // Use the original crypto identity when an alias was adopted. Never
+      // fall back to legacy columns after an encrypted payload fails to open.
+      payloadData = try MLSFieldEncryption.decrypt(
+        context: mlsContext,
+        conversationID: model.cryptoConversationID ?? model.conversationID,
+        wire: encrypted
+      )
+    } else {
+      payloadData = model.payloadJSON
+    }
+    let payload = try payloadData.map { try MLSMessagePayload.decodeFromJSON($0) }
+    let displayText = payload.map { $0.text ?? "" } ?? model.plaintext ?? ""
     let deliveryStatus: FfiDeliveryStatus? = {
       if model.isSent && model.isDelivered {
         return .deliveredToAll
@@ -1243,13 +1396,13 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       id: model.messageID,
       conversationId: model.conversationID,
       senderDid: model.senderID,
-      text: model.plaintext ?? "",
+      text: displayText,
       timestamp: formatDate(model.timestamp) ?? "",
       epoch: UInt64(model.epoch),
       sequenceNumber: UInt64(model.sequenceNumber),
       isOwn: model.senderID == userDID,
       deliveryStatus: deliveryStatus,
-      payloadJson: model.payloadJSON.flatMap { String(data: $0, encoding: .utf8) }
+      payloadJson: payloadData.flatMap { String(data: $0, encoding: .utf8) }
     )
   }
 }

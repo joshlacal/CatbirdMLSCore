@@ -14,6 +14,7 @@ public actor MLSWebSocketManager {
 
     private let apiClient: MLSAPIClient
     private var activeSubscriptions: [String: Task<Void, Never>] = [:]
+    private var subscriptionRuns: [String: MLSCanonicalSubscriptionRun] = [:]
     private var eventHandlers: [String: EventHandler] = [:]
 
     private var connectionState: [String: ConnectionState] = [:]
@@ -77,6 +78,7 @@ public actor MLSWebSocketManager {
         /// Canonical inventory actions. Every item returned by the aggregate
         /// must reach one of these concrete reconciliation closures before the
         /// snapshot cursor is installed.
+        public var onCanonicalInventoryReconciliationStarted: (() async throws -> Void)?
         public var onCanonicalConversationInventoryState:
             ((BlueCatbirdChatDefs.ConversationState) async throws -> Void)?
         public var onCanonicalConversationRemovalTombstone:
@@ -86,7 +88,13 @@ public actor MLSWebSocketManager {
         public var onCanonicalPendingWelcome:
             ((BlueCatbirdChatDefs.WelcomeView) async throws -> Void)?
         public var onCanonicalLeafRecovery:
-            ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)?
+            ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)? {
+            didSet { onCanonicalRecoveryConversationState = nil }
+        }
+        /// Installed only by Core's current-state consumer. Replacing the
+        /// public item callback restores ordinary per-item dispatch.
+        internal var onCanonicalRecoveryConversationState:
+            MLSCanonicalInventoryActionSet.RecoveryConversationStateHandler?
         /// Required typed actions for every canonical durable arm. The action
         /// table is optional as a whole so a missing consumer fails closed at
         /// dispatch time; individual missing arms also throw rather than
@@ -102,6 +110,7 @@ public actor MLSWebSocketManager {
         public init() {}
 
         public init(
+            onCanonicalInventoryReconciliationStarted: (() async throws -> Void)? = nil,
             onCanonicalConversationInventoryState: ((BlueCatbirdChatDefs.ConversationState) async throws -> Void)? = nil,
             onCanonicalConversationRemovalTombstone: ((BlueCatbirdChatDefs.ConversationRemovalTombstone) async throws -> Void)? = nil,
             onCanonicalConversationCloseTombstone: ((BlueCatbirdChatDefs.ConversationCloseTombstone) async throws -> Void)? = nil,
@@ -114,6 +123,7 @@ public actor MLSWebSocketManager {
             onError: ((Error) async -> Void)? = nil,
             onReconnected: (() async -> Void)? = nil
         ) {
+            self.onCanonicalInventoryReconciliationStarted = onCanonicalInventoryReconciliationStarted
             self.onCanonicalConversationInventoryState = onCanonicalConversationInventoryState
             self.onCanonicalConversationRemovalTombstone = onCanonicalConversationRemovalTombstone
             self.onCanonicalConversationCloseTombstone = onCanonicalConversationCloseTombstone
@@ -170,6 +180,9 @@ public actor MLSWebSocketManager {
         // Stop existing subscription if any
         stop(key)
 
+        let run = MLSCanonicalSubscriptionRun()
+        subscriptionRuns[key] = run
+
         // Store handler and reset stop flag
         eventHandlers[key] = handler
         shouldStop[key] = false
@@ -190,7 +203,7 @@ public actor MLSWebSocketManager {
             if cursorToUse == nil, let store = await self.cursorStore {
                 cursorToUse = await self.loadPersistentCursor(for: key, store: store)
             }
-            await self.runSubscription(convoId: convoId, key: key, cursor: cursorToUse)
+            await self.runSubscription(convoId: convoId, key: key, cursor: cursorToUse, run: run)
         }
 
         activeSubscriptions[key] = task
@@ -223,6 +236,7 @@ public actor MLSWebSocketManager {
         // Set the graceful shutdown flag FIRST so the loop can exit cleanly
         shouldStop[convoId] = true
 
+        subscriptionRuns.removeValue(forKey: convoId)?.invalidate()
         activeSubscriptions[convoId]?.cancel()
         activeSubscriptions.removeValue(forKey: convoId)
         eventHandlers.removeValue(forKey: convoId)
@@ -315,11 +329,13 @@ public actor MLSWebSocketManager {
         await canonicalSubscriptionFailureLifecycle.remember(coordinator)
     }
 
-    private func runSubscription(convoId: String?, key: String, cursor: String?) async {
+    private func runSubscription(convoId: String?, key: String, cursor: String?, run: MLSCanonicalSubscriptionRun) async {
+        guard run.isValid else { return }
         logger.info("🔌 WS: runSubscription() started for \(key), cursor: \(cursor ?? "nil")")
         var reconnectAttempts = 0
         var latestSavedCursor = cursor
         var subscriptionFence: MLSCanonicalSubscriptionFence?
+        var replayRequirement = MLSCanonicalSubscriptionReplayRequirement()
         let initialHandler = eventHandlers[key]
         var failureCoordinator: MLSCanonicalSubscriptionFailureCoordinator
         do {
@@ -330,17 +346,20 @@ public actor MLSWebSocketManager {
                 store: cursorStore
             )
             failureCoordinator = try await prepareCanonicalSubscriptionForReconnect(coordinator)
+            try run.check()
         } catch {
+            guard run.isValid else { return }
             logger.error("🔌 WS: Failed to load canonical subscription failure state for \(key): \(error)")
             connectionState[key] = .error(error)
             await initialHandler?.onError?(error)
+            guard run.isValid else { return }
             connectionState[key] = .disconnected
             return
         }
         // Spec §7: Exponential backoff (1s, 2s, 4s, 8s, max 30s), no give-up limit
         let maxReconnectDelay: TimeInterval = 30.0
 
-        while !Task.isCancelled, shouldStop[key] != true {
+        while run.isValid, !Task.isCancelled, shouldStop[key] != true {
             latestSavedCursor = lastCursor[key] ?? latestSavedCursor
 
             do {
@@ -348,7 +367,7 @@ public actor MLSWebSocketManager {
 
                 connectionState[key] = .connecting
 
-                guard let handler = eventHandlers[key] else {
+                guard let handler = initialHandler else {
                     throw MLSCanonicalInventoryActionMissingError.conversationState
                 }
                 let apiClient = self.apiClient
@@ -361,24 +380,42 @@ public actor MLSWebSocketManager {
                     fence: &subscriptionFence,
                     initialCursor: latestSavedCursor,
                     terminalFailure: failureCoordinator.terminalFailure,
+                    hasUnhandledEvent: replayRequirement.isRequired,
                     fetchInventory: {
                         try await apiClient.getCanonicalInventoryAggregateSnapshot(limit: 100)
                     },
                     reconcile: { snapshot in
+                        try run.check()
                         try await self.reconcileCanonicalInventory(snapshot, with: handler)
+                        try run.check()
                     },
                     installCompletion: { snapshot in
-                        apiClient.recordCompletedCanonicalInventory(snapshot)
+                        try? run.whileValid { apiClient.recordCompletedCanonicalInventory(snapshot) }
                     },
                     persistFence: { cursor in
-                        try await self.saveCursor(cursor, for: key)
+                        try await self.saveCursor(cursor, for: key, run: run)
                     }
                 )
+                try run.check()
                 let resumeCursor = fence.snapshotEventCursor
-                let ticket = try await apiClient.getCanonicalSubscriptionTicket(
-                    inventorySessionId: fence.inventorySessionId,
-                    eventCursor: resumeCursor
-                )
+                let ticket: BlueCatbirdChatGetSubscriptionTicket.Output
+                do {
+                    ticket = try await apiClient.getCanonicalSubscriptionTicket(
+                        inventorySessionId: fence.inventorySessionId,
+                        eventCursor: resumeCursor
+                    )
+                } catch {
+                    // Reuse the outer reconnect/backoff lifecycle. A rejected
+                    // capability requires full reconciliation on the next run;
+                    // an outstanding event or terminal latch forbids that move.
+                    try MLSCanonicalSubscriptionCoordinator.invalidateRejectedTicketFence(
+                        error,
+                        fence: &subscriptionFence,
+                        terminalFailure: failureCoordinator.terminalFailure,
+                        hasUnhandledEvent: replayRequirement.isRequired
+                    )
+                    throw error
+                }
                 let stream = try await apiClient.subscribeCanonicalEvents(
                     ticket: ticket.ticket,
                     cursor: resumeCursor
@@ -392,6 +429,7 @@ public actor MLSWebSocketManager {
                     currentFence: fence,
                     savedCursor: latestSavedCursor
                 )
+                try run.check()
                 connectionState[key] = .connected
                 logger.info("🔌 WS: Connected for \(key) - entering event loop")
 
@@ -402,6 +440,7 @@ public actor MLSWebSocketManager {
                         await reconnectedHandler()
                     }
                 }
+                try run.check()
 
                 // Reset attempts on successful connection
                 reconnectAttempts = 0
@@ -411,8 +450,9 @@ public actor MLSWebSocketManager {
                 var failurePersistenceUnavailable = false
                 let loopOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
                     stream,
-                    shouldStop: { await self.shouldStop[key] == true },
+                    shouldStop: { let stopped = await self.shouldStop[key]; return !run.isValid || stopped == true },
                     handle: { message in
+                        guard run.isValid else { return .reconnect(CancellationError()) }
                         switch replayGate.decide(message) {
                         case .skip:
                             // This envelope was already committed on the
@@ -420,21 +460,27 @@ public actor MLSWebSocketManager {
                             // write its cursor backward into the store.
                             return .handled
                         case let .reconnect(error):
+                            replayRequirement.recordFailure(message)
                             await handler.onError?(error)
                             return .reconnect(error)
                         case let .handle(expectedPreviousCursor):
                             let result = await self.handleCanonicalEvent(
                                 message,
                                 for: key,
-                                expectedPreviousCursor: expectedPreviousCursor
+                                expectedPreviousCursor: expectedPreviousCursor,
+                                run: run
                             )
                             if case .handled = result {
+                                replayRequirement.recordHandled(message)
                                 latestSavedCursor = await self.lastCursor[key] ?? latestSavedCursor
+                            } else {
+                                replayRequirement.recordFailure(message)
                             }
                             return result
                         }
                     }
                 )
+                try run.check()
                 switch loopOutcome {
                 case .ended:
                     break
@@ -443,9 +489,12 @@ public actor MLSWebSocketManager {
                 case let .reconnect(error, _):
                     do {
                         _ = try await failureCoordinator.record(error)
+                        try run.check()
                     } catch {
+                        guard run.isValid else { return }
                         logger.error("🔌 WS: Failed to persist canonical subscription failure for \(key): \(error)")
                         await canonicalSubscriptionFailureLifecycle.remember(failureCoordinator)
+                        guard run.isValid else { return }
                         await handler.onError?(error)
                         failurePersistenceUnavailable = true
                     }
@@ -482,6 +531,7 @@ public actor MLSWebSocketManager {
                 }
 
             } catch {
+                guard run.isValid else { return }
                 if shouldStop[key] == true || Task.isCancelled {
                     logger.info("🔌 WS: Exiting due to shutdown/cancellation for: \(key)")
                     break
@@ -489,9 +539,12 @@ public actor MLSWebSocketManager {
 
                 do {
                     _ = try await failureCoordinator.record(error)
+                    try run.check()
                 } catch {
+                    guard run.isValid else { return }
                     logger.error("🔌 WS: Failed to persist canonical subscription failure for \(key): \(error)")
                     await canonicalSubscriptionFailureLifecycle.remember(failureCoordinator)
+                    guard run.isValid else { return }
                     if let handler = eventHandlers[key] {
                         await handler.onError?(error)
                     }
@@ -520,6 +573,7 @@ public actor MLSWebSocketManager {
             }
         }
 
+        guard run.isValid else { return }
         if shouldStop[key] == true {
             logger.info("🔌 WS: Subscription stopped gracefully for: \(key)")
         }
@@ -530,9 +584,10 @@ public actor MLSWebSocketManager {
     private func handleCanonicalEvent(
         _ message: BlueCatbirdChatSubscribeEvents.Message,
         for key: String,
-        expectedPreviousCursor: String
+        expectedPreviousCursor: String,
+        run: MLSCanonicalSubscriptionRun
     ) async -> MLSCanonicalTransportAdapter.MLSCanonicalStreamHandlingResult {
-        guard let handler = eventHandlers[key] else {
+        guard run.isValid, let handler = eventHandlers[key] else {
             logger.warning("🔌 WS: No handler found for canonical stream key \(key)")
             let error = MLSCanonicalInventoryActionMissingError.conversationState
             return .reconnect(error)
@@ -551,12 +606,15 @@ public actor MLSWebSocketManager {
                 ).entries
             },
             onDurableEvent: { event in
+                try run.check()
                 try await Self.canonicalDurableEventActions(for: handler).dispatch(event)
+                try run.check()
             },
             saveCursor: { cursor in
-                try await self.saveCursor(cursor, for: key)
+                try await self.saveCursor(cursor, for: key, run: run)
             }
         )
+        guard run.isValid else { return .reconnect(CancellationError()) }
         if case let .reconnect(error) = result {
             await handler.onError?(error)
         }
@@ -567,15 +625,23 @@ public actor MLSWebSocketManager {
         _ snapshot: MLSCanonicalInventorySnapshot,
         with handler: EventHandler
     ) async throws {
+        try await handler.onCanonicalInventoryReconciliationStarted?()
         try await MLSCanonicalInventoryReconciler.reconcile(
             snapshot,
-            actions: MLSCanonicalInventoryActionSet(
-                onConversationState: handler.onCanonicalConversationInventoryState,
-                onConversationRemoval: handler.onCanonicalConversationRemovalTombstone,
-                onConversationClose: handler.onCanonicalConversationCloseTombstone,
-                onPendingWelcome: handler.onCanonicalPendingWelcome,
-                onLeafRecovery: handler.onCanonicalLeafRecovery
-            )
+            actions: Self.canonicalInventoryActions(for: handler)
+        )
+    }
+
+    internal static func canonicalInventoryActions(
+        for handler: EventHandler
+    ) -> MLSCanonicalInventoryActionSet {
+        MLSCanonicalInventoryActionSet(
+            onConversationState: handler.onCanonicalConversationInventoryState,
+            onConversationRemoval: handler.onCanonicalConversationRemovalTombstone,
+            onConversationClose: handler.onCanonicalConversationCloseTombstone,
+            onPendingWelcome: handler.onCanonicalPendingWelcome,
+            onLeafRecovery: handler.onCanonicalLeafRecovery,
+            onRecoveryConversationState: handler.onCanonicalRecoveryConversationState
         )
     }
 
@@ -673,12 +739,15 @@ public actor MLSWebSocketManager {
 
 
     /// Save cursor to both in-memory cache and persistent storage
-    private func saveCursor(_ cursor: String, for convoId: String) async throws {
+    private func saveCursor(_ cursor: String, for convoId: String, run: MLSCanonicalSubscriptionRun) async throws {
+        try run.check()
         try await MLSCanonicalTransportAdapter.persistCanonicalCursor(
             cursor,
             for: convoId,
-            store: cursorStore
+            store: cursorStore,
+            run: run
         )
+        try run.check()
         lastCursor[convoId] = cursor
     }
 }

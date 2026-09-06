@@ -38,6 +38,7 @@ final class MLSEditUnsendTests: XCTestCase {
 
     try await dbQueue.write { db in
       try MLSReadFrontierModel.createTable(in: db)
+      try MLSMessageAppendLedger.createSchema(in: db)
 
       try db.create(table: "MLSMessageModel") { t in
         t.primaryKey("messageID", .text).notNull()

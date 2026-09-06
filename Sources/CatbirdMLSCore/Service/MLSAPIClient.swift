@@ -49,6 +49,7 @@ private extension MLSCredentialBinding.KeyPackageBindingStatus {
 /// Properly configured with atproto-proxy header for MLS service routing
 @Observable
 public final class MLSAPIClient {
+    private static let inventoryRequestBackoff = MLSInventoryRequestBackoff()
     /// Nest-issued clean-chat authority. It is deliberately distinct from
     /// Petrel's ordinary PDS session and is the only authority accepted by
     /// canonical clean-chat transport.
@@ -380,6 +381,19 @@ public final class MLSAPIClient {
             queryItems = dummyComponents.queryItems
         }
 
+        let allocationDevice = MLSInventoryRequestBackoff.allocationDevice(
+            method: method, endpoint: endpoint, query: queryItems)
+        let allocationScope: MLSInventoryRequestBackoff.Scope?
+        if let allocationDevice {
+            let current = try await currentInventoryRequestScope(endpoint: endpoint)
+            guard current.deviceId == allocationDevice else {
+                throw MLSAPIError.invalidResponse(message: "Inventory request device does not match the active device")
+            }
+            allocationScope = current
+        } else {
+            allocationScope = nil
+        }
+
         var headers: [String: String] = [
             "Accept": "*/*"
         ]
@@ -396,14 +410,13 @@ public final class MLSAPIClient {
         )
 
         let proxyHeaders = ["atproto-proxy": mlsServiceDID]
-        let (data, httpResponse) = try await client.networkService
-            .performRequestReturningHTTPErrorResponses(
-                request,
-                skipTokenRefresh: false,
-                additionalHeaders: proxyHeaders
-            )
-
-        return (data, httpResponse)
+        return try await Self.inventoryRequestBackoff.perform(
+            scope: allocationScope,
+            currentScope: { try await self.currentInventoryRequestScope(endpoint: endpoint) },
+            request: {
+                try await self.client.networkService.performRequestReturningHTTPErrorResponses(
+                    request, skipTokenRefresh: false, additionalHeaders: proxyHeaders)
+            })
     }
 
     /// Read the lexicon error code from a failed `getOwnDevices` probe.
@@ -465,6 +478,17 @@ public final class MLSAPIClient {
             throw MLSAPIError.invalidResponse(message: "Enrolled device ID not found for actor \(actorDid)")
         }
         return deviceId
+    }
+
+    private func currentInventoryRequestScope(endpoint: String) async throws -> MLSInventoryRequestBackoff.Scope {
+        guard let did = await authenticatedUserDID(), !did.isEmpty else {
+            throw MLSAPIError.noAuthentication
+        }
+        guard let deviceId = try? MLSOrchestratorCredentialAdapter().getDeviceUuid(userDid: did),
+              !deviceId.isEmpty else {
+            throw MLSAPIError.invalidResponse(message: "Enrolled inventory device is unavailable")
+        }
+        return MLSInventoryRequestBackoff.Scope(service: mlsServiceDID, did: did, deviceId: deviceId, endpoint: endpoint)
     }
 
     /// Verify that the ATProto client is authenticated as the expected user
@@ -550,6 +574,17 @@ public final class MLSAPIClient {
             pageCursor: cursor,
             limit: limit
         )
+        if cursor == nil {
+            // Preserve response headers until the shared fresh-allocation gate
+            // observes them. The same generated DTO and error parser remain the
+            // response boundary; retained page reads keep their existing path.
+            var query = URLComponents()
+            query.queryItems = input.asQueryItems()
+            let (data, response) = try await submitPreparedRequest(
+                method: "GET", nsid: "blue.catbird.chat.getConversations", body: nil,
+                query: query.percentEncodedQuery.map { Data($0.utf8) })
+            return try Self.decodeInitialConversationInventory(data: data, response: response)
+        }
         let (responseCode, output) = try await client.blue.catbird.chat.getConversations(input: input)
 
         guard (200 ... 299).contains(responseCode), let output else {
@@ -559,6 +594,27 @@ public final class MLSAPIClient {
             )
         }
         return output
+    }
+
+    internal static func decodeInitialConversationInventory(
+        data: Data, response: HTTPURLResponse
+    ) throws -> BlueCatbirdChatGetConversations.Output {
+        let code = response.statusCode
+        if (200...299).contains(code) {
+            guard let contentType = response.value(forHTTPHeaderField: "Content-Type") else {
+                throw NetworkError.invalidContentType(expected: "application/json", actual: "nil")
+            }
+            guard contentType.lowercased().contains("application/json") else {
+                throw NetworkError.invalidContentType(expected: "application/json", actual: contentType)
+            }
+            if let output = try? JSONDecoder().decode(BlueCatbirdChatGetConversations.Output.self, from: data) {
+                return output
+            }
+        } else if let error = ATProtoErrorParser.parse(
+            data: data, statusCode: code, errorType: BlueCatbirdChatGetConversations.Error.self) {
+            throw error
+        }
+        throw MLSAPIError.httpError(statusCode: code, message: "Failed to fetch canonical conversation inventory")
     }
 
     /// Read one page of device-addressed pending Welcomes from the retained
@@ -719,7 +775,19 @@ public final class MLSAPIClient {
             inventorySessionId: inventorySessionId,
             eventCursor: eventCursor
         )
-        let (responseCode, output) = try await client.blue.catbird.chat.getSubscriptionTicket(input: input)
+        let responseCode: Int
+        let output: BlueCatbirdChatGetSubscriptionTicket.Output?
+        do {
+            (responseCode, output) = try await client.blue.catbird.chat.getSubscriptionTicket(input: input)
+        } catch {
+            // Another inventory read can replace the retained session before
+            // its advertised expiry. Keep this classification endpoint-typed;
+            // arbitrary error text must never authorize a new event fence.
+            if Self.isUnavailableSubscriptionTicketSession(error) {
+                throw MLSInventorySessionError.ticketSessionUnavailable
+            }
+            throw error
+        }
         guard (200 ... 299).contains(responseCode), let output else {
             throw MLSAPIError.httpError(
                 statusCode: responseCode,
@@ -727,6 +795,17 @@ public final class MLSAPIClient {
             )
         }
         return output
+    }
+
+    internal static func isUnavailableSubscriptionTicketSession(_ error: Error) -> Bool {
+        guard let ticketError = error as? ATProtoError<BlueCatbirdChatGetSubscriptionTicket.Error>,
+              ticketError.statusCode == 400 else { return false }
+        switch ticketError.error {
+        case .inventorySessionMismatch, .inventorySessionExpired:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Open the canonical ticketed stream. The cursor must be byte-identical
@@ -936,96 +1015,123 @@ public final class MLSAPIClient {
         }
     }
 
-    /// Check opt-in status for a list of users by inspecting declaration records and active device inventory.
-    /// - Parameter dids: List of DIDs to check
-    /// - Returns: Array of opt-in status objects
+    public enum MLSChatAvailability: Sendable, Equatable {
+        case available
+        case unavailable
+        case unknown
+    }
+
+    public struct MLSChatAvailabilityStatus: Sendable {
+        public let did: DID
+        public let availability: MLSChatAvailability
+    }
+
+    public enum AvailabilityError: Error, LocalizedError {
+        case checkFailed
+
+        public var errorDescription: String? {
+            "Couldn't check chat availability. Please try again."
+        }
+    }
+
+    /// Boolean callers must not cache a failed check as a confirmed opt-out.
     public func getOptInStatus(dids: [DID]) async throws -> [MLSOptInStatus] {
-        logger.info("🌐 [MLSAPIClient.getOptInStatus] START - \(dids.count) DIDs")
-        guard !dids.isEmpty else { return [] }
+        try Self.confirmedOptInStatuses(await getChatAvailability(dids: dids))
+    }
 
-        // Step 1: In parallel, fetch declaration records for all DIDs.
-        let didStrings = dids.map { $0.didString() }
-        let declarations: [String: BlueCatbirdChatDeclaration?] = await withTaskGroup(
-            of: (String, BlueCatbirdChatDeclaration?).self
-        ) { group in
-            for didStr in didStrings {
+    static func confirmedOptInStatuses(
+        _ statuses: [MLSChatAvailabilityStatus]
+    ) throws -> [MLSOptInStatus] {
+        guard !statuses.contains(where: { $0.availability == .unknown }) else {
+            throw AvailabilityError.checkFailed
+        }
+        return statuses.map { MLSOptInStatus(did: $0.did, optedIn: $0.availability == .available) }
+    }
+
+    /// Inspect public declarations and complete device inventories. A failed read is retryable,
+    /// and is distinct from an absent declaration or a successful empty device inventory.
+    /// Conversation admission still enforces the recipient's following and block policies.
+    public func getChatAvailability(dids: [DID]) async -> [MLSChatAvailabilityStatus] {
+        await Self.resolveChatAvailability(
+            dids: dids,
+            fetchDeclaration: { [client] did in
+                try await MLSPublicPDSReader.fetchDeclaration(
+                    did: did,
+                    resolvePDS: { try await client.resolveDIDToPDSURL(did: $0) }
+                )
+            },
+            fetchDevices: { [self] chunk in
+                let actorDeviceId = try await self.requireActorDeviceId()
+                let input = BlueCatbirdChatGetDevices.Parameters(
+                    actorDeviceId: actorDeviceId,
+                    userDids: chunk
+                )
+                let (code, output) = try await self.client.blue.catbird.chat.getDevices(input: input)
+                guard code == 200, let output else {
+                    throw AvailabilityError.checkFailed
+                }
+                return Set(output.devices.map { $0.userDid.didString() })
+            }
+        )
+    }
+
+    /// getDevices requires strictly ordered, duplicate-free exact UTF-8 DIDs in batches of five.
+    /// Deduplicate before batching, and associate results by DID rather than response order.
+    static func resolveChatAvailability(
+        dids: [DID],
+        fetchDeclaration: @escaping @Sendable (String) async throws -> BlueCatbirdChatDeclaration?,
+        fetchDevices: @escaping @Sendable ([DID]) async throws -> Set<String>
+    ) async -> [MLSChatAvailabilityStatus] {
+        var uniqueByDID: [String: DID] = [:]
+        for did in dids { uniqueByDID[did.didString()] = did }
+        let orderedDIDs = uniqueByDID.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }
+        var states: [String: MLSChatAvailability] = [:]
+        var candidates: Set<String> = []
+
+        await withTaskGroup(of: (String, MLSChatAvailability, Bool).self) { group in
+            for did in orderedDIDs {
                 group.addTask {
-                    let decl = try? await MLSPublicPDSReader.fetchDeclaration(
-                        did: didStr,
-                        resolvePDS: { [client = self.client] d in
-                            try await client.resolveDIDToPDSURL(did: d)
+                    do {
+                        guard let declaration = try await fetchDeclaration(did),
+                              declaration.protocolVersion == "1",
+                              ["all", "following"].contains(declaration.allowIncoming) else {
+                            return (did, .unavailable, false)
                         }
-                    )
-                    return (didStr.lowercased(), decl)
-                }
-            }
-            var dict: [String: BlueCatbirdChatDeclaration?] = [:]
-            for await (d, decl) in group {
-                dict[d] = decl
-            }
-            return dict
-        }
-
-        // Filter for candidate DIDs that have a valid declaration with allowIncoming != "none"
-        var candidateDids: [DID] = []
-        for did in dids {
-            let key = did.didString().lowercased()
-            if let decl = declarations[key], let decl = decl {
-                if decl.protocolVersion == "1" && decl.allowIncoming != "none" {
-                    candidateDids.append(did)
-                }
-            }
-        }
-
-        // Step 2: Query delivery service for authoritative active devices for candidate DIDs
-        // blue.catbird.chat.getDevices accepts 1..5 userDids per request
-        var didsWithActiveDevices: Set<String> = []
-        if !candidateDids.isEmpty {
-            let actorDeviceId = (try? await requireActorDeviceId()) ?? ""
-            if !actorDeviceId.isEmpty {
-                let chunkSize = 5
-                let chunks = stride(from: 0, to: candidateDids.count, by: chunkSize).map {
-                    Array(candidateDids[$0..<min($0 + chunkSize, candidateDids.count)])
-                }
-
-                await withTaskGroup(of: Set<String>.self) { group in
-                    for chunk in chunks {
-                        group.addTask {
-                            let input = BlueCatbirdChatGetDevices.Parameters(
-                                actorDeviceId: actorDeviceId,
-                                userDids: chunk
-                            )
-                            do {
-                                let (code, output) = try await self.client.blue.catbird.chat.getDevices(input: input)
-                                if (200...299).contains(code), let output = output {
-                                    let deviceDids = Set(output.devices.map { $0.userDid.didString().lowercased() })
-                                    return deviceDids
-                                }
-                            } catch {
-                                self.logger.warning("Failed getDevices query for chunk: \(error.localizedDescription)")
-                            }
-                            return Set<String>()
-                        }
-                    }
-
-                    for await activeSet in group {
-                        didsWithActiveDevices.formUnion(activeSet)
+                        return (did, .unknown, true)
+                    } catch {
+                        return (did, .unknown, false)
                     }
                 }
-            } else {
-                // Fall back to candidate DIDs with declarations if actorDeviceId is unassigned
-                didsWithActiveDevices = Set(candidateDids.map { $0.didString().lowercased() })
+            }
+            for await (did, state, isCandidate) in group {
+                states[did] = state
+                if isCandidate { candidates.insert(did) }
             }
         }
 
-        // Step 3: Build final status list for all requested DIDs
-        return dids.map { did in
-            let key = did.didString().lowercased()
-            let isCandidate = candidateDids.contains { $0.didString().lowercased() == key }
-            let hasDevices = didsWithActiveDevices.contains(key)
-            let optedIn = isCandidate && hasDevices
-            return MLSOptInStatus(did: did, optedIn: optedIn)
+        let orderedCandidates = orderedDIDs.filter { candidates.contains($0) }
+        await withTaskGroup(of: [(String, MLSChatAvailability)].self) { group in
+            for offset in stride(from: 0, to: orderedCandidates.count, by: 5) {
+                let keys = Array(orderedCandidates[offset..<min(offset + 5, orderedCandidates.count)])
+                let chunk = keys.compactMap { uniqueByDID[$0] }
+                group.addTask {
+                    do {
+                        let deviceDIDs = try await fetchDevices(chunk)
+                        guard deviceDIDs.isSubset(of: Set(keys)) else {
+                            throw AvailabilityError.checkFailed
+                        }
+                        return keys.map { ($0, deviceDIDs.contains($0) ? .available : .unavailable) }
+                    } catch {
+                        return keys.map { ($0, .unknown) }
+                    }
+                }
+            }
+            for await results in group {
+                for (did, state) in results { states[did] = state }
+            }
         }
+
+        return dids.map { MLSChatAvailabilityStatus(did: $0, availability: states[$0.didString()] ?? .unknown) }
     }
 
     /// Create a new MLS conversation using Petrel client

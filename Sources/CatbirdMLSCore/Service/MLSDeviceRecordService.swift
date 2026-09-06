@@ -21,6 +21,37 @@ internal actor MLSDeviceRecordService {
 
   // MARK: - Device Record Publishing
 
+  func ensureCanonicalDeviceRecordPublished(
+    userDid: String, deviceId: String, publicKey: Data
+  ) async throws {
+    let did = try DID(didString: userDid)
+    try await MLSDeviceRecordPublication.ensure(
+      userDid: userDid, deviceId: deviceId, publicKey: publicKey,
+      read: {
+        guard try await self.atProtoClient.getDid() == userDid else {
+          throw MLSConversationError.noAuthentication
+        }
+        return try await MLSPublicPDSReader.fetchAuthorizedDeviceRecords(
+          did: userDid,
+          resolvePDS: { did in try await MLSPublicPDSReader.resolveCurrentPDS(did: did) })
+      }, create: {
+        guard try await self.atProtoClient.getDid() == userDid else {
+          throw MLSConversationError.noAuthentication
+        }
+        let record = BlueCatbirdChatDevice(
+          mlsSignaturePublicKey: Bytes(data: publicKey), algorithm: "ed25519",
+          createdAt: ATProtocolDate(date: Date()))
+        let input = ComAtprotoRepoCreateRecord.Input(
+          repo: .did(did), collection: try NSID(nsidString: Self.deviceCollection),
+          rkey: try RecordKey(keyString: deviceId), validate: false,
+          record: .knownType(record), swapCommit: nil)
+        let (code, output) = try await self.atProtoClient.com.atproto.repo.createRecord(input: input)
+        guard (200...299).contains(code), output != nil else {
+          throw DeviceRecordError.networkFailure("Device authorization publication was not confirmed")
+        }
+      })
+  }
+
   func ensureDeviceRecordPublished(userDid: String) async throws {
     let normalized = userDid.lowercased()
 

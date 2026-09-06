@@ -1409,7 +1409,10 @@ public protocol MlsContextProtocol: AnyObject {
      * - Validated the incoming commit against its recovery/sync policy
      * - Persisted any pre-merge state it needs (ordering, ack state, etc.)
      *
-     * Returns the new (post-merge) epoch.
+     * Returns the accepted Commit's target epoch. A removed device is now
+     * inactive and has no successor secrets even if its public epoch advances.
+     * Rust orchestrators use `merge_incoming_commit_with_outcome` to distinguish
+     * this terminal membership transition from an active epoch advance.
      *
      * This method durably flushes the OpenMLS merge before returning, but it
      * deliberately does not prune retained epoch secrets. The caller must
@@ -2698,7 +2701,10 @@ open class MlsContext:
      * - Validated the incoming commit against its recovery/sync policy
      * - Persisted any pre-merge state it needs (ordering, ack state, etc.)
      *
-     * Returns the new (post-merge) epoch.
+     * Returns the accepted Commit's target epoch. A removed device is now
+     * inactive and has no successor secrets even if its public epoch advances.
+     * Rust orchestrators use `merge_incoming_commit_with_outcome` to distinguish
+     * this terminal membership transition from an active epoch advance.
      *
      * This method durably flushes the OpenMLS merge before returning, but it
      * deliberately does not prune retained epoch secrets. The caller must
@@ -3472,8 +3478,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func leaveGroup(convoId: String) throws
 
     /**
-     * Return the Rust-orchestrator storage projection for full-authority
-     * clients that need to refresh platform UI caches after sync/recovery.
+     * Return the current account's reconciled native display projection,
+     * retaining durable rows when no matching runtime view is available.
      */
     func listConversations(userDid: String) throws -> [FfiConversationView]
 
@@ -4132,8 +4138,8 @@ open class OrchestratorBridge:
     }
 
     /**
-     * Return the Rust-orchestrator storage projection for full-authority
-     * clients that need to refresh platform UI caches after sync/recovery.
+     * Return the current account's reconciled native display projection,
+     * retaining durable rows when no matching runtime view is available.
      */
     open func listConversations(userDid: String) throws -> [FfiConversationView] {
         return try FfiConverterSequenceTypeFFIConversationView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
@@ -6991,6 +6997,10 @@ public func FfiConverterTypeFFIConversationState_lower(_ value: FfiConversationS
 }
 
 public struct FfiConversationView {
+    /**
+     * Full canonical conversationState JSON; None is unknown admission.
+     */
+    public var canonicalStateJson: String?
     public var groupId: String
     /**
      * Stable conversation identifier (survives group resets).
@@ -7006,11 +7016,15 @@ public struct FfiConversationView {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(groupId: String,
-                /* 
-                    * Stable conversation identifier (survives group resets).
-                    */ conversationId: String, epoch: UInt64, members: [FfiMemberView], name: String?, description: String?, avatarUrl: String?, createdAt: String?, updatedAt: String?)
-    {
+    public init(
+        /* 
+         * Full canonical conversationState JSON; None is unknown admission.
+         */ canonicalStateJson: String?, groupId: String,
+        /* 
+            * Stable conversation identifier (survives group resets).
+            */ conversationId: String, epoch: UInt64, members: [FfiMemberView], name: String?, description: String?, avatarUrl: String?, createdAt: String?, updatedAt: String?
+    ) {
+        self.canonicalStateJson = canonicalStateJson
         self.groupId = groupId
         self.conversationId = conversationId
         self.epoch = epoch
@@ -7025,6 +7039,9 @@ public struct FfiConversationView {
 
 extension FfiConversationView: Equatable, Hashable {
     public static func == (lhs: FfiConversationView, rhs: FfiConversationView) -> Bool {
+        if lhs.canonicalStateJson != rhs.canonicalStateJson {
+            return false
+        }
         if lhs.groupId != rhs.groupId {
             return false
         }
@@ -7056,6 +7073,7 @@ extension FfiConversationView: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
+        hasher.combine(canonicalStateJson)
         hasher.combine(groupId)
         hasher.combine(conversationId)
         hasher.combine(epoch)
@@ -7075,6 +7093,7 @@ public struct FfiConverterTypeFFIConversationView: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationView {
         return
             try FfiConversationView(
+                canonicalStateJson: FfiConverterOptionString.read(from: &buf),
                 groupId: FfiConverterString.read(from: &buf),
                 conversationId: FfiConverterString.read(from: &buf),
                 epoch: FfiConverterUInt64.read(from: &buf),
@@ -7088,6 +7107,7 @@ public struct FfiConverterTypeFFIConversationView: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiConversationView, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.canonicalStateJson, into: &buf)
         FfiConverterString.write(value.groupId, into: &buf)
         FfiConverterString.write(value.conversationId, into: &buf)
         FfiConverterUInt64.write(value.epoch, into: &buf)
@@ -7866,15 +7886,19 @@ public struct FfiIncomingEnvelope {
     public var ciphertext: Data
     public var timestamp: String
     public var serverMessageId: String?
+    public var serverSequence: UInt64?
+    public var serverEpoch: UInt64?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(conversationId: String, senderDid: String, ciphertext: Data, timestamp: String, serverMessageId: String?) {
+    public init(conversationId: String, senderDid: String, ciphertext: Data, timestamp: String, serverMessageId: String?, serverSequence: UInt64?, serverEpoch: UInt64?) {
         self.conversationId = conversationId
         self.senderDid = senderDid
         self.ciphertext = ciphertext
         self.timestamp = timestamp
         self.serverMessageId = serverMessageId
+        self.serverSequence = serverSequence
+        self.serverEpoch = serverEpoch
     }
 }
 
@@ -7895,6 +7919,12 @@ extension FfiIncomingEnvelope: Equatable, Hashable {
         if lhs.serverMessageId != rhs.serverMessageId {
             return false
         }
+        if lhs.serverSequence != rhs.serverSequence {
+            return false
+        }
+        if lhs.serverEpoch != rhs.serverEpoch {
+            return false
+        }
         return true
     }
 
@@ -7904,6 +7934,8 @@ extension FfiIncomingEnvelope: Equatable, Hashable {
         hasher.combine(ciphertext)
         hasher.combine(timestamp)
         hasher.combine(serverMessageId)
+        hasher.combine(serverSequence)
+        hasher.combine(serverEpoch)
     }
 }
 
@@ -7918,7 +7950,9 @@ public struct FfiConverterTypeFFIIncomingEnvelope: FfiConverterRustBuffer {
                 senderDid: FfiConverterString.read(from: &buf),
                 ciphertext: FfiConverterData.read(from: &buf),
                 timestamp: FfiConverterString.read(from: &buf),
-                serverMessageId: FfiConverterOptionString.read(from: &buf)
+                serverMessageId: FfiConverterOptionString.read(from: &buf),
+                serverSequence: FfiConverterOptionUInt64.read(from: &buf),
+                serverEpoch: FfiConverterOptionUInt64.read(from: &buf)
             )
     }
 
@@ -7928,6 +7962,8 @@ public struct FfiConverterTypeFFIIncomingEnvelope: FfiConverterRustBuffer {
         FfiConverterData.write(value.ciphertext, into: &buf)
         FfiConverterString.write(value.timestamp, into: &buf)
         FfiConverterOptionString.write(value.serverMessageId, into: &buf)
+        FfiConverterOptionUInt64.write(value.serverSequence, into: &buf)
+        FfiConverterOptionUInt64.write(value.serverEpoch, into: &buf)
     }
 }
 
@@ -16038,6 +16074,8 @@ public protocol OrchestratorStorageCallback: AnyObject {
 
     func setConversationState(conversationId: String, state: String) throws
 
+    func completeAccountExit(conversationId: String, expectedGroupIdHex: String, expectedResetGeneration: Int32?, terminalEpoch: UInt64, terminalState: String) throws -> Bool
+
     func getConversationState(conversationId: String) throws -> FfiConversationState?
 
     /**
@@ -16324,6 +16362,38 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
             }
 
             let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        completeAccountExit: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            expectedGroupIdHex: RustBuffer,
+            expectedResetGeneration: RustBuffer,
+            terminalEpoch: UInt64,
+            terminalState: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.completeAccountExit(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    expectedGroupIdHex: FfiConverterString.lift(expectedGroupIdHex),
+                    expectedResetGeneration: FfiConverterOptionInt32.lift(expectedResetGeneration),
+                    terminalEpoch: FfiConverterUInt64.lift(terminalEpoch),
+                    terminalState: FfiConverterString.lift(terminalState)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -19252,7 +19322,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlscontext_list_pending_proposals() != 22913 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_merge_incoming_commit() != 27040 {
+    if uniffi_catbird_mls_checksum_method_mlscontext_merge_incoming_commit() != 61702 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 30340 {
@@ -19435,7 +19505,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_group() != 23679 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_conversations() != 29206 {
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_conversations() != 53327 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_devices() != 16449 {
@@ -19696,94 +19766,97 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 59265 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 39371 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_account_exit() != 48006 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 45552 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 3588 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 908 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 43017 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 37086 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 41915 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 22873 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 8939 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 26128 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 56843 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 24499 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 54946 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 56726 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 18893 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 22702 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 61853 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 10890 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 51219 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 769 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 49648 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 21213 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 47648 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 63956 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 27190 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 64461 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 29037 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 46670 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 31022 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 26611 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 10381 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 2671 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 52807 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 8217 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 16379 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 2908 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 61257 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 19423 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 11542 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 20369 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 51909 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 7206 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 58386 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 35633 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 37167 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 56098 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 59214 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 14492 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 17620 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 39110 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 41919 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 16053 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 55384 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 13497 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 64867 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 62447 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 36579 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 53096 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 31409 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 992 {
         return InitializationResult.apiChecksumMismatch
     }
 

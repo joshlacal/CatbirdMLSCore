@@ -13,6 +13,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
 
   override func setUpWithError() throws {
     try super.setUpWithError()
+    MLSKeychainManager.setFakeStorageOverrideForTesting(MLSKeychainFakeStorage())
     tempStorageDir = FileManager.default.temporaryDirectory
       .appendingPathComponent("MLSFullRustMessagingTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempStorageDir, withIntermediateDirectories: true)
@@ -20,6 +21,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
   }
 
   override func tearDownWithError() throws {
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
     MLSStoragePaths.setBaseDirectoryOverride(nil)
     if let tempStorageDir {
       try? FileManager.default.removeItem(at: tempStorageDir)
@@ -164,7 +166,7 @@ final class MLSFullRustMessagingTests: XCTestCase {
 
   func testRustFullIncomingUsesResultBridgeBeforeLegacyProcessing() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
-    try await seedConversation(conversationID: "convo-incoming", on: manager)
+    try await seedConversation(conversationID: stableConversationID, on: manager)
 
     let bridge = RecordingMessagingBridge()
     bridge.messageProcessingResult = FfiMessageProcessingResult(
@@ -178,15 +180,15 @@ final class MLSFullRustMessagingTests: XCTestCase {
     )
 
     let message = BlueCatbirdChatDefs.ApplicationEntry(
-      convoId: "convo-incoming",
-      id: "msg-1",
+      convoId: stableConversationID,
+      id: "650e8400-e29b-41d4-a716-446655440000",
       senderDid: try DID(didString: "did:plc:testuser"),
       senderDeviceDid: "did:plc:testuser#device",
       senderSeq: 1,
       ciphertext: Bytes(data: Data([0x01, 0x02, 0x03])),
       epoch: 7,
       seq: 44,
-      createdAt: ATProtocolDate(date: Date())
+      createdAt: try XCTUnwrap(ATProtocolDate(iso8601String: "2026-09-05T01:02:03.301Z"))
     )
 
     let outcome = try await manager.processServerMessage(message, source: "unit-test")
@@ -194,6 +196,10 @@ final class MLSFullRustMessagingTests: XCTestCase {
     XCTAssertEqual(bridge.processIncomingMessageCallCount, 1)
     XCTAssertEqual(bridge.processIncomingCallCount, 0)
     XCTAssertEqual(bridge.lastProcessIncomingServerEpoch, 7)
+    XCTAssertEqual(bridge.lastIncomingEnvelope?.serverSequence, 44)
+    XCTAssertEqual(bridge.lastIncomingEnvelope?.serverEpoch, 7)
+    XCTAssertEqual(bridge.lastIncomingEnvelope?.serverMessageId, "650e8400-e29b-41d4-a716-446655440000")
+    XCTAssertEqual(bridge.lastIncomingEnvelope?.timestamp, "2026-09-05T01:02:03.301Z")
     guard case .nonApplication = outcome else {
       return XCTFail("Expected nonApplication outcome, got \(outcome)")
     }
@@ -201,14 +207,24 @@ final class MLSFullRustMessagingTests: XCTestCase {
 
   func testRustFullIncomingAppliesReturnedEngineEvents() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
-    try await seedConversation(conversationID: "convo-incoming", on: manager)
-    seedGroupState(conversationID: "convo-incoming", groupID: "deadbeef", on: manager)
+    try await seedConversation(conversationID: stableConversationID, on: manager)
+    seedGroupState(conversationID: stableConversationID, groupID: "deadbeef", on: manager)
 
     let bridge = RecordingMessagingBridge()
     bridge.messageProcessingResult = FfiMessageProcessingResult(
       message: nil,
-      events: rustResetEvents(conversationID: "convo-incoming")
+      events: rustResetEvents(conversationID: stableConversationID)
     )
+    let database = manager.database
+    let conversationID = stableConversationID
+    let resetTarget = String(repeating: "ab", count: 32)
+    // Native persists the recovery fence before publishing its engine events.
+    bridge.onProcessIncomingMessage = {
+      try database.write { db in
+        try db.execute(sql: "UPDATE MLSConversationModel SET needsReset = 1, pendingNewGroupId = ?, pendingResetGeneration = 3 WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [resetTarget, conversationID, "did:plc:testuser"])
+      }
+    }
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
       userDID: "did:plc:testuser",
       mode: .rustFull,
@@ -216,21 +232,35 @@ final class MLSFullRustMessagingTests: XCTestCase {
     )
 
     let message = BlueCatbirdChatDefs.ApplicationEntry(
-      convoId: "convo-incoming",
-      id: "msg-1",
+      convoId: stableConversationID,
+      id: "650e8400-e29b-41d4-a716-446655440000",
       senderDid: try DID(didString: "did:plc:testuser"),
       senderDeviceDid: "did:plc:testuser#device",
       senderSeq: 1,
       ciphertext: Bytes(data: Data([0x01, 0x02, 0x03])),
       epoch: 7,
       seq: 44,
-      createdAt: ATProtocolDate(date: Date())
+      createdAt: try XCTUnwrap(ATProtocolDate(iso8601String: "2026-09-05T01:02:03.301Z"))
     )
 
     _ = try await manager.processServerMessage(message, source: "unit-test")
+    // Engine events schedule a follow-up sync. Assert the durable projection,
+    // not the transient cache eviction that occurs before that sync hydrates.
+    try await manager.hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "incoming-result-fixture")
 
     XCTAssertEqual(bridge.processIncomingMessageCallCount, 1)
-    XCTAssertNil(manager.groupStates["deadbeef"])
+    let persisted = try await database.read { db in
+      try MLSConversationModel.fetchOne(db,
+        sql: "SELECT * FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+        arguments: [conversationID, "did:plc:testuser"])
+    }
+    let resetConversation = try XCTUnwrap(persisted)
+    XCTAssertTrue(resetConversation.needsReset)
+    XCTAssertEqual(resetConversation.pendingNewGroupId, resetTarget)
+    XCTAssertEqual(resetConversation.pendingResetGeneration, 3)
+    guard case .initializing = manager.conversationStates[stableConversationID] else {
+      return XCTFail("Incoming engine events must preserve the native persisted reset fence")
+    }
   }
 
   func testRuntimeProcessServerEventWrapsBridgeEvents() throws {
@@ -263,69 +293,62 @@ final class MLSFullRustMessagingTests: XCTestCase {
     XCTAssertEqual(events.first?.conversationId, "convo-1")
   }
 
-  func testRustFullGroupResetUsesProcessServerEventAndAppliesEvents() async throws {
-    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
-    try await seedConversation(conversationID: "convo-reset", on: manager)
-    seedGroupState(conversationID: "convo-reset", groupID: "deadbeef", on: manager)
-
+  func testRustFullCanonicalConversationChangeProjectsPersistedResetState() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: stableConversationID, on: manager)
     let bridge = RecordingMessagingBridge()
-    bridge.serverEvents = rustResetEvents(conversationID: "convo-reset")
-    manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
-      mode: .rustFull,
-      bridge: bridge
-    )
-
-    let event = MLSConversationManager.MLSGroupResetEvent(
-      convoId: "convo-reset",
-      newGroupId: "00112233445566778899aabbccddeeff",
-      resetGeneration: 3,
-      resetBy: "did:plc:resetter",
-      reason: "unit-test"
-    )
-
-    await manager.handleGroupReset(event: event)
+    bridge.serverEvents = rustResetEvents(conversationID: stableConversationID)
+    let database = manager.database
+    let conversationID = stableConversationID
+    bridge.onProcessServerEvent = {
+      try database.write { db in
+        try db.execute(sql: "UPDATE MLSConversationModel SET needsReset = 1, pendingNewGroupId = ?, pendingResetGeneration = 3 WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [String(repeating: "ab", count: 32), conversationID, "did:plc:testuser"])
+      }
+    }
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    let handler = manager.makeCanonicalWebSocketHandler()
+    let actions = try XCTUnwrap(handler.onCanonicalDurableEventActions)
+    let action = try XCTUnwrap(actions.onConversationChanged)
+    try await action(.init(conversationId: stableConversationID))
 
     XCTAssertEqual(bridge.processServerEventCallCount, 1)
     XCTAssertEqual(bridge.recordGroupResetOutcomeCallCount, 0)
-    XCTAssertEqual(bridge.lastServerEventJsonField("type"), "groupReset")
-    XCTAssertEqual(bridge.lastServerEventJsonField("convoId"), "convo-reset")
-    XCTAssertNil(manager.groupStates["deadbeef"])
+    XCTAssertEqual(bridge.lastServerEventJsonField("$type"), BlueCatbirdChatDefs.ConversationChangedEvent.typeIdentifier)
+    XCTAssertEqual(bridge.lastServerEventJsonField("conversationId"), stableConversationID)
+    guard case .initializing = manager.conversationStates[stableConversationID] else {
+      return XCTFail("Canonical event must publish the native persisted reset fence")
+    }
   }
 
-  func testRustFullResetRequestedUsesProcessServerEventAndAppliesEvents() async throws {
-    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
-    try await seedConversation(conversationID: "convo-reset-requested", on: manager)
-    seedGroupState(conversationID: "convo-reset-requested", groupID: "deadbeef", on: manager)
-
+  func testRustFullCanonicalResetRequestedForwardsRequestAndProjectsPersistedState() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: stableConversationID, on: manager)
     let bridge = RecordingMessagingBridge()
-    bridge.serverEvents = rustResetEvents(conversationID: "convo-reset-requested")
-    manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
-      mode: .rustFull,
-      bridge: bridge
-    )
-
-    let event = MLSConversationManager.MLSResetRequestedEvent(
-      convoId: "convo-reset-requested",
-      generation: 4,
-      trigger: "inlineGroupInfo404",
-      requestEventId: "request-event-1",
-      cryptoSessionId: "session-prior",
-      expectedNewMlsGroupId: "00112233445566778899aabbccddeeff"
-    )
-
-    await manager.handleResetRequested(event: event)
+    bridge.serverEvents = rustResetEvents(conversationID: stableConversationID)
+    let database = manager.database
+    let conversationID = stableConversationID
+    bridge.onProcessServerEvent = {
+      try database.write { db in
+        try db.execute(sql: "UPDATE MLSConversationModel SET needsReset = 1, pendingNewGroupId = ?, pendingResetGeneration = 4 WHERE conversationID = ? AND currentUserDID = ?",
+          arguments: [String(repeating: "cd", count: 32), conversationID, "did:plc:testuser"])
+      }
+    }
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    let requestID = "750e8400-e29b-41d4-a716-446655440000"
+    let handler = manager.makeCanonicalWebSocketHandler()
+    let actions = try XCTUnwrap(handler.onCanonicalDurableEventActions)
+    let action = try XCTUnwrap(actions.onResetRequested)
+    try await action(.init(resetRequestId: requestID, conversationId: stableConversationID))
 
     XCTAssertEqual(bridge.processServerEventCallCount, 1)
     XCTAssertEqual(bridge.recordResetRequestedOutcomeCallCount, 0)
-    XCTAssertEqual(bridge.lastServerEventJsonField("type"), "resetRequested")
-    XCTAssertEqual(bridge.lastServerEventJsonField("convoId"), "convo-reset-requested")
-    XCTAssertEqual(
-      bridge.lastServerEventJsonField("expectedNewMlsGroupIdHex"),
-      "00112233445566778899aabbccddeeff"
-    )
-    XCTAssertNil(manager.groupStates["deadbeef"])
+    XCTAssertEqual(bridge.lastServerEventJsonField("$type"), BlueCatbirdChatDefs.ResetRequestedEvent.typeIdentifier)
+    XCTAssertEqual(bridge.lastServerEventJsonField("conversationId"), stableConversationID)
+    XCTAssertEqual(bridge.lastServerEventJsonField("resetRequestId"), requestID)
+    guard case .initializing = manager.conversationStates[stableConversationID] else {
+      return XCTFail("Canonical reset request must publish the native persisted reset fence")
+    }
   }
 
   private func makeManager(
@@ -333,71 +356,27 @@ final class MLSFullRustMessagingTests: XCTestCase {
   ) async throws -> MLSConversationManager {
     let database = try DatabaseQueue()
     try MLSGRDBManager.makeMigrator().migrate(database)
+    // The fake bridge does not construct the production storage adapter.
+    try await database.write { db in
+      try db.execute(sql: "CREATE TABLE mls_orchestrator_terminal_access (user_did TEXT NOT NULL, conversation_id TEXT NOT NULL, group_id BLOB NOT NULL, state TEXT NOT NULL, PRIMARY KEY(user_did, conversation_id))")
+    }
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let apiClient = await MLSAPIClient(
       client: atProtoClient,
       environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
     )
-    return MLSConversationManager(
+    let manager = MLSConversationManager(
       apiClient: apiClient,
       database: database,
       userDid: "did:plc:testuser",
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )
-  }
-
-  private func makeAuthenticatedManager(
-    protocolAuthorityMode: MLSProtocolAuthorityMode
-  ) async throws -> MLSConversationManager {
-    let database = try DatabaseQueue()
-    try MLSGRDBManager.makeMigrator().migrate(database)
-
-    let userDid = "did:plc:testuser"
-    let namespace = "MLSFullRustMessagingTests.\(UUID().uuidString)"
-    let storage = KeychainStorage(namespace: namespace)
-    try await storage.saveAccount(
-      Account(
-        did: userDid,
-        handle: "testuser.bsky.social",
-        pdsURL: URL(string: "https://example.com")!
-      ),
-      for: userDid
-    )
-    try await storage.saveSession(
-      Session(
-        accessToken: "access-token",
-        refreshToken: "refresh-token",
-        createdAt: Date(),
-        expiresIn: 3600,
-        tokenType: .bearer,
-        did: userDid
-      ),
-      for: userDid
-    )
-    try await storage.saveCurrentDID(userDid)
-
-    let atProtoClient = try await ATProtoClient(
-      baseURL: URL(string: "https://example.com")!,
-      oauthConfig: OAuthConfig(
-        clientId: "unit-test-client",
-        redirectUri: "catbird://tests/oauth",
-        scope: "atproto"
-      ),
-      namespace: namespace,
-      authMode: .legacy
-    )
-    let apiClient = await MLSAPIClient(
-      client: atProtoClient,
-      environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
-    )
-    return MLSConversationManager(
-      apiClient: apiClient,
-      database: database,
-      userDid: userDid,
-      atProtoClient: atProtoClient,
-      protocolAuthorityMode: protocolAuthorityMode
-    )
+    // Match the existing group-lifecycle fixture: fake runtime routing has no
+    // key custody. Real authorization failure/retry has its own dedicated suite.
+    try await manager.rustDeviceAuthorizationGate.ensure(
+      scope: manager.rustDeviceAuthorizationScope(for: "did:plc:testuser")) {}
+    return manager
   }
 
   private func seedConversation(
@@ -523,6 +502,9 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
     ),
     events: []
   )
+  var onProcessServerEvent: (() throws -> Void)?
+  var onProcessIncomingMessage: (() throws -> Void)?
+  var lastIncomingEnvelope: FfiIncomingEnvelope?
   var sendPayloadJsonResult: FfiMessage?
   var messageProcessingResult = FfiMessageProcessingResult(
     message: nil,
@@ -596,12 +578,15 @@ private final class RecordingMessagingBridge: OrchestratorBridge {
   ) throws -> FfiMessageProcessingResult {
     processIncomingMessageCallCount += 1
     lastProcessIncomingServerEpoch = serverEpoch
+    lastIncomingEnvelope = envelope
+    try onProcessIncomingMessage?()
     return messageProcessingResult
   }
 
   override func processServerEvent(eventJson: String) throws -> [FfiEngineEvent] {
     processServerEventCallCount += 1
     lastProcessServerEventJson = eventJson
+    try onProcessServerEvent?()
     return serverEvents
   }
 

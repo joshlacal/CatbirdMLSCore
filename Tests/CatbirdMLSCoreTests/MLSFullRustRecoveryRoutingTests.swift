@@ -1,11 +1,30 @@
 import XCTest
 import CatbirdMLS
 import GRDB
-import Petrel
+@testable import Petrel
 
 @testable import CatbirdMLSCore
 
 final class MLSFullRustRecoveryRoutingTests: XCTestCase {
+  private var storageDirectory: URL!
+
+  override func setUpWithError() throws {
+    try super.setUpWithError()
+    MLSKeychainManager.setFakeStorageOverrideForTesting(MLSKeychainFakeStorage())
+    KeychainManager._setStorageOverride(RoutingSecureStorage())
+    storageDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("mls-routing-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+    MLSStoragePaths.setBaseDirectoryOverride(storageDirectory)
+  }
+
+  override func tearDownWithError() throws {
+    KeychainManager._setStorageOverride(nil)
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
+    MLSStoragePaths.setBaseDirectoryOverride(nil)
+    try FileManager.default.removeItem(at: storageDirectory)
+    try super.tearDownWithError()
+  }
+
   func testRuntimeEnsureConversationReadyWrapsBridgeResult() throws {
     let bridge = RecordingStartupReconcileBridge()
     bridge.conversationReadyResult = FfiConversationReadyResult(
@@ -61,6 +80,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     bridge.conversationRecoveryState = .groupMissing
     bridge.rustConversationSnapshots = [
       FfiConversationView(
+        canonicalStateJson: nil,
         groupId: "cafebabefeedface",
         conversationId: "diagnostic-convo",
         epoch: 9,
@@ -113,6 +133,25 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
 
     XCTAssertEqual(bridge.ensureConversationReadyCallCount, 1)
     XCTAssertEqual(bridge.lastEnsureConversationReadyConversationId, "convo-ready")
+    XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
+  }
+
+  func testPublicEnsureGroupPreservesPendingThroughCatchUntilVerifiedReady() async throws {
+    let manager = try await makeAuthenticatedManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-pending", on: manager)
+    let bridge = RecordingStartupReconcileBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    for state in [FfiConversationRecoveryState.needsRejoin, .groupMissing] {
+      bridge.conversationReadyResult = FfiConversationReadyResult(recoveryState: state, epoch: nil, sendAllowed: false)
+      await XCTAssertThrowsErrorAsync(try await manager.ensureGroupInitialized(for: "convo-pending")) { error in
+        guard case MLSConversationLifecycleError.deviceAccessPending = error else {
+          return XCTFail("Expected pending access to survive the manager catch, got \(error)")
+        }
+      }
+    }
+    bridge.conversationReadyResult = FfiConversationReadyResult(recoveryState: .healthy, epoch: 2, sendAllowed: true)
+    try await manager.ensureGroupInitialized(for: "convo-pending")
+    XCTAssertEqual(bridge.ensureConversationReadyCallCount, 3)
     XCTAssertEqual(bridge.joinOrRejoinCallCount, 0)
   }
 
@@ -586,6 +625,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     let groupIDHex = "cafebabefeedface"
     bridge.rustConversationSnapshots = [
       FfiConversationView(
+        canonicalStateJson: nil,
         groupId: groupIDHex,
         conversationId: conversationID,
         epoch: 11,
@@ -625,7 +665,7 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
     let persistedConversationCount = try await manager.database.read { db in
       try MLSConversationModel.fetchCount(db)
     }
-    XCTAssertEqual(persistedConversationCount, 0)
+    XCTAssertEqual(persistedConversationCount, 1, "Rust display snapshots now persist the durable conversation before cache publication")
   }
 
   private func makeManager(
@@ -633,18 +673,24 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
   ) async throws -> MLSConversationManager {
     let database = try DatabaseQueue()
     try MLSGRDBManager.makeMigrator().migrate(database)
+    try await database.write { db in
+      try db.execute(sql: "CREATE TABLE mls_orchestrator_terminal_access (user_did TEXT NOT NULL, conversation_id TEXT NOT NULL, group_id BLOB NOT NULL, state TEXT NOT NULL, PRIMARY KEY(user_did, conversation_id))")
+    }
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let apiClient = await MLSAPIClient(
       client: atProtoClient,
       environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
     )
-    return MLSConversationManager(
+    let manager = MLSConversationManager(
       apiClient: apiClient,
       database: database,
       userDid: "did:plc:testuser",
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )
+    try await manager.rustDeviceAuthorizationGate.ensure(
+      scope: manager.rustDeviceAuthorizationScope(for: "did:plc:testuser")) {}
+    return manager
   }
 
   private func makeAuthenticatedManager(
@@ -652,6 +698,9 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
   ) async throws -> MLSConversationManager {
     let database = try DatabaseQueue()
     try MLSGRDBManager.makeMigrator().migrate(database)
+    try await database.write { db in
+      try db.execute(sql: "CREATE TABLE mls_orchestrator_terminal_access (user_did TEXT NOT NULL, conversation_id TEXT NOT NULL, group_id BLOB NOT NULL, state TEXT NOT NULL, PRIMARY KEY(user_did, conversation_id))")
+    }
 
     let userDid = "did:plc:testuser"
     let namespace = "MLSFullRustRecoveryRoutingTests.\(UUID().uuidString)"
@@ -691,13 +740,16 @@ final class MLSFullRustRecoveryRoutingTests: XCTestCase {
       client: atProtoClient,
       environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
     )
-    return MLSConversationManager(
+    let manager = MLSConversationManager(
       apiClient: apiClient,
       database: database,
       userDid: userDid,
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )
+    try await manager.rustDeviceAuthorizationGate.ensure(
+      scope: manager.rustDeviceAuthorizationScope(for: "did:plc:testuser")) {}
+    return manager
   }
 
   private func seedConversation(
@@ -831,5 +883,39 @@ private func XCTAssertThrowsErrorAsync<T>(
     XCTFail("Expected error to be thrown")
   } catch {
     handler(error)
+  }
+}
+
+/// Test-only Petrel session storage. Keep real account/session lookup behavior
+/// without reading or writing the host keychain from a command-line XCTest.
+private final class RoutingSecureStorage: SecureStorage, @unchecked Sendable {
+  private struct Key: Hashable { let namespace: String; let accessGroup: String?; let name: String }
+  private let lock = NSLock()
+  private var values: [Key: Data] = [:]
+  func store(key: String, value: Data, namespace: String, accessGroup: String?) throws {
+    lock.lock(); defer { lock.unlock() }
+    values[Key(namespace: namespace, accessGroup: accessGroup, name: key)] = value
+  }
+  func retrieve(key: String, namespace: String, accessGroup: String?) throws -> Data {
+    lock.lock(); defer { lock.unlock() }
+    guard let value = values[Key(namespace: namespace, accessGroup: accessGroup, name: key)] else { throw Petrel.KeychainError.itemRetrievalError(status: -25300) }
+    return value
+  }
+  func delete(key: String, namespace: String, accessGroup: String?) throws {
+    lock.lock(); defer { lock.unlock() }
+    values.removeValue(forKey: Key(namespace: namespace, accessGroup: accessGroup, name: key))
+  }
+  func deleteAll(namespace: String, accessGroup: String?) throws {
+    lock.lock(); defer { lock.unlock() }
+    values = values.filter { $0.key.namespace != namespace || $0.key.accessGroup != accessGroup }
+  }
+  func storeDPoPKeyRepresentation(_ representation: Data, keyTag: String, accessGroup: String?) throws {
+    try store(key: keyTag, value: representation, namespace: "dpop", accessGroup: accessGroup)
+  }
+  func retrieveDPoPKeyRepresentation(keyTag: String, accessGroup: String?) throws -> Data {
+    try retrieve(key: keyTag, namespace: "dpop", accessGroup: accessGroup)
+  }
+  func deleteDPoPKey(keyTag: String, accessGroup: String?) throws {
+    try delete(key: keyTag, namespace: "dpop", accessGroup: accessGroup)
   }
 }

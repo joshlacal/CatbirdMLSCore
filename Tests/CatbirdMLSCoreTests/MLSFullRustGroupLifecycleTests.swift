@@ -8,6 +8,59 @@ import PetrelCatbird
 
 final class MLSFullRustGroupLifecycleTests: XCTestCase {
   private static let stableConversationID = "550e8400-e29b-41d4-a716-446655440000"
+  private var storageDirectory: URL!
+
+  override func setUpWithError() throws {
+    try super.setUpWithError()
+    MLSKeychainManager.setFakeStorageOverrideForTesting(MLSKeychainFakeStorage())
+    storageDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("mls-group-lifecycle-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+    MLSStoragePaths.setBaseDirectoryOverride(storageDirectory)
+  }
+
+  override func tearDownWithError() throws {
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
+    MLSStoragePaths.setBaseDirectoryOverride(nil)
+    try FileManager.default.removeItem(at: storageDirectory)
+    try super.tearDownWithError()
+  }
+
+  func testUnexpectedCallbackFailureHasHumanLifecycleCopy() {
+    struct UnexpectedCallbackFailure: Error {}
+    for operation: MLSConversationLifecycleError.Operation in [.open, .leave, .removeMembers] {
+      let result = MLSConversationLifecycleError.presenting(UnexpectedCallbackFailure(), operation: operation)
+      XCTAssertFalse(result.localizedDescription.contains("UnexpectedCallbackFailure"))
+      XCTAssertTrue(result.localizedDescription.contains("try again"))
+    }
+  }
+
+  func testHistoricalDepartureDenialOffersAnotherDeviceWithoutClaimingLeft() {
+    let denied = OrchestratorBridgeError.ServerError(status: 400,
+      body: #"{"error":"AccessOutsideMembershipInterval","message":"fixture"}"#)
+    let leave = MLSConversationLifecycleError.presenting(denied, operation: .leave)
+    XCTAssertTrue(leave.localizedDescription.contains("another device"))
+    XCTAssertTrue(leave.localizedDescription.contains("saved messages are still here"))
+    XCTAssertFalse(leave.localizedDescription.contains("You left"))
+    XCTAssertFalse(MLSConversationLifecycleError.presenting(denied, operation: .open)
+      .localizedDescription.contains("another device"))
+    for body in ["AccessOutsideMembershipInterval", #"{"message":"AccessOutsideMembershipInterval"}"#,
+                 #"{"error":"OtherError"}"#] {
+      let other = OrchestratorBridgeError.ServerError(status: 400, body: body)
+      XCTAssertFalse(MLSConversationLifecycleError.presenting(other, operation: .leave)
+        .localizedDescription.contains("another device"))
+    }
+  }
+
+  func testRuntimePendingMemberRemovalHasHumanStatus() throws {
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.removeError = OrchestratorBridgeError.InvalidInput(message: "conversation_member_removal_pending: confirmation pending")
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    XCTAssertThrowsError(try runtime.removeMembers(conversationId: "convo-rust", memberDids: ["did:plc:bob"])) { error in
+      XCTAssertFalse(error.localizedDescription.contains("conversation_member_removal_pending"))
+      XCTAssertTrue(error.localizedDescription.contains("waiting"))
+    }
+  }
 
   func testRuntimeCreateConversationWrapsBridgeResult() throws {
     let bridge = RecordingGroupLifecycleBridge()
@@ -76,6 +129,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     let bridge = RecordingGroupLifecycleBridge()
     bridge.createConversationResult = FfiCreateConversationResult(
       conversation: FfiConversationView(
+        canonicalStateJson: nil,
         groupId: "deadbeef",
         conversationId: Self.stableConversationID,
         epoch: 7,
@@ -149,6 +203,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     let bridge = RecordingGroupLifecycleBridge()
     bridge.createConversationResult = FfiCreateConversationResult(
       conversation: FfiConversationView(
+        canonicalStateJson: nil,
         groupId: rawGroupID,
         conversationId: Self.stableConversationID,
         epoch: 7,
@@ -245,7 +300,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     _ = try await manager.createGroup(name: "Server title")
 
     let persisted = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
-    XCTAssertEqual(persisted?.epoch, 8)
+    XCTAssertEqual(persisted?.epoch, 4, "Pending reset prevents snapshot epoch promotion")
     XCTAssertEqual(persisted?.joinMethod, .creator)
     XCTAssertEqual(persisted?.joinEpoch, 1)
     XCTAssertEqual(persisted?.description, "Local description")
@@ -453,13 +508,39 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
       bridge: bridge
     )
 
+    // The injected bridge stands in for the native path which first persists
+    // verified terminal proof. Swift must not invent that proof from success.
+    try await manager.database.write { db in
+      try db.execute(sql: "INSERT INTO mls_orchestrator_terminal_access VALUES (?, ?, ?, ?)",
+        arguments: ["did:plc:testuser", "convo-rust", Data([0xde, 0xad, 0xbe, 0xef]), "closed"])
+    }
+    let before = try await manager.database.read { db in
+      try Data.fetchOne(db, sql: "SELECT payloadJSON FROM MLSMessageModel WHERE conversationID = 'convo-rust'")
+    }
     try await manager.leaveConversation(convoId: "convo-rust")
 
     XCTAssertEqual(bridge.leaveConversationCallCount, 1)
-    XCTAssertNil(manager.conversations["convo-rust"])
-    XCTAssertNil(manager.groupStates["deadbeef"])
+    if case .active = manager.conversationStates["convo-rust"] { XCTFail("Confirmed close must stay read-only") }
     let remainingRows = try await countDurableConversationRows(conversationID: "convo-rust", on: manager)
-    XCTAssertEqual(remainingRows, 0)
+    XCTAssertEqual(remainingRows, 4)
+    let after = try await manager.database.read { db in
+      try Data.fetchOne(db, sql: "SELECT payloadJSON FROM MLSMessageModel WHERE conversationID = 'convo-rust'")
+    }
+    XCTAssertEqual(after, before, "Confirmed leave must preserve exact stored message bytes")
+  }
+
+  func testSuccessfulLeaveWithoutPersistedNativeProofDoesNotAnnounceDepartureOrDelete() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-rust", on: manager)
+    let bridge = RecordingGroupLifecycleBridge()
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    let observer = MLSStateObserver { event in
+      if case .conversationLeft = event { XCTFail("Successful transport without proof must not announce departure") }
+    }
+    manager.addObserver(observer)
+    await XCTAssertThrowsErrorAsync(try await manager.leaveConversation(convoId: "convo-rust")) { _ in }
+    let rows = try await countDurableConversationRows(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(rows, 4)
   }
 
   func testRustFullLeaveConversationPropagatesDurableCleanupFailure() async throws {
@@ -487,6 +568,67 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertNotNil(manager.groupStates["deadbeef"])
   }
 
+  func testRustFullFailedLeavePreservesConversationMessagesMembersAndKeys() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-rust", on: manager)
+    seedGroupState(conversationID: "convo-rust", groupID: "deadbeef", on: manager)
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.leaveError = OrchestratorBridgeError.Api(message: "connection lost")
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge
+    )
+    let observer = MLSStateObserver { event in
+      if case .conversationLeft = event { XCTFail("A failed leave must not announce departure") }
+    }
+    manager.addObserver(observer)
+
+    await XCTAssertThrowsErrorAsync(try await manager.leaveConversation(convoId: "convo-rust")) { _ in }
+
+    XCTAssertEqual(bridge.leaveConversationCallCount, 1)
+    XCTAssertNotNil(manager.conversations["convo-rust"])
+    XCTAssertNotNil(manager.groupStates["deadbeef"])
+    let remainingRows = try await countDurableConversationRows(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(remainingRows, 4, "A failed leave must preserve conversation, message, member, and epoch-key rows")
+  }
+
+  func testRustFullPendingLeavePreservesConversationMessagesMembersAndKeys() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: "convo-rust", on: manager)
+    seedGroupState(conversationID: "convo-rust", groupID: "deadbeef", on: manager)
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.leaveError = OrchestratorBridgeError.InvalidInput(message: "conversation_leave_pending: Awaiting another member")
+    manager.orchestratorRuntime = MLSOrchestratorRuntime(
+      userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge
+    )
+    let observer = MLSStateObserver { event in
+      if case .conversationLeft = event { XCTFail("A pending leave must not announce departure") }
+    }
+    manager.addObserver(observer)
+
+    await XCTAssertThrowsErrorAsync(try await manager.leaveConversation(convoId: "convo-rust")) { error in
+      XCTAssertTrue(error.localizedDescription.contains("leave request"))
+      XCTAssertFalse(error.localizedDescription.contains("InvalidInput"))
+      XCTAssertFalse(error.localizedDescription.contains("Failed"))
+    }
+
+    XCTAssertNotNil(manager.conversations["convo-rust"])
+    XCTAssertNotNil(manager.groupStates["deadbeef"])
+    let remainingRows = try await countDurableConversationRows(conversationID: "convo-rust", on: manager)
+    XCTAssertEqual(remainingRows, 4)
+  }
+
+  func testRuntimeCreateConversationExplainsPendingDeviceAccessWithoutBridgeDetails() throws {
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.createError = OrchestratorBridgeError.InvalidInput(message: "conversation_device_access_pending: waiting")
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+
+    XCTAssertThrowsError(try runtime.createConversation(name: "", initialMemberDids: ["did:plc:bob"], description: nil)) { error in
+      XCTAssertTrue(error.localizedDescription.contains("this device"))
+      XCTAssertFalse(error.localizedDescription.contains("InvalidInput"))
+      XCTAssertFalse(error.localizedDescription.contains("conversation_device_access_pending"))
+    }
+  }
+
   func testRustAuthoritativeAddMembersKeepsLegacyPreconditions() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustAuthoritative)
     try await seedConversation(conversationID: "convo-rust", on: manager)
@@ -507,7 +649,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(bridge.addMembersCallCount, 0)
   }
 
-  func testRustFullAcceptConversationRequestCallsRustAndMarksAccepted() async throws {
+  func testRustFullAcceptConversationRequestKeepsConsentUntilValidatedActivePolicy() async throws {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingGroupLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
@@ -537,7 +679,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
         .filter(MLSConversationModel.Columns.conversationID == convoId)
         .fetchOne(db)
     }
-    XCTAssertEqual(updatedConvo?.requestState, MLSRequestState.none)
+    XCTAssertEqual(updatedConvo?.requestState, MLSRequestState.pendingInbound, "Accepted transport with no validated policy snapshot cannot fabricate active consent")
   }
 
   func testRustFullAcceptConversationRequestFailsClosedWhenRustThrows() async throws {
@@ -575,23 +717,133 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     XCTAssertEqual(unchangedConvo?.requestState, .pendingInbound, "Local row must NOT be flipped to accepted on failure")
   }
 
+  func testRustSyncPersistsMetadataEpochAndAccountRosterBeforePublishingCache() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: Self.stableConversationID, on: manager)
+    try await manager.database.write { db in
+      try db.execute(sql: "UPDATE MLSMemberModel SET handle = 'saved.handle', displayName = 'Saved profile' WHERE conversationID = ?", arguments: [Self.stableConversationID])
+    }
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.listResult = [FfiConversationView(
+      canonicalStateJson: nil,
+      groupId: "deadbeef",
+      conversationId: Self.stableConversationID,
+      epoch: 9,
+      members: [FfiMemberView(did: "did:plc:testuser", role: "member"), FfiMemberView(did: "did:plc:bob", role: "admin")],
+      name: "Current native title",
+      description: "Current description",
+      avatarUrl: nil,
+      createdAt: nil,
+      updatedAt: nil)]
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    try await manager.hydrateSwiftCachesFromRustSnapshotsAfterRustSync(runtime: runtime, reason: "test")
+    let model = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(model?.epoch, 9)
+    XCTAssertEqual(model?.title, "Current native title")
+    XCTAssertEqual(model?.description, "Current description")
+    let members = try await manager.database.read { db in
+      try MLSMemberModel.filter(MLSMemberModel.Columns.conversationID == Self.stableConversationID)
+        .filter(MLSMemberModel.Columns.isActive == true).order(MLSMemberModel.Columns.did).fetchAll(db)
+    }
+    XCTAssertEqual(members.map(\.did), ["did:plc:bob", "did:plc:testuser"])
+    XCTAssertEqual(members.map(\.role), [.admin, .member])
+    XCTAssertEqual(members.last?.handle, "saved.handle")
+    XCTAssertEqual(members.last?.displayName, "Saved profile")
+    XCTAssertEqual(manager.conversations[Self.stableConversationID]?.epoch, 9)
+    XCTAssertEqual(manager.groupStates["deadbeef"]?.members, Set(["did:plc:testuser", "did:plc:bob"]))
+    let rows = try await countDurableConversationRows(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(rows, 5, "Projection preserves the existing message and epoch key while adding one account row")
+  }
+
+  func testRustSnapshotCannotOverwriteTerminalCoordinatesRosterOrMetadata() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: Self.stableConversationID, on: manager)
+    try await manager.database.write { db in
+      try db.execute(sql: "INSERT INTO mls_orchestrator_terminal_access VALUES (?, ?, ?, ?)",
+        arguments: ["did:plc:testuser", Self.stableConversationID, Data([0xde, 0xad, 0xbe, 0xef]), "device_removed"])
+    }
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.listResult = [makeFFIConversationView(conversationID: Self.stableConversationID, groupID: "01020304", epoch: 99, members: ["did:plc:mallory"], name: "Stale title")]
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    try await manager.hydrateSwiftCachesFromRustSnapshotsAfterRustSync(runtime: runtime, reason: "terminal-test")
+    let model = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(model?.groupID, Data([0xde, 0xad, 0xbe, 0xef]))
+    XCTAssertEqual(model?.epoch, 0)
+    XCTAssertNil(model?.title)
+    if case .active = manager.conversationStates[Self.stableConversationID] { XCTFail("Terminal projection must not publish active") }
+    let rows = try await countDurableConversationRows(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(rows, 4)
+  }
+
+  func testRustSnapshotRejectsOldEpochAndPendingResetWithoutChangingSavedData() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: Self.stableConversationID, on: manager)
+    try await manager.database.write { db in
+      try db.execute(sql: "UPDATE MLSConversationModel SET epoch = 12, title = 'Keep title' WHERE conversationID = ?", arguments: [Self.stableConversationID])
+    }
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.listResult = [makeFFIConversationView(conversationID: Self.stableConversationID, groupID: "deadbeef", epoch: 3, members: ["did:plc:mallory"])]
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    try await manager.hydrateSwiftCachesFromRustSnapshotsAfterRustSync(runtime: runtime, reason: "stale-test")
+    var model = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(model?.epoch, 12)
+    XCTAssertEqual(model?.title, "Keep title")
+    try await manager.database.write { db in
+      try db.execute(sql: "UPDATE MLSConversationModel SET needsReset = 1, pendingNewGroupId = '01020304', pendingResetGeneration = 7 WHERE conversationID = ?", arguments: [Self.stableConversationID])
+    }
+    bridge.listResult = [makeFFIConversationView(conversationID: Self.stableConversationID, groupID: "ffffffff", epoch: 99, members: ["did:plc:mallory"])]
+    try await manager.hydrateSwiftCachesFromRustSnapshotsAfterRustSync(runtime: runtime, reason: "reset-test")
+    model = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(model?.epoch, 12)
+    XCTAssertEqual(model?.pendingNewGroupId, "01020304")
+    XCTAssertEqual(model?.pendingResetGeneration, 7)
+    XCTAssertTrue(model?.needsReset == true)
+    if case .active = manager.conversationStates[Self.stableConversationID] { XCTFail("Reset fence must not publish active") }
+  }
+
+  func testRustSnapshotCannotRebindDifferentGroupWithoutVerifiedAdoption() async throws {
+    let manager = try await makeManager(protocolAuthorityMode: .rustFull)
+    try await seedConversation(conversationID: Self.stableConversationID, on: manager)
+    let bridge = RecordingGroupLifecycleBridge()
+    bridge.listResult = [makeFFIConversationView(conversationID: Self.stableConversationID, groupID: "01020304", epoch: 99, members: ["did:plc:mallory"], name: "Wrong generation")]
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:testuser", mode: .rustFull, bridge: bridge)
+    try await manager.hydrateSwiftCachesFromRustSnapshotsAfterRustSync(runtime: runtime, reason: "generation-test")
+    let model = try await fetchConversation(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(model?.groupID, Data([0xde, 0xad, 0xbe, 0xef]))
+    XCTAssertEqual(model?.epoch, 0)
+    XCTAssertNil(model?.title)
+    XCTAssertEqual(manager.conversations[Self.stableConversationID]?.groupId, "deadbeef")
+    XCTAssertNil(manager.groupStates["01020304"])
+    let rows = try await countDurableConversationRows(conversationID: Self.stableConversationID, on: manager)
+    XCTAssertEqual(rows, 4)
+  }
+
   private func makeManager(
     protocolAuthorityMode: MLSProtocolAuthorityMode
   ) async throws -> MLSConversationManager {
     let database = try DatabaseQueue()
     try MLSGRDBManager.makeMigrator().migrate(database)
+    // The real storage adapter owns this table; this fixture injects a bridge without it.
+    try await database.write { db in
+      try db.execute(sql: "CREATE TABLE mls_orchestrator_terminal_access (user_did TEXT NOT NULL, conversation_id TEXT NOT NULL, group_id BLOB NOT NULL, state TEXT NOT NULL, PRIMARY KEY(user_did, conversation_id))")
+    }
     let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let apiClient = await MLSAPIClient(
       client: atProtoClient,
       environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
     )
-    return MLSConversationManager(
+    let manager = MLSConversationManager(
       apiClient: apiClient,
       database: database,
       userDid: "did:plc:testuser",
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )
+    // This fixture injects a fake Rust runtime without key custody. Authorization
+    // failure/retry is exercised separately by MLSDeviceAuthorizationTests.
+    try await manager.rustDeviceAuthorizationGate.ensure(
+      scope: manager.rustDeviceAuthorizationScope(for: "did:plc:testuser")) {}
+    return manager
   }
 
   private func seedConversation(
@@ -711,6 +963,7 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
     avatarUrl: String? = "https://example.com/rust.png"
   ) -> FfiConversationView {
     FfiConversationView(
+      canonicalStateJson: nil,
       groupId: groupID,
       conversationId: conversationID,
       epoch: epoch,
@@ -730,6 +983,9 @@ final class MLSFullRustGroupLifecycleTests: XCTestCase {
 }
 
 private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
+  var listResult: [FfiConversationView] = []
+
+  override func listConversations(userDid: String) throws -> [FfiConversationView] { listResult }
   var createConversationResult = FfiCreateConversationResult(
     conversation: RecordingGroupLifecycleBridge.makeFFIConversationView(
       conversationID: "convo-rust",
@@ -761,6 +1017,9 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
   private(set) var lastCreateConversationDescription: String?
 
   var shouldFailAcceptConversation = false
+  var leaveError: Error?
+  var createError: Error?
+  var removeError: Error?
   private(set) var acceptConversationCallCount = 0
   private(set) var lastAcceptConversationId: String?
 
@@ -780,6 +1039,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
     createConversationCallCount += 1
     lastCreateConversationName = name
     lastCreateConversationDescription = description
+    if let createError { throw createError }
     return createConversationResult
   }
 
@@ -796,6 +1056,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
     memberDids: [String]
   ) throws -> FfiGroupMutationResult {
     removeMembersCallCount += 1
+    if let removeError { throw removeError }
     return groupMutationResult
   }
 
@@ -803,6 +1064,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
     conversationId: String
   ) throws -> FfiLeaveResult {
     leaveConversationCallCount += 1
+    if let leaveError { throw leaveError }
     return leaveResult
   }
 
@@ -827,6 +1089,7 @@ private final class RecordingGroupLifecycleBridge: OrchestratorBridge {
     avatarUrl: String? = "https://example.com/rust.png"
   ) -> FfiConversationView {
     FfiConversationView(
+      canonicalStateJson: nil,
       groupId: groupID,
       conversationId: conversationID,
       epoch: epoch,

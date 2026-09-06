@@ -151,168 +151,12 @@ public struct MLSStorageHelpers {
     sequenceNumber: Int64,
     timestamp: Date = Date()
   ) async throws {
-    // Normalize DIDs for consistent storage
-    let normalizedUserDID = normalizeDID(currentUserDID)
-    let normalizedSenderID = normalizeDID(senderID)
-
     try await database.write { db in
-      let effectiveConversationID = try effectiveConversationIDForPayloadSync(
-        conversationID: conversationID,
-        currentUserDID: normalizedUserDID,
-        db: db
-      )
-      let existingMessage = try MLSMessageModel
-        .filter(MLSMessageModel.Columns.messageID == messageID)
-        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
-        .fetchOne(db)
-      let routedConversationID = existingMessage?.conversationID ?? effectiveConversationID
-      let cryptoConversationID: String
-      if let existingBinding = existingMessage?.cryptoConversationID,
-         !existingBinding.isEmpty
-      {
-        cryptoConversationID = existingBinding
-      } else {
-        cryptoConversationID = try preferredCryptoConversationIDSync(
-          conversationID: routedConversationID,
-          currentUserDID: normalizedUserDID,
-          db: db
-        )
-      }
-
-      // Encode + encrypt payload (field-level encryption above SQLCipher).
-      // Keep route resolution, encryption, and the HMAC append in one write
-      // transaction so alias adoption cannot race this projection.
-      let payloadData = try payload.encodeToJSON()
-      let encryptedWire = try MLSFieldEncryption.encrypt(
-        context: context,
-        conversationID: cryptoConversationID,
-        plaintext: payloadData
-      )
-
-      // Walk to the chain tail to seal this entry's HMAC.
-      let prevHMAC = try fetchLastEntryHMACSync(
-        conversationID: routedConversationID,
-        currentUserDID: normalizedUserDID,
-        legacyUserDID: currentUserDID,
-        db: db
-      )
-      let entryHMAC = try MLSFieldEncryption.computeHMAC(
-        context: context,
-        conversationID: cryptoConversationID,
-        previousHMAC: prevHMAC,
-        messageID: messageID,
-        payloadWire: encryptedWire
-      )
-
-      // Update message with encrypted payload + entry HMAC. Clear the legacy
-      // plaintext column so the row carries only ciphertext.
-      try db.execute(
-        sql: """
-          UPDATE MLSMessageModel
-          SET payloadJSON = NULL,
-              payloadEncrypted = ?,
-              entryHMAC = ?,
-              payloadKeyVersion = 1,
-              senderID = ?,
-              epoch = ?,
-              sequenceNumber = ?,
-              payloadExpired = 0
-          WHERE messageID = ? AND currentUserDID = ?;
-          """,
-        arguments: [
-          encryptedWire,
-          entryHMAC,
-          normalizedSenderID,
-          epoch,
-          sequenceNumber,
-          messageID,
-          normalizedUserDID,
-        ])
-
-      // If no rows were updated, insert a new cached record so future decrypts skip MLS
-      if db.changesCount == 0 {
-        // 🚨 FOREIGN KEY FIX: Ensure conversation exists before inserting message
-        // This prevents "FOREIGN KEY constraint failed" errors when processing
-        // messages from new conversations (e.g., Welcome message arrives first)
-        try ensureConversationExistsInTransaction(
-          db: db,
-          conversationID: effectiveConversationID,
-          userDID: normalizedUserDID,
-          senderDID: normalizedSenderID
-        )
-
-        let message = MLSMessageModel(
-          messageID: messageID,
-          currentUserDID: normalizedUserDID,
-          conversationID: effectiveConversationID,
-          cryptoConversationID: cryptoConversationID == effectiveConversationID ? nil : cryptoConversationID,
-          senderID: normalizedSenderID,
-          payloadJSON: nil,
-          wireFormat: nil,
-          contentType: "application/json",
-          timestamp: timestamp,
-          epoch: epoch,
-          sequenceNumber: sequenceNumber,
-          authenticatedData: nil,
-          signature: nil,
-          isDelivered: true,
-          isRead: false,
-          isSent: false,
-          sendAttempts: 0,
-          error: nil,
-          processingState: "cached",
-          gapBefore: false,
-          payloadExpired: false,
-          processingError: nil,
-          processingAttempts: 0,
-          validationFailureReason: nil,
-          payloadEncrypted: encryptedWire,
-          entryHMAC: entryHMAC,
-          payloadKeyVersion: 1
-        )
-
-        try message.insert(db)
-      }
-
-      logger.info("💾 Cached encrypted payload for message: \(messageID)")
+      try savePayloadSync(context: context, in: db, messageID: messageID,
+        conversationID: conversationID, currentUserDID: currentUserDID,
+        payload: payload, senderID: senderID, epoch: epoch,
+        sequenceNumber: sequenceNumber, timestamp: timestamp)
     }
-  }
-
-  /// Sync helper to fetch the last entry HMAC for a conversation (chain tail).
-  /// Tombstones are intentionally NOT filtered: chain walking covers the full
-  /// transcript so the verifier can prove continuity.
-  fileprivate static func fetchLastEntryHMACSync(
-    conversationID: String,
-    currentUserDID: String,
-    legacyUserDID: String?,
-    db: Database
-  ) throws -> Data? {
-    if let row = try MLSMessageModel
-      .filter(MLSMessageModel.Columns.conversationID == conversationID)
-      .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
-      .order(
-        MLSMessageModel.Columns.sequenceNumber.desc,
-        MLSMessageModel.Columns.timestamp.desc,
-        MLSMessageModel.Columns.messageID.desc
-      )
-      .fetchOne(db)
-    {
-      return row.entryHMAC
-    }
-    if let legacy = legacyUserDID, legacy != currentUserDID,
-       let row = try MLSMessageModel
-        .filter(MLSMessageModel.Columns.conversationID == conversationID)
-        .filter(MLSMessageModel.Columns.currentUserDID == legacy)
-        .order(
-          MLSMessageModel.Columns.sequenceNumber.desc,
-          MLSMessageModel.Columns.timestamp.desc,
-          MLSMessageModel.Columns.messageID.desc
-        )
-        .fetchOne(db)
-    {
-      return row.entryHMAC
-    }
-    return nil
   }
 
   /// Synchronous version of savePayload for use within a write(for:) closure.
@@ -347,11 +191,11 @@ public struct MLSStorageHelpers {
     let normalizedUserDID = normalizeDID(currentUserDID)
     let normalizedSenderID = normalizeDID(senderID)
 
-      let effectiveConversationID = try effectiveConversationIDForPayloadSync(
-        conversationID: conversationID,
-        currentUserDID: normalizedUserDID,
-        db: db
-      )
+    let effectiveConversationID = try effectiveConversationIDForPayloadSync(
+      conversationID: conversationID,
+      currentUserDID: normalizedUserDID,
+      db: db
+    )
     let existingMessage = try MLSMessageModel
       .filter(MLSMessageModel.Columns.messageID == messageID)
       .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
@@ -370,26 +214,17 @@ public struct MLSStorageHelpers {
       )
     }
 
-    // Encode + encrypt payload (field-level encryption above SQLCipher)
+    guard existingMessage == nil || existingMessage?.conversationID == effectiveConversationID else {
+      throw MLSMessageAppendLedger.IntegrityError.immutableMessageConflict
+    }
     let payloadData = try payload.encodeToJSON()
-    let encryptedWire = try MLSFieldEncryption.encrypt(
-      context: context,
-      conversationID: cryptoConversationID,
-      plaintext: payloadData
-    )
-    let prevHMAC = try fetchLastEntryHMACSync(
-      conversationID: routedConversationID,
-      currentUserDID: normalizedUserDID,
-      legacyUserDID: currentUserDID,
-      db: db
-    )
-    let entryHMAC = try MLSFieldEncryption.computeHMAC(
-      context: context,
-      conversationID: cryptoConversationID,
-      previousHMAC: prevHMAC,
-      messageID: messageID,
-      payloadWire: encryptedWire
-    )
+    guard let sealed = try MLSMessageAppendLedger.prepare(context: context, in: db,
+      userDID: normalizedUserDID, cryptoConversationID: cryptoConversationID,
+      messageID: messageID, payload: payloadData, senderID: normalizedSenderID,
+      existing: existingMessage)
+    else { return }
+    let encryptedWire = sealed.wire
+    let entryHMAC = sealed.entryHMAC
 
     // Update message with encrypted payload + entry HMAC
     try db.execute(

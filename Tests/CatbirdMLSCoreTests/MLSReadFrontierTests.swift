@@ -30,6 +30,7 @@ final class MLSReadFrontierTests: XCTestCase {
 
     try await dbQueue.write { db in
       try MLSReadFrontierModel.createTable(in: db)
+      try MLSMessageAppendLedger.createSchema(in: db)
       try MLSRemoteReadCursorModel.createTable(in: db)
 
       try db.create(table: "MLSMessageModel") { t in

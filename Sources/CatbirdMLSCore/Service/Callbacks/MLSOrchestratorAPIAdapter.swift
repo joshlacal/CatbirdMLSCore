@@ -27,6 +27,19 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     self.apiClient = apiClient
   }
 
+  internal func authorizedDeviceKeys(userDid: String) throws -> [Data] {
+    do {
+      return try blocking {
+        try await MLSPublicPDSReader.fetchAuthorizedDeviceSignatureKeys(
+          did: userDid,
+          resolvePDS: { did in try await MLSPublicPDSReader.resolveCurrentPDS(did: did) })
+      }
+    } catch {
+      throw OrchestratorBridgeError.Credential(
+        message: "device_authorization_unavailable: Repository authorization could not be verified. \(error.localizedDescription)")
+    }
+  }
+
   public func isAuthenticatedAs(did: String) -> Bool {
     (try? blocking { await self.apiClient.isAuthenticatedAs(did) }) ?? false
   }
@@ -66,7 +79,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       try await self.apiClient.getCanonicalConversationStates(limit: Int(limit), cursor: cursor)
     }
     return FfiConversationListPage(
-      conversations: result.states.map(Self.conversationView),
+      conversations: try result.states.map(Self.conversationView),
       cursor: result.cursor
     )
   }
@@ -94,8 +107,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       )
     }
     return FfiMessagesPage(
-      envelopes: result.entries.compactMap {
-        Self.incomingEnvelope($0, messageType: messageType)
+      envelopes: try result.entries.compactMap {
+        try Self.incomingEnvelope($0, messageType: messageType)
       },
       cursor: result.lastSeq.map(String.init)
     )
@@ -248,8 +261,9 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     return OrchestratorBridgeError.Api(message: error.localizedDescription)
   }
 
-  private static func conversationView(_ convo: BlueCatbirdChatDefs.ConversationState) -> FfiConversationView {
+  private static func conversationView(_ convo: BlueCatbirdChatDefs.ConversationState) throws -> FfiConversationView {
     FfiConversationView(
+      canonicalStateJson: String(decoding: try JSONEncoder().encode(convo), as: UTF8.self),
       groupId: convo.groupId,
       conversationId: convo.conversationId,
       epoch: UInt64(clamping: convo.epoch),
@@ -281,61 +295,65 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   /// Project a canonical entry into the FFI envelope shape. `messageType`
   /// mirrors the orchestrator's filter: `"app"` keeps only application
   /// entries, `"commit"` keeps every commit-bearing entry, and `nil` keeps
-  /// both. Any other entry kind, or an unexpected union body, projects to nil.
+  /// both. Other entry kinds project to nil; malformed supported entries throw so
+  /// the caller cannot advance its cursor past an unprocessed message.
   static func incomingEnvelope(
     _ entry: BlueCatbirdChatDefs.ConversationEntry,
     messageType: String? = nil
-  ) -> FfiIncomingEnvelope? {
+  ) throws -> FfiIncomingEnvelope? {
     let wantsApplication = messageType == nil || messageType == "app"
     let wantsCommit = messageType == nil || messageType == "commit"
 
     switch entry {
     case let .blueCatbirdChatDefsApplicationEntry(message) where wantsApplication:
-      guard case let .blueCatbirdChatDefsApplicationSendBody(body) = message.signedRequest.body else {
-        return nil
-      }
-      return envelope(
-        conversationId: message.conversationId,
-        senderDid: body.actorDid,
-        ciphertext: body.applicationMessage.bytes.data,
-        receivedAt: message.receivedAt,
-        entryId: message.entryId
-      )
+      return try applicationEnvelope(message)
 
     case let .blueCatbirdChatDefsCommitEntry(message) where wantsCommit:
-      guard case let .blueCatbirdChatDefsCommitTransitionBody(body) = message.signedRequest.body else {
-        return nil
+      guard case let .blueCatbirdChatDefsCommitTransitionBody(body) = message.signedRequest.body,
+            body.prior.conversationId == message.conversationId,
+            body.next.conversationId == message.conversationId else {
+        throw malformedCanonicalEnvelope()
       }
-      return envelope(
+      return try canonicalEnvelope(
         conversationId: message.conversationId,
         senderDid: body.actorDid,
         ciphertext: body.commit.bytes.data,
         receivedAt: message.receivedAt,
-        entryId: message.entryId
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
       )
 
     case let .blueCatbirdChatDefsLeafRecoveryFulfillmentEntry(message) where wantsCommit:
-      guard case let .blueCatbirdChatDefsLeafRecoveryFulfillmentBody(body) = message.signedRequest.body else {
-        return nil
+      guard case let .blueCatbirdChatDefsLeafRecoveryFulfillmentBody(body) = message.signedRequest.body,
+            body.prior.conversationId == message.conversationId,
+            body.next.conversationId == message.conversationId else {
+        throw malformedCanonicalEnvelope()
       }
-      return envelope(
+      return try canonicalEnvelope(
         conversationId: message.conversationId,
         senderDid: body.actorDid,
         ciphertext: body.commit.bytes.data,
         receivedAt: message.receivedAt,
-        entryId: message.entryId
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
       )
 
     case let .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(message) where wantsCommit:
-      guard case let .blueCatbirdChatDefsLeaveCommitFulfillmentBody(body) = message.signedRequest.body else {
-        return nil
+      guard case let .blueCatbirdChatDefsLeaveCommitFulfillmentBody(body) = message.signedRequest.body,
+            body.prior.conversationId == message.conversationId,
+            body.next.conversationId == message.conversationId else {
+        throw malformedCanonicalEnvelope()
       }
-      return envelope(
+      return try canonicalEnvelope(
         conversationId: message.conversationId,
         senderDid: body.actorDid,
         ciphertext: body.commit.bytes.data,
         receivedAt: message.receivedAt,
-        entryId: message.entryId
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
       )
 
     default:
@@ -343,21 +361,66 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
-  /// The fields every supported canonical entry contributes to an envelope.
-  /// The entry kinds differ only in which union body carries the ciphertext.
-  private static func envelope(
+  /// Canonical receipt metadata is retained exactly at first authenticated ingress.
+  /// It is never used to rewrite an older deduplicated row without wire proof.
+  static func canonicalEnvelope(
     conversationId: BlueCatbirdChatDefs.OperationId,
     senderDid: BlueCatbirdChatDefs.BareDid,
     ciphertext: Data,
     receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
-    entryId: BlueCatbirdChatDefs.OperationId
-  ) -> FfiIncomingEnvelope {
-    FfiIncomingEnvelope(
+    entryId: BlueCatbirdChatDefs.OperationId,
+    sequence: Int,
+    epoch: Int
+  ) throws -> FfiIncomingEnvelope {
+    let timestamp = receivedAt.iso8601String
+    guard MLSSystemMessagePresentation.canonicalUUID(conversationId),
+          MLSSystemMessagePresentation.canonicalUUID(entryId),
+          (1...9_007_199_254_740_991).contains(sequence),
+          (0...9_007_199_254_740_991).contains(epoch),
+          isCanonicalTimestamp(timestamp, date: receivedAt.date) else {
+      throw malformedCanonicalEnvelope()
+    }
+    return FfiIncomingEnvelope(
       conversationId: conversationId,
       senderDid: senderDid.description,
       ciphertext: ciphertext,
-      timestamp: iso8601Formatter.string(from: receivedAt.date),
-      serverMessageId: entryId
+      timestamp: timestamp,
+      serverMessageId: entryId,
+      serverSequence: UInt64(sequence),
+      serverEpoch: UInt64(epoch)
     )
+  }
+
+  static func applicationEnvelope(_ message: BlueCatbirdChatDefs.ApplicationEntry) throws -> FfiIncomingEnvelope {
+    guard let body = message.parsedBody,
+          body.prior.conversationId == message.conversationId else { throw malformedCanonicalEnvelope() }
+    return try canonicalEnvelope(
+      conversationId: message.conversationId, senderDid: body.actorDid,
+      ciphertext: body.applicationMessage.bytes.data, receivedAt: message.receivedAt,
+      entryId: message.entryId, sequence: message.seq, epoch: body.prior.epoch)
+  }
+
+  private static func malformedCanonicalEnvelope() -> MLSConversationError {
+    .operationFailed("A secure message could not be verified. Please try syncing again.")
+  }
+
+  private static func isCanonicalTimestamp(_ value: String, date: Date) -> Bool {
+    let bytes = Array(value.utf8)
+    guard bytes.count == 24, date.timeIntervalSince1970.isFinite else { return false }
+    let separators: [Int: UInt8] = [4: 45, 7: 45, 10: 84, 13: 58, 16: 58, 19: 46, 23: 90]
+    for (index, byte) in bytes.enumerated() {
+      if let separator = separators[index] {
+        guard byte == separator else { return false }
+      } else if !(48...57).contains(byte) { return false }
+    }
+    // Date may round a fractional millisecond when formatted. Compare only the
+    // calendar fields; preserve the exact original three fractional digits above.
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let fields = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+    let wholeSeconds = String(format: "%04d-%02d-%02dT%02d:%02d:%02d",
+      fields.year ?? -1, fields.month ?? -1, fields.day ?? -1,
+      fields.hour ?? -1, fields.minute ?? -1, fields.second ?? -1)
+    return value.hasPrefix(wholeSeconds)
   }
 }

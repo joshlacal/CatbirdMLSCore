@@ -7,6 +7,227 @@ import XCTest
 final class MLSInventoryAndDurableEventTests: XCTestCase {
   private let expiry = ATProtocolDate(date: Date(timeIntervalSinceNow: 3_600))
 
+  func testLostTicketSessionClassificationRequiresExactEndpointTypeAndStatus() {
+    for code in [BlueCatbirdChatGetSubscriptionTicket.Error.inventorySessionMismatch,
+                 .inventorySessionExpired] {
+      XCTAssertTrue(MLSAPIClient.isUnavailableSubscriptionTicketSession(
+        ATProtoError(error: code, message: "untrusted server detail", statusCode: 400)
+      ))
+      XCTAssertFalse(MLSAPIClient.isUnavailableSubscriptionTicketSession(
+        ATProtoError(error: code, message: nil, statusCode: 503)
+      ))
+    }
+    for code in [BlueCatbirdChatGetSubscriptionTicket.Error.inventoryIncomplete,
+                 .deviceBindingMismatch, .deviceRevoked, .notAuthorized, .invalidRequest] {
+      XCTAssertFalse(MLSAPIClient.isUnavailableSubscriptionTicketSession(
+        ATProtoError(error: code, message: "InventorySessionMismatch", statusCode: 400)
+      ))
+    }
+    XCTAssertFalse(MLSAPIClient.isUnavailableSubscriptionTicketSession(
+      ATProtoXRPCError(error: "InventorySessionMismatch", statusCode: 400)
+    ))
+    XCTAssertFalse(MLSAPIClient.isUnavailableSubscriptionTicketSession(
+      NSError(domain: "InventorySessionExpired", code: 400,
+              userInfo: [NSLocalizedDescriptionKey: "InventorySessionMismatch"])
+    ))
+  }
+
+  func testReplacedUnexpiredTicketSessionRequiresAllInventoryAndReconciliationBeforeNewFence() async throws {
+    var fence: MLSCanonicalSubscriptionFence? = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "replaced-session", snapshotEventCursor: "replaced-cursor",
+      snapshotExpiresAt: expiry.date
+    )
+    var steps: [String] = []
+    XCTAssertTrue(try MLSCanonicalSubscriptionCoordinator.invalidateRejectedTicketFence(
+      MLSInventorySessionError.ticketSessionUnavailable, fence: &fence,
+      terminalFailure: nil, hasUnhandledEvent: false
+    ))
+    XCTAssertNil(fence)
+    let refreshed = try await MLSCanonicalSubscriptionCoordinator.prepare(
+      fence: &fence, initialCursor: "replaced-cursor",
+      fetchInventory: {
+        try await MLSInventorySessionAssembler.assemble(
+          fetchConversations: { cursor in
+            steps.append("conversation")
+            return self.conversationPage(cursor: cursor)
+          },
+          fetchPendingWelcomes: { session, cursor in
+            XCTAssertEqual(session, "session-1")
+            steps.append("welcome")
+            return self.welcomePage(cursor: cursor)
+          },
+          fetchLeafRecoveryInbox: { session, cursor in
+            XCTAssertEqual(session, "session-1")
+            steps.append("recovery")
+            return self.recoveryPage(cursor: cursor)
+          }
+        )
+      },
+      reconcile: { snapshot in
+        XCTAssertTrue(snapshot.completion.isComplete)
+        steps.append("reconcile")
+      },
+      installCompletion: { _ in steps.append("install") },
+      persistFence: { cursor in
+        XCTAssertEqual(cursor, "event-1")
+        steps.append("persist")
+      }
+    )
+    XCTAssertEqual(steps, ["conversation", "conversation", "welcome", "welcome",
+                           "recovery", "recovery", "reconcile", "persist", "install"])
+    XCTAssertEqual(fence, refreshed)
+    XCTAssertEqual(refreshed.inventorySessionId, "session-1")
+    XCTAssertEqual(refreshed.snapshotEventCursor, "event-1")
+  }
+
+  func testLostTicketSessionCannotInstallFenceWhenReconciliationFails() async throws {
+    var fence: MLSCanonicalSubscriptionFence? = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "replaced-session", snapshotEventCursor: "replaced-cursor",
+      snapshotExpiresAt: expiry.date
+    )
+    try MLSCanonicalSubscriptionCoordinator.invalidateRejectedTicketFence(
+      MLSInventorySessionError.ticketSessionUnavailable, fence: &fence,
+      terminalFailure: nil, hasUnhandledEvent: false
+    )
+    do {
+      _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+        fence: &fence, initialCursor: "replaced-cursor",
+        fetchInventory: {
+          MLSCanonicalInventorySnapshot(
+            inventorySessionId: "fresh-session", snapshotEventCursor: "fresh-cursor",
+            snapshotExpiresAt: self.expiry.date,
+            conversationItems: [], pendingWelcomeItems: [], leafRecoveryItems: []
+          )
+        },
+        reconcile: { _ in throw DurableEventTestError.handlerFailed },
+        installCompletion: { _ in XCTFail("incomplete reconciliation cannot authorize ticket") },
+        persistFence: { _ in XCTFail("incomplete reconciliation cannot advance cursor") }
+      )
+      XCTFail("reconciliation failure must escape")
+    } catch {
+      XCTAssertEqual(error as? DurableEventTestError, .handlerFailed)
+    }
+    XCTAssertNil(fence)
+  }
+
+  func testLostTicketSessionPreservesTerminalFailureAndOriginalFence() throws {
+    let original = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1", snapshotEventCursor: "event-1",
+      snapshotExpiresAt: expiry.date
+    )
+    var fence: MLSCanonicalSubscriptionFence? = original
+    let failure = MLSCanonicalSubscriptionTerminalFailure.unsupportedDurableEvent(
+      typeIdentifier: "future-durable-event"
+    )
+    XCTAssertThrowsError(try MLSCanonicalSubscriptionCoordinator.invalidateRejectedTicketFence(
+      MLSInventorySessionError.ticketSessionUnavailable, fence: &fence,
+      terminalFailure: failure, hasUnhandledEvent: false
+    )) { error in
+      XCTAssertEqual(error as? MLSCanonicalSubscriptionCoordinatorError, .blocked(failure))
+    }
+    XCTAssertEqual(fence, original)
+  }
+
+  func testLostTicketSessionCannotSkipFailedDurableActionOrCursorWriteEvenAfterExpiry() async throws {
+    let envelope = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsEventEnvelope(
+      .init(previousCursor: "cursor-0", cursor: "cursor-1",
+            payload: .blueCatbirdChatDefsConversationChangedEvent(
+              .init(conversationId: "conversation-1")
+            ), createdAt: expiry)
+    )
+    for failAction in [true, false] {
+      let result = await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
+        envelope, subscriptionKey: "conversation-1", expectedPreviousCursor: "cursor-0",
+        loadEntries: { _, _ in [] },
+        onDurableEvent: { _ in
+          if failAction { throw DurableEventTestError.handlerFailed }
+        },
+        saveCursor: { _ in throw DurableEventTestError.persistenceFailed }
+      )
+      guard case .reconnect = result else { return XCTFail("durable failure must request replay") }
+      var replayRequirement = MLSCanonicalSubscriptionReplayRequirement()
+      replayRequirement.recordFailure(envelope)
+      XCTAssertTrue(replayRequirement.isRequired)
+      let original = MLSCanonicalSubscriptionFence(
+        inventorySessionId: "session-1", snapshotEventCursor: "cursor-0",
+        snapshotExpiresAt: Date(timeIntervalSince1970: 1)
+      )
+      var fence: MLSCanonicalSubscriptionFence? = original
+      XCTAssertThrowsError(try MLSCanonicalSubscriptionCoordinator.invalidateRejectedTicketFence(
+        MLSInventorySessionError.ticketSessionUnavailable, fence: &fence,
+        terminalFailure: nil, hasUnhandledEvent: replayRequirement.isRequired
+      )) { error in
+        XCTAssertEqual(error as? MLSCanonicalSubscriptionCoordinatorError, .unhandledEventBlocksRecovery)
+      }
+      do {
+        _ = try await MLSCanonicalSubscriptionCoordinator.prepare(
+          fence: &fence, initialCursor: "cursor-0", hasUnhandledEvent: replayRequirement.isRequired,
+          fetchInventory: { throw DurableEventTestError.handlerFailed },
+          reconcile: { _ in XCTFail("unhandled event must keep its original fence") },
+          installCompletion: { _ in XCTFail("unhandled event cannot install a new completion") },
+          persistFence: { _ in XCTFail("unhandled event cannot be skipped by a new cursor") }
+        )
+        XCTFail("expiry cannot bypass a known unhandled event")
+      } catch {
+        XCTAssertEqual(error as? MLSCanonicalSubscriptionCoordinatorError, .unhandledEventBlocksRecovery)
+      }
+      XCTAssertEqual(fence, original)
+    }
+  }
+
+  func testUnknownTicketErrorsPreserveCompletedFence() throws {
+    let original = MLSCanonicalSubscriptionFence(
+      inventorySessionId: "session-1", snapshotEventCursor: "cursor-0",
+      snapshotExpiresAt: expiry.date
+    )
+    var fence: MLSCanonicalSubscriptionFence? = original
+    XCTAssertFalse(try MLSCanonicalSubscriptionCoordinator.invalidateRejectedTicketFence(
+      MLSInventorySessionError.sessionMismatch, fence: &fence,
+      terminalFailure: nil, hasUnhandledEvent: false
+    ))
+    XCTAssertEqual(fence, original)
+  }
+
+  func testOnlyExactFailedEnvelopeCommitClearsLostFenceReplayRequirement() throws {
+    func event(_ cursor: String) -> BlueCatbirdChatSubscribeEvents.Message {
+      .blueCatbirdChatDefsEventEnvelope(.init(
+        previousCursor: "cursor-0", cursor: cursor,
+        payload: .blueCatbirdChatDefsConversationChangedEvent(
+          .init(conversationId: "conversation-1")
+        ), createdAt: expiry
+      ))
+    }
+    let failed = event("failed-cursor")
+    let typing = BlueCatbirdChatSubscribeEvents.Message.blueCatbirdChatDefsTypingEvent(.init(
+      typingId: "typing-1", conversationId: "conversation-1",
+      actorDid: try DID(didString: "did:web:peer.example.com"), actorDeviceId: "device-1",
+      isTyping: true, expiresAt: expiry
+    ))
+    var replayRequirement = MLSCanonicalSubscriptionReplayRequirement()
+    replayRequirement.recordFailure(typing)
+    XCTAssertFalse(replayRequirement.isRequired)
+    replayRequirement.recordFailure(failed)
+    replayRequirement.recordHandled(typing)
+    XCTAssertTrue(replayRequirement.isRequired)
+    // A replay-prefix success or unrelated error must not replace the first
+    // uncommitted event, even while the transport is otherwise making progress.
+    replayRequirement.recordHandled(event("different-cursor"))
+    replayRequirement.recordFailure(event("different-cursor"))
+    replayRequirement.recordHandled(event("different-cursor"))
+    XCTAssertTrue(replayRequirement.isRequired)
+    replayRequirement.recordHandled(.unexpected(.object([:])))
+    XCTAssertTrue(replayRequirement.isRequired)
+    replayRequirement.recordHandled(failed)
+    XCTAssertFalse(replayRequirement.isRequired)
+  }
+
+  func testUnknownDurableMessageKeepsReplayRequirementWithoutGuessingCursor() {
+    var replayRequirement = MLSCanonicalSubscriptionReplayRequirement()
+    replayRequirement.recordFailure(.unexpected(.object([:])))
+    replayRequirement.recordHandled(.unexpected(.object([:])))
+    XCTAssertTrue(replayRequirement.isRequired)
+  }
+
   func testConversationOnlyInventoryCannotMintSubscriptionTicket() throws {
     let completion = MLSInventorySessionCompletion(
       inventorySessionId: "session-1",

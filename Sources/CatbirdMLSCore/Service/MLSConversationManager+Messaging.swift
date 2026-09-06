@@ -2079,26 +2079,19 @@ public extension MLSConversationManager {
     userDid: String,
     attemptID: String
   ) async throws -> MessageProcessingOutcome {
-    let runtime = try await withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
-      runtime
-    }
 
+    let envelope = try MLSOrchestratorAPIAdapter.applicationEnvelope(message)
     let (_, outcome) = try await withMLSUserPermit(for: userDid) { [self] in
       try await self.messageProcessingCoordinator.withQueuedSection(conversationID: message.convoId) { queueIndex in
-        let envelope = FfiIncomingEnvelope(
-          conversationId: message.convoId,
-          senderDid: "",
-          ciphertext: message.ciphertext,
-          timestamp: ISO8601DateFormatter().string(from: message.createdAt.date),
-          serverMessageId: message.id
-        )
 
         self.logger.info(
           "🦀 [MLS-AUTHORITY] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
         )
 
-        let ffiMessage = try runtime.processIncoming(envelope: envelope)
-        let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        let outcome = try await self.withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
+          let ffiMessage = try runtime.processIncoming(envelope: envelope)
+          return try MLSOrchestratorRuntime.messageProcessingOutcome(from: ffiMessage)
+        }
         try await self.handleRustAuthoritativePayloadSideEffects(
           outcome,
           message: message,
@@ -2118,31 +2111,25 @@ public extension MLSConversationManager {
     userDid: String,
     attemptID: String
   ) async throws -> MessageProcessingOutcome {
-    let runtime = try await withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
-      runtime
-    }
 
-    let serverEpoch = message.epoch >= 0 ? UInt64(message.epoch) : nil
+    let envelope = try MLSOrchestratorAPIAdapter.applicationEnvelope(message)
+    let serverEpoch = envelope.serverEpoch
     let (_, outcome) = try await withMLSUserPermit(for: userDid) { [self] in
       try await self.messageProcessingCoordinator.withQueuedSection(conversationID: message.convoId) { queueIndex in
-        let envelope = FfiIncomingEnvelope(
-          conversationId: message.convoId,
-          senderDid: "",
-          ciphertext: message.ciphertext,
-          timestamp: ISO8601DateFormatter().string(from: message.createdAt.date),
-          serverMessageId: message.id
-        )
 
         self.logger.info(
           "🦀 [MLS-FULL-RUST] attempt=\(attemptID) queue=\(queueIndex) source=\(source) msg=\(message.id.prefix(16)) seq=\(message.seq)"
         )
 
-        let result = try runtime.processIncomingMessage(
-          envelope: envelope,
-          serverEpoch: serverEpoch
-        )
+        let (result, outcome) = try await self.withRustAuthoritativeRuntime(operation: "processServerMessage") { runtime in
+          let result = try runtime.processIncomingMessage(
+            envelope: envelope,
+            serverEpoch: serverEpoch
+          )
+          let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: result.message)
+          return (result, outcome)
+        }
         await self.handleRustEngineEvents(result.events, source: "processServerMessage")
-        let outcome = try MLSOrchestratorRuntime.messageProcessingOutcome(from: result.message)
         try await self.handleRustAuthoritativePayloadSideEffects(
           outcome,
           message: message,
@@ -4948,6 +4935,12 @@ public extension MLSConversationManager {
   /// - Parameter convoId: Conversation identifier
   /// - Throws: MLSConversationError if sync fails
   internal func syncGroupState(for convoId: String) async throws {
+    if protocolAuthorityMode == .rustFull {
+      let hint = BlueCatbirdChatDefs.ConversationChangedEvent(conversationId: convoId)
+      let json = String(decoding: try JSONEncoder().encode(hint), as: UTF8.self)
+      try await processCanonicalServerEvent(json)
+      return
+    }
     logger.info("Syncing group state for conversation: \(convoId)")
 
     guard let convo = conversations[convoId] else {
@@ -6554,12 +6547,17 @@ public extension MLSConversationManager {
           try runtime.ensureConversationReady(conversationId: convoId)
         }
         guard result.sendAllowed else {
+          if MLSConversationLifecycleError.isPendingDeviceAccess(result) {
+            throw MLSConversationLifecycleError.deviceAccessPending
+          }
           throw MLSConversationError.groupNotInitialized
         }
         logger.info(
           "✅ [MLS-AUTHORITY] ensureConversationReady completed for \(convoId.prefix(16), privacy: .private) epoch=\(String(describing: result.epoch), privacy: .public) state=\(result.recoveryState.rawValue, privacy: .public) sendAllowed=\(result.sendAllowed, privacy: .public)"
         )
         return
+      } catch MLSConversationLifecycleError.deviceAccessPending {
+        throw MLSConversationLifecycleError.deviceAccessPending
       } catch is CancellationError {
         throw MLSConversationError.groupNotInitialized
       } catch {

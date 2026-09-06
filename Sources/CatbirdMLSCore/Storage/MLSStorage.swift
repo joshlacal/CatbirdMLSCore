@@ -352,32 +352,21 @@ public final class MLSStorage: @unchecked Sendable {
           db: db
         )
       }
-      let encryptedWire = try MLSFieldEncryption.encrypt(
-        context: context,
-        conversationID: cryptoConversationID,
-        plaintext: payloadData
-      )
-      logger.debug("Encrypted payload (\(encryptedWire.count) bytes wire)")
-
-      // Compute the entry HMAC over (prev_hmac || messageID || encryptedWire).
-      // For the first message in a conversation prev_hmac is nil (Rust seeds
-      // with 32 zero bytes). For subsequent messages we walk the highest
-      // sequence-number row. This is a tail-insert chain; UPDATE-path rows
-      // re-seal with the same prev_hmac (best-effort under the current
-      // verifier contract).
-      let prevHMAC = try Self.fetchLastEntryHMACSync(
-        conversationID: routedConversationID,
-        currentUserDID: normalizedUserDID,
-        legacyUserDID: currentUserDID,
-        db: db
-      )
-      let entryHMAC = try MLSFieldEncryption.computeHMAC(
-        context: context,
-        conversationID: cryptoConversationID,
-        previousHMAC: prevHMAC,
-        messageID: messageID,
-        payloadWire: encryptedWire
-      )
+      guard existingMessage == nil || existingMessage?.conversationID == effectiveConversationID else {
+        throw MLSMessageAppendLedger.IntegrityError.immutableMessageConflict
+      }
+      let hasSuccessfulPayload = existingMessage?.processingError == nil
+        && (existingMessage?.payloadEncrypted != nil || existingMessage?.payloadJSON != nil)
+      let preserveSuccessfulPayload = hasSuccessfulPayload && processingError != nil
+      let sealed = preserveSuccessfulPayload ? nil : try MLSMessageAppendLedger.prepare(
+        context: context, in: db, userDID: normalizedUserDID,
+        cryptoConversationID: cryptoConversationID, messageID: messageID,
+        payload: payloadData, senderID: senderID,
+        existing: existingMessage, recordAppend: processingError == nil)
+      // A ledger duplicate whose projection has been purged stays purged.
+      if !exists && sealed == nil { return [] }
+      let encryptedWire = sealed?.wire
+      let entryHMAC = sealed?.entryHMAC
 
       if exists {
         // ═══════════════════════════════════════════════════════════════════════════
@@ -400,7 +389,7 @@ public final class MLSStorage: @unchecked Sendable {
           )
         let newHasError = (processingError != nil)
 
-        if existingHasValidPayload && newHasError {
+        if (existingHasValidPayload && newHasError) || sealed == nil {
           let existingSize = (existingMessage?.payloadEncrypted?.count
             ?? existingMessage?.payloadJSON?.count ?? 0)
           logger.warning(
@@ -413,9 +402,8 @@ public final class MLSStorage: @unchecked Sendable {
           // Still need to adopt orphans even if we skip the update
           // Fall through to orphan adoption logic
         } else {
-          // Update existing message (normal path). Clear legacy payloadJSON
-          // and write the new encrypted columns; entryHMAC is recomputed
-          // against the latest tail (best-effort for mid-chain updates).
+          // Only an unsealed placeholder can acquire its first payload here.
+          // Successful duplicate bodies preserve ciphertext and append proofs.
           try db.execute(
             sql: """
               UPDATE MLSMessageModel
@@ -2148,6 +2136,7 @@ public final class MLSStorage: @unchecked Sendable {
         .filter(MLSConversationModel.Columns.isActive == true)
         .order(MLSConversationModel.Columns.createdAt.desc)
         .fetchAll(db)
+        .filter { try $0.hasPendingConsent(in: db) }
     }
   }
 
@@ -2159,10 +2148,10 @@ public final class MLSStorage: @unchecked Sendable {
     try await database.read { db in
       try MLSConversationModel
         .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
-        .filter(MLSConversationModel.Columns.requestState != MLSRequestState.pendingInbound.rawValue)
         .filter(MLSConversationModel.Columns.isActive == true)
         .order(MLSConversationModel.Columns.lastMessageAt.desc)
         .fetchAll(db)
+        .filter { try !$0.hasPendingConsent(in: db) }
     }
   }
 

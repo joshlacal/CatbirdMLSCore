@@ -103,16 +103,16 @@ enum MLSPublicPDSReader {
   }
 
   /// Decode a declaration record from a `com.atproto.repo.getRecord` JSON response.
-  static func decodeDeclaration(fromGetRecordJSON data: Data) -> BlueCatbirdChatDeclaration? {
+  static func decodeDeclaration(fromGetRecordJSON data: Data) throws -> BlueCatbirdChatDeclaration {
     struct GetRecordEnvelope: Decodable {
-      let value: BlueCatbirdChatDeclaration?
+      let value: BlueCatbirdChatDeclaration
     }
-    let envelope = try? JSONDecoder().decode(GetRecordEnvelope.self, from: data)
-    return envelope?.value
+    return try JSONDecoder().decode(GetRecordEnvelope.self, from: data).value
   }
 
   /// Resolve the DID's hosting PDS and fetch its public chat declaration, unauthenticated.
-  /// Returns nil if the record does not exist (400/404) or cannot be decoded.
+  /// Returns nil only for an explicit RecordNotFound response. Transport errors, other
+  /// HTTP errors, and malformed successful responses remain failures, not opt-outs.
   static func fetchDeclaration(
     did: String,
     resolvePDS: @Sendable (String) async throws -> URL,
@@ -131,13 +131,22 @@ enum MLSPublicPDSReader {
     guard let http = response as? HTTPURLResponse else {
       throw ReaderError.invalidResponse
     }
-    guard (200...299).contains(http.statusCode) else {
-      if http.statusCode == 400 || http.statusCode == 404 {
-        return nil
-      }
-      throw ReaderError.httpStatus(http.statusCode)
+    return try declaration(from: data, statusCode: http.statusCode)
+  }
+
+  static func declaration(from data: Data, statusCode: Int) throws -> BlueCatbirdChatDeclaration? {
+    if (200...299).contains(statusCode) {
+      return try decodeDeclaration(fromGetRecordJSON: data)
     }
-    return decodeDeclaration(fromGetRecordJSON: data)
+    struct ErrorEnvelope: Decodable {
+      let error: String
+    }
+    if [400, 404].contains(statusCode),
+       let error = try? JSONDecoder().decode(ErrorEnvelope.self, from: data),
+       error.error == "RecordNotFound" {
+      return nil
+    }
+    throw ReaderError.httpStatus(statusCode)
   }
 
   // MARK: - JSON shapes

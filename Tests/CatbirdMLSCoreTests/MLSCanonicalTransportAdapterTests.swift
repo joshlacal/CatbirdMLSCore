@@ -109,7 +109,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       previousCursor: "cursor-0",
       cursor: "cursor-1",
       payload: .blueCatbirdChatDefsMessageAvailableEvent(
-        BlueCatbirdChatDefs.MessageAvailableEvent(conversationId: "convo-1", seq: 4)
+        BlueCatbirdChatDefs.MessageAvailableEvent(conversationId: "550e8400-e29b-41d4-a716-446655440000", seq: 4)
       ),
       createdAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_000))
     )
@@ -124,7 +124,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
           previousCursor: "cursor-0",
           cursor: "cursor-mismatch",
           payload: .blueCatbirdChatDefsMessageAvailableEvent(
-            BlueCatbirdChatDefs.MessageAvailableEvent(conversationId: "convo-1", seq: 4)
+            BlueCatbirdChatDefs.MessageAvailableEvent(conversationId: "550e8400-e29b-41d4-a716-446655440000", seq: 4)
           ),
           createdAt: ATProtocolDate(date: Date(timeIntervalSince1970: 1_700_000_000))
         )
@@ -144,7 +144,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
 
     await MLSCanonicalTransportAdapter.handleCanonicalStreamMessage(
       .blueCatbirdChatDefsEventEnvelope(envelope),
-      subscriptionKey: "convo-1",
+      subscriptionKey: "550e8400-e29b-41d4-a716-446655440000",
       loadEntries: { _, afterSeq in
         loadedAfterSeq = afterSeq
         return [
@@ -216,23 +216,26 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     )
   }
 
-  func testCanonicalApplicationEntryProjectsMessageView() {
+  func testCanonicalApplicationEntryProjectsMessageView() throws {
     let entry = makeApplicationEntry()
 
     XCTAssertTrue(entry.isApplication)
     XCTAssertFalse(entry.isCommit)
-    XCTAssertEqual(entry.entryID, "entry-1")
-    XCTAssertEqual(entry.conversationIdString, "convo-1")
+    XCTAssertEqual(entry.entryID, "650e8400-e29b-41d4-a716-446655440000")
+    XCTAssertEqual(entry.conversationIdString, "550e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(entry.applicationEntry?.ciphertext, Data([0xAA, 0xBB]))
     XCTAssertEqual(entry.sequenceNumber, 4)
 
-    let envelope = MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app")
-    XCTAssertEqual(envelope?.conversationId, "convo-1")
+    let envelope = try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app")
+    XCTAssertEqual(envelope?.conversationId, "550e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(envelope?.senderDid, actorDID.description)
     XCTAssertEqual(envelope?.ciphertext, Data([0xAA, 0xBB]))
-    XCTAssertEqual(envelope?.serverMessageId, "entry-1")
-    XCTAssertNil(MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit"))
-    XCTAssertEqual(MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xAA, 0xBB]))
+    XCTAssertEqual(envelope?.serverMessageId, "650e8400-e29b-41d4-a716-446655440000")
+    XCTAssertEqual(envelope?.serverSequence, 4)
+    XCTAssertEqual(envelope?.serverEpoch, 7)
+    XCTAssertEqual(envelope?.timestamp, "2023-11-14T22:13:21.000Z")
+    XCTAssertNil(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit"))
+    XCTAssertEqual(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xAA, 0xBB]))
   }
   func testUnexpectedCanonicalEntryDoesNotProjectAsCiphertext() {
     let entry = BlueCatbirdChatDefs.ConversationEntry.unexpected(.object([:]))
@@ -241,7 +244,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertNil(entry.applicationEntry)
     XCTAssertNil(entry.commitEntry)
   }
-  func testCanonicalCommitEntryProjectsRealCommitBytesAndType() {
+  func testCanonicalCommitEntryProjectsRealCommitBytesAndType() throws {
     let did = actorDID
     let prior = BlueCatbirdChatDefs.MlsAadPriorContext(
       conversationId: Bytes(data: Data([0x01])),
@@ -254,7 +257,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       lifecycle: "active"
     )
     let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
-      conversationId: "convo-1",
+      conversationId: "550e8400-e29b-41d4-a716-446655440000",
       generation: 1,
       stateVersion: 1,
       groupId: Bytes(data: Data([0x02])),
@@ -324,8 +327,8 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     )
     let entry = BlueCatbirdChatDefs.ConversationEntry.blueCatbirdChatDefsCommitEntry(
       BlueCatbirdChatDefs.CommitEntry(
-        entryId: "commit-entry-1",
-        conversationId: "convo-1",
+        entryId: "750e8400-e29b-41d4-a716-446655440000",
+        conversationId: "550e8400-e29b-41d4-a716-446655440000",
         seq: 5,
         signedRequest: BlueCatbirdChatDefs.SignedCommitTransition(
           body: .blueCatbirdChatDefsCommitTransitionBody(commitBody),
@@ -338,15 +341,54 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertTrue(entry.isCommit)
     XCTAssertFalse(entry.isApplication)
     XCTAssertEqual(entry.commitEntry?.commitData, Data([0xCC, 0xDD]))
-    XCTAssertEqual(entry.entryID, "commit-entry-1")
+    XCTAssertEqual(entry.entryID, "750e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(entry.sequenceNumber, 5)
-    let envelope = MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit")
-    XCTAssertEqual(envelope?.conversationId, "convo-1")
+    let envelope = try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit")
+    XCTAssertEqual(envelope?.conversationId, "550e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(envelope?.senderDid, did.description)
     XCTAssertEqual(envelope?.ciphertext, Data([0xCC, 0xDD]))
-    XCTAssertEqual(envelope?.serverMessageId, "commit-entry-1")
-    XCTAssertNil(MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app"))
-    XCTAssertEqual(MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xCC, 0xDD]))
+    XCTAssertEqual(envelope?.serverMessageId, "750e8400-e29b-41d4-a716-446655440000")
+    XCTAssertEqual(envelope?.serverSequence, 5)
+    XCTAssertEqual(envelope?.serverEpoch, 7)
+    XCTAssertNil(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app"))
+    XCTAssertEqual(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xCC, 0xDD]))
+  }
+
+  func testCanonicalEnvelopeRejectsReservedIDsAndInvalidReceiptMetadata() throws {
+    let entry = try XCTUnwrap(makeApplicationEntry().applicationEntry)
+    for id in ["membership-left:650e8400-e29b-41d4-a716-446655440000:750e8400-e29b-41d4-a716-446655440000", "650E8400-E29B-41D4-A716-446655440000", "650e8400-e29b-11d4-a716-446655440000"] {
+      let invalid = copyApplicationEntry(entry, entryID: id)
+      XCTAssertThrowsError(try MLSOrchestratorAPIAdapter.applicationEnvelope(invalid))
+    }
+    for seq in [-1, 0, 9_007_199_254_740_992] {
+      let invalid = copyApplicationEntry(entry, sequence: seq)
+      XCTAssertThrowsError(try MLSOrchestratorAPIAdapter.applicationEnvelope(invalid))
+    }
+    for timestamp in ["2023-11-14T22:13:21Z", "2023-11-14T22:13:21.3010Z", "2023-11-14T22:13:21.301+00:00"] {
+      let invalid = copyApplicationEntry(entry, receivedAt: try XCTUnwrap(ATProtocolDate(iso8601String: timestamp)))
+      XCTAssertThrowsError(try MLSOrchestratorAPIAdapter.applicationEnvelope(invalid))
+    }
+  }
+
+  func testCanonicalEnvelopePreservesExactWireMillisecondsAndRejectsUnexpectedBody() throws {
+    var entry = try XCTUnwrap(makeApplicationEntry().applicationEntry)
+    entry = copyApplicationEntry(entry, receivedAt: try XCTUnwrap(ATProtocolDate(iso8601String: "2023-11-14T22:13:21.301Z")))
+    XCTAssertEqual(try MLSOrchestratorAPIAdapter.applicationEnvelope(entry).timestamp, "2023-11-14T22:13:21.301Z")
+    entry = copyApplicationEntry(entry, unexpectedBody: true)
+    XCTAssertThrowsError(try MLSOrchestratorAPIAdapter.incomingEnvelope(.blueCatbirdChatDefsApplicationEntry(entry)))
+  }
+
+  private func copyApplicationEntry(
+    _ entry: BlueCatbirdChatDefs.ApplicationEntry,
+    entryID: String? = nil, sequence: Int? = nil,
+    receivedAt: ATProtocolDate? = nil, unexpectedBody: Bool = false
+  ) -> BlueCatbirdChatDefs.ApplicationEntry {
+    BlueCatbirdChatDefs.ApplicationEntry(
+      entryId: entryID ?? entry.entryId, conversationId: entry.conversationId,
+      seq: sequence ?? entry.seq,
+      signedRequest: .init(body: unexpectedBody ? .unexpected(.object([:])) : entry.signedRequest.body,
+        signature: entry.signedRequest.signature),
+      receivedAt: receivedAt ?? entry.receivedAt)
   }
 
   private let actorDID = try! DID(didString: "did:plc:abc123")
@@ -364,7 +406,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
       lifecycle: "active"
     )
     let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
-      conversationId: "convo-1",
+      conversationId: "550e8400-e29b-41d4-a716-446655440000",
       generation: 1,
       stateVersion: 1,
       groupId: Bytes(data: Data([0x02])),
@@ -399,8 +441,8 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     )
     return .blueCatbirdChatDefsApplicationEntry(
       BlueCatbirdChatDefs.ApplicationEntry(
-        entryId: "entry-1",
-        conversationId: "convo-1",
+        entryId: "650e8400-e29b-41d4-a716-446655440000",
+        conversationId: "550e8400-e29b-41d4-a716-446655440000",
         seq: 4,
         signedRequest: BlueCatbirdChatDefs.SignedApplicationSend(
           body: .blueCatbirdChatDefsApplicationSendBody(body),

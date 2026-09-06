@@ -164,7 +164,8 @@ extension MLSConversationManager {
         mode: protocolAuthorityMode,
         mlsContext: context,
         databasePool: databasePool,
-        apiClient: apiAdapter
+        apiClient: apiAdapter,
+        authorizedDeviceKeyResolver: { did in try apiAdapter.authorizedDeviceKeys(userDid: did) }
       )
       // Keep canonical live mutations on the Rust signer seam. The weak
       // capture avoids making the API client retain the orchestrator runtime;
@@ -272,10 +273,19 @@ extension MLSConversationManager {
 
   internal func withRustAuthoritativeRuntime<T>(
     operation: String,
+    requiresDeviceAuthorization: Bool = true,
     body: @escaping (MLSOrchestratorRuntime) throws -> T
   ) async throws -> T {
     guard protocolAuthorityMode.usesRustForDecisions else {
       throw MLSConversationError.operationFailed("Rust authority requested while mode is \(protocolAuthorityMode.rawValue)")
+    }
+    if protocolAuthorityMode == .rustFull && requiresDeviceAuthorization {
+      do { try await ensureDeviceRecordPublished() }
+      catch is CancellationError { throw CancellationError() }
+      catch {
+        if let publication = error as? MLSDeviceRecordPublication.Failure { throw publication }
+        throw MLSConversationLifecycleError.deviceAuthorizationUnavailable
+      }
     }
     guard let runtime = await ensureOrchestratorRuntime() else {
       throw MLSConversationError.operationFailed("Rust orchestrator runtime unavailable for \(operation)")
@@ -297,7 +307,10 @@ extension MLSConversationManager {
     // returning.
     return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
       Self.rustAuthorityExecutionQueue.async {
-        continuation.resume(with: Result { try body(runtime) })
+        continuation.resume(with: Result {
+          do { return try body(runtime) }
+          catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
+        })
       }
     }
   }

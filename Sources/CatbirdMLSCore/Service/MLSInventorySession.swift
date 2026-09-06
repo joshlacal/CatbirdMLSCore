@@ -15,10 +15,12 @@ internal enum MLSInventoryDomain: String, CaseIterable, Hashable, Sendable {
 internal enum MLSInventorySessionError: Error, Equatable, LocalizedError {
   case sessionIncomplete
   case sessionMismatch
+  case ticketSessionUnavailable
   case continuationChanged(MLSInventoryDomain)
   case missingContinuation(MLSInventoryDomain)
   case unexpectedContinuation(MLSInventoryDomain)
   case repeatedContinuation(MLSInventoryDomain, String)
+  case invalidRecoveryConversationID
 
   var errorDescription: String? {
     switch self {
@@ -26,6 +28,8 @@ internal enum MLSInventorySessionError: Error, Equatable, LocalizedError {
       return "The inventory session is incomplete"
     case .sessionMismatch:
       return "The inventory session or event cursor does not match"
+    case .ticketSessionUnavailable:
+      return "The retained inventory session must be reconciled again before reconnecting"
     case let .continuationChanged(domain):
       return "The \(domain.rawValue) inventory continuation changed session state"
     case let .missingContinuation(domain):
@@ -34,6 +38,8 @@ internal enum MLSInventorySessionError: Error, Equatable, LocalizedError {
       return "The \(domain.rawValue) inventory page returned a continuation after its final page"
     case let .repeatedContinuation(domain, cursor):
       return "The \(domain.rawValue) inventory pagination repeated cursor \(cursor)"
+    case .invalidRecoveryConversationID:
+      return "The recovery inventory contains an invalid conversation identifier"
     }
   }
 }
@@ -292,25 +298,32 @@ internal struct MLSCanonicalInventoryActionSet {
     (BlueCatbirdChatDefs.WelcomeView) async throws -> Void
   internal typealias LeafRecoveryHandler =
     (BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void
+  internal typealias RecoveryConversationStateHandler =
+    (BlueCatbirdChatDefs.OperationId) async throws -> Void
 
   internal var onConversationState: ConversationStateHandler?
   internal var onConversationRemoval: ConversationRemovalHandler?
   internal var onConversationClose: ConversationCloseHandler?
   internal var onPendingWelcome: WelcomeHandler?
   internal var onLeafRecovery: LeafRecoveryHandler?
+  /// Only a consumer that treats recovery items as current-state scheduling
+  /// hints may opt in. Ordinary item handlers retain their per-item effects.
+  internal var onRecoveryConversationState: RecoveryConversationStateHandler?
 
   internal init(
     onConversationState: ConversationStateHandler? = nil,
     onConversationRemoval: ConversationRemovalHandler? = nil,
     onConversationClose: ConversationCloseHandler? = nil,
     onPendingWelcome: WelcomeHandler? = nil,
-    onLeafRecovery: LeafRecoveryHandler? = nil
+    onLeafRecovery: LeafRecoveryHandler? = nil,
+    onRecoveryConversationState: RecoveryConversationStateHandler? = nil
   ) {
     self.onConversationState = onConversationState
     self.onConversationRemoval = onConversationRemoval
     self.onConversationClose = onConversationClose
     self.onPendingWelcome = onPendingWelcome
     self.onLeafRecovery = onLeafRecovery
+    self.onRecoveryConversationState = onRecoveryConversationState
   }
 }
 
@@ -362,13 +375,21 @@ internal enum MLSCanonicalInventoryActionMissingError: Error, Equatable, Localiz
   }
 }
 
-/// Applies the aggregate in wire order. A caller must provide an action for
-/// every item variant that appears; this function never filters an item out.
+/// Applies conversation and Welcome items in wire order, then recovery work.
+/// A current-state consumer can reconcile each recovery conversation once;
+/// all selectors are validated before any recovery hint can be coalesced.
 internal enum MLSCanonicalInventoryReconciler {
   internal static func reconcile(
     _ snapshot: MLSCanonicalInventorySnapshot,
     actions: MLSCanonicalInventoryActionSet
   ) async throws {
+    let recoveryConversationIDs: [BlueCatbirdChatDefs.OperationId]?
+    if actions.onRecoveryConversationState != nil {
+      recoveryConversationIDs = try recoveryConversations(snapshot.leafRecoveryItems)
+    } else {
+      recoveryConversationIDs = nil
+    }
+
     for item in snapshot.conversationItems {
       switch item {
       case let .blueCatbirdChatDefsConversationInventoryState(state):
@@ -398,6 +419,15 @@ internal enum MLSCanonicalInventoryReconciler {
       try await action(welcome)
     }
 
+    if let recoveryConversationIDs, let action = actions.onRecoveryConversationState {
+      // Welcome processing can change access. Do not reuse the earlier
+      // conversation phase's work, or retain this set across snapshots.
+      for conversationID in recoveryConversationIDs {
+        try await action(conversationID)
+      }
+      return
+    }
+
     for recovery in snapshot.leafRecoveryItems {
       guard let action = actions.onLeafRecovery else {
         throw MLSCanonicalInventoryActionMissingError.leafRecovery
@@ -414,6 +444,38 @@ internal enum MLSCanonicalInventoryReconciler {
       }
     }
   }
+
+  private static func recoveryConversations(
+    _ items: [BlueCatbirdChatDefs.LeafRecoveryInboxItem]
+  ) throws -> [BlueCatbirdChatDefs.OperationId] {
+    // Validate the complete typed array before deduplication. In particular,
+    // an unsupported tail or malformed duplicate cannot disappear in a Set.
+    let identifiers = try items.map { item -> BlueCatbirdChatDefs.OperationId in
+      let identifier: BlueCatbirdChatDefs.OperationId
+      switch item {
+      case let .blueCatbirdChatDefsLeafRecoveryView(value):
+        identifier = value.conversationId
+      case let .blueCatbirdChatDefsRecoveryWorkPendingView(value):
+        identifier = value.conversationId
+      case let .blueCatbirdChatDefsRecoveryWorkCompletedByTransitionView(value):
+        identifier = value.conversationId
+      case let .blueCatbirdChatDefsRecoveryWorkSupersededByTransitionView(value):
+        identifier = value.conversationId
+      case let .blueCatbirdChatDefsRecoveryWorkSupersededByRevocationView(value):
+        identifier = value.conversationId
+      case .unexpected:
+        throw MLSCanonicalInventoryActionMissingError.unsupportedLeafRecoveryItem
+      }
+      // Match the native ConversationChanged selector contract; do not
+      // normalize UUID spellings or let Swift string equality alias them.
+      guard MLSStorageHelpers.isCanonicalUUIDv4(identifier) else {
+        throw MLSInventorySessionError.invalidRecoveryConversationID
+      }
+      return identifier
+    }
+    var seen = Set<BlueCatbirdChatDefs.OperationId>()
+    return identifiers.filter { seen.insert($0).inserted }
+  }
 }
 
 /// The ticket fence is established once for a subscription attempt and is
@@ -424,6 +486,31 @@ internal struct MLSCanonicalSubscriptionFence: Equatable, Sendable {
   internal let inventorySessionId: String
   internal let snapshotEventCursor: String
   internal let snapshotExpiresAt: Date
+}
+
+/// A transient durable-action or cursor-write failure also requires replay.
+/// Only successfully committing that exact envelope may clear the requirement;
+/// typing and unrelated replay-prefix envelopes cannot authorize a new fence.
+internal struct MLSCanonicalSubscriptionReplayRequirement {
+  internal private(set) var isRequired = false
+  private var failedCursor: String?
+
+  internal mutating func recordFailure(_ message: BlueCatbirdChatSubscribeEvents.Message) {
+    if case .blueCatbirdChatDefsTypingEvent = message { return }
+    guard !isRequired else { return }
+    isRequired = true
+    if case let .blueCatbirdChatDefsEventEnvelope(envelope) = message {
+      failedCursor = envelope.cursor
+    }
+  }
+
+  internal mutating func recordHandled(_ message: BlueCatbirdChatSubscribeEvents.Message) {
+    guard isRequired, let failedCursor,
+          case let .blueCatbirdChatDefsEventEnvelope(envelope) = message,
+          envelope.cursor == failedCursor else { return }
+    isRequired = false
+    self.failedCursor = nil
+  }
 }
 
 /// A durable event that cannot be interpreted by the installed client is a
@@ -497,20 +584,46 @@ internal struct MLSCanonicalSubscriptionFailureLatch: Equatable, Sendable {
 
 internal enum MLSCanonicalSubscriptionCoordinatorError: Error, Equatable, LocalizedError {
   case blocked(MLSCanonicalSubscriptionTerminalFailure)
+  case unhandledEventBlocksRecovery
 
   internal var errorDescription: String? {
     switch self {
     case let .blocked(failure):
       return failure.errorDescription
+    case .unhandledEventBlocksRecovery:
+      return "An unhandled chat event must be replayed before replacing its inventory session"
     }
   }
 }
 
 internal enum MLSCanonicalSubscriptionCoordinator {
+  /// Only the ticket endpoint's typed session rejection can retire this local
+  /// capability before its advertised expiry. No cursor or completion is
+  /// installed here: the next prepare must finish the full inventory protocol.
+  @discardableResult
+  internal static func invalidateRejectedTicketFence(
+    _ error: Error,
+    fence: inout MLSCanonicalSubscriptionFence?,
+    terminalFailure: MLSCanonicalSubscriptionTerminalFailure?,
+    hasUnhandledEvent: Bool
+  ) throws -> Bool {
+    guard error as? MLSInventorySessionError == .ticketSessionUnavailable,
+          fence != nil else { return false }
+    if let terminalFailure {
+      throw MLSCanonicalSubscriptionCoordinatorError.blocked(terminalFailure)
+    }
+    guard !hasUnhandledEvent else {
+      throw MLSCanonicalSubscriptionCoordinatorError.unhandledEventBlocksRecovery
+    }
+    fence = nil
+    return true
+  }
+
   internal static func prepare(
     fence: inout MLSCanonicalSubscriptionFence?,
     initialCursor: String?,
     terminalFailure: MLSCanonicalSubscriptionTerminalFailure? = nil,
+    hasUnhandledEvent: Bool = false,
     fetchInventory: @escaping () async throws -> MLSCanonicalInventorySnapshot,
     reconcile: @escaping (MLSCanonicalInventorySnapshot) async throws -> Void,
     installCompletion: @escaping (MLSCanonicalInventorySnapshot) -> Void,
@@ -528,6 +641,9 @@ internal enum MLSCanonicalSubscriptionCoordinator {
         // the expiry branch can discard it or fetch a newer aggregate.
         throw MLSCanonicalSubscriptionCoordinatorError.blocked(terminalFailure)
       }
+      guard !hasUnhandledEvent else {
+        throw MLSCanonicalSubscriptionCoordinatorError.unhandledEventBlocksRecovery
+      }
       // An expired retained audience is explicit unsupported-state recovery:
       // it is the one case where a new aggregate is required. Event-handler
       // failures and unknown payloads never reach this branch while the
@@ -540,6 +656,9 @@ internal enum MLSCanonicalSubscriptionCoordinator {
       // cannot authorize a fresh aggregate until an explicit recovery
       // transition clears the latch.
       throw MLSCanonicalSubscriptionCoordinatorError.blocked(terminalFailure)
+    }
+    guard !hasUnhandledEvent else {
+      throw MLSCanonicalSubscriptionCoordinatorError.unhandledEventBlocksRecovery
     }
 
     let snapshot = try await fetchInventory()

@@ -4218,6 +4218,7 @@ public actor MLSGRDBManager {
         "MLSRecoveryAttemptStateModel",
         "MLSRecoveryGlobalStateModel",
         "MLSOrphanedMutationModel",
+        MLSMessageAppendLedger.table,
         "grdb_migrations"
       ]
       for req in requiredTables {
@@ -4233,46 +4234,14 @@ public actor MLSGRDBManager {
         )
       }
 
-      let migrations: [String] = try await queue.read { db in
-        try String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations;")
+      let migrations: Set<String> = try await queue.read { db in
+        try String.fetchSet(db, sql: "SELECT identifier FROM grdb_migrations;")
       }
-      let requiredMigrations = [
-        "v1_initial_schema",
-        "v2_performance_indexes",
-        "v3_consumption_tracking",
-        "v4_fix_message_ordering_index",
-        "v5_error_tracking_recovery",
-        "v6_membership_history",
-        "v7_validation_hardening",
-        "v8_add_deleted_at_to_epoch_keys",
-        "v9_join_tracking",
-        "v10_placeholder_conversations",
-        "v11_payload_consolidation",
-        "v12_orphan_reactions",
-        "v13_message_ordering",
-        "v14_decryption_receipts",
-        "v15_chat_request_state",
-        "v16_declaration_cache",
-        "v17_declaration_policy",
-        "v18_read_frontier",
-        "v19_control_messages_read",
-        "v20_drop_declaration_cache",
-        "v21_group_avatar_image_data",
-        "v22_conversation_muted_until",
-        "v23_member_avatar_url",
-        "v24_remote_read_cursors",
-        "v25_delivery_acks",
-        "addNeedsResetColumn",
-        "addIsUnrecoverable",
-        "v28_pending_group_reset",
-        "v29_bootstrap_pending",
-        "v30_message_timeline_sequence_index",
-        "v31_message_field_encryption",
-        "v32_recovery_attempt_state",
-        "v33_conversation_description",
-        "v34_message_edit_unsend",
-        "v35_message_crypto_binding"
-      ]
+      // The registered migrator is the authority for both creation and
+      // validate-only reopen. A copied list can reject a database this same
+      // binary just created. Compare exact identifiers (including unknown
+      // migrations), not an incidental SQL row order or only a count.
+      let requiredMigrations = Set(Self.makeMigrator().migrations)
       guard migrations == requiredMigrations else {
         throw MLSStorageInitializationError.validationFailed(
           details: "GRDB migrations mismatch (expected \(requiredMigrations.count), found \(migrations.count))"
@@ -4298,6 +4267,19 @@ public actor MLSGRDBManager {
             details: "MLSMessageModel missing required column \(col)"
           )
         }
+      }
+
+      let ledgerColumns: Set<String> = try await queue.read { db in
+        Set(try db.columns(in: MLSMessageAppendLedger.table).map(\.name))
+      }
+      let requiredLedgerColumns: Set<String> = [
+        "currentUserDID", "cryptoConversationID", "messageID", "appendOrdinal",
+        "payloadDigest", "bodyHMAC", "entryHMAC", "proofHMAC"
+      ]
+      guard requiredLedgerColumns.isSubset(of: ledgerColumns) else {
+        throw MLSStorageInitializationError.validationFailed(
+          details: "MLSMessageAppendLedgerV1 missing required columns"
+        )
       }
 
       // Check required columns on MLSConversationModel
@@ -5554,6 +5536,12 @@ public actor MLSGRDBManager {
         try db.execute(
           sql: "ALTER TABLE MLSMessageModel ADD COLUMN cryptoConversationID TEXT")
       }
+    }
+
+    // Starts a new append proof without rewriting or claiming integrity of
+    // legacy ciphertext/HMAC history. No duplicate decryptable body is stored.
+    migrator.registerMigration("v36_message_append_ledger") { db in
+      try MLSMessageAppendLedger.createSchema(in: db)
     }
 
     return migrator

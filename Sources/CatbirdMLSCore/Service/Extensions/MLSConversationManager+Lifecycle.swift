@@ -991,12 +991,6 @@ extension MLSConversationManager {
       }
     }
 
-    if configuration.skipDeviceRecordPublishing {
-      logger.info("Skipping device record publish (skipDeviceRecordPublishing=true)")
-    } else {
-      logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device record publish; Rust owns MLS device readiness")
-    }
-
     logger.info("Loading persisted MLS storage for user: \(userDid)")
     logger.info("✅ MLS storage loaded successfully")
     return reconciled
@@ -1093,6 +1087,9 @@ extension MLSConversationManager {
     }
 
     do {
+      // Repository authorization must exist before recovery consumes remote
+      // credentials or a sibling device attempts to admit this device.
+      try await ensureDeviceRecordPublished()
       let report = try await withRustAuthoritativeRuntime(operation: operation) { runtime in
         try runtime.startupReconcile()
       }

@@ -448,13 +448,19 @@ public enum MLSCanonicalTransportAdapter {
   internal static func persistCanonicalCursor(
     _ cursor: String,
     for conversationId: String,
-    store: MLSEventCursorStore?
+    store: MLSEventCursorStore?,
+    run: MLSCanonicalSubscriptionRun? = nil
   ) async throws {
+    try run?.check()
     guard let store else {
       throw MLSCanonicalSubscriptionFailureConfigurationError.missingStorage
     }
     try await MainActor.run {
-      try store.updateCursor(for: conversationId, cursor: cursor)
+      if let run {
+        try run.whileValid { try store.updateCursor(for: conversationId, cursor: cursor) }
+      } else {
+        try store.updateCursor(for: conversationId, cursor: cursor)
+      }
     }
   }
 

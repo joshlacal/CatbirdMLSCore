@@ -21,6 +21,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   public let bridge: OrchestratorBridge
 
+  private let localContext: MlsContext?
   private let storageAdapter: OrchestratorStorageCallback?
   private let apiClient: OrchestratorApiCallback?
   private let credentialAdapter: OrchestratorCredentialCallback?
@@ -34,7 +35,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     databasePool: DatabasePool,
     apiClient: OrchestratorApiCallback,
     keychainManager: MLSKeychainManager = .shared,
-    authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil,
+    authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)? = nil,
     signingPublicKeyResolver: MLSOrchestratorCredentialAdapter.SigningPublicKeyResolver? = nil,
     signingBindingResolver: MLSOrchestratorCredentialAdapter.SigningBindingResolver? = nil,
     config: FfiOrchestratorConfig? = nil,
@@ -58,6 +59,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
     self.userDID = normalizedDID
     self.mode = mode
+    self.localContext = mlsContext
     self.storageAdapter = storageAdapter
     self.apiClient = apiClient
     self.credentialAdapter = credentialAdapter
@@ -106,6 +108,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     self.userDID = normalizedDID
     self.mode = mode
     self.bridge = bridge
+    self.localContext = nil
     self.storageAdapter = nil
     self.apiClient = nil
     self.credentialAdapter = nil
@@ -126,8 +129,17 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   public func listConversations() throws -> [BlueCatbirdChatDefs.ConversationState] {
+    try listConversationSnapshots().map(\.conversation)
+  }
+
+  /// Retain the native decrypted metadata alongside the generated conversation shape.
+  /// The wire state has encrypted metadata fields and cannot carry the display title.
+  public func listConversationSnapshots() throws -> [MLSGroupMutationResult] {
     try bridge.listConversations(userDid: userDID).map { conversation in
-      try decodeConversationSnapshot(conversation, fallbackUserDID: userDID)
+      MLSGroupMutationResult(
+        conversation: try decodeConversationSnapshot(conversation, fallbackUserDID: userDID),
+        metadata: MLSConversationSnapshotMetadata(ffiConversation: conversation)
+      )
     }
   }
 
@@ -305,6 +317,9 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   public func ensureConversationReady(conversationId: String) throws -> MLSConversationReadyResult {
+    if let terminal = try terminalAccessState(conversationId: conversationId) {
+      return MLSConversationReadyResult(recoveryState: terminal, epoch: nil, sendAllowed: false)
+    }
     let result = try bridge.ensureConversationReady(convoId: conversationId)
     return MLSConversationReadyResult(ffiResult: result)
   }
@@ -341,6 +356,16 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     try bridge.removeDevice(deviceId: deviceId)
   }
 
+  internal func currentDeviceRecordMaterial() throws -> (deviceId: String, publicKey: Data) {
+    guard let localContext,
+          let identity = try credentialAdapter?.getMlsDid(userDid: userDID),
+          let deviceId = try credentialAdapter?.getDeviceUuid(userDid: userDID),
+          identity == "\(userDID)#\(deviceId)" else {
+      throw MLSConversationError.operationFailed("This device's signing identity is unavailable.")
+    }
+    return (deviceId, try localContext.identityPublicKey(identity: identity))
+  }
+
   public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo? {
     // The credential store holds the SERVER-MINTED device id (the delivery
     // service mints its own id and stores `device_uuid` as NULL), and
@@ -356,7 +381,16 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       .map(MLSRegisteredDeviceInfo.init(ffiDeviceInfo:))
   }
 
+  private func terminalAccessState(conversationId: String) throws -> ConversationRecoveryState? {
+    switch try storageAdapter?.getConversationState(conversationId: conversationId)?.state {
+    case "device_removed": return .deviceRemoved
+    case "closed": return .closed
+    default: return nil
+    }
+  }
+
   public func conversationRecoveryState(conversationId: String) throws -> ConversationRecoveryState {
+    if let terminal = try terminalAccessState(conversationId: conversationId) { return terminal }
     let ffiState = try bridge.getConversationRecoveryState(conversationId: conversationId)
     return ConversationRecoveryState(ffiRecoveryState: ffiState)
   }
@@ -366,12 +400,16 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     initialMemberDids: [String],
     description: String?
   ) throws -> MLSCreateConversationResult {
-    let ffiResult = try bridge.createConversation(
-      name: name,
-      initialMembers: initialMemberDids.isEmpty ? nil : initialMemberDids,
-      description: description
-    )
-    return try MLSCreateConversationResult(ffiResult: ffiResult, userDID: userDID)
+    do {
+      let ffiResult = try bridge.createConversation(
+        name: name,
+        initialMembers: initialMemberDids.isEmpty ? nil : initialMemberDids,
+        description: description
+      )
+      return try MLSCreateConversationResult(ffiResult: ffiResult, userDID: userDID)
+    } catch {
+      throw MLSConversationLifecycleError.presenting(error, operation: .open)
+    }
   }
 
   public func addMembers(
@@ -389,11 +427,15 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     conversationId: String,
     memberDids: [String]
   ) throws -> MLSGroupMutationResult {
-    let ffiResult = try bridge.removeMembersResult(
-      conversationId: conversationId,
-      memberDids: memberDids
-    )
-    return try MLSGroupMutationResult(ffiResult: ffiResult, userDID: userDID)
+    do {
+      let ffiResult = try bridge.removeMembersResult(
+        conversationId: conversationId,
+        memberDids: memberDids
+      )
+      return try MLSGroupMutationResult(ffiResult: ffiResult, userDID: userDID)
+    } catch {
+      throw MLSConversationLifecycleError.presenting(error, operation: .removeMembers)
+    }
   }
 
   /// Update a group's encrypted metadata (title / description / avatar) via the
@@ -433,9 +475,13 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   public func leaveConversation(
     conversationId: String
   ) throws -> MLSLeaveConversationResult {
-    MLSLeaveConversationResult(
-      ffiResult: try bridge.leaveConversation(conversationId: conversationId)
-    )
+    do {
+      return MLSLeaveConversationResult(
+        ffiResult: try bridge.leaveConversation(conversationId: conversationId)
+      )
+    } catch {
+      throw MLSConversationLifecycleError.presenting(error, operation: .leave)
+    }
   }
 
   public func acceptConversation(conversationId: String) throws {
@@ -530,31 +576,47 @@ public struct MLSConversationSnapshotMetadata: Equatable, Sendable {
   public let title: String?
   public let description: String?
   public let avatarUrl: String?
+  /// Exact canonical policy state; nil remains an unknown legacy projection.
+  public let canonicalStateJson: String?
+  /// Native verified local epoch may be ahead of the last policy snapshot.
+  public let nativeDisplayEpoch: UInt64?
+  private(set) var isNativePolicyProjection = false
 
   init(ffiConversation: FfiConversationView) {
     self.init(
       title: ffiConversation.name,
       description: ffiConversation.description,
-      avatarUrl: ffiConversation.avatarUrl
+      avatarUrl: ffiConversation.avatarUrl,
+      canonicalStateJson: ffiConversation.canonicalStateJson,
+      nativeDisplayEpoch: ffiConversation.epoch
     )
+    self.isNativePolicyProjection = true
   }
 
   public init(
     title: String? = nil,
     description: String? = nil,
-    avatarUrl: String? = nil
+    avatarUrl: String? = nil,
+    canonicalStateJson: String? = nil,
+    nativeDisplayEpoch: UInt64? = nil
   ) {
     self.title = Self.nonEmpty(title)
     self.description = Self.nonEmpty(description)
     self.avatarUrl = Self.nonEmpty(avatarUrl)
+    self.canonicalStateJson = canonicalStateJson
+    self.nativeDisplayEpoch = nativeDisplayEpoch
   }
 
   func fillingMissingValues(from fallback: MLSConversationSnapshotMetadata) -> MLSConversationSnapshotMetadata {
-    MLSConversationSnapshotMetadata(
+    var filled = MLSConversationSnapshotMetadata(
       title: title ?? fallback.title,
       description: description ?? fallback.description,
-      avatarUrl: avatarUrl ?? fallback.avatarUrl
+      avatarUrl: avatarUrl ?? fallback.avatarUrl,
+      canonicalStateJson: canonicalStateJson,
+      nativeDisplayEpoch: nativeDisplayEpoch
     )
+    filled.isNativePolicyProjection = isNativePolicyProjection
+    return filled
   }
 
   static func nonEmpty(_ value: String?) -> String? {
@@ -649,6 +711,20 @@ private func decodeConversationSnapshot(
   _ ffiConversation: FfiConversationView,
   fallbackUserDID: String
 ) throws -> BlueCatbirdChatDefs.ConversationState {
+  if let json = ffiConversation.canonicalStateJson {
+    guard let groupID = Data(hexEncoded: ffiConversation.groupId),
+          ffiConversation.epoch <= 9_007_199_254_740_991 else {
+      throw MLSCanonicalPolicyProjection.ValidationError.invalidSnapshot
+    }
+    let state = try MLSCanonicalPolicyProjection.decode(json,
+      conversationID: ffiConversation.conversationId, groupID: groupID, maximumEpoch: Int64(ffiConversation.epoch))
+    guard state.participants.contains(where: { $0.userDid.description == fallbackUserDID }) else {
+      throw MLSCanonicalPolicyProjection.ValidationError.invalidSnapshot
+    }
+    return state
+  }
+  // Legacy display-only shape. Its metadata carries no canonical policy JSON,
+  // so none of these compatibility values can change durable consent state.
   let creatorDIDString =
     ffiConversation.members.first(where: { $0.role.lowercased() == "admin" })?.did ?? fallbackUserDID
   let creatorDID = (try? DID(didString: creatorDIDString)) ?? (try! DID(didString: "did:plc:unknown"))
@@ -665,7 +741,7 @@ private func decodeConversationSnapshot(
 
   let coordinates = BlueCatbirdChatDefs.ConversationCoordinates(
     conversationId: ffiConversation.conversationId,
-    generation: 1,
+    generation: 0,
     stateVersion: 1,
     groupId: Bytes(data: Data(hexEncoded: ffiConversation.groupId) ?? Data()),
     epoch: Int(ffiConversation.epoch),
@@ -677,7 +753,7 @@ private func decodeConversationSnapshot(
   let metadataSnapshot = BlueCatbirdChatDefs.MetadataSnapshot(
     coordinate: BlueCatbirdChatDefs.MetadataCryptoContext(
       conversationId: Bytes(data: Data(ffiConversation.conversationId.utf8)),
-      generation: 1,
+      generation: 0,
       groupId: Bytes(data: Data(hexEncoded: ffiConversation.groupId) ?? Data()),
       epoch: Int(ffiConversation.epoch),
       groupContextHash: Bytes(data: Data()),

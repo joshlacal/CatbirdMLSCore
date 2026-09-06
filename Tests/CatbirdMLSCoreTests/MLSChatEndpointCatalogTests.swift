@@ -12,7 +12,7 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
       "getConversations", "getDevices", "getEntries",
       "getLeafRecoveryInbox", "getOwnDevices", "getPendingWelcomes",
       "getSubscriptionTicket", "prepareBlobUpload", "publishTyping",
-      "rebindDeviceAuthentication", "rejectWelcome", "replenishKeyPackages",
+      "rejectWelcome", "replenishKeyPackages",
       "requestLeafRecovery", "requestLeave", "requestReset",
       "revokeDevice", "sendMessage", "submitTransition",
       "subscribeEvents", "uploadBlob"
@@ -53,7 +53,7 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
       "sendMessage", "submitTransition", "createConversation",
       "closeConversation", "acceptConversation", "requestLeave",
       "cancelLeave", "enrollDevice", "revokeDevice",
-      "rebindDeviceAuthentication", "replenishKeyPackages",
+      "replenishKeyPackages",
       "requestLeafRecovery", "cancelLeafRecovery", "requestReset",
       "activateReset", "acknowledgeWelcome", "rejectWelcome",
       "deleteBlob"

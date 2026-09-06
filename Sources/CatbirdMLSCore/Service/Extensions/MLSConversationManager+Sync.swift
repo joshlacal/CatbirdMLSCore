@@ -116,8 +116,6 @@ public extension MLSConversationManager {
         )
         try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer-fallback")
       }
-      await bridgeMissingMetadataTitlesAfterRustSync()
-      await persistRustHydratedMembers()
       return
     }
 
@@ -130,6 +128,7 @@ public extension MLSConversationManager {
   }
 
   internal func hydrateSwiftCachesFromDatabaseAfterRustSync(reason: String) async throws {
+    let capturedGeneration = sessionGeneration
     guard let userDid else {
       logger.warning("⚠️ [MLS-FULL-RUST] Skipping Swift cache hydrate after \(reason): no user DID")
       return
@@ -141,9 +140,45 @@ public extension MLSConversationManager {
       database: database
     )
 
+    let terminalStates = try await database.read { db -> [String: String] in
+      let rows = try Row.fetchAll(db,
+        sql: "SELECT conversation_id, state FROM mls_orchestrator_terminal_access WHERE user_did = ?",
+        arguments: [normalizedUserDID])
+      return Dictionary(uniqueKeysWithValues: rows.map { ($0["conversation_id"] as String, $0["state"] as String) })
+    }
+    let canonicalStates = try await database.read { db -> [String: BlueCatbirdChatDefs.ConversationState] in
+      var states: [String: BlueCatbirdChatDefs.ConversationState] = [:]
+      for model in snapshot.conversations {
+        if let json = try MLSCanonicalPolicyProjection.json(for: model, in: db) {
+          states[model.conversationID] = try MLSCanonicalPolicyProjection.decode(json,
+            conversationID: model.conversationID, groupID: model.groupID, maximumEpoch: model.epoch)
+        }
+      }
+      return states
+    }
+    var hydrationStates: [String: ConversationInitState] = [:]
     var hydratedConversations: [BlueCatbirdChatDefs.ConversationState] = []
 
     for model in snapshot.conversations {
+      if terminalStates[model.conversationID] == "closed" {
+        hydrationStates[model.conversationID] = .failed("Conversation closed")
+      } else if terminalStates[model.conversationID] == "device_removed" {
+        hydrationStates[model.conversationID] = .failed("This device no longer has access")
+      } else if model.needsReset || model.pendingNewGroupId != nil {
+        hydrationStates[model.conversationID] = .initializing
+      } else if !model.isActive {
+        hydrationStates[model.conversationID] = .failed("Conversation is inactive")
+      } else if model.isUnrecoverable {
+        hydrationStates[model.conversationID] = .failed("Secure session unavailable")
+      } else if model.needsRejoin {
+        hydrationStates[model.conversationID] = .initializing
+      }
+
+      if let canonical = canonicalStates[model.conversationID] {
+        hydratedConversations.append(canonical)
+        continue
+      }
+
       let members = snapshot.membersByConvoID[model.conversationID] ?? []
       let apiParticipants: [BlueCatbirdChatDefs.ParticipantView] = members.compactMap { member -> BlueCatbirdChatDefs.ParticipantView? in
         guard let did = try? DID(didString: member.did) else {
@@ -229,144 +264,52 @@ public extension MLSConversationManager {
       hydratedConversations.append(convo)
     }
 
-    applySwiftCacheHydration(
-      hydratedConversations,
-      reason: reason,
-      source: "database fallback"
-    )
+    let conversationsToPublish = hydratedConversations
+    let statesToPublish = hydrationStates
+    let nativeEpochs = Dictionary(uniqueKeysWithValues: snapshot.conversations.map {
+      ($0.conversationID, UInt64(clamping: $0.epoch))
+    })
+    try await MainActor.run {
+      try validateSessionGeneration(capturedGeneration: capturedGeneration)
+      applySwiftCacheHydration(conversationsToPublish, reason: reason, source: "database projection",
+        states: statesToPublish, nativeEpochs: nativeEpochs)
+    }
   }
 
   internal func hydrateSwiftCachesFromRustSnapshotsAfterRustSync(
     runtime: MLSOrchestratorRuntime,
     reason: String
   ) async throws {
-    let hydratedConversations = try runtime.listConversations()
-    applySwiftCacheHydration(
-      hydratedConversations,
-      reason: reason,
-      source: "Rust snapshots"
-    )
+    try await persistRustConversationSnapshots(try runtime.listConversationSnapshots(), reason: reason)
   }
 
-  /// Persist the orchestrator-hydrated member roster into the durable GRDB
-  /// `MLSMemberModel` table for rustFull recipients.
-  ///
-  /// In `.rustFull`, `syncWithServer` returns right after the Rust sync +
-  /// `applySwiftCacheHydration` (which populates the IN-MEMORY `conversations`
-  /// dict + `groupStates`, but NOT the GRDB member table). The only writers of
-  /// `MLSMemberModel` are the legacy sync body (`persistMembersToDatabase` at
-  /// the end of `syncWithServerLegacy`, short-circuited in rustFull) and the
-  /// local ADMIN actions (createGroup/addMembers/removeMember via
-  /// `applyRustConversationSnapshot`). So a JOINER's member table stays empty
-  /// and the UI's `memberCount()` / `fetchMembers()` read 0 → "0 members".
-  ///
-  /// Mirror the legacy contract: write the hydrated roster to GRDB after every
-  /// rustFull sync. Guarded on a non-empty roster so a transient empty snapshot
-  /// can't wipe a good member list (`persistMembersToDatabase` marks all active
-  /// rows inactive before re-inserting from `convo.members`).
-  private func persistRustHydratedMembers() async {
-    guard let userDid = userDid else { return }
-    var rosters = conversations.values.filter { !$0.participants.isEmpty }
-
-    let emptyRosterConvos = conversations.values.filter { $0.participants.isEmpty }
-    for convo in emptyRosterConvos {
-      guard let groupIdData = Data(hexEncoded: convo.groupId) else { continue }
-      guard
-        let debugInfo = try? await mlsClient.debugGroupMembers(for: userDid, groupId: groupIdData),
-        !debugInfo.members.isEmpty
-      else { continue }
-
-      let creatorDIDString = convo.metadataSnapshot.authorProof.authorDid.description
-      let participants: [BlueCatbirdChatDefs.ParticipantView] = debugInfo.members.compactMap { member in
-        guard
-          let didString = String(data: member.credentialIdentity, encoding: .utf8),
-          let did = try? DID(didString: MLSStorageHelpers.normalizeDID(didString))
-        else { return nil }
-        return BlueCatbirdChatDefs.ParticipantView(
-          userDid: did,
-          role: did.didString().caseInsensitiveCompare(creatorDIDString) == .orderedSame ? .value_admin : .value_member,
-          status: .value_active,
-          invitationProvenance: nil,
-          leafCount: 1
-        )
+  internal func persistRustConversationSnapshots(
+    _ snapshots: [MLSGroupMutationResult],
+    reason: String
+  ) async throws {
+    let generation = sessionGeneration
+    for snapshot in snapshots {
+      try Task.checkCancellation()
+      try validateSessionGeneration(capturedGeneration: generation)
+      try await applyRustConversationSnapshot(snapshot.conversation, metadata: snapshot.metadata, publishCache: false)
+      if let userDid,
+         await MLSPendingLeaveHintStore.shared.load(userDID: userDid, conversationID: snapshot.conversation.conversationId) != nil {
+        _ = await conversationLeavePresentation(conversationID: snapshot.conversation.conversationId, refresh: true)
       }
-      guard !participants.isEmpty else { continue }
-
-      rosters.append(
-        BlueCatbirdChatDefs.ConversationState(
-          conversationKind: convo.conversationKind,
-          coordinates: convo.coordinates,
-          cipherSuite: convo.cipherSuite,
-          participants: participants,
-          leaves: convo.leaves,
-          metadataSnapshot: convo.metadataSnapshot,
-          snapshotSeq: convo.snapshotSeq,
-          sequencerDid: convo.sequencerDid,
-          sequencerTerm: convo.sequencerTerm
-        )
-      )
     }
-
-    guard !rosters.isEmpty else { return }
-    do {
-      try await persistMembersToDatabase(Array(rosters))
-    } catch {
-      logger.warning(
-        "⚠️ [MLS-FULL-RUST] Failed to persist hydrated member roster to GRDB: \(error.localizedDescription, privacy: .public)"
-      )
-    }
+    try validateSessionGeneration(capturedGeneration: generation)
+    // Read back the durable projection so rejected stale/terminal snapshots cannot
+    // leak their coordinates or rosters into the observed caches.
+    try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: reason)
   }
 
-  /// Bridge the orchestrator-decrypted group name into the durable
-  /// `MLSConversationModel.title` for rustFull recipients.
-  ///
-  /// In `.rustFull`, incoming Welcomes/commits are processed by the Rust
-  /// orchestrator (`join_group` → `hydrate_conversation_metadata`), which
-  /// decrypts the group name into the orchestrator's IN-MEMORY conversation
-  /// cache but never writes it to GRDB. The legacy `initializeGroupFromWelcome`
-  /// path — the only recipient path that called `bootstrapMetadataAfterJoin`
-  /// — is short-circuited here (`syncWithServer` returns right after the Rust
-  /// sync), and `listConversations()` snapshots can't carry the name because
-  /// `ConvoView.metadata` was removed from the lexicon (Phase F). So the title
-  /// stays nil and the UI's `navigationTitle` falls back to "Secure Chat".
-  ///
-  /// For every hydrated conversation whose persisted title is still empty, run
-  /// the same `bootstrapMetadataAfterJoin` the legacy path used: it derives the
-  /// metadata key from the current epoch exporter via FFI `getCurrentMetadata`
-  /// (available in rustFull since M = native `MLSContext`), fetches + decrypts
-  /// the blob, and writes the title via `updateDecryptedMetadata`. Gated on an
-  /// empty title so already-named groups skip the network blob fetch; permanent
-  /// failures are suppressed by `bootstrapMetadataAfterJoin`'s own
-  /// failed-blob tracking. 1:1 chats legitimately have no group name and simply
-  /// no-op (UI shows the participant's name).
-  private func bridgeMissingMetadataTitlesAfterRustSync() async {
-    guard let userDid else { return }
-
-    let hydrated = Array(conversations.values)
-    for convo in hydrated {
-      let existingTitle: String? = try? await database.read { db in
-        try MLSConversationModel
-          .filter(MLSConversationModel.Columns.conversationID == convo.conversationId)
-          .filter(MLSConversationModel.Columns.currentUserDID == userDid)
-          .fetchOne(db)?
-          .title
-      } ?? nil
-
-      if let existingTitle, !existingTitle.isEmpty {
-        continue
-      }
-
-      await bootstrapMetadataAfterJoin(
-        groupIdHex: convo.groupId,
-        joinSource: "rustFull sync hydrate"
-      )
-    }
-  }
-
-  private func applySwiftCacheHydration(
+  @MainActor
+  internal func applySwiftCacheHydration(
     _ hydratedConversations: [BlueCatbirdChatDefs.ConversationState],
     reason: String,
-    source: String
+    source: String,
+    states: [String: ConversationInitState] = [:],
+    nativeEpochs: [String: UInt64] = [:]
   ) {
     let oldConversationCount = conversations.count
     let oldGroupStateCount = groupStates.count
@@ -374,12 +317,12 @@ public extension MLSConversationManager {
     groupStates.removeAll()
     for convo in hydratedConversations {
       conversations[convo.conversationId] = convo
-      conversationStates[convo.conversationId] = .active
+      conversationStates[convo.conversationId] = states[convo.conversationId] ?? .active
       let epoch = UInt64(clamping: convo.epoch)
       groupStates[convo.groupId] = MLSGroupState(
         groupId: convo.groupId,
         convoId: convo.conversationId,
-        epoch: epoch,
+        epoch: nativeEpochs[convo.conversationId] ?? epoch,
         members: Set(convo.participants.map { $0.userDid.description }),
         knownServerEpoch: epoch
       )

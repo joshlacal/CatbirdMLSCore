@@ -197,6 +197,17 @@ final class MLSRecoveryStateMachineTests: XCTestCase {
 
   // MARK: - Self-transitions
 
+  func testRemovedAndClosedNeverAutomaticallyRecover() {
+    for state in [ConversationRecoveryState.deviceRemoved, .closed] {
+      XCTAssertTrue(state.isPersisted)
+      XCTAssertFalse(state.allowsRecoveryAttempt)
+      XCTAssertFalse(state.canTransition(to: .needsRejoin))
+      XCTAssertFalse(state.canTransition(to: .resetPending))
+    }
+    XCTAssertTrue(ConversationRecoveryState.deviceRemoved.canTransition(to: .healthy))
+    XCTAssertFalse(ConversationRecoveryState.closed.canTransition(to: .healthy))
+  }
+
   func testAllStatesAllowSelfTransition() {
     // Self-transitions are always legal — the implementation may rewrite the
     // same state to update counters/timestamps without violating the

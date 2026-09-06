@@ -87,7 +87,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   public typealias SigningAuthorityResolver = @Sendable (String) -> SigningAuthoritySnapshot?
 
   private let keychainManager: MLSKeychainManager
-  private let authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)?
+  private let authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)?
   private let signingAuthorityResolver: SigningAuthorityResolver?
   private let transcriptSigner: TranscriptSigner?
   private let signingPublicKeyResolver: SigningPublicKeyResolver?
@@ -106,7 +106,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   /// - Parameter keychainManager: The keychain manager instance to use. Defaults to `.shared`.
   public init(
     keychainManager: MLSKeychainManager = .shared,
-    authorizedDeviceKeyResolver: (@Sendable (String) -> [Data]?)? = nil,
+    authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)? = nil,
     signingAuthorityResolver: SigningAuthorityResolver? = nil,
     transcriptSigner: TranscriptSigner? = nil,
     signingPublicKeyResolver: SigningPublicKeyResolver? = nil,
@@ -121,7 +121,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   }
 
   public convenience init(
-    authorizedDeviceKeyResolver: @escaping @Sendable (String) -> [Data]?
+    authorizedDeviceKeyResolver: @escaping @Sendable (String) throws -> [Data]?
   ) {
     self.init(
       keychainManager: .shared,
@@ -370,6 +370,6 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
 
   public func getAuthorizedDeviceKeys(userDid: String) throws -> [Data]? {
     logger.debug("Resolving authorized device keys for user: \(userDid.prefix(20))...")
-    return authorizedDeviceKeyResolver?(userDid)
+    return try authorizedDeviceKeyResolver?(userDid)
   }
 }

@@ -48,6 +48,7 @@ public final class MLSConversationManager {
     @ObservationIgnored internal var orchestratorRuntimeResumeFactory: (() async -> MLSOrchestratorRuntime?)?
     @ObservationIgnored internal var rustRuntimeRequiresForegroundRestore = false
     @ObservationIgnored internal var rustStartupReconcileCompleted = false
+    @ObservationIgnored internal let rustDeviceAuthorizationGate = MLSDeviceAuthorizationGate()
     @ObservationIgnored internal var postReloadSyncPending = false
     @ObservationIgnored internal var activeSuspensionID: UUID?
 
@@ -647,10 +648,33 @@ public final class MLSConversationManager {
         try await deviceRecordService.removeCurrentDeviceRecord(userDid: activeDid)
     }
 
+    internal func rustDeviceAuthorizationScope(for did: String) throws -> String {
+        let device = try MLSOrchestratorCredentialAdapter().getDeviceUuid(userDid: did) ?? "unregistered"
+        return "\(did)/\(device)/\(sessionGeneration.uuidString)"
+    }
+
     public func ensureDeviceRecordPublished() async throws {
         try throwIfShuttingDown("ensureDeviceRecordPublished")
         if protocolAuthorityMode == .rustFull {
-            logger.info("⏭️ [MLS-FULL-RUST] Skipping Swift device record publish; Rust owns MLS device readiness")
+            guard let activeDid = userDid else { throw MLSConversationError.noAuthentication }
+            let generation = sessionGeneration
+            try await rustDeviceAuthorizationGate.ensure(scope: try rustDeviceAuthorizationScope(for: activeDid)) { [self] in
+                let material = try await withRustAuthoritativeRuntime(
+                    operation: "publishDeviceAuthorization", requiresDeviceAuthorization: false
+                ) { runtime in
+                    guard runtime.userDID == activeDid else { throw MLSConversationError.noAuthentication }
+                    _ = try runtime.ensureDeviceRegistered()
+                    return try runtime.currentDeviceRecordMaterial()
+                }
+                try validateSessionGeneration(capturedGeneration: generation)
+                guard userDid == activeDid else { throw MLSConversationError.noAuthentication }
+                try throwIfShuttingDown("publishDeviceAuthorization")
+                try await deviceRecordService.ensureCanonicalDeviceRecordPublished(
+                    userDid: activeDid, deviceId: material.deviceId, publicKey: material.publicKey)
+                try validateSessionGeneration(capturedGeneration: generation)
+                guard userDid == activeDid else { throw MLSConversationError.noAuthentication }
+                try throwIfShuttingDown("publishDeviceAuthorization completed")
+            }
             return
         }
         guard let activeDid = userDid else {
