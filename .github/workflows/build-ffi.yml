@@ -33,6 +33,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  PYTHONDONTWRITEBYTECODE: "1"
   ASSET_NAME: CatbirdMLSFFI.xcframework.zip
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
   IPHONEOS_DEPLOYMENT_TARGET: "18.0"
