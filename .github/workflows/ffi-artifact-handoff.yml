@@ -1,0 +1,33 @@
+name: Inspect completed FFI artifact
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  handoff:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test artifact verification guards
+        run: python3 -m unittest discover -s Scripts/tests -p 'test_ffi*.py' -v
+      - name: Retrieve the reviewed completed run artifact
+        run: |
+          mkdir -p .build/ffi-artifact-work
+          run_id="$(python3 -c 'import json; print(json.load(open("Scripts/ffi-release-inputs.json"))["source_run_id"])')"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > .build/ffi-artifact-work/source-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" > .build/ffi-artifact-work/source-artifacts.json
+          artifact_id="$(python3 Scripts/ffi-artifacts.py select)"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > .build/ffi-artifact-work/build-artifact.zip
+      - name: Verify the original binary and all provenance
+        run: python3 Scripts/ffi-artifacts.py verify
+      - name: Upload small release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffi-release-metadata
+          path: .build/ffi-artifact-work/metadata/
+          include-hidden-files: true
+          if-no-files-found: error

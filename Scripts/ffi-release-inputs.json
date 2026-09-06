@@ -1,0 +1,13 @@
+{
+  "source_run_id": 34004430583,
+  "source_run_attempt": 1,
+  "release_tag": "v1.5.18",
+  "artifact_name": "catbird-mls-ffi",
+  "sources": {
+    "CatbirdMLSCore": "c53a5186e9985fc3be0b764d981e2cb1fda1e419",
+    "catbird-mls": "1495be65e0b74336267b642b895401373d4f507b",
+    "catbird-atproto": "be86e472901097d09459fd2a6bce1e5e7a5dbcba",
+    "Petrel": "dd2ad04bafa1176d45e18be13267349f2d5ec33a",
+    "PetrelCatbird": "e750323f1094a140f8dafceab792f4eebefb6347"
+  }
+}

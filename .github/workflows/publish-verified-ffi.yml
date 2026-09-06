@@ -1,0 +1,81 @@
+name: Publish verified FFI for existing final tag
+on:
+  workflow_dispatch:
+    inputs:
+      final_commit_sha:
+        description: Root-reviewed final package commit already named by the release tag
+        required: true
+        type: string
+      expected_artifact_id:
+        description: Original build artifact ID from verified handoff receipt
+        required: true
+        type: string
+      expected_archive_sha256:
+        description: Framework ZIP checksum from verified handoff receipt
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: publish-verified-ffi
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      FINAL_COMMIT_SHA: ${{ github.event.inputs.final_commit_sha }}
+      EXPECTED_ARTIFACT_ID: ${{ github.event.inputs.expected_artifact_id }}
+      EXPECTED_ARCHIVE_SHA256: ${{ github.event.inputs.expected_archive_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.final_commit_sha }}
+      - name: Retrieve the same immutable build artifact
+        run: |
+          mkdir -p .build/ffi-artifact-work
+          run_id="$(python3 -c 'import json; print(json.load(open("Scripts/ffi-release-inputs.json"))["source_run_id"])')"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > .build/ffi-artifact-work/source-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" > .build/ffi-artifact-work/source-artifacts.json
+          artifact_id="$(python3 Scripts/ffi-artifacts.py select)"
+          test "$artifact_id" = "$EXPECTED_ARTIFACT_ID"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > .build/ffi-artifact-work/build-artifact.zip
+          python3 Scripts/ffi-artifacts.py verify
+      - name: Check final package source, public manifest and existing tag
+        run: |
+          source_sha="$(python3 -c 'import json; print(json.load(open("Scripts/ffi-release-inputs.json"))["sources"]["CatbirdMLSCore"])')"
+          git fetch --no-tags --depth=1 origin "$source_sha"
+          tag="$(python3 -c 'import json; print(json.load(open("Scripts/ffi-release-inputs.json"))["release_tag"])')"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > .build/ffi-artifact-work/release-tag.json
+          python3 Scripts/ffi-artifacts.py publication
+      - name: Publish original paired assets without creating or replacing a tag
+        run: |
+          tag="$(python3 -c 'import json; print(json.load(open("Scripts/ffi-release-inputs.json"))["release_tag"])')"
+          gh release create "$tag" \
+            .build/ffi-artifact-work/unpacked/CatbirdMLSFFI.xcframework.zip \
+            .build/ffi-artifact-work/unpacked/CatbirdMLSFFI.xcframework.zip.sha256 \
+            .build/ffi-artifact-work/metadata/CatbirdMLS.swift \
+            .build/ffi-artifact-work/metadata/CatbirdMLSFFI.h \
+            .build/ffi-artifact-work/metadata/CatbirdMLSFFI.modulemap \
+            .build/ffi-artifact-work/metadata/ffi-provenance.json \
+            .build/ffi-artifact-work/metadata/handoff-receipt.json \
+            .build/ffi-artifact-work/metadata/CatbirdMLSCore.Package.resolved \
+            .build/ffi-artifact-work/metadata/PetrelCatbird.Package.resolved \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "CatbirdMLSFFI $tag" \
+            --notes "Paired Swift bindings and framework from the recorded successful immutable build. The existing version tag names the final package commit with its matching public binary URL and checksum." \
+            --latest
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > .build/ffi-artifact-work/release-tag.json
+          python3 Scripts/ffi-artifacts.py publication
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > .build/ffi-artifact-work/metadata/published-release.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffi-publication-receipt
+          path: .build/ffi-artifact-work/metadata/
+          include-hidden-files: true
+          if-no-files-found: error
