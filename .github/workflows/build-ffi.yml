@@ -1,125 +1,101 @@
 name: Build and Release FFI
 
+# A final package tag must not rebuild native code from moving main branches.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: GitHub release tag to update
+        description: New immutable versioned FFI release tag
         required: true
-        default: ffi-v1
         type: string
       catbird_mls_ref:
-        description: catbird-mls ref to build
+        description: Full catbird-mls commit SHA
         required: true
-        default: main
         type: string
       catbird_atproto_ref:
-        description: catbird-atproto ref to build
+        description: Full catbird-atproto commit SHA
         required: true
-        default: main
         type: string
       petrel_ref:
-        description: Petrel ref for Swift package verification
+        description: Full Petrel commit SHA matching Package.swift
         required: true
-        default: main
         type: string
       petrel_catbird_ref:
-        description: PetrelCatbird ref for Swift package verification
+        description: Full PetrelCatbird commit SHA matching Package.swift
         required: true
-        default: main
         type: string
-      upload_release:
-        description: Upload zip and checksum to the release
-        required: true
-        default: true
-        type: boolean
-  push:
-    tags:
-      - "ffi-*"
-      - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ffi-${{ github.event.inputs.release_tag }}
+  cancel-in-progress: false
 
 env:
   ASSET_NAME: CatbirdMLSFFI.xcframework.zip
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
   IPHONEOS_DEPLOYMENT_TARGET: "18.0"
   MACOSX_DEPLOYMENT_TARGET: "15.0"
-  RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
-  CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref || 'main' }}
-  CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref || 'main' }}
-  PETREL_REF: ${{ github.event.inputs.petrel_ref || 'main' }}
-  PETREL_CATBIRD_REF: ${{ github.event.inputs.petrel_catbird_ref || 'main' }}
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+  CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref }}
+  CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref }}
+  PETREL_REF: ${{ github.event.inputs.petrel_ref }}
+  PETREL_CATBIRD_REF: ${{ github.event.inputs.petrel_catbird_ref }}
 
 jobs:
   build-xcframework:
-    name: Build CatbirdMLSFFI.xcframework
+    name: Build paired Swift and CatbirdMLSFFI.xcframework
     runs-on: macos-15
-
     steps:
-      - name: Checkout CatbirdMLSCore
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           path: CatbirdMLSCore
-
-      - name: Checkout catbird-mls
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: joshlacal/catbird-mls
           ref: ${{ env.CATBIRD_MLS_REF }}
           path: catbird-mls
-
-      - name: Checkout catbird-atproto
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: joshlacal/catbird-atproto
           ref: ${{ env.CATBIRD_ATPROTO_REF }}
           path: catbird-atproto
-
-      - name: Checkout Petrel
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: joshlacal/Petrel
           ref: ${{ env.PETREL_REF }}
           path: Petrel
-
-      - name: Checkout PetrelCatbird
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: joshlacal/PetrelCatbird
           ref: ${{ env.PETREL_CATBIRD_REF }}
           path: PetrelCatbird
 
-      - name: Show toolchain
+      - name: Check immutable sources and package dependency pins
+        working-directory: CatbirdMLSCore
         run: |
-          xcodebuild -version
-          swift --version
-          rustc --version
-          cargo --version
+          python3 -m unittest discover -s Scripts/tests -p test_ffi_release.py -v
+          python3 Scripts/ffi-release.py preflight
 
-      - name: Install Rust targets
+      - name: Install pinned Rust toolchain and all seven targets
         run: |
-          rustup target add \
-            aarch64-apple-ios \
-            aarch64-apple-ios-sim \
-            x86_64-apple-ios \
-            aarch64-apple-ios-macabi \
-            x86_64-apple-ios-macabi \
-            aarch64-apple-darwin \
-            x86_64-apple-darwin
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" \
+            aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
+            aarch64-apple-ios-macabi x86_64-apple-ios-macabi \
+            aarch64-apple-darwin x86_64-apple-darwin
 
-      - name: Free runner disk space
-        # A cold 7-target Rust build plus the ~4 GB xcframework exhausts the
-        # runner (v1.5.14 attempt 1 died with ENOSPC in the verify step).
+      - name: Free disposable runner tool caches
         run: |
-          df -h / | tail -1
+          df -h /
           selected="$(xcode-select -p | sed -E 's#(/Applications/[^/]+\.app).*#\1#')"
           for app in /Applications/Xcode*.app; do
             [ "$app" = "$selected" ] || sudo rm -rf "$app"
           done
           sudo rm -rf /Users/runner/Library/Android /usr/local/lib/android /usr/local/share/dotnet || true
-          df -h / | tail -1
+          df -h /
 
       - name: Cache Cargo registry and build outputs
         uses: actions/cache@v4
@@ -128,68 +104,42 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             catbird-mls/target
-          key: ${{ runner.os }}-catbird-mls-${{ hashFiles('catbird-mls/Cargo.lock') }}
+          key: ${{ runner.os }}-ffi-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('catbird-mls/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-catbird-mls-
+            ${{ runner.os }}-ffi-${{ env.RUSTUP_TOOLCHAIN }}-
 
-      - name: Build and copy FFI outputs
+      - name: Build without changing committed Swift bindings
         working-directory: CatbirdMLSCore
+        env:
+          FFI_VERIFY_COMMITTED_BINDINGS: "1"
         run: ./Scripts/rebuild-ffi.sh
 
-      - name: Verify Swift package consumes generated FFI
+      - name: Verify paired bindings and complete platform matrix
         working-directory: CatbirdMLSCore
-        # Build against the framework just produced, not the previous release
-        # the committed URL binary target points at.
+        run: python3 Scripts/ffi-release.py verify
+
+      - name: Verify Swift package against the new local binary
+        working-directory: CatbirdMLSCore
         run: |
-          cp Package.swift /tmp/Package.swift.committed
-          python3 - <<'EOF'
-          import re
-          manifest = open("Package.swift").read()
-          patched, n = re.subn(
-              r'\.binaryTarget\(\s*name: "CatbirdMLSFFI",\s*url: "[^"]+",\s*checksum: "[^"]+"\s*\)',
-              '.binaryTarget(name: "CatbirdMLSFFI", path: "Sources/CatbirdMLSFFI.xcframework")',
-              manifest,
-          )
-          assert n == 1, "expected exactly one CatbirdMLSFFI url binary target"
-          open("Package.swift", "w").write(patched)
-          EOF
+          swift test --package-path ../PetrelCatbird
+          cp Package.swift release-support/Package.swift.committed
+          trap 'cp release-support/Package.swift.committed Package.swift' EXIT
+          python3 Scripts/ffi-release.py local-manifest
           swift build
-          cp /tmp/Package.swift.committed Package.swift
 
-      - name: Create release archive
+      - name: Archive paired release and provenance
         working-directory: CatbirdMLSCore
         run: |
-          test -d Sources/CatbirdMLSFFI.xcframework
-          rm -f "${ASSET_NAME}" "${ASSET_NAME}.sha256"
-          ditto -c -k --keepParent Sources/CatbirdMLSFFI.xcframework "${ASSET_NAME}"
-          shasum -a 256 "${ASSET_NAME}" > "${ASSET_NAME}.sha256"
-          cat "${ASSET_NAME}.sha256"
+          ditto -c -k --keepParent Sources/CatbirdMLSFFI.xcframework "$ASSET_NAME"
+          shasum -a 256 "$ASSET_NAME" > "$ASSET_NAME.sha256"
+          python3 Scripts/ffi-release.py provenance
 
-      - name: Upload build artifacts
+      - name: Preserve outputs and provenance
         uses: actions/upload-artifact@v4
         with:
           name: catbird-mls-ffi
           path: |
             CatbirdMLSCore/${{ env.ASSET_NAME }}
             CatbirdMLSCore/${{ env.ASSET_NAME }}.sha256
+            CatbirdMLSCore/release-support/
           if-no-files-found: error
-
-      - name: Upload release assets
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.upload_release == 'true' }}
-        working-directory: CatbirdMLSCore
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --latest
-          else
-            gh release create "${RELEASE_TAG}" "${ASSET_NAME}" "${ASSET_NAME}.sha256" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --target "${GITHUB_SHA}" \
-              --title "CatbirdMLSFFI ${RELEASE_TAG}" \
-              --notes "Prebuilt CatbirdMLSFFI.xcframework from catbird-mls ${CATBIRD_MLS_REF}." \
-              --latest
-          fi

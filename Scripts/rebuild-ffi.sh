@@ -38,6 +38,11 @@ cd "$(dirname "$0")/../../catbird-mls"
 echo "📦 Step 1: Building XCFramework..."
 ./create-xcframework.sh
 
+# Reject generator drift before either output can replace the reviewed pair.
+if [ "${FFI_VERIFY_COMMITTED_BINDINGS:-0}" = "1" ]; then
+    cmp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift
+fi
+
 echo ""
 echo "📋 Step 2: Copying XCFramework to CatbirdMLSCore..."
 rm -rf ../CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework

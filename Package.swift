@@ -27,7 +27,7 @@ let package = Package(
         // Published PetrelCatbird, pinned by revision.
         .package(
             url: "https://github.com/joshlacal/PetrelCatbird.git",
-            revision: "0e68066f0024d05d820be64c0e999771f829d3aa"
+            revision: "ea7323237eff40aee8abdec4433fece7c2d2cffb"
         )
     ],
     targets: [
