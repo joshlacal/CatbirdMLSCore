@@ -2,6 +2,21 @@
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
+import Foundation
+
+// A locally built `Sources/CatbirdMLSFFI.xcframework` (produced by
+// `Scripts/rebuild-ffi.sh`) wins over the published artifact. That directory is
+// gitignored, so a clean checkout and CI still resolve the release URL below.
+// Use it whenever Swift code needs native changes that are not published yet.
+let localFFI = "Sources/CatbirdMLSFFI.xcframework"
+let ffiTarget: Target =
+    FileManager.default.fileExists(atPath: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent(localFFI).path)
+    ? .binaryTarget(name: "CatbirdMLSFFI", path: localFFI)
+    : .binaryTarget(
+        name: "CatbirdMLSFFI",
+        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.18/CatbirdMLSFFI.xcframework.zip",
+        checksum: "76c969aed946af97bc6e6a397952e7a77b166d1a69c679459f743c47720a6212"
+    )
 
 let package = Package(
     name: "CatbirdMLSCore",
@@ -60,11 +75,7 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
-        .binaryTarget(
-            name: "CatbirdMLSFFI",
-            url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.18/CatbirdMLSFFI.xcframework.zip",
-            checksum: "76c969aed946af97bc6e6a397952e7a77b166d1a69c679459f743c47720a6212"
-        ),
+        ffiTarget,
         .testTarget(
             name: "CatbirdMLSCoreTests",
             dependencies: ["CatbirdMLSCore"]
