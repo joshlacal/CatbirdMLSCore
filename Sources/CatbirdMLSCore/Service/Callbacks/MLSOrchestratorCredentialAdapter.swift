@@ -92,6 +92,8 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   private let transcriptSigner: TranscriptSigner?
   private let signingPublicKeyResolver: SigningPublicKeyResolver?
   private let signingBindingResolver: SigningBindingResolver?
+  private let deviceUuidCache: MLSDeviceUUIDCache
+  private let generationProvider: @Sendable () -> Int
   private let logger = Logger(subsystem: "blue.catbird", category: "OrchestratorCredentialAdapter")
 
   /// Keychain key prefix for MLS DID storage (scoped by user DID).
@@ -110,7 +112,9 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     signingAuthorityResolver: SigningAuthorityResolver? = nil,
     transcriptSigner: TranscriptSigner? = nil,
     signingPublicKeyResolver: SigningPublicKeyResolver? = nil,
-    signingBindingResolver: SigningBindingResolver? = nil
+    signingBindingResolver: SigningBindingResolver? = nil,
+    deviceUuidCache: MLSDeviceUUIDCache = .shared,
+    generationProvider: (@Sendable () -> Int)? = nil
   ) {
     self.keychainManager = keychainManager
     self.authorizedDeviceKeyResolver = authorizedDeviceKeyResolver
@@ -118,8 +122,9 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     self.transcriptSigner = transcriptSigner
     self.signingPublicKeyResolver = signingPublicKeyResolver
     self.signingBindingResolver = signingBindingResolver
+    self.deviceUuidCache = deviceUuidCache
+    self.generationProvider = generationProvider ?? { MLSCoordinationStore.shared.currentGeneration }
   }
-
   public convenience init(
     authorizedDeviceKeyResolver: @escaping @Sendable (String) throws -> [Data]?
   ) {
@@ -333,12 +338,17 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     guard let data = uuid.data(using: .utf8) else {
       throw MLSKeychainError.invalidData
     }
-    logger.debug("Storing device UUID for user: \(userDid.prefix(20))...")
     _ = try MLSKeychainManager.shared.storeOrAdoptImmutableKey(data, forKey: key)
-    logger.info("Stored device UUID for user: \(userDid.prefix(20))...")
+    let currentGen = generationProvider()
+    deviceUuidCache.set(uuid, for: userDid, generation: currentGen)
+    logger.debug("[Credentials] stored_device_uuid user=\(userDid.prefix(16)) device=\(uuid.prefix(8))")
   }
 
   public func getDeviceUuid(userDid: String) throws -> String? {
+    let currentGen = generationProvider()
+    if let cached = deviceUuidCache.get(for: userDid, generation: currentGen) {
+      return cached
+    }
     let key = MLSStoragePaths.deviceUuidAccount(for: userDid)
     logger.debug("Retrieving device UUID for user: \(userDid.prefix(20))...")
     guard let data = try MLSKeychainManager.shared.retrieveKeyStrict(forKey: key) else {
@@ -347,6 +357,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
     guard let str = String(data: data, encoding: .utf8) else {
       throw MLSStorageInitializationError.validationFailed(details: "Corrupt non-UTF8 device UUID")
     }
+    deviceUuidCache.set(str, for: userDid, generation: currentGen)
     return str
   }
 
@@ -360,6 +371,7 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   }
 
   public func clearAll(userDid: String) throws {
+    deviceUuidCache.invalidate(userDid: userDid)
     logger.error("🚨 Prohibiting automatic credential deletion for user: \(userDid.prefix(20))... Explicit reset required.")
     throw MLSStorageInitializationError.validationFailed(
       details: "Automatic clean credential deletion is prohibited. Explicit reset required."

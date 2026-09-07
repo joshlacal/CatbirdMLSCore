@@ -114,6 +114,11 @@ final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
       _count += 1
       return _count
     }
+    func value() -> Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return _count
+    }
   }
 
   func testAtomicAuthoritySnapshotRotationRejectsWholeSignature() throws {
@@ -145,6 +150,68 @@ final class MLSOrchestratorCredentialAdapterTests: XCTestCase {
         )
       )
     )
+  }
+  func testDeviceUUIDCachingInvariants() throws {
+    let aliceDid = "did:plc:alice-\(UUID().uuidString.lowercased())"
+    let bobDid = "did:plc:bob-\(UUID().uuidString.lowercased())"
+    let aliceUUID1 = UUID().uuidString.lowercased()
+    let aliceUUID2 = UUID().uuidString.lowercased()
+    let bobUUID1 = UUID().uuidString.lowercased()
+
+    let cache = MLSDeviceUUIDCache()
+    let generationBox = TestAtomicCounter()
+    _ = generationBox.increment() // currentGen = 1
+
+    let adapter = MLSOrchestratorCredentialAdapter(
+      deviceUuidCache: cache,
+      generationProvider: { generationBox.value() }
+    )
+    // 1. Initial store and resolution for Alice and Bob
+    try adapter.storeDeviceUuid(userDid: aliceDid, uuid: aliceUUID1)
+    try adapter.storeDeviceUuid(userDid: bobDid, uuid: bobUUID1)
+
+
+    // Both accounts should resolve their own stored UUIDs
+    let resolvedAlice1 = try adapter.getDeviceUuid(userDid: aliceDid)
+    XCTAssertEqual(resolvedAlice1, aliceUUID1)
+
+    let resolvedBob1 = try adapter.getDeviceUuid(userDid: bobDid)
+    XCTAssertEqual(resolvedBob1, bobUUID1)
+    // 2. Cache hit invariant: delete from underlying keychain, repeated resolution still succeeds
+    let aliceKey = MLSStoragePaths.deviceUuidAccount(for: aliceDid)
+    try MLSKeychainManager.shared.deleteStrict(forKey: aliceKey)
+    XCTAssertNil(try MLSKeychainManager.shared.retrieveKeyStrict(forKey: aliceKey))
+
+    let cachedAlice = try adapter.getDeviceUuid(userDid: aliceDid)
+    XCTAssertEqual(cachedAlice, aliceUUID1, "Repeated resolution MUST hit the in-memory cache without keychain read")
+
+    // 3. Per-account isolation invariant: Bob's resolution never returns Alice's value
+    let cachedBob = try adapter.getDeviceUuid(userDid: bobDid)
+    XCTAssertEqual(cachedBob, bobUUID1, "Account resolution MUST be isolated by user DID and never return other account's value")
+    XCTAssertNotEqual(cachedBob, cachedAlice)
+
+    // 4. Generation change invariant: changing generation forces fresh resolution from keychain
+    // Re-populate Alice in keychain with a new UUID
+    let aliceData2 = try XCTUnwrap(aliceUUID2.data(using: .utf8))
+    _ = try MLSKeychainManager.shared.storeOrAdoptImmutableKey(aliceData2, forKey: aliceKey)
+
+    // Bump generation
+    let newGen = generationBox.increment()
+    let adapterNewGen = MLSOrchestratorCredentialAdapter(
+      deviceUuidCache: cache,
+      generationProvider: { newGen }
+    )
+
+    let resolvedAliceGen2 = try adapterNewGen.getDeviceUuid(userDid: aliceDid)
+    XCTAssertEqual(resolvedAliceGen2, aliceUUID2, "Generation change MUST force fresh resolution and purge stale cached value")
+
+    // 5. Account switch / invalidation invariant
+    cache.invalidate(userDid: aliceDid)
+    XCTAssertNil(cache.entry(for: aliceDid), "Explicit invalidation for user DID must purge that account's entry")
+    XCTAssertNotNil(cache.entry(for: bobDid), "Invalidating one account must not invalidate another account")
+
+    cache.invalidate()
+    XCTAssertNil(cache.entry(for: bobDid), "Invalidate all must clear all entries")
   }
 
   private func sourceFileURL(relativePath: String) -> URL {

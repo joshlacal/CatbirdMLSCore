@@ -357,6 +357,9 @@ extension MLSConversationManager {
 
     // CRITICAL: Capture userDid before clearing state
     let resetUserDid = userDid
+    if let resetUserDid {
+      MLSDeviceUUIDCache.shared.invalidate(userDid: resetUserDid)
+    }
     userDid = nil  // Fail-fast any new operations
 
     isShuttingDown = true
