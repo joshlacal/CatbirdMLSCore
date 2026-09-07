@@ -5544,6 +5544,11 @@ public actor MLSGRDBManager {
       try MLSMessageAppendLedger.createSchema(in: db)
     }
 
+    // v37: Local conversation deletion markers for "Delete for me".
+    migrator.registerMigration("v37_local_conversation_deletion_markers") { db in
+      try MLSConversationDeletionMarkerModel.createTable(in: db)
+    }
+
     return migrator
   }
 

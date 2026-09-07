@@ -691,11 +691,31 @@ public final class MLSStorage: @unchecked Sendable {
     // Hide tombstones from user-facing reads; chain walkers use their own
     // unfiltered queries.
     let row = try await database.read { db -> MLSMessageModel? in
-      try MLSMessageModel
+      guard let msg = try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.isTombstone == 0)
-        .fetchOne(db)
+        .fetchOne(db) else {
+        return nil
+      }
+
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == msg.conversationID)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          if msg.sequenceNumber > 0 {
+            if msg.sequenceNumber <= seq { return nil }
+          } else {
+            if msg.timestamp <= marker.deletedAt { return nil }
+          }
+        } else {
+          if msg.timestamp <= marker.deletedAt { return nil }
+        }
+      }
+
+      return msg
     }
 
     guard let model = row else {
@@ -884,10 +904,27 @@ public final class MLSStorage: @unchecked Sendable {
 
     let messages = try await database.read { db in
       // Hide tombstones from user-facing reads
-      try MLSMessageModel
+      var request = MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.isTombstone == 0)
+
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          request = request.filter(
+            (MLSMessageModel.Columns.sequenceNumber > 0 && MLSMessageModel.Columns.sequenceNumber > seq) ||
+            (MLSMessageModel.Columns.sequenceNumber <= 0 && MLSMessageModel.Columns.timestamp > marker.deletedAt)
+          )
+        } else {
+          request = request.filter(MLSMessageModel.Columns.timestamp > marker.deletedAt)
+        }
+      }
+
+      return try request
         .order(
           MLSMessageModel.Columns.sequenceNumber.desc,
           MLSMessageModel.Columns.timestamp.desc,
@@ -938,6 +975,21 @@ public final class MLSStorage: @unchecked Sendable {
         request = request.filter(MLSMessageModel.Columns.sequenceNumber < beforeSeq)
       }
 
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == conversationId)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          request = request.filter(
+            (MLSMessageModel.Columns.sequenceNumber > 0 && MLSMessageModel.Columns.sequenceNumber > seq) ||
+            (MLSMessageModel.Columns.sequenceNumber <= 0 && MLSMessageModel.Columns.timestamp > marker.deletedAt)
+          )
+        } else {
+          request = request.filter(MLSMessageModel.Columns.timestamp > marker.deletedAt)
+        }
+      }
+
       return try request
         .order(
           MLSMessageModel.Columns.sequenceNumber.desc,
@@ -947,7 +999,6 @@ public final class MLSStorage: @unchecked Sendable {
         .limit(limit)
         .fetchAll(db)
     }
-
     logger.info("📦 [DB] Query returned \(messages.count) older messages")
     if !messages.isEmpty {
       for msg in messages {
@@ -1557,13 +1608,11 @@ public final class MLSStorage: @unchecked Sendable {
     conversations: [MLSConversationModel], membersByConvoID: [String: [MLSMemberModel]]
   ) {
     return try await database.read { db in
-      // Fetch all active conversations
-      let conversations =
-        try MLSConversationModel
-        .filter(MLSConversationModel.Columns.isActive == true)
-        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
-        .order(MLSConversationModel.Columns.lastMessageAt.desc)
-        .fetchAll(db)
+      // Fetch all active conversations excluding locally deleted conversations
+      let conversations = try MLSStorageHelpers.fetchActiveConversationsSync(
+        in: db,
+        currentUserDID: currentUserDID
+      )
 
       guard !conversations.isEmpty else {
         return ([], [:])
@@ -1598,13 +1647,11 @@ public final class MLSStorage: @unchecked Sendable {
     conversations: [MLSConversationModel], membersByConvoID: [String: [MLSMemberModel]]
   ) {
     return try await MLSGRDBManager.shared.read(for: currentUserDID) { db in
-      // Fetch all active conversations
-      let conversations =
-        try MLSConversationModel
-        .filter(MLSConversationModel.Columns.isActive == true)
-        .filter(MLSConversationModel.Columns.currentUserDID == currentUserDID)
-        .order(MLSConversationModel.Columns.lastMessageAt.desc)
-        .fetchAll(db)
+      // Fetch all active conversations excluding locally deleted conversations
+      let conversations = try MLSStorageHelpers.fetchActiveConversationsSync(
+        in: db,
+        currentUserDID: currentUserDID
+      )
 
       guard !conversations.isEmpty else {
         return ([], [:])
@@ -1643,9 +1690,26 @@ public final class MLSStorage: @unchecked Sendable {
   ) async throws -> (epoch: Int64, seq: Int64, messageID: String)? {
     let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
-      try MLSMessageModel
+      var request = MLSMessageModel
         .filter(MLSMessageModel.Columns.conversationID == conversationID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          request = request.filter(
+            (MLSMessageModel.Columns.sequenceNumber > 0 && MLSMessageModel.Columns.sequenceNumber > seq) ||
+            (MLSMessageModel.Columns.sequenceNumber <= 0 && MLSMessageModel.Columns.timestamp > marker.deletedAt)
+          )
+        } else {
+          request = request.filter(MLSMessageModel.Columns.timestamp > marker.deletedAt)
+        }
+      }
+
+      return try request
         .order(
           MLSMessageModel.Columns.sequenceNumber.desc,
           MLSMessageModel.Columns.timestamp.desc,
@@ -1679,23 +1743,51 @@ public final class MLSStorage: @unchecked Sendable {
     return try await database.read { db in
       // Hide tombstones from user-facing reads. Match rows that have either
       // the new encrypted payload or a legacy plaintext payload.
+      var sql = """
+        SELECT msg.epoch, msg.sequenceNumber, msg.messageID
+        FROM MLSMessageModel msg
+        """
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) {
+        sql += """
+          LEFT JOIN MLSConversationDeletionMarkerModel m
+            ON m.conversationID = msg.conversationID AND m.currentUserDID = msg.currentUserDID
+          WHERE msg.conversationID = ?
+            AND msg.currentUserDID = ?
+            AND msg.processingError IS NULL
+            AND msg.payloadExpired = 0
+            AND msg.isTombstone = 0
+            AND (
+              (msg.payloadEncrypted IS NOT NULL AND LENGTH(msg.payloadEncrypted) > 0)
+              OR (msg.payloadJSON IS NOT NULL AND LENGTH(msg.payloadJSON) > 0)
+            )
+            AND (
+              m.conversationID IS NULL
+              OR (
+                (m.clearedThroughSequenceNumber IS NOT NULL AND msg.sequenceNumber > 0 AND msg.sequenceNumber > m.clearedThroughSequenceNumber)
+                OR ((m.clearedThroughSequenceNumber IS NULL OR msg.sequenceNumber <= 0) AND msg.timestamp > m.deletedAt)
+              )
+            )
+          """
+      } else {
+        sql += """
+          WHERE msg.conversationID = ?
+            AND msg.currentUserDID = ?
+            AND msg.processingError IS NULL
+            AND msg.payloadExpired = 0
+            AND msg.isTombstone = 0
+            AND (
+              (msg.payloadEncrypted IS NOT NULL AND LENGTH(msg.payloadEncrypted) > 0)
+              OR (msg.payloadJSON IS NOT NULL AND LENGTH(msg.payloadJSON) > 0)
+            )
+          """
+      }
+      sql += """
+        ORDER BY msg.sequenceNumber DESC, msg.timestamp DESC, msg.messageID DESC
+        LIMIT 1
+        """
       guard let row = try Row.fetchOne(
         db,
-        sql: """
-          SELECT epoch, sequenceNumber, messageID
-          FROM MLSMessageModel
-          WHERE conversationID = ?
-            AND currentUserDID = ?
-            AND processingError IS NULL
-            AND payloadExpired = 0
-            AND isTombstone = 0
-            AND (
-              (payloadEncrypted IS NOT NULL AND LENGTH(payloadEncrypted) > 0)
-              OR (payloadJSON IS NOT NULL AND LENGTH(payloadJSON) > 0)
-            )
-          ORDER BY sequenceNumber DESC, timestamp DESC, messageID DESC
-          LIMIT 1
-          """,
+        sql: sql,
         arguments: [conversationID, normalizedUserDID]
       ) else {
         return nil
@@ -1734,6 +1826,21 @@ public final class MLSStorage: @unchecked Sendable {
         request = request.filter(senderCandidates.contains(MLSMessageModel.Columns.senderID))
       }
 
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          request = request.filter(
+            (MLSMessageModel.Columns.sequenceNumber > 0 && MLSMessageModel.Columns.sequenceNumber > seq) ||
+            (MLSMessageModel.Columns.sequenceNumber <= 0 && MLSMessageModel.Columns.timestamp > marker.deletedAt)
+          )
+        } else {
+          request = request.filter(MLSMessageModel.Columns.timestamp > marker.deletedAt)
+        }
+      }
+
       return try request
         .order(
           MLSMessageModel.Columns.sequenceNumber.desc,
@@ -1761,28 +1868,47 @@ public final class MLSStorage: @unchecked Sendable {
     let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
       // Hide tombstones from user-facing reads
+      let candidate: MLSMessageModel?
       if let normalizedMatch = try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageID)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSMessageModel.Columns.isTombstone == 0)
         .fetchOne(db)
       {
-        return normalizedMatch
-      }
-
-      guard normalizedUserDID != currentUserDID else { return nil }
-
-      let legacyMatch = try MLSMessageModel
-        .filter(MLSMessageModel.Columns.messageID == messageID)
-        .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
-        .filter(MLSMessageModel.Columns.isTombstone == 0)
-        .fetchOne(db)
-
-      if legacyMatch != nil {
+        candidate = normalizedMatch
+      } else if normalizedUserDID != currentUserDID,
+                let legacyMatch = try MLSMessageModel
+                  .filter(MLSMessageModel.Columns.messageID == messageID)
+                  .filter(MLSMessageModel.Columns.currentUserDID == currentUserDID)
+                  .filter(MLSMessageModel.Columns.isTombstone == 0)
+                  .fetchOne(db)
+      {
         logger.warning(
           "⚠️ [DID-NORMALIZE] Legacy message row matched via raw DID for \(messageID.prefix(16))")
+        candidate = legacyMatch
+      } else {
+        candidate = nil
       }
-      return legacyMatch
+
+      guard let msg = candidate else { return nil }
+
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == msg.conversationID)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          if msg.sequenceNumber > 0 {
+            if msg.sequenceNumber <= seq { return nil }
+          } else {
+            if msg.timestamp <= marker.deletedAt { return nil }
+          }
+        } else {
+          if msg.timestamp <= marker.deletedAt { return nil }
+        }
+      }
+
+      return msg
     }
   }
 
@@ -2424,6 +2550,243 @@ public final class MLSStorage: @unchecked Sendable {
     }
 
     logger.debug("✅ Deleted \(deletedCount) reactions")
+  }
+
+  // MARK: - Local Conversation Deletion ("Delete for me")
+
+  /// Deletes a conversation locally for the current user ("Delete for me").
+  ///
+  /// This removes local message history through the current sequence cursor and records
+  /// an account-scoped deletion marker in `MLSConversationDeletionMarkerModel`.
+  /// Server membership, OpenMLS group state, and epoch cryptographic keys are preserved
+  /// so active participation and cryptographic sync remain valid.
+  ///
+  /// - Parameters:
+  ///   - conversationID: Canonical or requested conversation ID
+  ///   - currentUserDID: Current user's DID
+  ///   - database: Database writer
+  public func deleteConversationForMe(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    logger.info("🗑️ [DELETE-FOR-ME] Marking conversation \(conversationID.prefix(16)) as deleted for user \(normalizedUserDID)")
+
+    try await database.write { db in
+      // 0. Fail transaction if table absent - never skip marker persistence and still delete history
+      guard try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) else {
+        throw MLSStorageError.requiredTableMissing(MLSConversationDeletionMarkerModel.databaseTableName)
+      }
+
+      // Resolve canonical ID if available
+      let effectiveID = (try? MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      )) ?? conversationID
+
+      // 1. Fetch existing marker if present
+      let existingMarker = try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == effectiveID || MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)
+
+      // Fetch sequence state stored cursor if present
+      let storedCursor = try MLSConversationSequenceState
+        .filter(MLSConversationSequenceState.Columns.conversationID == effectiveID || MLSConversationSequenceState.Columns.conversationID == conversationID)
+        .filter(MLSConversationSequenceState.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)?.lastProcessedSeq
+
+      // Fetch max message sequence currently in storage
+      let maxMsgSeq = try Int64.fetchOne(
+        db,
+        sql: "SELECT MAX(sequenceNumber) FROM MLSMessageModel WHERE (conversationID = ? OR conversationID = ?) AND currentUserDID = ?",
+        arguments: [effectiveID, conversationID, normalizedUserDID]
+      )
+
+      var candidates: [Int64] = []
+      if let existingFloor = existingMarker?.clearedThroughSequenceNumber, existingFloor > 0 {
+        candidates.append(existingFloor)
+      }
+      if let storedCursor, storedCursor > 0 {
+        candidates.append(storedCursor)
+      }
+      if let maxMsgSeq, maxMsgSeq > 0 {
+        candidates.append(maxMsgSeq)
+      }
+
+      let effectiveFloor: Int64? = candidates.max()
+      let now = Date()
+      let effectiveDeletedAt = max(existingMarker?.deletedAt ?? Date.distantPast, now)
+
+      // 2. Persist or update the deletion marker
+      let marker = MLSConversationDeletionMarkerModel(
+        conversationID: effectiveID,
+        currentUserDID: normalizedUserDID,
+        deletedAt: effectiveDeletedAt,
+        clearedThroughSequenceNumber: effectiveFloor,
+        isHiddenFromList: true
+      )
+      try marker.save(db)
+
+      // 3. Delete local messages up through this cursor
+      if let maxSeq = effectiveFloor {
+        try db.execute(
+          sql: """
+            DELETE FROM MLSMessageModel
+            WHERE (conversationID = ? OR conversationID = ?)
+              AND currentUserDID = ?
+              AND (
+                (sequenceNumber > 0 AND sequenceNumber <= ?)
+                OR (sequenceNumber <= 0 AND timestamp <= ?)
+              );
+            """,
+          arguments: [effectiveID, conversationID, normalizedUserDID, maxSeq, effectiveDeletedAt]
+        )
+      } else {
+        try db.execute(
+          sql: """
+            DELETE FROM MLSMessageModel
+            WHERE (conversationID = ? OR conversationID = ?)
+              AND currentUserDID = ?
+              AND timestamp <= ?;
+            """,
+          arguments: [effectiveID, conversationID, normalizedUserDID, effectiveDeletedAt]
+        )
+      }
+
+      // 4. Delete local reactions for this conversation
+      try db.execute(
+        sql: """
+          DELETE FROM MLSMessageReactionModel
+          WHERE (conversationID = ? OR conversationID = ?)
+            AND currentUserDID = ?
+            AND messageID NOT IN (
+              SELECT messageID FROM MLSMessageModel
+              WHERE (conversationID = ? OR conversationID = ?)
+                AND currentUserDID = ?
+            );
+          """,
+        arguments: [effectiveID, conversationID, normalizedUserDID, effectiveID, conversationID, normalizedUserDID]
+      )
+      try db.execute(
+        sql: "DELETE FROM MLSOrphanedReactionModel WHERE (conversationID = ? OR conversationID = ?) AND currentUserDID = ?;",
+        arguments: [effectiveID, conversationID, normalizedUserDID]
+      )
+    }
+  }
+
+  /// Clears the local deletion marker for a conversation, un-hiding it for the current user.
+  /// Any previously deleted message history remains purged.
+  public func clearLocalConversationDeletion(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    logger.info("🔄 [CLEAR-DELETION] Un-hiding locally deleted conversation for \(conversationID.prefix(16)) (user: \(normalizedUserDID))")
+    try await database.write { db in
+      guard try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) else { return }
+      let effectiveID = (try? MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      )) ?? conversationID
+
+      try db.execute(
+        sql: """
+          UPDATE MLSConversationDeletionMarkerModel
+          SET isHiddenFromList = 0
+          WHERE (conversationID = ? OR conversationID = ?)
+            AND currentUserDID = ?;
+          """,
+        arguments: [effectiveID, conversationID, normalizedUserDID]
+      )
+    }
+  }
+
+  /// Checks whether a conversation is locally deleted for the current user without newer traffic.
+  public func isConversationLocallyDeleted(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> Bool {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
+      guard try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) else { return false }
+      let effectiveID = (try? MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      )) ?? conversationID
+
+      guard let marker = try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == effectiveID || MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db) else {
+        return false
+      }
+
+      guard marker.isHiddenFromList else {
+        return false
+      }
+
+      // Check if newer messages exist in storage beyond the deletion floor
+      let hasNewerMsg: Bool
+      if let maxSeq = marker.clearedThroughSequenceNumber {
+        hasNewerMsg = try Row.fetchOne(
+          db,
+          sql: """
+            SELECT 1 FROM MLSMessageModel
+            WHERE (conversationID = ? OR conversationID = ?)
+              AND currentUserDID = ?
+              AND (
+                (sequenceNumber > 0 AND sequenceNumber > ?)
+                OR (sequenceNumber <= 0 AND timestamp > ?)
+              )
+            LIMIT 1
+            """,
+          arguments: [effectiveID, conversationID, normalizedUserDID, maxSeq, marker.deletedAt]
+        ) != nil
+      } else {
+        hasNewerMsg = try Row.fetchOne(
+          db,
+          sql: """
+            SELECT 1 FROM MLSMessageModel
+            WHERE (conversationID = ? OR conversationID = ?)
+              AND currentUserDID = ?
+              AND timestamp > ?
+            LIMIT 1
+            """,
+          arguments: [effectiveID, conversationID, normalizedUserDID, marker.deletedAt]
+        ) != nil
+      }
+
+      return !hasNewerMsg
+    }
+  }
+
+  /// Fetches the local conversation deletion marker, if any.
+  public func fetchLocalConversationDeletionMarker(
+    conversationID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async throws -> MLSConversationDeletionMarkerModel? {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    return try await database.read { db in
+      guard try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) else { return nil }
+      let effectiveID = (try? MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: conversationID
+      )) ?? conversationID
+
+      return try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == effectiveID || MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)
+    }
   }
 
   // MARK: - Orphaned Reaction Management
@@ -3471,6 +3834,7 @@ enum MLSStorageError: LocalizedError {
   case foreignKeyViolation(String)
   case accountMismatch(requested: String, active: String)
   case databaseClosed
+  case requiredTableMissing(String)
 
   var errorDescription: String? {
     switch self {
@@ -3503,6 +3867,8 @@ enum MLSStorageError: LocalizedError {
         "Database account mismatch: requested \(requested.prefix(20))..., but active is \(active.prefix(20))..."
     case .databaseClosed:
       return "Database has been closed"
+    case .requiredTableMissing(let name):
+      return "Required table missing: \(name)"
     }
   }
 }

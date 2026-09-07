@@ -408,6 +408,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       )
       return try MLSCreateConversationResult(ffiResult: ffiResult, userDID: userDID)
     } catch {
+      logger.error("Conversation open failed before presentation: \(String(describing: error), privacy: .public)")
       throw MLSConversationLifecycleError.presenting(error, operation: .open)
     }
   }

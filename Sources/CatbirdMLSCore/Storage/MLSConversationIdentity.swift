@@ -51,6 +51,7 @@ extension MLSStorageHelpers {
     ("MLSDeliveryAck", .stable),
     ("mls_conversation_read_frontier", .stable),
     ("mls_remote_read_cursor", .stable),
+    ("MLSConversationDeletionMarkerModel", .stable),
     ("MLSInviteModel", .stable),
     ("MLSPolicyModel", .stable),
     ("mls_orchestrator_pending_local_deletes", .stable),
@@ -89,6 +90,7 @@ extension MLSStorageHelpers {
       .init(name: "MLSDeliveryAck", idColumn: "conversationId", userColumn: "currentUserDID"),
       .init(name: "mls_conversation_read_frontier", idColumn: "conversationID", userColumn: "currentUserDID"),
       .init(name: "mls_remote_read_cursor", idColumn: "conversationID", userColumn: "currentUserDID"),
+      .init(name: "MLSConversationDeletionMarkerModel", idColumn: "conversationID", userColumn: "currentUserDID"),
       // These models are not created by the current migrator, but older
       // installations may still have them.  If present they are migrated;
       // if their shape is not known, migration fails closed.
@@ -690,6 +692,34 @@ extension MLSStorageHelpers {
       throw MLSStorageError.unsafeConversationAliasMigration(
         "\(descriptor.name) is missing \(userColumn)"
       )
+    }
+
+    if descriptor.name == MLSConversationDeletionMarkerModel.databaseTableName {
+      let oldMarker = try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == oldID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == userDID)
+        .fetchOne(db)
+      let newMarker = try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == newID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == userDID)
+        .fetchOne(db)
+      if let oldMarker {
+        if let newMarker {
+          let mergedFloor = [oldMarker.clearedThroughSequenceNumber, newMarker.clearedThroughSequenceNumber].compactMap { $0 }.max()
+          let mergedDeletedAt = max(oldMarker.deletedAt, newMarker.deletedAt)
+          let mergedHidden = oldMarker.isHiddenFromList || newMarker.isHiddenFromList
+          try db.execute(
+            sql: """
+              UPDATE \(MLSConversationDeletionMarkerModel.databaseTableName)
+              SET clearedThroughSequenceNumber = ?, deletedAt = ?, isHiddenFromList = ?
+              WHERE conversationID = ? AND currentUserDID = ?;
+              """,
+            arguments: [mergedFloor, mergedDeletedAt, mergedHidden, newID, userDID]
+          )
+          try oldMarker.delete(db)
+          return
+        }
+      }
     }
 
     var sql = "UPDATE \(descriptor.name) SET \(descriptor.idColumn) = ? WHERE \(descriptor.idColumn) = ?"

@@ -116,6 +116,7 @@ public extension MLSConversationManager {
         )
         try await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "syncWithServer-fallback")
       }
+      notifyObservers(.syncCompleted(conversations.count))
       return
     }
 

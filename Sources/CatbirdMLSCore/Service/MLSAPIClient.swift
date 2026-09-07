@@ -236,7 +236,7 @@ public final class MLSAPIClient {
         isHealthy = false
         lastHealthCheck = nil
         clearCompletedInventorySessions()
-
+        await availabilityCache.clear()
         // Reconfigure with new service DID
         await configureMLSService()
 
@@ -1051,28 +1051,58 @@ public final class MLSAPIClient {
     /// Inspect public declarations and complete device inventories. A failed read is retryable,
     /// and is distinct from an absent declaration or a successful empty device inventory.
     /// Conversation admission still enforces the recipient's following and block policies.
+    /// Bounded in-memory availability cache and request coalescer
+    public let availabilityCache = MLSChatAvailabilityCache(maxEntries: 1000, ttl: 300)
+
+    /// Invalidate chat availability cache for all users
+    public func clearAvailabilityCache() async {
+        await availabilityCache.clear()
+    }
+
+    /// Invalidate chat availability cache for a specific user DID
+    public func invalidateAvailability(for did: String) async {
+        await availabilityCache.invalidate(did: did)
+    }
+
+    /// Inspect public declarations and complete device inventories. A failed read is retryable,
+    /// and is distinct from an absent declaration or a successful empty device inventory.
+    /// Conversation admission still enforces the recipient's following and block policies.
+    ///
+    /// Cached results are returned immediately; in-flight requests for the same DID are coalesced.
+    /// Transient errors (.unknown) are never cached so that network errors remain retryable.
     public func getChatAvailability(dids: [DID]) async -> [MLSChatAvailabilityStatus] {
-        await Self.resolveChatAvailability(
-            dids: dids,
-            fetchDeclaration: { [client] did in
-                try await MLSPublicPDSReader.fetchDeclaration(
-                    did: did,
-                    resolvePDS: { try await client.resolveDIDToPDSURL(did: $0) }
-                )
-            },
-            fetchDevices: { [self] chunk in
-                let actorDeviceId = try await self.requireActorDeviceId()
-                let input = BlueCatbirdChatGetDevices.Parameters(
-                    actorDeviceId: actorDeviceId,
-                    userDids: chunk
-                )
-                let (code, output) = try await self.client.blue.catbird.chat.getDevices(input: input)
-                guard code == 200, let output else {
-                    throw AvailabilityError.checkFailed
+        guard !dids.isEmpty else { return [] }
+
+        let resultMap = await availabilityCache.resolve(dids: dids) { [client, self] fetchDids in
+            let statuses = await Self.resolveChatAvailability(
+                dids: fetchDids,
+                fetchDeclaration: { did in
+                    try await MLSPublicPDSReader.fetchDeclaration(
+                        did: did,
+                        resolvePDS: { try await client.resolveDIDToPDSURL(did: $0) }
+                    )
+                },
+                fetchDevices: { [self] chunk in
+                    let actorDeviceId = try await self.requireActorDeviceId()
+                    let input = BlueCatbirdChatGetDevices.Parameters(
+                        actorDeviceId: actorDeviceId,
+                        userDids: chunk
+                    )
+                    let (code, output) = try await self.client.blue.catbird.chat.getDevices(input: input)
+                    guard code == 200, let output else {
+                        throw AvailabilityError.checkFailed
+                    }
+                    return Set(output.devices.map { $0.userDid.didString() })
                 }
-                return Set(output.devices.map { $0.userDid.didString() })
+            )
+            var map: [String: MLSChatAvailability] = [:]
+            for status in statuses {
+                map[status.did.didString()] = status.availability
             }
-        )
+            return map
+        }
+
+        return dids.map { MLSChatAvailabilityStatus(did: $0, availability: resultMap[$0.didString()] ?? .unknown) }
     }
 
     /// getDevices requires strictly ordered, duplicate-free exact UTF-8 DIDs in batches of five.
@@ -1091,6 +1121,7 @@ public final class MLSAPIClient {
         await withTaskGroup(of: (String, MLSChatAvailability, Bool).self) { group in
             for did in orderedDIDs {
                 group.addTask {
+                    if Task.isCancelled { return (did, .unknown, false) }
                     do {
                         guard let declaration = try await fetchDeclaration(did),
                               declaration.protocolVersion == "1",
@@ -1115,6 +1146,7 @@ public final class MLSAPIClient {
                 let keys = Array(orderedCandidates[offset..<min(offset + 5, orderedCandidates.count)])
                 let chunk = keys.compactMap { uniqueByDID[$0] }
                 group.addTask {
+                    if Task.isCancelled { return keys.map { ($0, .unknown) } }
                     do {
                         let deviceDIDs = try await fetchDevices(chunk)
                         guard deviceDIDs.isSubset(of: Set(keys)) else {

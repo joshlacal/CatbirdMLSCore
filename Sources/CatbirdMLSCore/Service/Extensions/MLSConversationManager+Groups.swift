@@ -24,11 +24,18 @@ extension MLSConversationManager {
       // 1. The conversation belongs to the current user and is active
       // 2. The conversation has exactly 2 active members
       // 3. One of the members is the target DID
+      // Closed transcripts retain active membership rows for history, but cannot be reused.
       let conversationID = try String.fetchOne(db, sql: """
         SELECT c.conversationID
         FROM MLSConversationModel c
         WHERE c.currentUserDID = ?
           AND c.isActive = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM mls_orchestrator_terminal_access terminal
+            WHERE terminal.user_did = c.currentUserDID
+              AND terminal.conversation_id = c.conversationID
+              AND terminal.state = 'closed'
+          )
           AND (
             SELECT COUNT(*) FROM MLSMemberModel m
             WHERE m.conversationID = c.conversationID
@@ -1102,6 +1109,124 @@ extension MLSConversationManager {
 
     // Notify observers
     notifyObservers(.conversationLeft(convoId))
+  }
+
+  /// Deletes a conversation locally for the current user ("Delete for me").
+  ///
+  /// Removes local messages through the current sequence cursor and records an account-scoped
+  /// deletion marker. Server membership, OpenMLS group state, and epoch cryptographic keys are
+  /// preserved so active participation and cryptographic sync remain valid.
+  ///
+  /// - Parameter convoId: Conversation identifier to delete locally
+  public func deleteConversationForMe(convoId: String, expectedUserDID: String? = nil) async throws {
+    let capturedGeneration = sessionGeneration
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    try throwIfShuttingDown("deleteConversationForMe")
+
+    guard let userDid = userDid else {
+      throw MLSConversationError.contextNotInitialized
+    }
+
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(userDid)
+
+    if let expectedUserDID = expectedUserDID {
+      let normalizedExpectedDID = MLSStorageHelpers.normalizeDID(expectedUserDID)
+      guard normalizedUserDID == normalizedExpectedDID else {
+        logger.error("❌ [deleteConversationForMe] Account mismatch: manager is \(normalizedUserDID), expected \(normalizedExpectedDID)")
+        throw MLSConversationError.invalidIdentity
+      }
+    }
+
+    let canonicalID = try await database.read { db in
+      (try? MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: convoId
+      )) ?? convoId
+    }
+
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+
+    try await storage.deleteConversationForMe(
+      conversationID: canonicalID,
+      currentUserDID: normalizedUserDID,
+      database: database
+    )
+
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+
+    // Remove from in-memory caches
+    conversations.removeValue(forKey: canonicalID)
+    if canonicalID != convoId {
+      conversations.removeValue(forKey: convoId)
+    }
+
+    notifyObservers(.conversationDeleted(canonicalID))
+    logger.info("✅ [MLSConversationManager.deleteConversationForMe] Completed for \(canonicalID.prefix(16))...")
+  }
+
+  /// Clears the local deletion marker for a conversation (e.g. when user explicitly starts a new chat).
+  ///
+  /// - Parameters:
+  ///   - convoId: Conversation identifier to un-hide locally
+  ///   - expectedUserDID: Optional expected user DID to validate account ownership
+  public func clearLocalConversationDeletion(convoId: String, expectedUserDID: String? = nil) async throws {
+    let capturedGeneration = sessionGeneration
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    try throwIfShuttingDown("clearLocalConversationDeletion")
+
+    guard let userDid = userDid else {
+      throw MLSConversationError.contextNotInitialized
+    }
+
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(userDid)
+
+    if let expectedUserDID = expectedUserDID {
+      let normalizedExpectedDID = MLSStorageHelpers.normalizeDID(expectedUserDID)
+      guard normalizedUserDID == normalizedExpectedDID else {
+        logger.error("❌ [clearLocalConversationDeletion] Account mismatch: manager is \(normalizedUserDID), expected \(normalizedExpectedDID)")
+        throw MLSConversationError.invalidIdentity
+      }
+    }
+
+    let canonicalID = try await database.read { db in
+      (try? MLSStorageHelpers.resolveCanonicalConversationIDSync(
+        in: db,
+        userDID: normalizedUserDID,
+        conversationID: convoId
+      )) ?? convoId
+    }
+
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+
+    try await storage.clearLocalConversationDeletion(
+      conversationID: canonicalID,
+      currentUserDID: normalizedUserDID,
+      database: database
+    )
+
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+
+    // Rehydrate in-memory manager caches
+    var rehydratedConvo: BlueCatbirdChatDefs.ConversationState?
+    if let serverConvo = try? await apiClient.getCanonicalConversationState(conversationId: canonicalID).state {
+      rehydratedConvo = serverConvo
+    } else {
+      // Fallback to local database projection
+      try? await hydrateSwiftCachesFromDatabaseAfterRustSync(reason: "clearLocalConversationDeletion")
+      rehydratedConvo = conversations[canonicalID]
+    }
+
+    if let convo = rehydratedConvo {
+      conversations[canonicalID] = convo
+      if canonicalID != convoId {
+        conversations[convoId] = convo
+      }
+      notifyObservers(.conversationJoined(convo))
+    }
+
+    notifyObservers(.messagesUpdated(convoId: canonicalID, count: 0))
+    logger.info("✅ [MLSConversationManager.clearLocalConversationDeletion] Completed and rehydrated for \(canonicalID.prefix(16))...")
   }
 
   @discardableResult

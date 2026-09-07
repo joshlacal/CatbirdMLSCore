@@ -196,10 +196,51 @@ public struct MLSStorageHelpers {
       currentUserDID: normalizedUserDID,
       db: db
     )
+
     let existingMessage = try MLSMessageModel
       .filter(MLSMessageModel.Columns.messageID == messageID)
       .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
       .fetchOne(db)
+
+    // Enforce durable deletion floor at shared storage write boundary
+    if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+       let marker = try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == effectiveConversationID || MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db) {
+      let isPurged: Bool
+      if let seq = marker.clearedThroughSequenceNumber {
+        if sequenceNumber > 0 {
+          isPurged = sequenceNumber <= seq
+        } else {
+          isPurged = timestamp <= marker.deletedAt
+        }
+      } else {
+        isPurged = timestamp <= marker.deletedAt
+      }
+
+      if isPurged {
+        // Message is at or before the deletion fence. Suppress writing to storage to enforce durable deletion.
+        if let existing = existingMessage {
+          try existing.delete(db)
+        }
+        return
+      }
+
+      // If new traffic arrives beyond the deletion fence, unhide the conversation safely
+      if marker.isHiddenFromList {
+        try db.execute(
+          sql: """
+            UPDATE MLSConversationDeletionMarkerModel
+            SET isHiddenFromList = 0
+            WHERE (conversationID = ? OR conversationID = ?)
+              AND currentUserDID = ?;
+            """,
+          arguments: [effectiveConversationID, conversationID, normalizedUserDID]
+        )
+      }
+    }
+
     let routedConversationID = existingMessage?.conversationID ?? effectiveConversationID
     let cryptoConversationID: String
     if let existingBinding = existingMessage?.cryptoConversationID,
@@ -981,18 +1022,60 @@ public struct MLSStorageHelpers {
   ///   - database: GRDB DatabaseQueue
   ///   - currentUserDID: Current user DID
   /// - Returns: Array of active conversations
+  /// Fetch active conversations sorted by last message, excluding locally deleted conversations
+  /// (unless newer messages have arrived after the deletion marker).
+  /// - Parameters:
+  ///   - database: GRDB DatabaseQueue
+  ///   - currentUserDID: Current user DID
+  /// - Returns: Array of active conversations
   public static func fetchActiveConversations(
     from database: MLSDatabase,
     currentUserDID: String
   ) async throws -> [MLSConversationModel] {
-    let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
-      try MLSConversationModel
+      try fetchActiveConversationsSync(in: db, currentUserDID: currentUserDID)
+    }
+  }
+
+  /// Synchronous version of fetchActiveConversations for use within db read closures.
+  public static func fetchActiveConversationsSync(
+    in db: Database,
+    currentUserDID: String
+  ) throws -> [MLSConversationModel] {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    guard try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) else {
+      return try MLSConversationModel
         .filter(MLSConversationModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSConversationModel.Columns.isActive == true)
         .order(MLSConversationModel.Columns.lastMessageAt.desc)
         .fetchAll(db)
     }
+
+    return try MLSConversationModel.fetchAll(
+      db,
+      sql: """
+        SELECT c.* FROM MLSConversationModel c
+        LEFT JOIN MLSConversationDeletionMarkerModel m
+          ON m.conversationID = c.conversationID AND m.currentUserDID = c.currentUserDID
+        WHERE c.isActive = 1
+          AND c.currentUserDID = ?
+          AND (
+            m.conversationID IS NULL
+            OR m.isHiddenFromList = 0
+            OR EXISTS (
+              SELECT 1 FROM MLSMessageModel msg
+              WHERE msg.conversationID = c.conversationID
+                AND msg.currentUserDID = c.currentUserDID
+                AND (
+                  (m.clearedThroughSequenceNumber IS NOT NULL AND msg.sequenceNumber > 0 AND msg.sequenceNumber > m.clearedThroughSequenceNumber)
+                  OR ((m.clearedThroughSequenceNumber IS NULL OR msg.sequenceNumber <= 0) AND msg.timestamp > m.deletedAt)
+                )
+            )
+          )
+        ORDER BY c.lastMessageAt DESC
+        """,
+      arguments: [normalizedUserDID]
+    )
   }
 
   /// Get unread message counts for all conversations in a single batch query.
@@ -1005,26 +1088,8 @@ public struct MLSStorageHelpers {
     from database: MLSDatabase,
     currentUserDID: String
   ) async throws -> [String: Int] {
-    let normalizedUserDID = normalizeDID(currentUserDID)
     return try await database.read { db in
-      // Use raw SQL for efficient GROUP BY query
-      let rows = try Row.fetchAll(
-        db,
-        sql: """
-          SELECT conversationID, COUNT(*) as unreadCount
-          FROM MLSMessageModel
-          WHERE currentUserDID = ? AND isRead = 0 AND senderID != ?
-            AND processingError IS NULL AND payloadExpired = 0
-          GROUP BY conversationID
-          """, arguments: [normalizedUserDID, normalizedUserDID])
-
-      var result: [String: Int] = [:]
-      for row in rows {
-        let conversationID: String = row["conversationID"]
-        let count: Int = row["unreadCount"]
-        result[conversationID] = count
-      }
-      return result
+      try getUnreadCountsForAllConversationsSync(from: db, currentUserDID: currentUserDID)
     }
   }
   
@@ -1038,16 +1103,34 @@ public struct MLSStorageHelpers {
     currentUserDID: String
   ) throws -> [String: Int] {
     let normalizedUserDID = normalizeDID(currentUserDID)
-    // Use raw SQL for efficient GROUP BY query
-    let rows = try Row.fetchAll(
-      db,
-      sql: """
+    let sql: String
+    if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) {
+      sql = """
+        SELECT msg.conversationID, COUNT(*) as unreadCount
+        FROM MLSMessageModel msg
+        LEFT JOIN MLSConversationDeletionMarkerModel m
+          ON m.conversationID = msg.conversationID AND m.currentUserDID = msg.currentUserDID
+        WHERE msg.currentUserDID = ? AND msg.isRead = 0 AND msg.senderID != ?
+          AND msg.processingError IS NULL AND msg.payloadExpired = 0
+          AND (
+            m.conversationID IS NULL
+            OR (
+              (m.clearedThroughSequenceNumber IS NOT NULL AND msg.sequenceNumber > 0 AND msg.sequenceNumber > m.clearedThroughSequenceNumber)
+              OR ((m.clearedThroughSequenceNumber IS NULL OR msg.sequenceNumber <= 0) AND msg.timestamp > m.deletedAt)
+            )
+          )
+        GROUP BY msg.conversationID
+        """
+    } else {
+      sql = """
         SELECT conversationID, COUNT(*) as unreadCount
         FROM MLSMessageModel
         WHERE currentUserDID = ? AND isRead = 0 AND senderID != ?
           AND processingError IS NULL AND payloadExpired = 0
         GROUP BY conversationID
-        """, arguments: [normalizedUserDID, normalizedUserDID])
+        """
+    }
+    let rows = try Row.fetchAll(db, sql: sql, arguments: [normalizedUserDID, normalizedUserDID])
 
     var result: [String: Int] = [:]
     for row in rows {
@@ -1056,6 +1139,57 @@ public struct MLSStorageHelpers {
       result[conversationID] = count
     }
     return result
+  }
+
+  // MARK: - Displayable Message Query & Observation
+
+  /// Builds a query for displayable messages in a conversation, respecting any local deletion fence.
+  public static func makeDisplayableMessagesRequest(
+    in db: Database,
+    conversationID: String,
+    currentUserDID: String
+  ) throws -> QueryInterfaceRequest<MLSMessageModel> {
+    let normalizedUserDID = normalizeDID(currentUserDID)
+    var request = MLSMessageModel
+      .filter(MLSMessageModel.Columns.conversationID == conversationID)
+      .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+      .filter(MLSMessageModel.Columns.isTombstone == 0)
+      .filter(MLSMessageModel.Columns.payloadExpired == false)
+
+    if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+       let marker = try MLSConversationDeletionMarkerModel
+        .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == conversationID)
+        .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db) {
+      if let seq = marker.clearedThroughSequenceNumber {
+        request = request.filter(
+          (MLSMessageModel.Columns.sequenceNumber > 0 && MLSMessageModel.Columns.sequenceNumber > seq) ||
+          (MLSMessageModel.Columns.sequenceNumber <= 0 && MLSMessageModel.Columns.timestamp > marker.deletedAt)
+        )
+      } else {
+        request = request.filter(MLSMessageModel.Columns.timestamp > marker.deletedAt)
+      }
+    }
+
+    return request.order(
+      MLSMessageModel.Columns.sequenceNumber.asc,
+      MLSMessageModel.Columns.timestamp.asc,
+      MLSMessageModel.Columns.messageID.asc
+    )
+  }
+
+  /// Creates a ValueObservation for displayable messages in a conversation, enforcing local deletion fences.
+  public static func makeDisplayableMessagesObservation(
+    conversationID: String,
+    currentUserDID: String
+  ) -> ValueObservation<ValueReducers.Fetch<[MLSMessageModel]>> {
+    ValueObservation.tracking { db in
+      try makeDisplayableMessagesRequest(
+        in: db,
+        conversationID: conversationID,
+        currentUserDID: currentUserDID
+      ).fetchAll(db)
+    }
   }
 
   // MARK: - Transactions

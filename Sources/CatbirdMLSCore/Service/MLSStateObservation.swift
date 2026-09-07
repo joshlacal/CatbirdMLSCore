@@ -26,6 +26,8 @@ public enum MLSStateEvent {
   /// A message was unsent/tombstoned (spec §5.8). `messageID` is the target
   /// message's server-assigned ID (`MessageView.id`), not the delete message's own ID.
   case messageUnsent(conversationID: String, messageID: String)
+  /// A conversation was locally deleted ("Delete for me").
+  case conversationDeleted(String)
 
   public var description: String {
     switch self {
@@ -65,6 +67,8 @@ public enum MLSStateEvent {
       return "Message edited in \(conversationID): \(messageID)"
     case .messageUnsent(let conversationID, let messageID):
       return "Message unsent in \(conversationID): \(messageID)"
+    case .conversationDeleted(let id):
+      return "Conversation deleted locally: \(id)"
     }
   }
 }

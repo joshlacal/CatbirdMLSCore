@@ -812,6 +812,40 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         in: db,
         requestedID: message.conversationId
       )
+
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == effectiveID || MLSConversationDeletionMarkerModel.Columns.conversationID == message.conversationId)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedDID)
+          .fetchOne(db) {
+        let seq = Int64(message.sequenceNumber)
+        let isPurged: Bool
+        if let floorSeq = marker.clearedThroughSequenceNumber {
+          if seq > 0 {
+            isPurged = seq <= floorSeq
+          } else {
+            isPurged = timestamp <= marker.deletedAt
+          }
+        } else {
+          isPurged = timestamp <= marker.deletedAt
+        }
+
+        if isPurged {
+          return
+        }
+
+        if marker.isHiddenFromList {
+          try db.execute(
+            sql: """
+              UPDATE MLSConversationDeletionMarkerModel
+              SET isHiddenFromList = 0
+              WHERE (conversationID = ? OR conversationID = ?)
+                AND currentUserDID = ?;
+              """,
+            arguments: [effectiveID, message.conversationId, normalizedDID]
+          )
+        }
+      }
       try MLSStorageHelpers.savePayloadSync(
         context: mlsContext,
         in: db,
@@ -861,6 +895,21 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         request = request.filter(MLSMessageModel.Columns.sequenceNumber < Int64(before))
       }
 
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == effectiveID || MLSConversationDeletionMarkerModel.Columns.conversationID == conversationId)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          request = request.filter(
+            (MLSMessageModel.Columns.sequenceNumber > 0 && MLSMessageModel.Columns.sequenceNumber > seq) ||
+            (MLSMessageModel.Columns.sequenceNumber <= 0 && MLSMessageModel.Columns.timestamp > marker.deletedAt)
+          )
+        } else {
+          request = request.filter(MLSMessageModel.Columns.timestamp > marker.deletedAt)
+        }
+      }
+
       return try request
         .order(
           MLSMessageModel.Columns.sequenceNumber.desc,
@@ -879,11 +928,30 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
 
     return try dbPool.read { db in
-      let count = try MLSMessageModel
+      guard let msg = try MLSMessageModel
         .filter(MLSMessageModel.Columns.messageID == messageId)
         .filter(MLSMessageModel.Columns.currentUserDID == normalizedDID)
-        .fetchCount(db)
-      return count > 0
+        .fetchOne(db) else {
+        return false
+      }
+
+      if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName),
+         let marker = try MLSConversationDeletionMarkerModel
+          .filter(MLSConversationDeletionMarkerModel.Columns.conversationID == msg.conversationID)
+          .filter(MLSConversationDeletionMarkerModel.Columns.currentUserDID == normalizedDID)
+          .fetchOne(db) {
+        if let seq = marker.clearedThroughSequenceNumber {
+          if msg.sequenceNumber > 0 {
+            if msg.sequenceNumber <= seq { return false }
+          } else {
+            if msg.timestamp <= marker.deletedAt { return false }
+          }
+        } else {
+          if msg.timestamp <= marker.deletedAt { return false }
+        }
+      }
+
+      return true
     }
   }
 

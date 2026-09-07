@@ -169,6 +169,236 @@ struct MLSChatAvailabilityTests {
     let valid = Data(#"{"value":{"$type":"blue.catbird.chat.declaration","allowIncoming":"none","deliveryService":"did:web:chat.catbird.blue","protocolVersion":"1","createdAt":"2026-06-27T00:00:00.000Z"}}"#.utf8)
     #expect(try MLSPublicPDSReader.declaration(from: valid, statusCode: 200)?.allowIncoming == "none")
   }
+
+  @Test func concurrentIdenticalAndOverlappingLookupsIssueEachUncachedDIDOnce() async throws {
+    let cache = MLSChatAvailabilityCache(ttl: 60)
+    let recorder = TestLookupRecorder()
+
+    let alice = try DID(didString: "did:plc:alice")
+    let bob = try DID(didString: "did:plc:bob")
+    let charlie = try DID(didString: "did:plc:charlie")
+
+    let gateBatch1Entered = TestGate()
+    let gateAllowBatch1Finish = TestGate()
+
+    let gateBatch2Entered = TestGate()
+    let gateAllowBatch2Finish = TestGate()
+
+    // Task 1: requests [alice, bob]
+    async let task1 = cache.resolve(dids: [alice, bob]) { chunk in
+      let keys = chunk.map { $0.didString() }
+      await recorder.record(dids: keys)
+      await gateBatch1Entered.open()
+      await gateAllowBatch1Finish.pass()
+      return [
+        "did:plc:alice": .available,
+        "did:plc:bob": .unavailable
+      ]
+    }
+
+    // Wait until Task 1 has started its batch fetch and is in-flight
+    await gateBatch1Entered.pass()
+
+    // Task 2: requests [bob, charlie] overlapping with in-flight bob
+    async let task2 = cache.resolve(dids: [bob, charlie]) { chunk in
+      let keys = chunk.map { $0.didString() }
+      await recorder.record(dids: keys)
+      await gateBatch2Entered.open()
+      await gateAllowBatch2Finish.pass()
+      return [
+        "did:plc:charlie": .available
+      ]
+    }
+
+    // Wait until Task 2 has started its batch fetch for charlie
+    await gateBatch2Entered.pass()
+
+    // Task 3: duplicate request for [alice, bob] while both are in-flight
+    async let task3 = cache.resolve(dids: [alice, bob]) { _ in
+      Issue.record("Task 3 should not issue a new fetch because both DIDs are already in-flight")
+      return [:]
+    }
+
+    // Now unblock the in-flight fetches
+    await gateAllowBatch1Finish.open()
+    await gateAllowBatch2Finish.open()
+
+    let result1 = await task1
+    let result2 = await task2
+    let result3 = await task3
+
+    // Verify results
+    #expect(result1["did:plc:alice"] == .available)
+    #expect(result1["did:plc:bob"] == .unavailable)
+
+    #expect(result2["did:plc:bob"] == .unavailable)
+    #expect(result2["did:plc:charlie"] == .available)
+
+    #expect(result3["did:plc:alice"] == .available)
+    #expect(result3["did:plc:bob"] == .unavailable)
+
+    // Verify each DID was only fetched once
+    #expect(await recorder.count(for: "did:plc:alice") == 1)
+    #expect(await recorder.count(for: "did:plc:bob") == 1)
+    #expect(await recorder.count(for: "did:plc:charlie") == 1)
+  }
+
+  @Test func freshQueryDoesNotWaitUnrelatedFlightBeforeStarting() async throws {
+    let cache = MLSChatAvailabilityCache(ttl: 60)
+    let alice = try DID(didString: "did:plc:alice")
+    let bob = try DID(didString: "did:plc:bob")
+
+    let gateAliceStarted = TestGate()
+    let gateAliceFinish = TestGate()
+
+    let gateBobStarted = TestGate()
+    let gateBobFinish = TestGate()
+
+    // Start long-running flight for alice
+    async let taskAlice = cache.resolve(dids: [alice]) { _ in
+      await gateAliceStarted.open()
+      await gateAliceFinish.pass()
+      return ["did:plc:alice": .available]
+    }
+
+    // Ensure alice is in flight
+    await gateAliceStarted.pass()
+
+    // Start query for [alice, bob] where alice is already in flight and bob is new
+    async let taskCombined = cache.resolve(dids: [alice, bob]) { chunk in
+      // Bob's fetch must start immediately, without waiting for Alice to finish
+      let keys = chunk.map { $0.didString() }
+      if keys.contains("did:plc:bob") {
+        await gateBobStarted.open()
+      }
+      await gateBobFinish.pass()
+      return ["did:plc:bob": .unavailable]
+    }
+
+    // Bob's fetch MUST start while Alice's fetch is still paused!
+    await gateBobStarted.pass()
+
+    // Now unblock both
+    await gateBobFinish.open()
+    await gateAliceFinish.open()
+
+    let resAlice = await taskAlice
+    let resCombined = await taskCombined
+
+    #expect(resAlice["did:plc:alice"] == .available)
+    #expect(resCombined["did:plc:alice"] == .available)
+    #expect(resCombined["did:plc:bob"] == .unavailable)
+  }
+
+  @Test func invalidationDuringFlightPreventsLateCompletionFromRepopulatingCache() async throws {
+    let cache = MLSChatAvailabilityCache(ttl: 60)
+    let alice = try DID(didString: "did:plc:alice")
+
+    let gateFlightStarted = TestGate()
+    let gateAllowFlightFinish = TestGate()
+    let recorder = TestLookupRecorder()
+
+    // Start flight for alice
+    async let firstLookup = cache.resolve(dids: [alice]) { chunk in
+      await recorder.record(dids: chunk.map { $0.didString() })
+      await gateFlightStarted.open()
+      await gateAllowFlightFinish.pass()
+      return ["did:plc:alice": .available]
+    }
+
+    // Wait until flight is actively running
+    await gateFlightStarted.pass()
+
+    // Invalidate alice while fetch is in-flight
+    await cache.invalidate(did: "did:plc:alice")
+
+    // Allow the original flight to complete
+    await gateAllowFlightFinish.open()
+    _ = await firstLookup
+
+    // Late completion must NOT repopulate the cache
+    let cachedAfterLateCompletion = await cache.get(did: "did:plc:alice")
+    #expect(cachedAfterLateCompletion == nil)
+
+    // Subsequent lookup must issue a fresh fetch rather than returning stale result
+    let secondLookup = await cache.resolve(dids: [alice]) { chunk in
+      await recorder.record(dids: chunk.map { $0.didString() })
+      return ["did:plc:alice": .unavailable]
+    }
+
+    #expect(secondLookup["did:plc:alice"] == .unavailable)
+    #expect(await recorder.count(for: "did:plc:alice") == 2)
+    #expect(await cache.get(did: "did:plc:alice") == .unavailable)
+  }
+
+  @Test func clearDuringFlightPreventsLateCompletionFromRepopulatingCache() async throws {
+    let cache = MLSChatAvailabilityCache(ttl: 60)
+    let bob = try DID(didString: "did:plc:bob")
+
+    let gateFlightStarted = TestGate()
+    let gateAllowFlightFinish = TestGate()
+
+    async let flight = cache.resolve(dids: [bob]) { _ in
+      await gateFlightStarted.open()
+      await gateAllowFlightFinish.pass()
+      return ["did:plc:bob": .available]
+    }
+
+    await gateFlightStarted.pass()
+
+    // Clear entire cache while fetch is in-flight
+    await cache.clear()
+
+    await gateAllowFlightFinish.open()
+    _ = await flight
+
+    #expect(await cache.get(did: "did:plc:bob") == nil)
+  }
+
+  @Test func unknownAvailabilityIsNeverCachedAndIsRetried() async throws {
+    let cache = MLSChatAvailabilityCache(ttl: 60)
+    let failing = try DID(didString: "did:plc:failing")
+    let recorder = TestLookupRecorder()
+
+    // First lookup: transient error returns .unknown
+    let result1 = await cache.resolve(dids: [failing]) { chunk in
+      await recorder.record(dids: chunk.map { $0.didString() })
+      return ["did:plc:failing": .unknown]
+    }
+
+    #expect(result1["did:plc:failing"] == .unknown)
+    #expect(await cache.get(did: "did:plc:failing") == nil)
+
+    // Second lookup: must retry and fetch again
+    let result2 = await cache.resolve(dids: [failing]) { chunk in
+      await recorder.record(dids: chunk.map { $0.didString() })
+      return ["did:plc:failing": .available]
+    }
+
+    #expect(result2["did:plc:failing"] == .available)
+    #expect(await recorder.count(for: "did:plc:failing") == 2)
+    #expect(await cache.get(did: "did:plc:failing") == .available)
+  }
+
+  @Test func boundedCacheEvictsOldestEntriesWhenCapacityExceeded() async throws {
+    let cache = MLSChatAvailabilityCache(maxEntries: 2, ttl: 300)
+    let did1 = try DID(didString: "did:plc:user1")
+    let did2 = try DID(didString: "did:plc:user2")
+    let did3 = try DID(didString: "did:plc:user3")
+
+    _ = await cache.resolve(dids: [did1]) { _ in ["did:plc:user1": .available] }
+    _ = await cache.resolve(dids: [did2]) { _ in ["did:plc:user2": .available] }
+
+    #expect(await cache.get(did: "did:plc:user1") == .available)
+    #expect(await cache.get(did: "did:plc:user2") == .available)
+
+    // Adding a 3rd entry exceeds maxEntries: 2, so oldest (user1) must be evicted
+    _ = await cache.resolve(dids: [did3]) { _ in ["did:plc:user3": .available] }
+
+    #expect(await cache.get(did: "did:plc:user1") == nil)
+    #expect(await cache.get(did: "did:plc:user2") == .available)
+    #expect(await cache.get(did: "did:plc:user3") == .available)
+  }
 }
 
 private actor RequestRecorder {
@@ -178,4 +408,41 @@ private actor RequestRecorder {
   func recordDeclaration(_ did: String) { declarations.append(did) }
   func recordDevices(_ dids: [String]) { deviceRequests.append(dids) }
   func recordAttempt() -> Int { attempts += 1; return attempts }
+}
+
+private actor TestGate {
+  private var continuations: [CheckedContinuation<Void, Never>] = []
+  private var isOpened = false
+
+  func pass() async {
+    if isOpened { return }
+    await withCheckedContinuation { cont in
+      continuations.append(cont)
+    }
+  }
+
+  func open() {
+    isOpened = true
+    let toResume = continuations
+    continuations.removeAll()
+    for cont in toResume {
+      cont.resume()
+    }
+  }
+}
+
+private actor TestLookupRecorder {
+  var callCount: [String: Int] = [:]
+  var batchCalls: [[String]] = []
+
+  func record(dids: [String]) {
+    batchCalls.append(dids)
+    for did in dids {
+      callCount[did, default: 0] += 1
+    }
+  }
+
+  func count(for did: String) -> Int {
+    callCount[did, default: 0]
+  }
 }

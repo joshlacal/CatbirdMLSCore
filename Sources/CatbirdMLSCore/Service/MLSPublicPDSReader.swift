@@ -126,7 +126,7 @@ enum MLSPublicPDSReader {
     var request = URLRequest(url: url)
     request.httpMethod = "GET"
     request.setValue("application/json", forHTTPHeaderField: "Accept")
-
+    request.timeoutInterval = 10.0
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse else {
       throw ReaderError.invalidResponse

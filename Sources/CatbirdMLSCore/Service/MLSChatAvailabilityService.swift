@@ -6,64 +6,33 @@ import Petrel
 /// Uses the server's getOptInStatus endpoint to check if users have opted in
 public actor MLSChatAvailabilityService {
   private let logger = Logger(subsystem: "blue.catbird", category: "MLSChatAvailability")
-
-  /// Cache of DID -> availability status
-  private var cache: [String: CachedStatus] = [:]
-
-  /// How long to cache availability status (5 minutes)
-  private let cacheDuration: TimeInterval = 300
-
-  private struct CachedStatus {
-    let available: Bool
-    let checkedAt: Date
-
-    func isExpired(now: Date, cacheDuration: TimeInterval) -> Bool {
-      now.timeIntervalSince(checkedAt) > cacheDuration
-    }
-  }
-
-  private struct UncachedEntry {
-    let original: String
-    let canonical: String
-    let did: DID
-  }
-
   private let apiClient: MLSAPIClient
 
   public init(apiClient: MLSAPIClient) {
     self.apiClient = apiClient
   }
 
-  /// Check if a single user can receive MLS messages
-  public func canChat(with did: String) async -> Bool {
+  /// Check availability state for a single user
+  public func checkAvailability(with did: String) async -> MLSAPIClient.MLSChatAvailability {
     guard let normalizedDid = try? DID(didString: did) else {
       logger.error("Failed to normalize DID for chat availability: \(did)")
-      return false
+      return .unavailable
     }
 
-    let cacheKey = normalizedDid.description
-    let now = Date()
+    let statuses = await apiClient.getChatAvailability(dids: [normalizedDid])
+    return statuses.first?.availability ?? .unknown
+  }
 
-    if let cached = cache[cacheKey], !cached.isExpired(now: now, cacheDuration: cacheDuration) {
-      return cached.available
-    }
-
-    do {
-      let statuses = try await apiClient.getOptInStatus(dids: [normalizedDid])
-        let available = statuses.first(where: { $0.did.didString() == cacheKey })?.optedIn ?? false
-      cache[cacheKey] = CachedStatus(available: available, checkedAt: now)
-      return available
-    } catch {
-      logger.error("Failed to check chat availability for \(cacheKey): \(error.localizedDescription)")
-      return false // Fail closed - assume not available
-    }
+  /// Check if a single user can receive MLS messages (legacy boolean)
+  public func canChat(with did: String) async -> Bool {
+    await checkAvailability(with: did) == .available
   }
 
   /// Batch check for multiple users (efficient for profile lists)
   public func canChat(withDids dids: [String]) async -> [String: Bool] {
     var results: [String: Bool] = [:]
-    var uncachedEntries: [UncachedEntry] = []
-    let now = Date()
+    var validDIDs: [DID] = []
+    var didMap: [String: [String]] = [:] // canonical -> original input strings
 
     for did in dids {
       guard let normalizedDid = try? DID(didString: did) else {
@@ -71,38 +40,24 @@ public actor MLSChatAvailabilityService {
         results[did] = false
         continue
       }
-
-      let cacheKey = normalizedDid.description
-
-      if let cached = cache[cacheKey], !cached.isExpired(now: now, cacheDuration: cacheDuration) {
-        results[did] = cached.available
-      } else {
-        uncachedEntries.append(UncachedEntry(original: did, canonical: cacheKey, did: normalizedDid))
+      let canonical = normalizedDid.description
+      if didMap[canonical] == nil {
+        validDIDs.append(normalizedDid)
       }
+      didMap[canonical, default: []].append(did)
     }
 
-    guard !uncachedEntries.isEmpty else {
+    guard !validDIDs.isEmpty else {
       return results
     }
 
-    for batch in uncachedEntries.chunked(into: 100) {
-      do {
-        let statuses = try await apiClient.getOptInStatus(dids: batch.map(\.did))
-        var statusMap: [String: Bool] = [:]
-        statuses.forEach { status in
-            statusMap[status.did.didString()] = status.optedIn
-        }
-        let timestamp = Date()
-
-        for entry in batch {
-          let available = statusMap[entry.canonical] ?? false
-          results[entry.original] = available
-          cache[entry.canonical] = CachedStatus(available: available, checkedAt: timestamp)
-        }
-      } catch {
-        logger.error("Failed to batch check chat availability: \(error.localizedDescription)")
-        for entry in batch {
-          results[entry.original] = false
+    let statuses = await apiClient.getChatAvailability(dids: validDIDs)
+    for status in statuses {
+      let canonical = status.did.description
+      let isAvailable = (status.availability == .available)
+      if let originals = didMap[canonical] {
+        for original in originals {
+          results[original] = isAvailable
         }
       }
     }
@@ -111,16 +66,12 @@ public actor MLSChatAvailabilityService {
   }
 
   /// Clear the cache (e.g., on logout)
-  public func clearCache() {
-    cache.removeAll()
+  public func clearCache() async {
+    await apiClient.clearAvailabilityCache()
   }
 
   /// Invalidate cache for a specific user
-  public func invalidate(did: String) {
-    if let normalizedDid = try? DID(didString: did) {
-      cache.removeValue(forKey: normalizedDid.description)
-    } else {
-      cache.removeValue(forKey: did)
-    }
+  public func invalidate(did: String) async {
+    await apiClient.invalidateAvailability(for: did)
   }
 }

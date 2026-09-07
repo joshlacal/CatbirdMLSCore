@@ -8,6 +8,57 @@ internal enum MLSCanonicalRustEventHandler {
     prepareInventory: @escaping () async throws -> Void,
     processEvent: @escaping (String) async throws -> Void
   ) -> MLSWebSocketManager.EventHandler {
+    var handler = makeIndividual(prepareInventory: prepareInventory, processEvent: processEvent)
+    handler.onCanonicalInventoryBatch = { snapshot in
+      // Reuse validated phase ordering and selectors, collecting hints only.
+      // Native code obtains its own authenticated inventory for this one pass.
+      let json = try await makeInventoryBatchEnvelope(snapshot: snapshot)
+      try Task.checkCancellation()
+      try await processEvent(json)
+    }
+    return handler
+  }
+
+  static func makeEventStream(
+    prepareInventory: @escaping () async throws -> Void,
+    processEvent: @escaping (String) async throws -> Void
+  ) -> MLSEventStreamManager.EventHandler {
+    var handler = makeIndividualEventStream(
+      prepareInventory: prepareInventory, processEvent: processEvent)
+    handler.onCanonicalInventoryBatch = { snapshot in
+      let json = try await makeInventoryBatchEnvelope(snapshot: snapshot)
+      try Task.checkCancellation()
+      try await processEvent(json)
+    }
+    return handler
+  }
+
+  internal static func makeInventoryBatchEnvelope(
+    snapshot: MLSCanonicalInventorySnapshot
+  ) async throws -> String {
+    var payloads: [String] = []
+    let collector = makeIndividual(prepareInventory: {}, processEvent: { payloads.append($0) })
+    try await MLSCanonicalInventoryReconciler.reconcile(
+      snapshot, actions: MLSWebSocketManager.canonicalInventoryActions(for: collector))
+    guard payloads.count <= 10_000 else {
+      throw MLSConversationError.operationFailed(
+        "Inventory hint batch exceeds maximum limit of 10000 hints")
+    }
+    let events = try payloads.map { try JSONSerialization.jsonObject(with: Data($0.utf8)) }
+    let data = try JSONSerialization.data(withJSONObject: [
+      "$type": "blue.catbird.internal#inventoryHintBatch", "events": events,
+    ])
+    guard data.count <= 16 * 1024 * 1024 else {
+      throw MLSConversationError.operationFailed(
+        "Inventory hint batch exceeds maximum size of 16MiB")
+    }
+    return String(decoding: data, as: UTF8.self)
+  }
+
+  private static func makeIndividual(
+    prepareInventory: @escaping () async throws -> Void,
+    processEvent: @escaping (String) async throws -> Void
+  ) -> MLSWebSocketManager.EventHandler {
     func forward<T: Encodable>(_ value: T) async throws {
       let json = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
       try await processEvent(json)
@@ -19,28 +70,37 @@ internal enum MLSCanonicalRustEventHandler {
       onCanonicalInventoryReconciliationStarted: prepareInventory,
       onCanonicalConversationInventoryState: { try await changed($0.coordinates.conversationId) },
       onCanonicalConversationRemovalTombstone: { value in
-        try await forward(BlueCatbirdChatDefs.AccessEndedEvent(
-          conversationId: value.conversationId, membershipIntervalId: value.membershipIntervalId,
-          userDid: value.userDid, deviceId: value.deviceId, terminalSeq: value.terminalSeq))
+        try await forward(
+          BlueCatbirdChatDefs.AccessEndedEvent(
+            conversationId: value.conversationId, membershipIntervalId: value.membershipIntervalId,
+            userDid: value.userDid, deviceId: value.deviceId, terminalSeq: value.terminalSeq))
       },
       onCanonicalConversationCloseTombstone: { value in
-        try await forward(BlueCatbirdChatDefs.ConversationClosedEvent(
-          conversationId: value.conversationId, conversationKind: value.conversationKind,
-          terminalSeq: value.terminalSeq))
+        try await forward(
+          BlueCatbirdChatDefs.ConversationClosedEvent(
+            conversationId: value.conversationId, conversationKind: value.conversationKind,
+            terminalSeq: value.terminalSeq))
       },
       onCanonicalPendingWelcome: { value in
-        try await forward(BlueCatbirdChatDefs.WelcomeAvailableEvent(
-          welcomeId: value.welcomeId, conversationId: value.conversationId))
+        try await forward(
+          BlueCatbirdChatDefs.WelcomeAvailableEvent(
+            welcomeId: value.welcomeId, conversationId: value.conversationId))
       },
       onCanonicalLeafRecovery: { item in
         switch item {
-        case .blueCatbirdChatDefsLeafRecoveryView(let value): try await changed(value.conversationId)
-        case .blueCatbirdChatDefsRecoveryWorkPendingView(let value): try await changed(value.conversationId)
-        case .blueCatbirdChatDefsRecoveryWorkCompletedByTransitionView(let value): try await changed(value.conversationId)
-        case .blueCatbirdChatDefsRecoveryWorkSupersededByTransitionView(let value): try await changed(value.conversationId)
-        case .blueCatbirdChatDefsRecoveryWorkSupersededByRevocationView(let value): try await changed(value.conversationId)
+        case .blueCatbirdChatDefsLeafRecoveryView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkPendingView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkCompletedByTransitionView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkSupersededByTransitionView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkSupersededByRevocationView(let value):
+          try await changed(value.conversationId)
         case .unexpected:
-          throw MLSConversationError.operationFailed("This version of Catbird cannot process this recovery update.")
+          throw MLSConversationError.operationFailed(
+            "This version of Catbird cannot process this recovery update.")
         }
       },
       onCanonicalDurableEventActions: .init(
@@ -67,6 +127,71 @@ internal enum MLSCanonicalRustEventHandler {
     handler.onCanonicalRecoveryConversationState = changed
     return handler
   }
+  private static func makeIndividualEventStream(
+    prepareInventory: @escaping () async throws -> Void,
+    processEvent: @escaping (String) async throws -> Void
+  ) -> MLSEventStreamManager.EventHandler {
+    func forward<T: Encodable>(_ value: T) async throws {
+      let json = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+      try await processEvent(json)
+    }
+    func changed(_ id: BlueCatbirdChatDefs.OperationId) async throws {
+      try await forward(BlueCatbirdChatDefs.ConversationChangedEvent(conversationId: id))
+    }
+    var handler = MLSEventStreamManager.EventHandler(
+      onCanonicalInventoryReconciliationStarted: prepareInventory,
+      onCanonicalConversationInventoryState: { try await changed($0.coordinates.conversationId) },
+      onCanonicalConversationRemovalTombstone: { value in
+        try await forward(
+          BlueCatbirdChatDefs.AccessEndedEvent(
+            conversationId: value.conversationId, membershipIntervalId: value.membershipIntervalId,
+            userDid: value.userDid, deviceId: value.deviceId, terminalSeq: value.terminalSeq))
+      },
+      onCanonicalConversationCloseTombstone: { value in
+        try await forward(
+          BlueCatbirdChatDefs.ConversationClosedEvent(
+            conversationId: value.conversationId, conversationKind: value.conversationKind,
+            terminalSeq: value.terminalSeq))
+      },
+      onCanonicalPendingWelcome: { value in
+        try await forward(
+          BlueCatbirdChatDefs.WelcomeAvailableEvent(
+            welcomeId: value.welcomeId, conversationId: value.conversationId))
+      },
+      onCanonicalLeafRecovery: { item in
+        switch item {
+        case .blueCatbirdChatDefsLeafRecoveryView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkPendingView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkCompletedByTransitionView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkSupersededByTransitionView(let value):
+          try await changed(value.conversationId)
+        case .blueCatbirdChatDefsRecoveryWorkSupersededByRevocationView(let value):
+          try await changed(value.conversationId)
+        case .unexpected:
+          throw MLSConversationError.operationFailed(
+            "This version of Catbird cannot process this recovery update.")
+        }
+      },
+      onCanonicalDurableEventActions: .init(
+        onConversationChanged: { try await forward($0) },
+        onConversationClosed: { try await forward($0) },
+        onMessageAvailable: { event, _, _ in try await forward(event) },
+        onWelcomeAvailable: { try await forward($0) },
+        onWelcomeDisposition: { try await forward($0) },
+        onResetRequested: { try await forward($0) },
+        onLeafRecovery: { try await forward($0) },
+        onLeaveRequest: { try await forward($0) },
+        onAccessEnded: { try await forward($0) },
+        onWatermark: { try await forward($0) },
+        onTyping: { _ in }
+      )
+    )
+    handler.onCanonicalRecoveryConversationState = changed
+    return handler
+  }
 }
 
 extension MLSConversationManager {
@@ -74,8 +199,26 @@ extension MLSConversationManager {
     MLSCanonicalRustEventHandler.make(
       prepareInventory: { [weak self] in
         guard let self else { throw CancellationError() }
-        guard await self.runRustStartupReconcileIfNeeded(operation: "canonicalInventoryStartup") else {
-          throw MLSConversationError.operationFailed("Secure chat is still reconnecting. Please try again.")
+        guard await self.runRustStartupReconcileIfNeeded(operation: "canonicalInventoryStartup")
+        else {
+          throw MLSConversationError.operationFailed(
+            "Secure chat is still reconnecting. Please try again.")
+        }
+      },
+      processEvent: { [weak self] json in
+        guard let self else { throw CancellationError() }
+        try await self.processCanonicalServerEvent(json)
+      }
+    )
+  }
+  public func makeCanonicalEventStreamHandler() -> MLSEventStreamManager.EventHandler {
+    MLSCanonicalRustEventHandler.makeEventStream(
+      prepareInventory: { [weak self] in
+        guard let self else { throw CancellationError() }
+        guard await self.runRustStartupReconcileIfNeeded(operation: "canonicalInventoryStartup")
+        else {
+          throw MLSConversationError.operationFailed(
+            "Secure chat is still reconnecting. Please try again.")
         }
       },
       processEvent: { [weak self] json in
@@ -89,30 +232,34 @@ extension MLSConversationManager {
     let generation = sessionGeneration
     try throwIfShuttingDown("canonicalServerEvent")
     guard let userDid else { throw MLSConversationError.noAuthentication }
-    try await MLSCanonicalEventTransaction.run(userDid: userDid, read: { [self] in
-      try Task.checkCancellation()
-      try validateSessionGeneration(capturedGeneration: generation)
-      try throwIfShuttingDown("canonicalServerEvent")
-      return try await withRustAuthoritativeRuntime(operation: "canonicalServerEvent") { runtime in
-        let events = try runtime.processServerEvent(eventJson: json)
-        return (events, try runtime.listConversationSnapshots())
-      }
-    }, apply: { [self] events, snapshots in
-      try Task.checkCancellation()
-      try validateSessionGeneration(capturedGeneration: generation)
-      try throwIfShuttingDown("canonicalServerEvent projection")
-      let affectedIDs = Set(events.map(\.conversationId)).filter { !$0.isEmpty }
-      try await persistRustConversationSnapshots(snapshots, reason: "canonicalServerEvent")
-      // Observed caches and notifications are published together on the UI
-      // executor, while the per-user transaction still excludes other events.
-      try await MainActor.run {
+    try await MLSCanonicalEventTransaction.run(
+      userDid: userDid,
+      read: { [self] in
         try Task.checkCancellation()
         try validateSessionGeneration(capturedGeneration: generation)
-        try throwIfShuttingDown("canonicalServerEvent publish")
-        for id in affectedIDs { notifyObservers(.messagesUpdated(convoId: id, count: 0)) }
-        if !events.isEmpty { notifyObservers(.syncCompleted(snapshots.count)) }
-      }
-    })
+        try throwIfShuttingDown("canonicalServerEvent")
+        return try await withRustAuthoritativeRuntime(operation: "canonicalServerEvent") {
+          runtime in
+          let events = try runtime.processServerEvent(eventJson: json)
+          return (events, try runtime.listConversationSnapshots())
+        }
+      },
+      apply: { [self] events, snapshots in
+        try Task.checkCancellation()
+        try validateSessionGeneration(capturedGeneration: generation)
+        try throwIfShuttingDown("canonicalServerEvent projection")
+        let affectedIDs = Set(events.map(\.conversationId)).filter { !$0.isEmpty }
+        try await persistRustConversationSnapshots(snapshots, reason: "canonicalServerEvent")
+        // Observed caches and notifications are published together on the UI
+        // executor, while the per-user transaction still excludes other events.
+        try await MainActor.run {
+          try Task.checkCancellation()
+          try validateSessionGeneration(capturedGeneration: generation)
+          try throwIfShuttingDown("canonicalServerEvent publish")
+          for id in affectedIDs { notifyObservers(.messagesUpdated(convoId: id, count: 0)) }
+          if !events.isEmpty { notifyObservers(.syncCompleted(snapshots.count)) }
+        }
+      })
   }
 }
 

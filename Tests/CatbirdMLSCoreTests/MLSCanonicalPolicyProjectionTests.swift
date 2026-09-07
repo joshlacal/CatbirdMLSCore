@@ -296,6 +296,65 @@ final class MLSCanonicalPolicyProjectionTests: XCTestCase {
     expectEqual(try await model(manager).requestState, .pendingInbound, "An old display value alone carries no authority")
     expectEqual(try await retainedBytes(manager), before)
   }
+  func testRecipientPendingRequestVisibilityAndAccountScoping() async throws {
+    let manager = try await makeManager()
+    let pendingPolicy = try snapshot(pending: true)
+
+    // Recipient receives native projection of authorized pending invitation
+    expectTrue(try await apply(manager, json: pendingPolicy, nativeProjection: true))
+    expectTrue(try await pendingConsent(manager))
+    expectEqual(try await model(manager).requestState, .pendingInbound)
+
+    // Pending request is visible to recipient
+    let pendingForRecipient = try await manager.fetchPendingRequestConversations()
+    expectEqual(pendingForRecipient.count, 1)
+    expectEqual(pendingForRecipient.first?.conversationID, cid)
+
+    // Pending request is excluded from normal accepted conversations
+    let acceptedForRecipient = try await manager.storage.fetchAcceptedConversations(
+      currentUserDID: account,
+      database: manager.database
+    )
+    expectTrue(acceptedForRecipient.isEmpty)
+
+    // DID scoping: pending request does NOT leak to other account
+    let pendingForOther = try await manager.storage.fetchPendingRequestConversations(
+      currentUserDID: otherAccount,
+      database: manager.database
+    )
+    expectTrue(pendingForOther.isEmpty)
+
+    // Terminal fence: closed conversation invalidates pending consent
+    try await manager.database.write { [account, cid] db in
+      try db.execute(sql: "INSERT INTO mls_orchestrator_terminal_access VALUES (?, ?, ?, 'closed')",
+        arguments: [account, cid, Data(repeating: 0xab, count: 32)])
+    }
+    expectFalse(try await pendingConsent(manager))
+    let pendingAfterClosed = try await manager.fetchPendingRequestConversations()
+    expectTrue(pendingAfterClosed.isEmpty, "Closed conversation must not appear in pending requests")
+
+    // Clear terminal fence for acceptance test
+    try await manager.database.write { [account, cid] db in
+      try db.execute(sql: "DELETE FROM mls_orchestrator_terminal_access WHERE user_did = ? AND conversation_id = ?",
+        arguments: [account, cid])
+    }
+
+    // Acceptance: after accepting the request (state becomes active / none)
+    let activePolicy = try snapshot(version: 2, pending: false)
+    expectTrue(try await apply(manager, json: activePolicy, nativeProjection: true))
+    expectEqual(try await model(manager).requestState, .none)
+    expectFalse(try await pendingConsent(manager))
+
+    let pendingAfterAccept = try await manager.fetchPendingRequestConversations()
+    expectTrue(pendingAfterAccept.isEmpty)
+
+    let acceptedAfterAccept = try await manager.storage.fetchAcceptedConversations(
+      currentUserDID: account,
+      database: manager.database
+    )
+    expectEqual(acceptedAfterAccept.count, 1)
+    expectEqual(acceptedAfterAccept.first?.conversationID, cid)
+  }
 
   private func makeManager(epoch: Int64 = 0) async throws -> MLSConversationManager {
     let db = try DatabasePool(path: directory.appendingPathComponent("messages.sqlite").path)

@@ -4,6 +4,7 @@ import Foundation
 /// Host-facing outcomes for conversation lifecycle operations. The bridge keeps
 /// its existing ABI; stable pending prefixes identify nonterminal Rust outcomes.
 public enum MLSConversationLifecycleError: Error, LocalizedError {
+  case rateLimited(retryAfter: TimeInterval?)
   case leavePending
   case deviceAccessPending
   case memberRemovalPending
@@ -12,6 +13,11 @@ public enum MLSConversationLifecycleError: Error, LocalizedError {
 
   public var errorDescription: String? {
     switch self {
+    case .rateLimited(let retryAfter):
+      if let seconds = Self.validRetryAfter(retryAfter) {
+        return "Secure chat is temporarily rate limited. Try again in \(Int(ceil(seconds))) seconds."
+      }
+      return "Secure chat is temporarily rate limited. Please wait a little before trying again."
     case .leavePending:
       return "Your leave request is waiting for another member to finish removing you. This conversation and its messages will stay on this device until that completes."
     case .deviceAccessPending:
@@ -23,6 +29,35 @@ public enum MLSConversationLifecycleError: Error, LocalizedError {
     case .unavailable(let message, _):
       return message
     }
+  }
+
+  /// Validated server cooldown, when one is available. No hint means callers
+  /// should present the rate limit without scheduling an immediate retry.
+  public var retryAfter: TimeInterval? {
+    guard case .rateLimited(let seconds) = self else { return nil }
+    return Self.validRetryAfter(seconds)
+  }
+
+  private static func validRetryAfter(_ seconds: TimeInterval?) -> TimeInterval? {
+    // Match MLSInventoryRequestBackoff's accepted server hint horizon.
+    guard let seconds, seconds.isFinite, seconds >= 1, seconds <= 901 else { return nil }
+    return seconds
+  }
+
+  private static func bridgeRetryAfter(_ body: String) -> TimeInterval? {
+    struct Payload: Decodable { let retryAfter: Double }
+    if let payload = try? JSONDecoder().decode(Payload.self, from: Data(body.utf8)) {
+      return validRetryAfter(payload.retryAfter)
+    }
+    // This exact sentence is emitted locally by MLSAPIError.errorDescription
+    // and preserved by the native bridge. Never display arbitrary server text.
+    let prefix = "Rate limited. Retry after "
+    let suffix = " seconds."
+    guard body.hasPrefix(prefix), body.hasSuffix(suffix) else { return nil }
+    let digits = body.dropFirst(prefix.count).dropLast(suffix.count)
+    guard !digits.isEmpty, digits.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+          let seconds = TimeInterval(digits) else { return nil }
+    return validRetryAfter(seconds)
   }
 
   internal static func isPendingDeviceAccess(_ result: MLSConversationReadyResult) -> Bool {
@@ -48,6 +83,12 @@ public enum MLSConversationLifecycleError: Error, LocalizedError {
   }
 
   internal static func presenting(_ error: Error, operation: Operation) -> Error {
+    if case MLSAPIError.rateLimited(let seconds) = error {
+      return Self.rateLimited(retryAfter: validRetryAfter(seconds))
+    }
+    if case MLSError.rateLimited(let seconds) = error {
+      return Self.rateLimited(retryAfter: validRetryAfter(TimeInterval(seconds)))
+    }
     if let mapped = presentingDeviceAuthorization(error) as? Self { return mapped }
     guard let bridgeError = error as? OrchestratorBridgeError else {
       if let localized = error as? LocalizedError, localized.errorDescription != nil { return error }
@@ -61,6 +102,8 @@ public enum MLSConversationLifecycleError: Error, LocalizedError {
     }
     let message: String
     switch bridgeError {
+    case .ServerError(let status, let body) where status == 429:
+      return Self.rateLimited(retryAfter: bridgeRetryAfter(body))
     case .ServerError(let status, let body) where status == 400
       && operation == .leave && canonicalErrorCode(body) == "AccessOutsideMembershipInterval":
       message = "This device no longer has access to complete the request. Open the conversation on another device to leave it. Your saved messages are still here."
