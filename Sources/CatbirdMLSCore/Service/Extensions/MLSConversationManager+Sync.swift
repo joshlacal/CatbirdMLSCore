@@ -6,6 +6,59 @@ import Petrel
 import PetrelCatbird
 import Synchronization
 
+/// Joins concurrent `syncWithServer` requests onto one server round trip.
+///
+/// Every UI reload, stream event, notification and reconcile path funnels
+/// through the same server inventory pagination; without this the startup
+/// fan-in issued dozens of `getConversations` requests, earned HTTP 429 and
+/// left the live event stream paused for minutes, delaying incoming messages.
+public actor MLSServerSyncCoalescer {
+  /// Set while a coalesced sync's own work is running. A nested
+  /// `syncWithServer` from inside that work must never join the sync it is
+  /// running under — that awaits its own parent task and deadlocks the send
+  /// and reconcile paths.
+  @TaskLocal static var isInsideSync = false
+
+  private var running: (full: Bool, task: Task<Void, Error>)?
+
+  /// Returns `true` when this call performed the sync, `false` when it joined
+  /// an equivalent in-flight sync.
+  @discardableResult
+  public func run(
+    fullSync: Bool,
+    joinInFlight: Bool = true,
+    work: @escaping @Sendable () async throws -> Void
+  ) async throws -> Bool {
+    if MLSServerSyncCoalescer.isInsideSync {
+      try await work()
+      return true
+    }
+
+    if joinInFlight, let running, running.full || !fullSync {
+      try await running.task.value
+      return false
+    }
+
+    // A caller that needs a guaranteed-fresh read still waits for the current
+    // sync to finish, so its own read observes everything that one wrote.
+    if let running {
+      _ = try? await running.task.value
+    }
+
+    let task = Task {
+      try await MLSServerSyncCoalescer.$isInsideSync.withValue(true) {
+        try await work()
+      }
+    }
+    running = (full: fullSync, task: task)
+    defer {
+      if running?.task == task { running = nil }
+    }
+    try await task.value
+    return true
+  }
+}
+
 extension MLSConversationManager {
   static func shouldCatchUpMessagesDuringSync(
     needsGroupInit: Bool,
@@ -100,6 +153,20 @@ public extension MLSConversationManager {
   /// Sync conversations with server
   /// - Parameter fullSync: Whether to perform full sync or incremental
   public func syncWithServer(fullSync: Bool = false) async throws {
+    try await syncCoalescer.run(fullSync: fullSync) { [self] in
+      try await performSyncWithServer(fullSync: fullSync)
+    }
+  }
+
+  /// Sync without joining an in-flight sync, for callers that must observe a
+  /// read taken after this call (send preflight repair, E2E freshness).
+  public func syncWithServerFresh(fullSync: Bool = false) async throws {
+    try await syncCoalescer.run(fullSync: fullSync, joinInFlight: false) { [self] in
+      try await performSyncWithServer(fullSync: fullSync)
+    }
+  }
+
+  private func performSyncWithServer(fullSync: Bool) async throws {
     if protocolAuthorityMode == .rustFull {
       let runtime = try await withRustAuthoritativeRuntime(operation: "syncWithServer") { runtime in
         try runtime.syncWithServer(fullSync: fullSync)

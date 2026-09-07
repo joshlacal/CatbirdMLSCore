@@ -620,7 +620,7 @@ public extension MLSConversationManager {
       let isInitialized = await mlsClient.groupExists(for: userDid, groupId: groupIdData)
       if !isInitialized {
         logger.warning("Group \(convoId) not initialized in FFI; attempting sync-fix...")
-        try await syncWithServer()
+        try await syncWithServerFresh()
       }
 
       // GUARD: Check FFI group existence BEFORE proceeding to avoid loops on preSendSync FFI errors

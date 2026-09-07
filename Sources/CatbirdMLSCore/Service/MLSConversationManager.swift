@@ -105,6 +105,12 @@ public final class MLSConversationManager {
     /// Using Mutex<Bool> to atomically check-and-set sync status
     public let syncState = Mutex<Bool>(false)
 
+    /// Collapses redundant `syncWithServer` calls. Every UI reload, stream
+    /// event, notification and reconcile path funnels through one server
+    /// inventory pagination; without this the fan-in issues dozens of
+    /// `getConversations` requests per startup and earns HTTP 429.
+    @ObservationIgnored public let syncCoalescer = MLSServerSyncCoalescer()
+
     /// Processing counters for MLS message handling diagnostics
     public let processingAttemptCounter = Mutex<Int64>(0)
     public let processingMutationCounter = Mutex<Int64>(0)
