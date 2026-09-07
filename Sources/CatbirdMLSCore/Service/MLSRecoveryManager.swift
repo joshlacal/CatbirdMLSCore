@@ -724,6 +724,12 @@ public actor MLSRecoveryManager {
       logger.error(
         "⛔️ [MLSRecoveryManager] Skipping \(convoId.prefix(16)) - quarantined (reason=\(state.reason.rawValue), since=\(state.since)) — automated rejoin disabled"
       )
+      MLSDiagnostics.record(
+        .rejoinWaiting,
+        code: "Quarantined",
+        conversation: convoId,
+        detail: ["reason": state.reason.rawValue]
+      )
       return true
     }
 
@@ -898,6 +904,13 @@ public actor MLSRecoveryManager {
         "⛔️ [MLSRecoveryManager] Max rejoin attempts (\(self.maxRejoinAttempts)) reached for \(convoId.prefix(16)) — automated rejoin disabled, quarantined for 24h (circuit breaker)"
       )
     }
+      MLSDiagnostics.record(
+        .rejoinWaiting,
+        code: "RejoinLockoutQuarantined",
+        conversation: convoId,
+        attempt: newAttempts,
+        detail: ["failureType": failureType]
+      )
 
     // WS-6.4 / E7: write-through on every state change.
     persistConversationEntry(convoId: convoId)
@@ -1041,6 +1054,13 @@ public actor MLSRecoveryManager {
       // means no real network attempt happened. Counting it would falsely
       // accelerate the convo toward MAX_REJOIN_ATTEMPTS and trip the
       // §8.6 escalation prematurely.
+      MLSDiagnostics.record(
+        .rejoinWaiting,
+        code: "RustRejoinGateActive",
+        conversation: convoId,
+        retryAfter: remainingSec,
+        detail: ["gateRemainingSec": String(Int(remainingSec))]
+      )
       return
     }
     recordFailedRejoin(
@@ -1074,6 +1094,13 @@ public actor MLSRecoveryManager {
     // above is the intended throttle for the reset-pending loop.
     logger.warning(
       "⏳ [MLSRecoveryManager] Waiting for peer key packages for \(convoId.prefix(16)) - cooldown attempt \(nextAttempts)/\(self.maxRejoinAttempts - 1)"
+    )
+    MLSDiagnostics.record(
+      .rejoinWaiting,
+      code: "RecipientNotReady",
+      conversation: convoId,
+      attempt: nextAttempts,
+      detail: ["reason": "missing_peer_key_packages"]
     )
     // WS-6.4 / E7: write-through on every state change.
     persistConversationEntry(convoId: convoId)

@@ -448,6 +448,11 @@ public extension MLSConversationManager {
         logger.info("✅ Sync pause period expired, resuming normal operation")
         syncPausedAt = nil
         consecutiveSyncFailures = 0
+        MLSDiagnostics.record(
+          .streamResumed,
+          code: "CircuitBreakerExpired",
+          detail: ["reason": "pause_period_expired"]
+        )
       }
     }
 
@@ -1029,6 +1034,14 @@ public extension MLSConversationManager {
           "   Sync will be paused for \(Int(self.syncPauseDuration))s to prevent resource exhaustion"
         )
         logger.error("   Error pattern: \(error.localizedDescription)")
+        let syncErrorCode = MLSDiagnostics.errorCode(from: error)
+        MLSDiagnostics.record(
+          .streamPaused,
+          code: syncErrorCode,
+          retryAfter: self.syncPauseDuration,
+          attempt: self.consecutiveSyncFailures,
+          detail: ["reason": "circuit_breaker_tripped"]
+        )
       }
 
       notifyObservers(.syncFailed(error))

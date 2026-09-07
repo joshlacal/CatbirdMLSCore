@@ -228,7 +228,24 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   @discardableResult
   public func processIncoming(envelope: FfiIncomingEnvelope) throws -> FfiMessage? {
-    try bridge.processIncoming(envelope: envelope)
+    do {
+      return try bridge.processIncoming(envelope: envelope)
+    } catch {
+      let code = MLSDiagnostics.errorCode(from: error)
+      let coords = MLSDiagnostics.extractCoordinates(from: error)
+      let retryAfter = MLSDiagnostics.extractRetryAfter(from: error)
+      MLSDiagnostics.record(
+        .decryptRefused,
+        code: code,
+        conversation: envelope.conversationId,
+        epoch: coords.epoch,
+        generation: coords.generation,
+        stateVersion: coords.stateVersion,
+        retryAfter: retryAfter,
+        detail: MLSDiagnostics.extractDetail(from: error)
+      )
+      throw error
+    }
   }
 
   @discardableResult
@@ -236,7 +253,24 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     envelope: FfiIncomingEnvelope,
     serverEpoch: UInt64?
   ) throws -> FfiMessageProcessingResult {
-    try bridge.processIncomingMessage(envelope: envelope, serverEpoch: serverEpoch)
+    do {
+      return try bridge.processIncomingMessage(envelope: envelope, serverEpoch: serverEpoch)
+    } catch {
+      let code = MLSDiagnostics.errorCode(from: error)
+      let coords = MLSDiagnostics.extractCoordinates(from: error)
+      let retryAfter = MLSDiagnostics.extractRetryAfter(from: error)
+      MLSDiagnostics.record(
+        .decryptRefused,
+        code: code,
+        conversation: envelope.conversationId,
+        epoch: serverEpoch ?? coords.epoch,
+        generation: coords.generation,
+        stateVersion: coords.stateVersion,
+        retryAfter: retryAfter,
+        detail: MLSDiagnostics.extractDetail(from: error)
+      )
+      throw error
+    }
   }
 
   public func processServerEvent(eventJson: String) throws -> [FfiEngineEvent] {
@@ -320,8 +354,35 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     if let terminal = try terminalAccessState(conversationId: conversationId) {
       return MLSConversationReadyResult(recoveryState: terminal, epoch: nil, sendAllowed: false)
     }
-    let result = try bridge.ensureConversationReady(convoId: conversationId)
-    return MLSConversationReadyResult(ffiResult: result)
+    do {
+      let result = try bridge.ensureConversationReady(convoId: conversationId)
+      let ready = MLSConversationReadyResult(ffiResult: result)
+      if !ready.sendAllowed && (ready.recoveryState == .needsRejoin || ready.recoveryState == .groupMissing) {
+        MLSDiagnostics.record(
+          .rejoinWaiting,
+          code: "RecipientNotReady",
+          conversation: conversationId,
+          epoch: ready.epoch,
+          detail: ["recoveryState": ready.recoveryState.rawValue]
+        )
+      }
+      return ready
+    } catch {
+      let code = MLSDiagnostics.errorCode(from: error)
+      let coords = MLSDiagnostics.extractCoordinates(from: error)
+      let retryAfter = MLSDiagnostics.extractRetryAfter(from: error)
+      MLSDiagnostics.record(
+        .conversationLoadFailed,
+        code: code,
+        conversation: conversationId,
+        epoch: coords.epoch,
+        generation: coords.generation,
+        stateVersion: coords.stateVersion,
+        retryAfter: retryAfter,
+        detail: MLSDiagnostics.extractDetail(from: error)
+      )
+      throw error
+    }
   }
 
   /// User-confirmed clean-chat reset: `requestReset` + (as an admin)

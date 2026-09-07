@@ -27,8 +27,17 @@ public final class MLSSuspensionFlightRecorder: @unchecked Sendable {
   private let suiteName = "group.blue.catbird.shared"
   private let storageKey = "mls_suspension_flight_recorder"
   private let maxEntries = 50
+  private let diagnosticsStorageKey = "mls_diagnostics_records"
+  private let diagnosticsMaxEntries = 200
   private let queue = DispatchQueue(label: "blue.catbird.mls.flightRecorder")
+  private static let defaultsOverrideLock = NSLock()
+  private static nonisolated(unsafe) var _defaultsOverride: UserDefaults?
 
+  public static func setDefaultsOverrideForTesting(_ defaults: UserDefaults?) {
+    defaultsOverrideLock.lock()
+    defer { defaultsOverrideLock.unlock() }
+    _defaultsOverride = defaults
+  }
   /// Event types for the flight recorder
   public enum EventType: String, Codable {
     case scenePhaseChange = "scene_phase"
@@ -77,9 +86,10 @@ public final class MLSSuspensionFlightRecorder: @unchecked Sendable {
   }
 
   private var defaults: UserDefaults? {
-    UserDefaults(suiteName: suiteName)
+    Self.defaultsOverrideLock.lock()
+    defer { Self.defaultsOverrideLock.unlock() }
+    return Self._defaultsOverride ?? UserDefaults(suiteName: suiteName) ?? .standard
   }
-
   private init() {}
 
   /// Record an event to the flight recorder
@@ -198,6 +208,60 @@ public final class MLSSuspensionFlightRecorder: @unchecked Sendable {
       defaults.set(data, forKey: storageKey)
     } catch {
       logger.warning("📼 [FlightRecorder] Failed to encode entries: \(error.localizedDescription)")
+    }
+  }
+
+  // MARK: - Diagnostics Ring Buffer Support
+
+  public func recordDiagnosticRecord(_ record: MLSDiagnosticRecord) {
+    queue.sync {
+      guard let defaults = self.defaults else { return }
+      var records = self.loadDiagnosticRecords(from: defaults)
+      records.append(record)
+      if records.count > self.diagnosticsMaxEntries {
+        records = Array(records.suffix(self.diagnosticsMaxEntries))
+      }
+      self.saveDiagnosticRecords(records, to: defaults)
+    }
+  }
+
+  public func getDiagnosticRecords(limit: Int = 200) -> [MLSDiagnosticRecord] {
+    queue.sync {
+      guard let defaults = self.defaults else { return [] }
+      let records = self.loadDiagnosticRecords(from: defaults)
+      let reversed = Array(records.reversed())
+      if limit > 0 && reversed.count > limit {
+        return Array(reversed.prefix(limit))
+      }
+      return reversed
+    }
+  }
+
+  public func clearDiagnosticRecords() {
+    queue.sync {
+      guard let defaults = self.defaults else { return }
+      defaults.removeObject(forKey: diagnosticsStorageKey)
+    }
+  }
+
+  private func loadDiagnosticRecords(from defaults: UserDefaults) -> [MLSDiagnosticRecord] {
+    guard let data = defaults.data(forKey: diagnosticsStorageKey) else {
+      return []
+    }
+    do {
+      return try JSONDecoder().decode([MLSDiagnosticRecord].self, from: data)
+    } catch {
+      logger.warning("📼 [FlightRecorder] Failed to decode diagnostic records: \(error.localizedDescription)")
+      return []
+    }
+  }
+
+  private func saveDiagnosticRecords(_ records: [MLSDiagnosticRecord], to defaults: UserDefaults) {
+    do {
+      let data = try JSONEncoder().encode(records)
+      defaults.set(data, forKey: diagnosticsStorageKey)
+    } catch {
+      logger.warning("📼 [FlightRecorder] Failed to encode diagnostic records: \(error.localizedDescription)")
     }
   }
 }

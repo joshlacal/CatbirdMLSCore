@@ -1395,8 +1395,20 @@ public actor MLSCoreContext {
           }
 
           logger.warning("⚠️ [DECRYPT] SecretReuseError: Cache miss after retries; skipping")
+          MLSDiagnostics.record(
+            .decryptRefused,
+            code: "SecretReuse",
+            conversation: groupId.hexEncodedString(),
+            detail: ["messageID": messageID, "reason": "cache_miss_after_retries"]
+          )
           throw MLSError.secretReuseSkipped(messageID: messageID)
         }
+        MLSDiagnostics.record(
+          .decryptRefused,
+          code: MLSDiagnostics.errorCode(from: error),
+          conversation: groupId.hexEncodedString(),
+          detail: ["messageID": messageID]
+        )
         throw error
       }
 

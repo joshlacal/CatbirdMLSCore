@@ -476,6 +476,15 @@ public actor MLSEventStreamManager {
         // Process events from stream
         print("[SSE] Starting event loop for: \(convoId.prefix(12))..., waiting for events...")
         logger.info("📡 SSE: Starting event loop for convoId: \(convoId)")
+        if reconnectAttempts > 0 {
+          MLSDiagnostics.record(
+            .streamResumed,
+            code: "Reconnected",
+            conversation: convoId,
+            attempt: reconnectAttempts,
+            detail: ["reason": "event_loop_started"]
+          )
+        }
         var reconnectRequested = false
         var failurePersistenceUnavailable = false
         let loopOutcome = try await MLSCanonicalTransportAdapter.consumeCanonicalStream(
@@ -612,6 +621,16 @@ public actor MLSEventStreamManager {
         print("[SSE] Connection error for \(convoId.prefix(12))...: \(error.localizedDescription)")
         logger.error(
           "📡 SSE: Connection error for \(convoId): \(error.localizedDescription) - \(String(describing: error))"
+        )
+        let streamErrorCode = MLSDiagnostics.errorCode(from: error)
+        let streamRetryAfter = MLSDiagnostics.extractRetryAfter(from: error)
+        MLSDiagnostics.record(
+          .streamPaused,
+          code: streamErrorCode,
+          conversation: convoId,
+          retryAfter: streamRetryAfter,
+          attempt: reconnectAttempts + 1,
+          detail: ["reason": "connection_error"]
         )
 
         connectionState[convoId] = .error(error)

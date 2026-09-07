@@ -502,33 +502,49 @@ public extension MLSConversationManager {
   public func sendMessage(
     convoId: String,
     plaintext: String,
-    embed: MLSEmbedData? = nil
+    embed: MLSEmbedData? = nil,
+    onRetryProgress: (@Sendable (MLSSendRetryProgress) -> Void)? = nil
   ) async throws -> (
     messageId: String, receivedAt: ATProtocolDate, sequenceNumber: Int64, epoch: Int64
   ) {
     try throwIfShuttingDown("sendMessage")
 
     if protocolAuthorityMode == .rustFull {
-      let stableConversationID = try await rustConversationID(for: convoId)
-      let payload = MLSMessagePayload.text(plaintext, embed: embed)
-      let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
-        try runtime.sendPayloadResult(conversationId: stableConversationID, payload: payload)
+      return try await MLSSendRetryCoordinator.performSendWithRetry(
+        convoId: convoId,
+        onRetryProgress: onRetryProgress
+      ) { [self] in
+        let stableConversationID = try await rustConversationID(for: convoId)
+        let payload = MLSMessagePayload.text(plaintext, embed: embed)
+        let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
+          try runtime.sendPayloadResult(conversationId: stableConversationID, payload: payload)
+        }
+        await handleRustEngineEvents(sendResult.events, source: "sendMessage")
+        let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
+        return (
+          messageId: sendResult.message.id,
+          receivedAt: ATProtocolDate(date: timestamp),
+          sequenceNumber: Int64(clamping: sendResult.message.sequenceNumber),
+          epoch: Int64(clamping: sendResult.message.epoch)
+        )
       }
-      await handleRustEngineEvents(sendResult.events, source: "sendMessage")
-      let timestamp = ISO8601DateFormatter().date(from: sendResult.message.timestamp) ?? Date()
-      return (
-        messageId: sendResult.message.id,
-        receivedAt: ATProtocolDate(date: timestamp),
-        sequenceNumber: Int64(clamping: sendResult.message.sequenceNumber),
-        epoch: Int64(clamping: sendResult.message.epoch)
-      )
     }
 
 #if MLS_SWIFT_LEGACY_PROTOCOL
-    return try await sendMessageLegacy(convoId: convoId, plaintext: plaintext, embed: embed)
+    return try await MLSSendRetryCoordinator.performSendWithRetry(
+      convoId: convoId,
+      onRetryProgress: onRetryProgress
+    ) { [self] in
+      try await sendMessageLegacy(convoId: convoId, plaintext: plaintext, embed: embed)
+    }
 #else
     try assertSwiftProtocolMutationAllowed("sendMessage legacy protocol implementation")
-    return try await sendMessageLegacy(convoId: convoId, plaintext: plaintext, embed: embed)
+    return try await MLSSendRetryCoordinator.performSendWithRetry(
+      convoId: convoId,
+      onRetryProgress: onRetryProgress
+    ) { [self] in
+      try await sendMessageLegacy(convoId: convoId, plaintext: plaintext, embed: embed)
+    }
 #endif
   }
 
