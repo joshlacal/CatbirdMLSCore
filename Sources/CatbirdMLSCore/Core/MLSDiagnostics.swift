@@ -129,7 +129,70 @@ public enum MLSDiagnostics {
     self.record(record)
   }
 
+  /// Record straight from an error so the trail always names the real failure:
+  /// the code identifies the class, `errorSummary` carries the redacted text
+  /// for whatever the mapping did not recognise.
+  public static func record(
+    _ event: MLSDiagnosticEvent,
+    error: Error,
+    conversation: String? = nil,
+    epoch: UInt64? = nil,
+    generation: UInt64? = nil,
+    stateVersion: UInt64? = nil,
+    retryAfter: TimeInterval? = nil,
+    attempt: Int? = nil,
+    detail: [String: String] = [:]
+  ) {
+    var enriched = detail
+    enriched["errorType"] = String(describing: type(of: error))
+    enriched["errorSummary"] = errorSummary(from: error)
+    record(
+      event,
+      code: errorCode(from: error),
+      conversation: conversation,
+      epoch: epoch,
+      generation: generation,
+      stateVersion: stateVersion,
+      retryAfter: retryAfter ?? extractRetryAfter(from: error),
+      attempt: attempt,
+      detail: enriched
+    )
+  }
+
+  private struct RepeatKey: Hashable {
+    let event: MLSDiagnosticEvent
+    let code: String
+    let conversation: String?
+    /// Distinct attempts are distinct facts: a retry ladder must stay legible
+    /// while an unnumbered failure loop collapses.
+    let attempt: Int?
+  }
+
+  private static let repeatLock = NSLock()
+  private static nonisolated(unsafe) var lastRecorded: (key: RepeatKey, at: Date)?
+
+  /// A failing loop must not bury the trail. Identical failures for the same
+  /// conversation inside this window are dropped rather than appended, so a
+  /// storm leaves one entry instead of flooding the buffer and Sentry.
+  private static let repeatSuppressionWindow: TimeInterval = 30
+
   public static func record(_ record: MLSDiagnosticRecord) {
+    let key = RepeatKey(
+      event: record.event,
+      code: record.code,
+      conversation: record.conversationIDPrefix,
+      attempt: record.attempt
+    )
+    let isRepeat: Bool = repeatLock.withLock {
+      if let last = lastRecorded, last.key == key,
+         record.occurredAt.timeIntervalSince(last.at) < repeatSuppressionWindow {
+        return true
+      }
+      lastRecorded = (key: key, at: record.occurredAt)
+      return false
+    }
+    if isRepeat { return }
+
     // 1. Persist to App Group ring buffer
     MLSSuspensionFlightRecorder.shared.recordDiagnosticRecord(record)
 
@@ -292,7 +355,35 @@ public enum MLSDiagnostics {
       return "GenerationMismatch"
     }
     if desc.contains("502") { return "HTTP_502" }
-    return "UnknownError"
+    // Never report an anonymous failure: a code of "UnknownError" tells nobody
+    // anything. Fall back to the concrete error type, which stays stable enough
+    // to fingerprint, and let `errorSummary` carry the redacted detail.
+    return "Unmapped_\(String(describing: type(of: error)))"
+  }
+
+  /// Redacted one-line description for an error whose code came out unmapped,
+  /// so a diagnostics trail names the real failure instead of a placeholder.
+  public static func errorSummary(from error: Error) -> String {
+    let raw = String(describing: error)
+      .replacingOccurrences(of: "\n", with: " ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let collapsed = raw.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
+    return sanitizeSummary(collapsed)
+  }
+
+  private static func sanitizeSummary(_ summary: String) -> String {
+    var redacted = summary
+    if let didRange = redacted.range(of: "did:plc:") {
+      let tail = redacted[didRange.upperBound...].prefix(8)
+      redacted = redacted.replacingOccurrences(
+        of: "did:plc:" + tail, with: "did:plc:" + tail + "…"
+      )
+    }
+    let words = redacted.split(separator: " ").map { word -> String in
+      // Anything long and opaque is a token, capability or ciphertext blob.
+      word.count > 44 || word.hasPrefix("eyJ") ? "[REDACTED]" : String(word)
+    }
+    return String(words.joined(separator: " ").prefix(180))
   }
 
   private static func errorCode(fromBridgeError bridgeError: OrchestratorBridgeError) -> String {

@@ -6539,7 +6539,19 @@ public extension MLSConversationManager {
       throw MLSConversationError.noAuthentication
     }
 
-    guard let convo = conversations[convoId] else {
+    // Opening a conversation can beat the sync that fills this cache, and the
+    // view then reported "Couldn't load messages" for a conversation the server
+    // holds intact. Hydrate once through the coalesced sync (it joins one
+    // already in flight rather than issuing another) before declaring it gone.
+    var resolved = conversations[convoId]
+    if resolved == nil {
+      logger.info(
+        "[chat] hydrating convo=\(convoId.prefix(8), privacy: .public) reason=coldCache")
+      try? await syncWithServer()
+      resolved = conversations[convoId]
+    }
+
+    guard let convo = resolved else {
       logger.warning("Cannot initialize group: conversation \(convoId) not found")
       throw MLSConversationError.conversationNotFound
     }

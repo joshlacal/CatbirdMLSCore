@@ -1405,7 +1405,7 @@ public actor MLSCoreContext {
         }
         MLSDiagnostics.record(
           .decryptRefused,
-          code: MLSDiagnostics.errorCode(from: error),
+          error: error,
           conversation: groupId.hexEncodedString(),
           detail: ["messageID": messageID]
         )

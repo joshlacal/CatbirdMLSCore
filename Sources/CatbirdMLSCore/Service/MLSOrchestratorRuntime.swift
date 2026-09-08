@@ -368,17 +368,14 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       }
       return ready
     } catch {
-      let code = MLSDiagnostics.errorCode(from: error)
       let coords = MLSDiagnostics.extractCoordinates(from: error)
-      let retryAfter = MLSDiagnostics.extractRetryAfter(from: error)
       MLSDiagnostics.record(
         .conversationLoadFailed,
-        code: code,
+        error: error,
         conversation: conversationId,
         epoch: coords.epoch,
         generation: coords.generation,
         stateVersion: coords.stateVersion,
-        retryAfter: retryAfter,
         detail: MLSDiagnostics.extractDetail(from: error)
       )
       throw error

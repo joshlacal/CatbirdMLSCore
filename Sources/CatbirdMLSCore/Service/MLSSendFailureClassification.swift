@@ -120,11 +120,22 @@ public extension MLSSendFailureClassification {
         return "Connection Issue (\(status))"
       }
       return "Connection Issue"
-    case .terminal:
+    case .terminal(let code, _):
+      if code == "ConversationNotFound" {
+        return "Conversation Not Found"
+      }
+      if code == "ConversationUnavailable" {
+        return "Conversation Unavailable"
+      }
+      if code == "DecryptionFailed" {
+        return "Decryption Error"
+      }
+      if code == "DecodingFailed" {
+        return "Data Error"
+      }
       return "Couldn't Load Messages"
     }
   }
-
   /// Detail body suitable for full-screen or card error presentations.
   var presentationDetail: String {
     switch self {
@@ -145,10 +156,15 @@ public extension MLSSendFailureClassification {
       }
       return "\(message) Check your connection and try again."
     case .terminal(_, let reason):
+      if reason.isEmpty || reason.hasPrefix("The operation couldn") {
+        return "Couldn't load messages. Tap Retry to try again."
+      }
+      if !reason.contains("Retry") && !reason.contains("retry") {
+        return "\(reason) Tap Retry to try again."
+      }
       return reason
     }
   }
-
   /// Central classification entrypoint. Maps any error into a typed send failure classification.
   static func classify(_ error: Error) -> MLSSendFailureClassification {
     // 1. Direct typed MLSConversationLifecycleError
@@ -329,12 +345,81 @@ public extension MLSSendFailureClassification {
         return .terminal(code: "DuplicateMessage", reason: "Message already sent.")
       case .groupNotInitialized:
         return .peerActionRequired(reason: "Secure conversation group is not active on this device.")
+      case .conversationNotFound:
+        return .terminal(code: "ConversationNotFound", reason: "Conversation not found on this device.")
+      case .groupStateNotFound:
+        return .terminal(code: "GroupStateNotFound", reason: "Conversation security group state is missing.")
+      case .contextNotInitialized:
+        return .terminal(code: "ContextNotInitialized", reason: "Secure messaging context is not initialized.")
+      case .conversationNotReady:
+        return .peerActionRequired(reason: "Conversation is not ready for messaging.")
+      case .storageUnavailable(let reason):
+        return .terminal(code: "StorageUnavailable", reason: "Local storage unavailable: \(reason)")
+      case .operationFailed(let reason):
+        return .terminal(code: "OperationFailed", reason: reason)
+      case .decryptionFailed:
+        return .terminal(code: "DecryptionFailed", reason: "Failed to decrypt message content.")
+      case .decodingFailed:
+        return .terminal(code: "DecodingFailed", reason: "Failed to decode conversation data.")
+      case .mlsError(let message):
+        return .terminal(code: "MLSError", reason: message)
+      case .serverError(let err):
+        let sub = classify(err)
+        if case .terminal = sub {
+          return .terminal(code: "ServerError", reason: err.localizedDescription)
+        }
+        return sub
+      case .syncFailed(let err):
+        return .transientNetwork(status: nil, message: "Failed to sync conversation with server: \(err.localizedDescription)")
+      case .welcomeFetchFailed:
+        return .transientNetwork(status: nil, message: "Failed to fetch Welcome message from server.")
+      case .epochMismatch:
+        return .staleCoordinates(epoch: nil, generation: nil, stateVersion: nil)
+      case .invalidEpoch:
+        return .staleCoordinates(epoch: nil, generation: nil, stateVersion: nil)
+      case .keyPackageDesyncRecoveryInitiated:
+        return .peerActionRequired(reason: "Key package desync detected. Recovery initiated.")
       case .noAuthentication:
         return .terminal(code: "NoAuth", reason: "Not authenticated.")
       case .invalidGroupId:
         return .terminal(code: "InvalidGroup", reason: "Invalid conversation identifier.")
-      default:
-        break
+      case .invalidKeyPackage(let msg):
+        return .terminal(code: "InvalidKeyPackage", reason: msg)
+      case .invalidWelcomeMessage:
+        return .terminal(code: "InvalidWelcomeMessage", reason: "Invalid Welcome message format.")
+      case .invalidIdentity:
+        return .terminal(code: "InvalidIdentity", reason: "Invalid identity credentials.")
+      case .invalidMessage:
+        return .terminal(code: "InvalidMessage", reason: "Invalid message format.")
+      case .invalidCiphertext:
+        return .terminal(code: "InvalidCiphertext", reason: "Invalid message ciphertext.")
+      case .missingKeyPackages:
+        return .terminal(code: "MissingKeyPackages", reason: "Missing key packages for conversation.")
+      case .commitProcessingFailed(_, let err):
+        return .terminal(code: "CommitProcessingFailed", reason: err.localizedDescription)
+      case .memberSyncFailed:
+        return .transientNetwork(status: nil, message: "Failed to sync members.")
+      case .duplicateSend:
+        return .terminal(code: "DuplicateSend", reason: "Duplicate send detected.")
+      case .invalidCredential:
+        return .terminal(code: "InvalidCredential", reason: "Invalid device credential.")
+      }
+    }
+
+    // 6. Pipeline access failure
+    let reflecting = String(reflecting: type(of: error))
+    if reflecting.contains("MLSConversationPipelineAccess") || reflecting.contains("PipelineAccess") {
+      let desc = String(describing: error)
+      if desc.contains("managerUnavailable") {
+        return .transientNetwork(
+          status: nil,
+          message: "Secure messaging service is temporarily unavailable."
+        )
+      } else {
+        return .terminal(
+          code: "ConversationUnavailable",
+          reason: "Conversation data is unavailable in local storage."
+        )
       }
     }
 
@@ -376,7 +461,16 @@ public extension MLSSendFailureClassification {
       return .transientNetwork(status: nil, message: "Coordination generation mismatch.")
     }
 
-    return .terminal(code: MLSDiagnostics.errorCode(from: error), reason: desc)
+    let typeName = String(describing: type(of: error))
+    let diagCode = MLSDiagnostics.errorCode(from: error)
+    let fallbackCode: String
+    if diagCode.isEmpty || diagCode == "UnknownError" {
+      fallbackCode = "Unmapped_\(typeName)"
+    } else {
+      fallbackCode = diagCode
+    }
+    let reason = desc.isEmpty || desc.hasPrefix("The operation couldn") ? "Operation failed with \(typeName)." : desc
+    return .terminal(code: fallbackCode, reason: reason)
   }
 }
 
