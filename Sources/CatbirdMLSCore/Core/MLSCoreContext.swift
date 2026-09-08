@@ -174,6 +174,9 @@ public actor MLSCoreContext {
   /// Used to detect when NSE has advanced the ratchet and we need to reload.
   private var contextVersions: [String: Int] = [:]
 
+  /// Per-user coordination generation at time of context creation/reload.
+  /// Used to ensure no cached context is reused across a generation bump.
+  private var contextGenerations: [String: Int] = [:]
   /// Per-DID in-flight context creation tasks, so concurrent getContext calls coalesce
   /// to one open and the loser adopts the winner's context instead of overwriting maps
   /// and leaking a second admission lease.
@@ -442,6 +445,15 @@ public actor MLSCoreContext {
       throw MLSError.contextCreationBlocked(reason: "App is transitioning to background - MLS operations suspended")
     }
 
+    let isExtension = Bundle.main.bundlePath.hasSuffix(".appex")
+    if !isExtension {
+      if let activeUser = MLSCoordinationStore.shared.getState().activeUserDID,
+         !activeUser.isEmpty,
+         activeUser.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != normalized {
+        logger.warning("🛑 [CONTEXT] Refusing to open context for inactive user: \(normalized.prefix(20))... (active: \(activeUser.prefix(20))...)")
+        throw MLSError.contextCreationBlocked(reason: "Account is no longer active")
+      }
+    }
     // Retry failed emergency survivors ONLY (never normal active registrations)
     let failedToRetry = Self.emergencyState.withLock { state -> [String: MlsContext] in
       return state.failedEmergencyContexts
@@ -472,6 +484,7 @@ public actor MLSCoreContext {
       logger.debug("🔄 [0xdead10cc-FIX] Clearing stale Rust context cache after emergency close")
       contexts.removeAll()
       contextVersions.removeAll()
+      contextGenerations.removeAll()
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -482,24 +495,41 @@ public actor MLSCoreContext {
     // This is faster than waiting for Darwin notifications.
     // ═══════════════════════════════════════════════════════════════════════════
     if let existingContext = contexts[normalized] {
-      let memoryVersion = contextVersions[normalized] ?? 0
-      let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
+      let memoryGeneration = contextGenerations[normalized] ?? -1
+      let currentGeneration = MLSCoordinationStore.shared.currentGeneration
 
-      if diskVersion > memoryVersion {
-        logger.warning("🔄 [CONTEXT] Stale context detected for \(normalized.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
-        logger.info("   NSE advanced the ratchet - reloading context from disk")
-
-        // Close the stale context: only evict and unregister on proven success
+      if memoryGeneration != currentGeneration {
+        logger.warning("🔄 [CONTEXT] Stale context generation detected for \(normalized.prefix(20))...: current=\(currentGeneration), cached=\(memoryGeneration)")
         existingContext.clearContentRootKey()
-        try existingContext.flushAndPrepareClose()
+        try? existingContext.flushAndPrepareClose()
         contexts.removeValue(forKey: normalized)
         contextVersions.removeValue(forKey: normalized)
+        contextGenerations.removeValue(forKey: normalized)
         if Self.unregisterFromEmergencyClose(for: normalized) {
           MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
         }
         // Fall through to create fresh context below
       } else {
-        return existingContext
+        let memoryVersion = contextVersions[normalized] ?? 0
+        let diskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
+
+        if diskVersion > memoryVersion {
+          logger.warning("🔄 [CONTEXT] Stale context detected for \(normalized.prefix(20))...: disk=\(diskVersion), memory=\(memoryVersion)")
+          logger.info("   NSE advanced the ratchet - reloading context from disk")
+
+          // Close the stale context: only evict and unregister on proven success
+          existingContext.clearContentRootKey()
+          try existingContext.flushAndPrepareClose()
+          contexts.removeValue(forKey: normalized)
+          contextVersions.removeValue(forKey: normalized)
+          contextGenerations.removeValue(forKey: normalized)
+          if Self.unregisterFromEmergencyClose(for: normalized) {
+            MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
+          }
+          // Fall through to create fresh context below
+        } else {
+          return existingContext
+        }
       }
     }
 
@@ -599,6 +629,7 @@ public actor MLSCoreContext {
       let currentDiskVersion = MLSStateVersionManager.shared.getDiskVersion(for: normalized)
       contexts[normalized] = context
       contextVersions[normalized] = currentDiskVersion
+      contextGenerations[normalized] = MLSCoordinationStore.shared.currentGeneration
       MLSStateVersionManager.shared.syncLastKnownVersion(for: normalized)
       return context
     }
@@ -628,6 +659,8 @@ public actor MLSCoreContext {
       try existingContext.flushAndPrepareClose()
       contextVersions.removeValue(forKey: userDid)
       contextVersions.removeValue(forKey: normalized)
+      contextGenerations.removeValue(forKey: userDid)
+      contextGenerations.removeValue(forKey: normalized)
       if Self.unregisterFromEmergencyClose(for: normalized) {
         MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
       }
@@ -807,6 +840,7 @@ public actor MLSCoreContext {
     for key in aliases {
       contexts.removeValue(forKey: key)
       contextVersions.removeValue(forKey: key)
+      contextGenerations.removeValue(forKey: key)
     }
     if Self.unregisterFromEmergencyClose(for: normalized) {
       MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
@@ -846,6 +880,7 @@ public actor MLSCoreContext {
       for key in aliases where contexts[key] === context {
         contexts.removeValue(forKey: key)
         contextVersions.removeValue(forKey: key)
+        contextGenerations.removeValue(forKey: key)
       }
       if Self.unregisterFromEmergencyClose(for: normalized) {
         MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: normalized)
@@ -897,6 +932,7 @@ public actor MLSCoreContext {
         try context.flushAndPrepareClose()
         contexts.removeValue(forKey: userDid)
         contextVersions.removeValue(forKey: userDid)
+        contextGenerations.removeValue(forKey: userDid)
         if Self.unregisterFromEmergencyClose(for: userDid) {
           MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: userDid)
         }
@@ -938,6 +974,7 @@ public actor MLSCoreContext {
           try context.flushAndPrepareClose()
           contexts.removeValue(forKey: staleUser)
           contextVersions.removeValue(forKey: staleUser)
+          contextGenerations.removeValue(forKey: staleUser)
           if Self.unregisterFromEmergencyClose(for: staleUser) {
             MLSStorageCoordinator.shared.releaseAdmissionLease(for: .rustState, userDID: staleUser)
           }
@@ -980,6 +1017,13 @@ public actor MLSCoreContext {
   public func hasContext(for userDid: String) -> Bool {
     let normalizedUserDid = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     return contexts.keys.contains { $0.lowercased() == normalizedUserDid }
+  }
+
+  /// Testing helper: returns ObjectIdentifier of cached context if present
+  public func cachedContextIdentifier(for userDid: String) -> ObjectIdentifier? {
+    let normalized = userDid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard let context = contexts[normalized] else { return nil }
+    return ObjectIdentifier(context)
   }
 
   // MARK: - Cross-Process Decryption Coordination

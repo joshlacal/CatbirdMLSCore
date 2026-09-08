@@ -17,7 +17,8 @@ public actor MLSEventStreamManager {
   private var activeSubscriptions: [String: Task<Void, Never>] = [:]
   private var subscriptionRuns: [String: MLSCanonicalSubscriptionRun] = [:]
   private var eventHandlers: [String: EventHandler] = [:]
-
+  public typealias HandlerProvider = @Sendable () async -> EventHandler?
+  private var eventHandlerProviders: [String: HandlerProvider] = [:]
   private var connectionState: [String: ConnectionState] = [:]
   private var lastCursor: [String: String] = [:]
 
@@ -171,7 +172,8 @@ public actor MLSEventStreamManager {
   public func subscribe(
     to convoId: String,
     cursor: String? = nil,
-    handler: EventHandler
+    handler: EventHandler,
+    handlerProvider: HandlerProvider? = nil
   ) {
     print("[SSE] subscribe() called for convoId: \(convoId.prefix(12))...")
     logger.info("📡 SSE: subscribe() called for convoId: \(convoId), cursor: \(cursor ?? "nil")")
@@ -184,7 +186,9 @@ public actor MLSEventStreamManager {
 
     // Store handler and reset stop flag
     eventHandlers[convoId] = handler
-    shouldStop[convoId] = false
+    if let handlerProvider {
+      eventHandlerProviders[convoId] = handlerProvider
+    }
     logger.info("📡 SSE: Handler registered for convoId: \(convoId)")
 
     // Update state
@@ -238,8 +242,8 @@ public actor MLSEventStreamManager {
     shouldStop[convoId] = true
 
     subscriptionRuns.removeValue(forKey: convoId)?.invalidate()
-    activeSubscriptions[convoId]?.cancel()
-    activeSubscriptions.removeValue(forKey: convoId)
+    eventHandlers.removeValue(forKey: convoId)
+    eventHandlerProviders.removeValue(forKey: convoId)
     eventHandlers.removeValue(forKey: convoId)
     connectionState[convoId] = .disconnected
   }
@@ -345,15 +349,15 @@ public actor MLSEventStreamManager {
   private func runSubscription(convoId: String, cursor: String?, run: MLSCanonicalSubscriptionRun)
     async
   {
-    guard run.isValid else { return }
-    print("[SSE] runSubscription() started for convoId: \(convoId.prefix(12))...")
+    let initialHandler = eventHandlers[convoId]
+    var currentHandler = initialHandler
+    var subscriptionInitialGeneration = MLSCoordinationStore.shared.currentGeneration
     logger.info(
       "📡 SSE: runSubscription() started for convoId: \(convoId), cursor: \(cursor ?? "nil")")
     var reconnectAttempts = 0
     var latestSavedCursor = cursor
     var subscriptionFence: MLSCanonicalSubscriptionFence?
     var replayRequirement = MLSCanonicalSubscriptionReplayRequirement()
-    let initialHandler = eventHandlers[convoId]
     var failureCoordinator: MLSCanonicalSubscriptionFailureCoordinator
     do {
       let scope = try await canonicalSubscriptionScope(for: convoId)
@@ -394,7 +398,7 @@ public actor MLSEventStreamManager {
 
         connectionState[convoId] = .connecting
 
-        guard let handler = initialHandler else {
+        guard let handler = currentHandler ?? eventHandlers[convoId] else {
           throw MLSCanonicalInventoryActionMissingError.conversationState
         }
         let apiClient = self.apiClient
@@ -622,7 +626,12 @@ public actor MLSEventStreamManager {
         logger.error(
           "📡 SSE: Connection error for \(convoId): \(error.localizedDescription) - \(String(describing: error))"
         )
-        let streamErrorCode = MLSDiagnostics.errorCode(from: error)
+        let isClosedContext = Self.isClosedContextError(error)
+        let isGenMismatch = Self.isGenerationMismatchError(error)
+        let currentCoordGen = MLSCoordinationStore.shared.currentGeneration
+        let isStaleGeneration = isGenMismatch || (subscriptionInitialGeneration != currentCoordGen)
+
+        let streamErrorCode = isClosedContext ? "ContextClosed" : (isStaleGeneration ? "GenerationMismatch" : MLSDiagnostics.errorCode(from: error))
         let streamRetryAfter = MLSDiagnostics.extractRetryAfter(from: error)
         MLSDiagnostics.record(
           .streamPaused,
@@ -630,9 +639,55 @@ public actor MLSEventStreamManager {
           conversation: convoId,
           retryAfter: streamRetryAfter,
           attempt: reconnectAttempts + 1,
-          detail: ["reason": "connection_error"]
+          detail: ["reason": streamErrorCode, "attempt": String(reconnectAttempts + 1)]
         )
 
+        if isClosedContext || isStaleGeneration {
+          let diagCode = streamErrorCode
+          logger.warning("📡 SSE: Detected \(diagCode) for \(convoId) — attempting to rebind to active account")
+
+          // If the account switched away from this stream's client, stop gracefully instead of spinning
+          if let activeDID = MLSCoordinationStore.shared.getState().activeUserDID,
+             let clientDID = await apiClient.authenticatedUserDID(),
+             !activeDID.isEmpty,
+             clientDID.lowercased() != activeDID.lowercased() {
+            logger.info("📡 SSE: Account switched away (\(clientDID) != \(activeDID)) — stopping stream for \(convoId)")
+            shouldStop[convoId] = true
+            break
+          }
+
+          // Try to rebind via handlerProvider or current eventHandlers
+          if let provider = eventHandlerProviders[convoId], let freshHandler = await provider() {
+            logger.info("📡 SSE: Rebound stream for \(convoId) to fresh active account handler")
+            eventHandlers[convoId] = freshHandler
+            currentHandler = freshHandler
+            subscriptionFence = nil
+            subscriptionInitialGeneration = currentCoordGen
+            reconnectAttempts = 0
+            MLSDiagnostics.record(
+              .streamResumed,
+              code: diagCode,
+              conversation: convoId,
+              attempt: 0,
+              detail: ["reason": "rebound_active_handler"]
+            )
+            continue
+          } else if let registeredHandler = eventHandlers[convoId] {
+            logger.info("📡 SSE: Adopting registered handler for \(convoId) after context reset")
+            currentHandler = registeredHandler
+            subscriptionFence = nil
+            subscriptionInitialGeneration = currentCoordGen
+            reconnectAttempts = 0
+            MLSDiagnostics.record(
+              .streamResumed,
+              code: diagCode,
+              conversation: convoId,
+              attempt: 0,
+              detail: ["reason": "adopted_registered_handler"]
+            )
+            continue
+          }
+        }
         connectionState[convoId] = .error(error)
 
         // Notify error handler
@@ -846,6 +901,34 @@ public actor MLSEventStreamManager {
     )
     try run.check()
     lastCursor[convoId] = cursor
+  }
+  internal static func isClosedContextError(_ error: Error) -> Bool {
+    let message: String
+    if let bridge = error as? OrchestratorBridgeError {
+      switch bridge {
+      case .Mls(let msg), .Storage(let msg), .Api(let msg):
+        message = msg
+      default:
+        message = error.localizedDescription
+      }
+    } else {
+      message = error.localizedDescription
+    }
+    let lower = message.lowercased()
+    return lower.contains("context closed")
+      || lower.contains("connections have been released")
+      || lower.contains("database connections have been released")
+      || lower.contains("database closed")
+      || lower.contains("database is closed")
+      || lower.contains("storage is closed")
+  }
+
+  internal static func isGenerationMismatchError(_ error: Error) -> Bool {
+    if error is MLSCoordinationAwareTask.GenerationStaleError { return true }
+    let lower = error.localizedDescription.lowercased()
+    return lower.contains("generation mismatch")
+      || lower.contains("coordination generation mismatch")
+      || lower.contains("generationstale")
   }
 }
 

@@ -305,14 +305,72 @@ extension MLSConversationManager {
     // a genuinely escaping body, ARC owns its lifetime and there is no escape check to
     // race. The body still does not outlive this call — we await its completion before
     // returning.
-    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-      Self.rustAuthorityExecutionQueue.async {
-        continuation.resume(with: Result {
-          do { return try body(runtime) }
-          catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
-        })
+    do {
+      return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+        Self.rustAuthorityExecutionQueue.async {
+          continuation.resume(with: Result {
+            do { return try body(runtime) }
+            catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
+          })
+        }
       }
+    } catch {
+      if Self.isClosedContextError(error) {
+        let isForeground = !MLSCoreContext.isSuspensionInProgress && !MLSClient.isSuspensionInProgress
+        if !isShuttingDown, isForeground, let userDid = self.userDid, isUserActive(userDid) {
+          logger.warning("🔄 [MLS-AUTHORITY] Context closed during \(operation) on active account — re-resolving context and retrying once")
+          invalidateOrchestratorRuntime(reason: "recovering from closed context in \(operation)")
+          try? await MLSCoreContext.shared.reloadContext(for: userDid)
+          if let freshRuntime = await ensureOrchestratorRuntime() {
+            do {
+              let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                Self.rustAuthorityExecutionQueue.async {
+                  continuation.resume(with: Result {
+                    do { return try body(freshRuntime) }
+                    catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
+                  })
+                }
+              }
+              logger.info("✅ [MLS-AUTHORITY] Recovered from closed context in \(operation)")
+              return result
+            } catch {
+              logger.error("❌ [MLS-AUTHORITY] Retry failed after context reload in \(operation): \(error.localizedDescription)")
+              throw error
+            }
+          }
+        }
+      }
+      throw error
     }
+  }
+
+  internal static func isClosedContextError(_ error: Error) -> Bool {
+    let message: String
+    if let bridge = error as? OrchestratorBridgeError {
+      switch bridge {
+      case .Mls(let msg), .Storage(let msg), .Api(let msg):
+        message = msg
+      default:
+        message = error.localizedDescription
+      }
+    } else {
+      message = error.localizedDescription
+    }
+    let lower = message.lowercased()
+    return lower.contains("context closed")
+      || lower.contains("connections have been released")
+      || lower.contains("database connections have been released")
+      || lower.contains("database closed")
+      || lower.contains("database is closed")
+      || lower.contains("storage is closed")
+  }
+
+  private func isUserActive(_ did: String) -> Bool {
+    let normalized = did.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let activeDID = MLSCoordinationStore.shared.getState().activeUserDID, !activeDID.isEmpty {
+      return activeDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
+    }
+    return true
   }
 
   internal func joinOrRejoinWithRustAuthorityIfNeeded(

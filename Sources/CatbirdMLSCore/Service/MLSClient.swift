@@ -144,8 +144,10 @@ public actor MLSClient {
   /// Clear suspension flag (idempotent). Call when the app returns to foreground, or when BGTasks
   /// need to run MLS work while the app is backgrounded.
   public nonisolated static func clearSuspensionFlag(reason: String = "unknown") {
-    emergencyState.withLock { $0.suspensionInProgress = false }
-    MLSCoreContext.clearSuspensionFlag()
+    emergencyState.withLock {
+      $0.suspensionInProgress = false
+      $0.cacheInvalidated = false
+    }
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
       details: "MLSClient clearSuspensionFlag: \(reason)",
@@ -645,16 +647,9 @@ public actor MLSClient {
       )
     }
 
-    // If contexts were closed out-of-band (nonisolated emergency close), clear the shared cache.
-    let needsCacheClear = Self.emergencyState.withLock { state in
-      if state.cacheInvalidated {
-        state.cacheInvalidated = false
-        return true
-      }
-      return false
-    }
-    if needsCacheClear {
-      await MLSCoreContext.shared.clearAllContexts()
+    // Clear stale emergency state flag if set without closing active contexts
+    Self.emergencyState.withLock { state in
+      state.cacheInvalidated = false
     }
 
     guard apiClients[normalizedDID] != nil else {

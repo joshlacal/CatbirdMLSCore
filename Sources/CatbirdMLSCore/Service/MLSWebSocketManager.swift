@@ -16,7 +16,8 @@ public actor MLSWebSocketManager {
   private var activeSubscriptions: [String: Task<Void, Never>] = [:]
   private var subscriptionRuns: [String: MLSCanonicalSubscriptionRun] = [:]
   private var eventHandlers: [String: EventHandler] = [:]
-
+  public typealias HandlerProvider = @Sendable () async -> EventHandler?
+  private var eventHandlerProviders: [String: HandlerProvider] = [:]
   private var connectionState: [String: ConnectionState] = [:]
   private var lastCursor: [String: String] = [:]
 
@@ -194,7 +195,8 @@ public actor MLSWebSocketManager {
   public func subscribe(
     to convoId: String?,
     cursor: String? = nil,
-    handler: EventHandler
+    handler: EventHandler,
+    handlerProvider: HandlerProvider? = nil
   ) {
     let key = convoId ?? "__global__"
     let logPrefix = convoId != nil ? "convoId: \(convoId!)" : "GLOBAL"
@@ -209,7 +211,9 @@ public actor MLSWebSocketManager {
 
     // Store handler and reset stop flag
     eventHandlers[key] = handler
-    shouldStop[key] = false
+    if let handlerProvider {
+      eventHandlerProviders[key] = handlerProvider
+    }
     logger.info("🔌 WS: Handler registered for \(key)")
 
     // Update state
@@ -264,7 +268,7 @@ public actor MLSWebSocketManager {
     activeSubscriptions[convoId]?.cancel()
     activeSubscriptions.removeValue(forKey: convoId)
     eventHandlers.removeValue(forKey: convoId)
-    connectionState[convoId] = .disconnected
+    eventHandlerProviders.removeValue(forKey: convoId)
   }
 
   /// Stop all active subscriptions
@@ -364,6 +368,8 @@ public actor MLSWebSocketManager {
     var subscriptionFence: MLSCanonicalSubscriptionFence?
     var replayRequirement = MLSCanonicalSubscriptionReplayRequirement()
     let initialHandler = eventHandlers[key]
+    var currentHandler = initialHandler
+    var subscriptionInitialGeneration = MLSCoordinationStore.shared.currentGeneration
     var failureCoordinator: MLSCanonicalSubscriptionFailureCoordinator
     do {
       let scope = try await canonicalSubscriptionScope(for: key)
@@ -394,7 +400,7 @@ public actor MLSWebSocketManager {
 
         connectionState[key] = .connecting
 
-        guard let handler = initialHandler else {
+        guard let handler = currentHandler ?? eventHandlers[key] else {
           throw MLSCanonicalInventoryActionMissingError.conversationState
         }
         let apiClient = self.apiClient
@@ -463,12 +469,18 @@ public actor MLSWebSocketManager {
         // Trigger reconnected callback if this was a reconnection
         if reconnectAttempts > 0 {
           logger.info("✅ Reconnected successfully for: \(key) after \(reconnectAttempts) attempts")
+          MLSDiagnostics.record(
+            .streamResumed,
+            code: "StreamResumed",
+            conversation: key == "__global__" ? nil : key,
+            attempt: reconnectAttempts,
+            detail: ["attempts": String(reconnectAttempts)]
+          )
           if let handler = eventHandlers[key], let reconnectedHandler = handler.onReconnected {
             await reconnectedHandler()
           }
         }
         try run.check()
-
         // Reset attempts on successful connection
         reconnectAttempts = 0
 
@@ -583,6 +595,64 @@ public actor MLSWebSocketManager {
             await handler.onError?(error)
           }
           break
+        }
+        let isClosedContext = Self.isClosedContextError(error)
+        let isGenMismatch = Self.isGenerationMismatchError(error)
+        let currentCoordGen = MLSCoordinationStore.shared.currentGeneration
+        let isStaleGeneration = isGenMismatch || (subscriptionInitialGeneration != currentCoordGen)
+
+        if isClosedContext || isStaleGeneration {
+          let diagCode = isClosedContext ? "ContextClosed" : "GenerationMismatch"
+          logger.warning("🔌 WS: Detected \(diagCode) for \(key) — attempting to rebind to active account")
+          MLSDiagnostics.record(
+            .streamPaused,
+            code: diagCode,
+            conversation: key == "__global__" ? nil : key,
+            attempt: reconnectAttempts + 1,
+            detail: ["reason": diagCode, "attempt": String(reconnectAttempts + 1)]
+          )
+
+          // If the account switched away from this stream's client, stop gracefully instead of spinning
+          if let activeDID = MLSCoordinationStore.shared.getState().activeUserDID,
+             let clientDID = await apiClient.authenticatedUserDID(),
+             !activeDID.isEmpty,
+             clientDID.lowercased() != activeDID.lowercased() {
+            logger.info("🔌 WS: Account switched away (\(clientDID) != \(activeDID)) — stopping stream for \(key)")
+            shouldStop[key] = true
+            break
+          }
+
+          // Try to rebind via handlerProvider or current eventHandlers
+          if let provider = eventHandlerProviders[key], let freshHandler = await provider() {
+            logger.info("🔌 WS: Rebound stream for \(key) to fresh active account handler")
+            eventHandlers[key] = freshHandler
+            currentHandler = freshHandler
+            subscriptionFence = nil
+            subscriptionInitialGeneration = currentCoordGen
+            reconnectAttempts = 0
+            MLSDiagnostics.record(
+              .streamResumed,
+              code: diagCode,
+              conversation: key == "__global__" ? nil : key,
+              attempt: 0,
+              detail: ["reason": "rebound_active_handler"]
+            )
+            continue
+          } else if let registeredHandler = eventHandlers[key] {
+            logger.info("🔌 WS: Adopting registered handler for \(key) after context reset")
+            currentHandler = registeredHandler
+            subscriptionFence = nil
+            subscriptionInitialGeneration = currentCoordGen
+            reconnectAttempts = 0
+            MLSDiagnostics.record(
+              .streamResumed,
+              code: diagCode,
+              conversation: key == "__global__" ? nil : key,
+              attempt: 0,
+              detail: ["reason": "adopted_registered_handler"]
+            )
+            continue
+          }
         }
 
         logger.error("🔌 WS: Connection error for \(key): \(error)")
@@ -794,5 +864,32 @@ public actor MLSWebSocketManager {
     )
     try run.check()
     lastCursor[convoId] = cursor
+  }
+  internal static func isClosedContextError(_ error: Error) -> Bool {
+    let message: String
+    if let bridge = error as? OrchestratorBridgeError {
+      switch bridge {
+      case .Mls(let msg), .Storage(let msg), .Api(let msg):
+        message = msg
+      default:
+        message = error.localizedDescription
+      }
+    } else {
+      message = error.localizedDescription
+    }
+    let lower = message.lowercased()
+    return lower.contains("context closed")
+      || lower.contains("connections have been released")
+      || lower.contains("database connections have been released")
+      || lower.contains("database closed")
+      || lower.contains("database is closed")
+      || lower.contains("storage is closed")
+  }
+  internal static func isGenerationMismatchError(_ error: Error) -> Bool {
+    if error is MLSCoordinationAwareTask.GenerationStaleError { return true }
+    let lower = error.localizedDescription.lowercased()
+    return lower.contains("generation mismatch")
+      || lower.contains("coordination generation mismatch")
+      || lower.contains("generationstale")
   }
 }

@@ -72,7 +72,13 @@ public extension MLSSendFailureClassification {
       if reason.contains("access") || reason.contains("Access") { return "DeviceAccessPending" }
       if reason.contains("rejoin") || reason.contains("Rejoin") { return "RejoinWaiting" }
       return "PeerActionRequired"
-    case .transientNetwork(let status, _):
+    case .transientNetwork(let status, let message):
+      if message.contains("Context closed") || message.contains("database connections have been released") || message.contains("context closed") {
+        return "ContextClosed"
+      }
+      if message.contains("generation mismatch") || message.contains("GenerationStale") || message.contains("Coordination generation mismatch") {
+        return "GenerationMismatch"
+      }
       if let status { return "HTTP_\(status)" }
       return "TransientNetwork"
     case .terminal(let code, _):
@@ -95,6 +101,12 @@ public extension MLSSendFailureClassification {
     case .peerActionRequired(let reason):
       return reason
     case .transientNetwork(let status, let message):
+      if message.contains("Context closed") || message.contains("database connections have been released") || message.contains("context closed") {
+        return "Secure messaging service is reconnecting"
+      }
+      if message.contains("generation mismatch") || message.contains("GenerationStale") || message.contains("Coordination generation mismatch") {
+        return "Updating secure session after account change"
+      }
       if let status {
         return "Server temporarily unavailable (\(status))"
       }
@@ -115,7 +127,13 @@ public extension MLSSendFailureClassification {
       return "Recipient Not Ready"
     case .peerActionRequired:
       return "Waiting for Device Access"
-    case .transientNetwork(let status, _):
+    case .transientNetwork(let status, let message):
+      if message.contains("Context closed") || message.contains("database connections have been released") || message.contains("context closed") {
+        return "Reconnecting"
+      }
+      if message.contains("generation mismatch") || message.contains("GenerationStale") || message.contains("Coordination generation mismatch") {
+        return "Session Updating"
+      }
       if let status {
         return "Connection Issue (\(status))"
       }
@@ -283,13 +301,21 @@ public extension MLSSendFailureClassification {
 
       case .Storage(let message):
         return .terminal(code: "StorageError", reason: message)
+      case .Mls(let message):
+        if message.contains("Context closed") || message.contains("database connections have been released") || message.contains("context closed") {
+          return .transientNetwork(status: nil, message: "Context closed - database connections have been released.")
+        }
+        if message.contains("generation mismatch") || message.contains("Coordination generation mismatch") {
+          return .transientNetwork(status: nil, message: "Coordination generation mismatch.")
+        }
+        let code = MLSDiagnostics.errorCode(from: error)
+        return .terminal(code: code, reason: error.localizedDescription)
 
       default:
         let code = MLSDiagnostics.errorCode(from: error)
         return .terminal(code: code, reason: error.localizedDescription)
       }
     }
-
     // 3. MLSAPIError
     if let apiError = error as? MLSAPIError {
       switch apiError {
@@ -362,6 +388,12 @@ public extension MLSSendFailureClassification {
       case .decodingFailed:
         return .terminal(code: "DecodingFailed", reason: "Failed to decode conversation data.")
       case .mlsError(let message):
+        if message.contains("Context closed") || message.contains("database connections have been released") || message.contains("context closed") {
+          return .transientNetwork(status: nil, message: "Context closed - database connections have been released.")
+        }
+        if message.contains("generation mismatch") || message.contains("Coordination generation mismatch") {
+          return .transientNetwork(status: nil, message: "Coordination generation mismatch.")
+        }
         return .terminal(code: "MLSError", reason: message)
       case .serverError(let err):
         let sub = classify(err)
@@ -457,7 +489,10 @@ public extension MLSSendFailureClassification {
     if desc.contains("502") || desc.contains("Bad Gateway") {
       return .transientNetwork(status: 502, message: "Upstream gateway timed out (502).")
     }
-    if desc.contains("generation mismatch") || desc.contains("GenerationStaleError") {
+    if desc.contains("Context closed") || desc.contains("context closed") || desc.contains("database connections have been released") {
+      return .transientNetwork(status: nil, message: "Context closed - database connections have been released.")
+    }
+    if desc.contains("generation mismatch") || desc.contains("GenerationStaleError") || desc.contains("Coordination generation mismatch") {
       return .transientNetwork(status: nil, message: "Coordination generation mismatch.")
     }
 

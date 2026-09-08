@@ -510,10 +510,20 @@ public extension MLSConversationManager {
     try throwIfShuttingDown("sendMessage")
 
     if protocolAuthorityMode == .rustFull {
+      let senderUserDID = self.userDid
       return try await MLSSendRetryCoordinator.performSendWithRetry(
         convoId: convoId,
         onRetryProgress: onRetryProgress
       ) { [self] in
+        try throwIfShuttingDown("sendMessage")
+        if let senderUserDID {
+          if let activeDID = MLSCoordinationStore.shared.getState().activeUserDID,
+             !activeDID.isEmpty,
+             activeDID.lowercased() != senderUserDID.lowercased() {
+            logger.warning("🛑 [SEND] Account changed mid-flight (\(senderUserDID.prefix(16)) -> \(activeDID.prefix(16))) - abandoning send")
+            throw MLSConversationError.noAuthentication
+          }
+        }
         let stableConversationID = try await rustConversationID(for: convoId)
         let payload = MLSMessagePayload.text(plaintext, embed: embed)
         let sendResult = try await withRustAuthoritativeRuntime(operation: "sendMessage") { runtime in
@@ -579,6 +589,12 @@ public extension MLSConversationManager {
     }
 
     guard let userDid = userDid else {
+      throw MLSConversationError.noAuthentication
+    }
+    if let activeDID = MLSCoordinationStore.shared.getState().activeUserDID,
+       !activeDID.isEmpty,
+       activeDID.lowercased() != userDid.lowercased() {
+      logger.warning("🛑 [SEND] Account changed mid-flight - abandoning send")
       throw MLSConversationError.noAuthentication
     }
 
