@@ -447,7 +447,12 @@ public actor MLSCoreContext {
 
     let isExtension = Bundle.main.bundlePath.hasSuffix(".appex")
     if !isExtension {
-      if let activeUser = MLSCoordinationStore.shared.getState().activeUserDID,
+      let coordState = MLSCoordinationStore.shared.getState()
+      if coordState.phase == .switching {
+        logger.warning("🛑 [CONTEXT] Refusing to open context while account switch is in progress for \(normalized.prefix(20))...")
+        throw MLSError.contextCreationBlocked(reason: "Account switch in progress")
+      }
+      if let activeUser = coordState.activeUserDID,
          !activeUser.isEmpty,
          activeUser.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != normalized {
         logger.warning("🛑 [CONTEXT] Refusing to open context for inactive user: \(normalized.prefix(20))... (active: \(activeUser.prefix(20))...)")

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import os.log
 
 /// Manages cross-process coordination state for the Stop-The-World protocol.
@@ -8,6 +9,13 @@ public final class MLSCoordinationStore {
   public static let shared = MLSCoordinationStore()
   
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSCoordination")
+  private let activeUserProvider = Mutex<(@Sendable () -> String?)?>(nil)
+
+  /// Provide an in-memory active user authority (e.g. from AppStateManager in the main app).
+  public func setActiveUserProvider(_ provider: (@Sendable () -> String?)?) {
+    activeUserProvider.withLock { $0 = provider }
+  }
+
   
   private let fileName = "coordination_state.\(MLSStoragePaths.cleanSuffix).json"
   public var currentGeneration: Int {
@@ -87,10 +95,39 @@ public final class MLSCoordinationStore {
   /// Get current coordination state
   public func getState() -> State {
     do {
-      return try fetchState()
+      var state = try fetchState()
+      if let provider = activeUserProvider.withLock({ $0 }), let liveActive = provider() {
+        state.activeUserDID = liveActive
+      }
+      return state
     } catch {
+      let fallbackActive = activeUserProvider.withLock({ $0 })?()
       logger.critical("⚠️ [COORD] Failed to fetch coordination state (corrupt or unavailable): \(error.localizedDescription)")
-      return State(coordinationGeneration: -1, activeUserDID: nil, phase: .closed, updatedAt: Date())
+      return State(coordinationGeneration: -1, activeUserDID: fallbackActive, phase: .closed, updatedAt: Date())
+    }
+  }
+
+  /// Set or update the active user DID and persist to the App Group container.
+  /// If the active user has changed from the current state, this increments the coordination generation
+  /// to invalidate in-flight work from the previous account.
+  public func setActiveUserDID(_ userDID: String?) {
+    queue.sync {
+      do {
+        var state = try fetchState()
+        let normalized = userDID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let currentNormalized = state.activeUserDID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized != currentNormalized {
+          state.coordinationGeneration += 1
+          logger.info("🔢 [COORD] Generation incremented to \(state.coordinationGeneration) on active user change (\(currentNormalized ?? "nil", privacy: .private) -> \(normalized ?? "nil", privacy: .private))")
+        }
+        state.activeUserDID = userDID
+        state.phase = .active
+        state.updatedAt = Date()
+        try saveStrict(state)
+        logger.info("👤 [COORD] Active user set to \(userDID?.prefix(16) ?? "nil", privacy: .private)")
+      } catch {
+        logger.critical("🚨 [COORD] Refusing to set active user from unreadable/unwritable state: \(error.localizedDescription)")
+      }
     }
   }
   

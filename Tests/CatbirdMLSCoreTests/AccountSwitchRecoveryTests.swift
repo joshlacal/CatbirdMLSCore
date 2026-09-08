@@ -58,6 +58,7 @@ final class AccountSwitchRecoveryTests: XCTestCase {
   }
 
   override func tearDown() async throws {
+    MLSCoordinationStore.shared.setActiveUserProvider(nil)
     MLSDiagnostics.clear()
     MLSStoragePaths.setBaseDirectoryOverride(nil)
     MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
@@ -304,6 +305,105 @@ final class AccountSwitchRecoveryTests: XCTestCase {
     do {
       try await MLSCoreContext.shared.ensureContext(for: userDID)
       XCTFail("Must refuse to open context for account that is no longer active")
+    } catch let error as MLSError {
+      guard case .contextCreationBlocked(let reason) = error else {
+        return XCTFail("Expected contextCreationBlocked but got: \(error)")
+      }
+      XCTAssertTrue(reason.contains("Account is no longer active"))
+    }
+  }
+
+  // MARK: - (f) Restart With Stale Persisted Active User Hint Replaced On Startup
+
+  func testRestartWithStalePersistedActiveUserHintReplacedOnStartup() async throws {
+    let staleDID = "did:plc:stale_\(UUID().uuidString.prefix(8).lowercased())"
+    let newActiveDID = "did:plc:new_active_\(UUID().uuidString.prefix(8).lowercased())"
+
+    // 1. Simulate on-disk persisted state left behind from a previous session / crash
+    MLSCoordinationStore.shared.incrementGeneration(for: staleDID)
+    let staleGen = MLSCoordinationStore.shared.currentGeneration
+    XCTAssertEqual(MLSCoordinationStore.shared.getState().activeUserDID, staleDID)
+
+    // 2. Simulate app restart with new authenticated session publishing its active account
+    MLSCoordinationStore.shared.setActiveUserDID(newActiveDID)
+
+    // Verify: active user updated and coordination generation bumped
+    XCTAssertEqual(MLSCoordinationStore.shared.getState().activeUserDID, newActiveDID)
+    XCTAssertGreaterThan(MLSCoordinationStore.shared.currentGeneration, staleGen)
+
+    // 3. New active account successfully opens MLS context
+    try await MLSCoreContext.shared.ensureContext(for: newActiveDID)
+    let newContextID = await MLSCoreContext.shared.cachedContextIdentifier(for: newActiveDID)
+    XCTAssertNotNil(newContextID, "Active user must be able to open context")
+
+    // 4. Stale/inactive account is rejected by guard and cannot steal ownership
+    do {
+      try await MLSCoreContext.shared.ensureContext(for: staleDID)
+      XCTFail("Must refuse to open context for account that is no longer active")
+    } catch let error as MLSError {
+      guard case .contextCreationBlocked(let reason) = error else {
+        return XCTFail("Expected contextCreationBlocked but got: \(error)")
+      }
+      XCTAssertTrue(reason.contains("Account is no longer active"))
+    }
+
+    // 5. Verify live provider authority takes precedence over disk hints
+    let liveProviderDID = "did:plc:live_authority_\(UUID().uuidString.prefix(8).lowercased())"
+    MLSCoordinationStore.shared.setActiveUserProvider { liveProviderDID }
+    defer { MLSCoordinationStore.shared.setActiveUserProvider(nil) }
+
+    XCTAssertEqual(MLSCoordinationStore.shared.getState().activeUserDID, liveProviderDID)
+    try await MLSCoreContext.shared.ensureContext(for: liveProviderDID)
+  }
+
+  // MARK: - (g) Account Switch Safety and Switching Phase Cancellation
+
+  func testAccountSwitchSafetyAndSwitchingPhaseCancellation() async throws {
+    let userA = "did:plc:user_a_\(UUID().uuidString.prefix(8).lowercased())"
+    let userB = "did:plc:user_b_\(UUID().uuidString.prefix(8).lowercased())"
+
+    // 1. Initial user A is active and has an open context
+    MLSCoordinationStore.shared.setActiveUserDID(userA)
+    try await MLSCoreContext.shared.ensureContext(for: userA)
+    let genBeforeSwitch = MLSCoordinationStore.shared.currentGeneration
+
+    // 2. Account switch begins: enter .switching phase and bump generation for new user
+    MLSCoordinationStore.shared.updatePhase(.switching)
+    MLSCoordinationStore.shared.incrementGeneration(for: userB)
+    let switchingGen = MLSCoordinationStore.shared.currentGeneration
+    XCTAssertGreaterThan(switchingGen, genBeforeSwitch)
+
+    // In-flight tasks from user A fail generation validation
+    XCTAssertThrowsError(try MLSCoordinationStore.shared.validateGeneration(genBeforeSwitch)) { error in
+      guard case MLSCoordinationError.generationMismatch(let expected, let current) = error else {
+        return XCTFail("Expected generationMismatch but got: \(error)")
+      }
+      XCTAssertEqual(expected, genBeforeSwitch)
+      XCTAssertEqual(current, switchingGen)
+    }
+
+    // While in .switching phase, getContext is refused
+    do {
+      try await MLSCoreContext.shared.ensureContext(for: userA)
+      XCTFail("Context creation must be blocked during account switch")
+    } catch let error as MLSError {
+      guard case .contextCreationBlocked(let reason) = error else {
+        return XCTFail("Expected contextCreationBlocked but got: \(error)")
+      }
+      XCTAssertTrue(reason.contains("Account switch in progress"))
+    }
+
+    // 3. Switch completes: restore .active phase with user B published as active
+    MLSCoordinationStore.shared.updatePhase(.active)
+    MLSCoordinationStore.shared.setActiveUserDID(userB)
+
+    // User B can now open context
+    try await MLSCoreContext.shared.ensureContext(for: userB)
+
+    // Old user A is now inactive and blocked
+    do {
+      try await MLSCoreContext.shared.ensureContext(for: userA)
+      XCTFail("User A must be refused after switch to User B completes")
     } catch let error as MLSError {
       guard case .contextCreationBlocked(let reason) = error else {
         return XCTFail("Expected contextCreationBlocked but got: \(error)")

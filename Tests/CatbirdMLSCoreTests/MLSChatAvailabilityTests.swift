@@ -399,6 +399,74 @@ struct MLSChatAvailabilityTests {
     #expect(await cache.get(did: "did:plc:user2") == .available)
     #expect(await cache.get(did: "did:plc:user3") == .available)
   }
+
+  @Test func discoveryFailurePreservesActorResultsAndMarksUnknownWithoutCrashingOrDroppingDIDs() async throws {
+    let declaration = try declaration()
+    let candidates = Array(descending.prefix(3))
+    let dids = try candidates.map { try DID(didString: $0) }
+
+    // Simulate discovery failure when fetching devices (e.g. database reset / missing actor device)
+    let results = await MLSAPIClient.resolveChatAvailability(
+      dids: dids,
+      fetchDeclaration: { _ in declaration },
+      fetchDevices: { _ in throw MLSAPIError.invalidResponse(message: "Enrolled device ID not found") }
+    )
+
+    // Valid search results must NEVER be dropped or erased on discovery error
+    #expect(results.count == candidates.count)
+    #expect(results.map { $0.did.didString() } == candidates)
+    #expect(results.allSatisfy { $0.availability == .unknown })
+  }
+
+  @Test func unregisteredRecipientAccuratelyReflectsReadinessAsUnavailable() async throws {
+    let registeredWithDeclaration = descending[0]
+    let missingDeclaration = descending[1]
+    let registeredNoDevices = descending[2]
+    let dids = try [registeredWithDeclaration, missingDeclaration, registeredNoDevices].map { try DID(didString: $0) }
+    let declaration = try declaration()
+
+    let results = await MLSAPIClient.resolveChatAvailability(
+      dids: dids,
+      fetchDeclaration: { did in
+        if did == missingDeclaration { return nil }
+        return declaration
+      },
+      fetchDevices: { queriedDids in
+        // Only registeredWithDeclaration has an active device on delivery service
+        Set([registeredWithDeclaration]).intersection(queriedDids.map { $0.didString() })
+      }
+    )
+
+    #expect(results.count == 3)
+    let map = Dictionary(uniqueKeysWithValues: results.map { ($0.did.didString(), $0.availability) })
+    #expect(map[registeredWithDeclaration] == .available)
+    #expect(map[missingDeclaration] == .unavailable)
+    #expect(map[registeredNoDevices] == .unavailable)
+  }
+
+  @Test func chatAvailabilityServiceBatchNormalizesAndMapsStatuses() async throws {
+    let atProtoClient = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let apiClient = await MLSAPIClient(client: atProtoClient)
+    let service = MLSChatAvailabilityService(apiClient: apiClient)
+
+    // Pre-populate availability cache to test batch mapping without hitting network
+    let availableDid = try DID(didString: "did:plc:avail123")
+    let unavailableDid = try DID(didString: "did:plc:unavail123")
+    _ = await apiClient.availabilityCache.resolve(dids: [availableDid, unavailableDid]) { _ in
+      [availableDid.didString(): .available, unavailableDid.didString(): .unavailable]
+    }
+
+    let batch = ["did:plc:avail123", "did:plc:unavail123", "invalid-did-format"]
+    let statuses = await service.checkAvailability(withDids: batch)
+    #expect(statuses["did:plc:avail123"] == .available)
+    #expect(statuses["did:plc:unavail123"] == .unavailable)
+    #expect(statuses["invalid-did-format"] == .unavailable)
+
+    let canChatMap = await service.canChat(withDids: batch)
+    #expect(canChatMap["did:plc:avail123"] == true)
+    #expect(canChatMap["did:plc:unavail123"] == false)
+    #expect(canChatMap["invalid-did-format"] == false)
+  }
 }
 
 private actor RequestRecorder {
