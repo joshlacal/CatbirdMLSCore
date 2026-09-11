@@ -363,6 +363,21 @@ public actor MLSGRDBManager {
     }
   }
 
+  /// Epoch of synchronous storage closure, used when rebinding retained readers
+  /// across actor awaits. A later foreground cycle must not make an old result current.
+  internal nonisolated static var storageLifecycleGeneration: UInt64 {
+    emergencyDatabasesLock.withLock { emergencyGeneration }
+  }
+
+  internal nonisolated static func requireCurrentStorageGeneration(_ generation: UInt64) throws {
+    try emergencyDatabasesLock.withLock {
+      guard emergencyGeneration == generation,
+            !MLSClient.isSuspensionInProgress, !MLSCoreContext.isSuspensionInProgress else {
+        throw MLSSQLCipherError.storageUnavailable(reason: "Storage binding superseded by suspension")
+      }
+    }
+  }
+
   private nonisolated static func finishCoordinatedOpen() {
     emergencyDatabasesLock.withLock { inFlightEmergencyOpenCount -= 1 }
   }

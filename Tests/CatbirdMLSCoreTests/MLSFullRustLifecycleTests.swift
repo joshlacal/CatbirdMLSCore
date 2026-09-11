@@ -6,11 +6,25 @@ import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSFullRustLifecycleTests: XCTestCase {
+  private static let testUserDID = "did:plc:lifecycle-\(UUID().uuidString.lowercased())"
+  private static let storageDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("MLSFullRustLifecycleTests-\(UUID().uuidString)")
+  private static let keychain = MLSKeychainFakeStorage()
+
+  override func setUpWithError() throws {
+    try super.setUpWithError()
+    try FileManager.default.createDirectory(at: Self.storageDirectory, withIntermediateDirectories: true)
+    MLSStoragePaths.setBaseDirectoryOverride(Self.storageDirectory)
+    MLSKeychainManager.setFakeStorageOverrideForTesting(Self.keychain)
+  }
+
   override func tearDownWithError() throws {
     MLSConversationManager.resetSuspensionStateForTesting()
     MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
     MLSClient.clearSuspensionFlag(reason: "MLSFullRustLifecycleTests.tearDown")
     MLSCoreContext.clearSuspensionFlag()
+    MLSStoragePaths.setBaseDirectoryOverride(nil)
+    MLSKeychainManager.setFakeStorageOverrideForTesting(nil)
     try super.tearDownWithError()
   }
 
@@ -61,7 +75,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: bridge
     )
@@ -82,7 +96,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let manager = try await makeManager(protocolAuthorityMode: .rustAuthoritative)
     let bridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustAuthoritative,
       bridge: bridge
     )
@@ -102,7 +116,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let bridge = RecordingLifecycleBridge()
     bridge.prepareError = TestLifecycleError.prepareFailed
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: bridge
     )
@@ -137,7 +151,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: bridge
     )
@@ -158,13 +172,13 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let staleBridge = RecordingLifecycleBridge()
     let rebuiltBridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: staleBridge
     )
     manager.orchestratorRuntimeResumeFactory = {
       MLSOrchestratorRuntime(
-        userDID: "did:plc:testuser",
+        userDID: Self.testUserDID,
         mode: .rustFull,
         bridge: rebuiltBridge
       )
@@ -186,7 +200,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertEqual(
       rebuiltBridge.reattachCalls,
       [LifecycleUserReasonCall(
-        userDID: "did:plc:testuser",
+        userDID: Self.testUserDID,
         reason: "MLSConversationManager.resumeMLSOperations"
       )]
     )
@@ -198,7 +212,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let staleBridge = RecordingLifecycleBridge()
     let rebuiltBridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: staleBridge
     )
@@ -209,7 +223,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
         return nil
       }
       return MLSOrchestratorRuntime(
-        userDID: "did:plc:testuser",
+        userDID: Self.testUserDID,
         mode: .rustFull,
         bridge: rebuiltBridge
       )
@@ -234,7 +248,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     XCTAssertEqual(
       rebuiltBridge.reattachCalls,
       [LifecycleUserReasonCall(
-        userDID: "did:plc:testuser",
+        userDID: Self.testUserDID,
         reason: "MLSConversationManager.resumeMLSOperations"
       )]
     )
@@ -245,13 +259,13 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let staleBridge = RecordingLifecycleBridge()
     let rebuiltBridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: staleBridge
     )
     manager.orchestratorRuntimeResumeFactory = {
       MLSOrchestratorRuntime(
-        userDID: "did:plc:testuser",
+        userDID: Self.testUserDID,
         mode: .rustFull,
         bridge: rebuiltBridge
       )
@@ -280,13 +294,13 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let staleBridge = RecordingLifecycleBridge()
     let rebuiltBridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: staleBridge
     )
     manager.orchestratorRuntimeResumeFactory = {
       MLSOrchestratorRuntime(
-        userDID: "did:plc:testuser",
+        userDID: Self.testUserDID,
         mode: .rustFull,
         bridge: rebuiltBridge
       )
@@ -322,7 +336,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: bridge
     )
@@ -353,7 +367,7 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     let manager = try await makeManager(protocolAuthorityMode: .rustFull)
     let bridge = RecordingLifecycleBridge()
     manager.orchestratorRuntime = MLSOrchestratorRuntime(
-      userDID: "did:plc:testuser",
+      userDID: Self.testUserDID,
       mode: .rustFull,
       bridge: bridge
     )
@@ -397,8 +411,8 @@ final class MLSFullRustLifecycleTests: XCTestCase {
     }
 
     let manager = MLSGRDBManager()
-    let appContentPath = manager.appContentDatabasePath(for: "did:plc:testuser")
-    let rustStoragePath = manager.rustStateDatabasePath(for: "did:plc:testuser")
+    let appContentPath = manager.appContentDatabasePath(for: Self.testUserDID)
+    let rustStoragePath = manager.rustStateDatabasePath(for: Self.testUserDID)
 
     XCTAssertNotEqual(appContentPath, rustStoragePath)
     XCTAssertTrue(appContentPath.path.contains("/MLS-\(MLSStoragePaths.cleanSuffix)/"))
@@ -654,13 +668,22 @@ final class MLSFullRustLifecycleTests: XCTestCase {
       client: atProtoClient,
       environment: .custom(serviceDID: "did:web:example.com#atproto_mls")
     )
-    return MLSConversationManager(
+    let manager = MLSConversationManager(
       apiClient: apiClient,
       database: database,
-      userDid: "did:plc:testuser",
+      userDid: Self.testUserDID,
       atProtoClient: atProtoClient,
       protocolAuthorityMode: protocolAuthorityMode
     )
+    try await manager.refreshDatabaseIfNeeded()
+    if protocolAuthorityMode == .rustFull {
+      // Lifecycle bridge tests provide their own runtime; repository publication
+      // is covered separately and must not attempt real network/keychain work.
+      try await manager.rustDeviceAuthorizationGate.ensure(
+        scope: manager.rustDeviceAuthorizationScope(for: Self.testUserDID)
+      ) { }
+    }
+    return manager
   }
 }
 
