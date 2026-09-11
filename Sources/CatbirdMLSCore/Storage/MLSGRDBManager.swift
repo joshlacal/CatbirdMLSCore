@@ -1998,8 +1998,19 @@ public actor MLSGRDBManager {
       let existingToken = poolRegistrationTokens[userDID]
       let validationGeneration = Self.emergencyDatabasesLock.withLock { Self.emergencyGeneration }
       do {
-        _ = try await existingDatabase.read { db in
-          try Int.fetchOne(db, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
+        try await retryTransientValidation(generation: validationGeneration) {
+          // GRDB gives pooled readers an internal ten-second busy timeout. Use
+          // the existing writer for this read-only probe so its scoped busy
+          // callback can yield immediately to our interruptible retry loop.
+          _ = try await existingDatabase.writeWithoutTransaction { db in
+            try Self.requireCurrentStorageGeneration(validationGeneration)
+            let previousLimit = Thread.current.threadDictionary[Self.checkpointTimeoutKey]
+            Thread.current.threadDictionary[Self.checkpointTimeoutKey] = 0
+            defer {
+              Thread.current.threadDictionary[Self.checkpointTimeoutKey] = previousLimit
+            }
+            return try Int.fetchOne(db, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
+          }
         }
         guard databases[userDID] === existingDatabase,
           Self.emergencyDatabasesLock.withLock({ Self.emergencyGeneration == validationGeneration })
@@ -2011,6 +2022,10 @@ public actor MLSGRDBManager {
       } catch let error as CancellationError {
         throw error
       } catch {
+        // Contention is not evidence of corruption. Keep the exact cached pool,
+        // registration, and admission lease so a later call can validate it.
+        if Self.isTransientValidationContention(error) { throw error }
+        if case MLSSQLCipherError.storageUnavailable = error { throw error }
         try existingDatabase.close()
         if databases[userDID] === existingDatabase {
           databases.removeValue(forKey: userDID)
@@ -4354,7 +4369,81 @@ public actor MLSGRDBManager {
     return config
   }
 
+  private nonisolated static func isTransientValidationContention(_ error: Error) -> Bool {
+    guard let databaseError = error as? DatabaseError else { return false }
+    return databaseError.resultCode == .SQLITE_BUSY || databaseError.resultCode == .SQLITE_LOCKED
+  }
+
+  /// Only transient SQLite contention is retried. The one-second budget covers
+  /// retries, not time queued behind an existing local database operation.
+  private func retryTransientValidation<T>(
+    generation: UInt64,
+    operation: () async throws -> T
+  ) async throws -> T {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while true {
+      try Task.checkCancellation()
+      try Self.requireCurrentStorageGeneration(generation)
+      do {
+        let value = try await operation()
+        try Task.checkCancellation()
+        try Self.requireCurrentStorageGeneration(generation)
+        return value
+      } catch {
+        try Task.checkCancellation()
+        try Self.requireCurrentStorageGeneration(generation)
+        let now = ContinuousClock.now
+        guard Self.isTransientValidationContention(error), now < deadline else {
+          throw error
+        }
+        let remaining = now.duration(to: deadline)
+        try await Task.sleep(for: min(.milliseconds(25), remaining))
+        try Task.checkCancellation()
+        try Self.requireCurrentStorageGeneration(generation)
+        guard ContinuousClock.now < deadline else { throw error }
+      }
+    }
+  }
+
   func validateExistingGRDBDatabase(at dbPath: URL, encryptionKey: Data, salt: Data) async throws {
+    let generation = Self.storageLifecycleGeneration
+    do {
+      try await retryTransientValidation(generation: generation) {
+        try await self.validateExistingGRDBDatabaseAttempt(at: dbPath, encryptionKey: encryptionKey, salt: salt)
+      }
+    } catch let error as DatabaseError {
+      throw MLSStorageInitializationError.validationFailed(
+        details: "GRDB database read-only validation failed: \(error.localizedDescription)")
+    }
+  }
+
+  /// A complete attempt owns its temporary queue and closes it before backoff.
+  /// No database, statement, or cursor escapes the validation closure.
+  private func withReadOnlyValidationQueue(
+    at dbPath: URL,
+    configuration: Configuration,
+    validate: (DatabaseQueue) async throws -> Void
+  ) async throws {
+    let queue = try DatabaseQueue(path: dbPath.path, configuration: configuration)
+    let validationResult: Result<Void, Error>
+    do {
+      try await validate(queue)
+      validationResult = .success(())
+    } catch {
+      validationResult = .failure(error)
+    }
+    do {
+      try queue.close()
+    } catch {
+      // Never retry with a connection whose explicit close failed. The local
+      // queue then deinitializes through GRDB's close_v2 cleanup path.
+      throw MLSStorageInitializationError.validationFailed(
+        details: "GRDB validation connection could not close: \(error.localizedDescription)")
+    }
+    try validationResult.get()
+  }
+
+  private func validateExistingGRDBDatabaseAttempt(at dbPath: URL, encryptionKey: Data, salt: Data) async throws {
     guard try MLSStoragePaths.fileExistsStrict(at: dbPath) else {
       throw MLSStorageInitializationError.validationFailed(details: "GRDB database file missing for validation")
     }
@@ -4371,10 +4460,7 @@ public actor MLSGRDBManager {
 
     let readConfig = Self.readOnlyDatabaseConfiguration(encryptionKey: encryptionKey, salt: salt)
 
-    do {
-      let queue = try DatabaseQueue(path: dbPath.path, configuration: readConfig)
-      defer { try? queue.close() }
-
+    try await withReadOnlyValidationQueue(at: dbPath, configuration: readConfig) { queue in
       let cipherVersion: String? = try await queue.read { db in
         try String.fetchOne(db, sql: "PRAGMA cipher_version;")
       }
@@ -4490,10 +4576,6 @@ public actor MLSGRDBManager {
           details: "GRDB database missing required columns in MLSConversationModel (found: \(convoColumns))"
         )
       }
-    } catch let error as MLSStorageInitializationError {
-      throw error
-    } catch {
-      throw MLSStorageInitializationError.validationFailed(details: "GRDB database read-only validation failed: \(error.localizedDescription)")
     }
   }
 
