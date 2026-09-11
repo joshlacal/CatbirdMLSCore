@@ -9,11 +9,23 @@ public final class MLSCoordinationStore {
   public static let shared = MLSCoordinationStore()
   
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSCoordination")
-  private let activeUserProvider = Mutex<(@Sendable () -> String?)?>(nil)
+  // Copy a stable reference through Mutex rather than an optional closure.
+  // Repeated closure reads through its generic inout boundary can accumulate
+  // Swift reabstraction wrappers and eventually exhaust the calling stack.
+  private final class ActiveUserProvider: Sendable {
+    let call: @Sendable () -> String?
+
+    init(_ call: @escaping @Sendable () -> String?) {
+      self.call = call
+    }
+  }
+
+  private let activeUserProvider = Mutex<ActiveUserProvider?>(nil)
 
   /// Provide an in-memory active user authority (e.g. from AppStateManager in the main app).
   public func setActiveUserProvider(_ provider: (@Sendable () -> String?)?) {
-    activeUserProvider.withLock { $0 = provider }
+    let holder = provider.map { ActiveUserProvider($0) }
+    activeUserProvider.withLock { $0 = holder }
   }
 
   
@@ -96,12 +108,12 @@ public final class MLSCoordinationStore {
   public func getState() -> State {
     do {
       var state = try fetchState()
-      if let provider = activeUserProvider.withLock({ $0 }), let liveActive = provider() {
+      if let provider = activeUserProvider.withLock({ $0 }), let liveActive = provider.call() {
         state.activeUserDID = liveActive
       }
       return state
     } catch {
-      let fallbackActive = activeUserProvider.withLock({ $0 })?()
+      let fallbackActive = activeUserProvider.withLock({ $0 })?.call()
       logger.critical("⚠️ [COORD] Failed to fetch coordination state (corrupt or unavailable): \(error.localizedDescription)")
       return State(coordinationGeneration: -1, activeUserDID: fallbackActive, phase: .closed, updatedAt: Date())
     }
