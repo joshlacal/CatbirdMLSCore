@@ -136,7 +136,8 @@ extension MLSConversationManager {
          latest.enabled == enabled,
          latest.keyID == authority.keyID,
          latest.authGeneration == authority.authGeneration,
-         latest.publicKey == authority.publicKey
+         latest.publicKey == authority.publicKey,
+         MLSPushRegistrationJournal.canReuse(latest)
       { return latest }
 
       let generation: Int64

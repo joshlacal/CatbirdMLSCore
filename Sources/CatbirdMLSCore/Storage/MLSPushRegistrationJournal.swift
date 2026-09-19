@@ -82,7 +82,27 @@ enum MLSPushRegistrationJournal {
     return try entry(from: row)
   }
 
-  static func reserve(_ entry: Entry, in db: Database) throws -> Entry {
+  /// The server accepts a new binding only within five minutes of its signed
+  /// time. Keep a minute for transport/clock skew, while preserving old unknown
+  /// attempts when a higher generation is needed. An acknowledged binding does
+  /// not expire merely because its original signature ages.
+  static func canReuse(_ entry: Entry, now: Date = Date()) -> Bool {
+    switch entry.state {
+    case .active:
+      return true
+    case .superseded:
+      return false
+    case .pending:
+      let formatter = ISO8601DateFormatter()
+      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      guard let signed = formatter.date(from: entry.signedAt),
+            MLSPushRegistrationCodec.canonicalTimestamp(signed) == entry.signedAt
+      else { return false }
+      return abs(now.timeIntervalSince(signed)) <= 240
+    }
+  }
+
+  static func reserve(_ entry: Entry, in db: Database, now: Date = Date()) throws -> Entry {
     try createTable(in: db)
     let normalizedDID = MLSStorageHelpers.normalizeDID(entry.currentUserDID)
     if let current = try latest(
@@ -96,7 +116,8 @@ enum MLSPushRegistrationJournal {
          current.enabled == entry.enabled,
          current.keyID == entry.keyID,
          current.authGeneration == entry.authGeneration,
-         current.publicKey == entry.publicKey
+         current.publicKey == entry.publicKey,
+         canReuse(current, now: now)
       { return current }
       guard entry.tokenGeneration > current.tokenGeneration else {
         throw MLSPushRegistrationError.invalidField("tokenGeneration")
