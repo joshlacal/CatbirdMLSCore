@@ -100,6 +100,11 @@ public actor MLSWebSocketManager {
     {
       didSet { onCanonicalInventoryBatch = nil }
     }
+    public var onCanonicalPendingDirectRequestWelcome:
+      ((BlueCatbirdChatDefs.DirectRequestWelcomeView) async throws -> Void)?
+    {
+      didSet { onCanonicalInventoryBatch = nil }
+    }
     public var onCanonicalLeafRecovery:
       ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)?
     {
@@ -138,6 +143,9 @@ public actor MLSWebSocketManager {
         (BlueCatbirdChatDefs.ConversationCloseTombstone) async throws -> Void
       )? = nil,
       onCanonicalPendingWelcome: ((BlueCatbirdChatDefs.WelcomeView) async throws -> Void)? = nil,
+      onCanonicalPendingDirectRequestWelcome: (
+        (BlueCatbirdChatDefs.DirectRequestWelcomeView) async throws -> Void
+      )? = nil,
       onCanonicalLeafRecovery: ((BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void)? =
         nil,
       onCanonicalDurableEventActions: MLSCanonicalTransportAdapter
@@ -153,6 +161,7 @@ public actor MLSWebSocketManager {
       self.onCanonicalConversationRemovalTombstone = onCanonicalConversationRemovalTombstone
       self.onCanonicalConversationCloseTombstone = onCanonicalConversationCloseTombstone
       self.onCanonicalPendingWelcome = onCanonicalPendingWelcome
+      self.onCanonicalPendingDirectRequestWelcome = onCanonicalPendingDirectRequestWelcome
       self.onCanonicalLeafRecovery = onCanonicalLeafRecovery
       self.onCanonicalDurableEventActions = onCanonicalDurableEventActions
       self.onMembershipChanged = onMembershipChanged
@@ -752,6 +761,7 @@ public actor MLSWebSocketManager {
       onConversationRemoval: handler.onCanonicalConversationRemovalTombstone,
       onConversationClose: handler.onCanonicalConversationCloseTombstone,
       onPendingWelcome: handler.onCanonicalPendingWelcome,
+      onPendingDirectRequestWelcome: handler.onCanonicalPendingDirectRequestWelcome,
       onLeafRecovery: handler.onCanonicalLeafRecovery,
       onRecoveryConversationState: handler.onCanonicalRecoveryConversationState
     )

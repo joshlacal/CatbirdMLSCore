@@ -22,6 +22,11 @@ final class MLSConversationProjectionCommitTests: XCTestCase {
             keychain: InMemoryKeychainAccess()
         )
         try context.setContentRootKey(key: Data(repeating: 0x51, count: 32))
+        _ = MLSOrchestratorStorageAdapter(
+            dbPool: database,
+            userDID: "did:plc:projection-test",
+            mlsContext: context
+        )
     }
 
     override func tearDown() async throws {

@@ -17,13 +17,17 @@ struct MLSPushRegistrationCodecTests {
       publicKey: publicKey
     )
     let tokenBytes = try #require(bodyObject["tokenSha256"] as? [String: String])
+    let providerName = try #require(bodyObject["provider"] as? String)
+    let provider = try #require(MLSPushRegistrationProvider(rawValue: providerName))
+    let encodedTokenDigest = try #require(tokenBytes["$bytes"])
+    let tokenDigest = try #require(Data(base64Encoded: encodedTokenDigest))
     let body = MLSPushRegistrationCodec.Body(
       authority: authority,
       registrationID: try #require(bodyObject["registrationId"] as? String),
-      provider: try #require(MLSPushRegistrationProvider(rawValue: #require(bodyObject["provider"] as? String))),
+      provider: provider,
       appID: try #require(bodyObject["appId"] as? String),
       tokenGeneration: Int64(try #require(bodyObject["tokenGeneration"] as? Int)),
-      tokenSHA256: try #require(Data(base64Encoded: #require(tokenBytes["$bytes"]))),
+      tokenSHA256: tokenDigest,
       enabled: try #require(bodyObject["enabled"] as? Bool),
       signedAt: try #require(bodyObject["signedAt"] as? String)
     )
@@ -53,6 +57,8 @@ struct MLSPushRegistrationCodecTests {
     let fixture = try fixture()
     let bodyObject = try #require(fixture["body"] as? [String: Any])
     let tokenBytes = try #require(bodyObject["tokenSha256"] as? [String: String])
+    let encodedTokenDigest = try #require(tokenBytes["$bytes"])
+    let tokenDigest = try #require(Data(base64Encoded: encodedTokenDigest))
     let body = MLSPushRegistrationCodec.Body(
       authority: MLSPushSigningAuthority(
         actorDID: try #require(bodyObject["actorDid"] as? String),
@@ -65,7 +71,7 @@ struct MLSPushRegistrationCodecTests {
       provider: .fcm,
       appID: try #require(bodyObject["appId"] as? String),
       tokenGeneration: Int64(try #require(bodyObject["tokenGeneration"] as? Int)),
-      tokenSHA256: try #require(Data(base64Encoded: #require(tokenBytes["$bytes"]))),
+      tokenSHA256: tokenDigest,
       enabled: true,
       signedAt: try #require(bodyObject["signedAt"] as? String)
     )
@@ -141,6 +147,7 @@ struct MLSPushRegistrationCodecTests {
 
   private func fixture() throws -> [String: Any] {
     let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
       .deletingLastPathComponent()
       .deletingLastPathComponent()
       .deletingLastPathComponent()

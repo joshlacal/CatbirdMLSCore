@@ -122,10 +122,10 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
       return (200, document)
     }
 
-    XCTAssertEqual(
-      try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(session: session),
-      document
+    let fetched = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+      session: session
     )
+    XCTAssertEqual(fetched, document)
   }
 
   func testDirectRequestReceiptAuthorityRejectsWrongDID() async throws {

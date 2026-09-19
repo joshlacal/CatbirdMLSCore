@@ -84,9 +84,27 @@ internal struct MLSCanonicalInventorySnapshot {
   internal let snapshotEventCursor: String
   internal let snapshotExpiresAt: Date
   internal let conversationItems: [BlueCatbirdChatDefs.ConversationInventoryItem]
-  internal let pendingWelcomeItems: [BlueCatbirdChatDefs.WelcomeView]
+  internal let pendingWelcomeItems: [BlueCatbirdChatGetPendingWelcomes.OutputItemsUnion]
   internal let leafRecoveryItems: [BlueCatbirdChatDefs.LeafRecoveryInboxItem]
   internal let directRequestScope: BlueCatbirdChatDefs.DirectRequestInventoryScope?
+
+  internal init(
+    inventorySessionId: String,
+    snapshotEventCursor: String,
+    snapshotExpiresAt: Date,
+    conversationItems: [BlueCatbirdChatDefs.ConversationInventoryItem],
+    pendingWelcomeItems: [BlueCatbirdChatGetPendingWelcomes.OutputItemsUnion],
+    leafRecoveryItems: [BlueCatbirdChatDefs.LeafRecoveryInboxItem],
+    directRequestScope: BlueCatbirdChatDefs.DirectRequestInventoryScope? = nil
+  ) {
+    self.inventorySessionId = inventorySessionId
+    self.snapshotEventCursor = snapshotEventCursor
+    self.snapshotExpiresAt = snapshotExpiresAt
+    self.conversationItems = conversationItems
+    self.pendingWelcomeItems = pendingWelcomeItems
+    self.leafRecoveryItems = leafRecoveryItems
+    self.directRequestScope = directRequestScope
+  }
 
   internal var completion: MLSInventorySessionCompletion {
     MLSInventorySessionCompletion(
@@ -163,7 +181,7 @@ internal enum MLSInventorySessionAssembler {
     let sessionId = firstMetadata.sessionId
 
     var welcomeCursor: String?
-    var pendingWelcomeItems: [BlueCatbirdChatDefs.WelcomeView] = []
+    var pendingWelcomeItems: [BlueCatbirdChatGetPendingWelcomes.OutputItemsUnion] = []
     var seenWelcomeCursors: Set<String> = []
     repeat {
       let page = try await fetchPendingWelcomes(sessionId, welcomeCursor)
@@ -176,6 +194,9 @@ internal enum MLSInventorySessionAssembler {
         domain: .pendingWelcomes
       )
       try validate(metadata, matching: firstMetadata, domain: .pendingWelcomes)
+      guard page.inventoryScope == directRequestScope else {
+        throw MLSInventorySessionError.continuationChanged(.pendingWelcomes)
+      }
       pendingWelcomeItems.append(contentsOf: page.items)
       if page.hasMore {
         guard let nextCursor = page.nextPageCursor else {
@@ -208,6 +229,9 @@ internal enum MLSInventorySessionAssembler {
         domain: .leafRecovery
       )
       try validate(metadata, matching: firstMetadata, domain: .leafRecovery)
+      guard page.inventoryScope == directRequestScope else {
+        throw MLSInventorySessionError.continuationChanged(.leafRecovery)
+      }
       leafRecoveryItems.append(contentsOf: page.items)
       if page.hasMore {
         guard let nextCursor = page.nextPageCursor else {
@@ -308,6 +332,8 @@ internal struct MLSCanonicalInventoryActionSet {
     (BlueCatbirdChatDefs.ConversationCloseTombstone) async throws -> Void
   internal typealias WelcomeHandler =
     (BlueCatbirdChatDefs.WelcomeView) async throws -> Void
+  internal typealias DirectRequestWelcomeHandler =
+    (BlueCatbirdChatDefs.DirectRequestWelcomeView) async throws -> Void
   internal typealias LeafRecoveryHandler =
     (BlueCatbirdChatDefs.LeafRecoveryInboxItem) async throws -> Void
   internal typealias RecoveryConversationStateHandler =
@@ -317,6 +343,7 @@ internal struct MLSCanonicalInventoryActionSet {
   internal var onConversationRemoval: ConversationRemovalHandler?
   internal var onConversationClose: ConversationCloseHandler?
   internal var onPendingWelcome: WelcomeHandler?
+  internal var onPendingDirectRequestWelcome: DirectRequestWelcomeHandler?
   internal var onLeafRecovery: LeafRecoveryHandler?
   /// Only a consumer that treats recovery items as current-state scheduling
   /// hints may opt in. Ordinary item handlers retain their per-item effects.
@@ -327,6 +354,7 @@ internal struct MLSCanonicalInventoryActionSet {
     onConversationRemoval: ConversationRemovalHandler? = nil,
     onConversationClose: ConversationCloseHandler? = nil,
     onPendingWelcome: WelcomeHandler? = nil,
+    onPendingDirectRequestWelcome: DirectRequestWelcomeHandler? = nil,
     onLeafRecovery: LeafRecoveryHandler? = nil,
     onRecoveryConversationState: RecoveryConversationStateHandler? = nil
   ) {
@@ -334,6 +362,7 @@ internal struct MLSCanonicalInventoryActionSet {
     self.onConversationRemoval = onConversationRemoval
     self.onConversationClose = onConversationClose
     self.onPendingWelcome = onPendingWelcome
+    self.onPendingDirectRequestWelcome = onPendingDirectRequestWelcome
     self.onLeafRecovery = onLeafRecovery
     self.onRecoveryConversationState = onRecoveryConversationState
   }
@@ -344,7 +373,9 @@ internal enum MLSCanonicalInventoryActionMissingError: Error, Equatable, Localiz
   case conversationRemoval
   case conversationClose
   case pendingWelcome
+  case pendingDirectRequestWelcome
   case leafRecovery
+  case unsupportedPendingWelcomeItem
   case unsupportedLeafRecoveryItem
   case unsupportedConversationItem
 
@@ -358,8 +389,12 @@ internal enum MLSCanonicalInventoryActionMissingError: Error, Equatable, Localiz
       return "conversationClose"
     case .pendingWelcome:
       return "pendingWelcome"
+    case .pendingDirectRequestWelcome:
+      return "pendingDirectRequestWelcome"
     case .leafRecovery:
       return "leafRecovery"
+    case .unsupportedPendingWelcomeItem:
+      return "unsupportedPendingWelcomeItem"
     case .unsupportedLeafRecoveryItem:
       return "unsupportedLeafRecoveryItem"
     case .unsupportedConversationItem:
@@ -377,8 +412,12 @@ internal enum MLSCanonicalInventoryActionMissingError: Error, Equatable, Localiz
       return "No canonical conversation-close reconciliation action is installed"
     case .pendingWelcome:
       return "No canonical pending-Welcome reconciliation action is installed"
+    case .pendingDirectRequestWelcome:
+      return "No canonical direct-request Welcome reconciliation action is installed"
     case .leafRecovery:
       return "No canonical leaf-recovery reconciliation action is installed"
+    case .unsupportedPendingWelcomeItem:
+      return "Unsupported canonical pending-Welcome inventory item"
     case .unsupportedLeafRecoveryItem:
       return "Unsupported canonical leaf-recovery inventory item"
     case .unsupportedConversationItem:
@@ -424,11 +463,21 @@ internal enum MLSCanonicalInventoryReconciler {
       }
     }
 
-    for welcome in snapshot.pendingWelcomeItems {
-      guard let action = actions.onPendingWelcome else {
-        throw MLSCanonicalInventoryActionMissingError.pendingWelcome
+    for item in snapshot.pendingWelcomeItems {
+      switch item {
+      case .blueCatbirdChatDefsWelcomeView(let welcome):
+        guard let action = actions.onPendingWelcome else {
+          throw MLSCanonicalInventoryActionMissingError.pendingWelcome
+        }
+        try await action(welcome)
+      case .blueCatbirdChatDefsDirectRequestWelcomeView(let welcome):
+        guard let action = actions.onPendingDirectRequestWelcome else {
+          throw MLSCanonicalInventoryActionMissingError.pendingDirectRequestWelcome
+        }
+        try await action(welcome)
+      case .unexpected:
+        throw MLSCanonicalInventoryActionMissingError.unsupportedPendingWelcomeItem
       }
-      try await action(welcome)
     }
 
     if let recoveryConversationIDs, let action = actions.onRecoveryConversationState {

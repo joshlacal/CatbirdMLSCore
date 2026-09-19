@@ -654,7 +654,8 @@ public final class MLSAPIClient {
             actorDeviceId: try await requireActorDeviceId(),
             inventorySessionId: inventorySessionId,
             pageCursor: cursor,
-            limit: limit
+            limit: limit,
+            supportedProtocolVersions: [.value_1, .value_2]
         )
         let (responseCode, output) = try await client.blue.catbird.chat.getPendingWelcomes(input: input)
         guard (200 ... 299).contains(responseCode), let output else {
@@ -677,7 +678,8 @@ public final class MLSAPIClient {
             actorDeviceId: try await requireActorDeviceId(),
             inventorySessionId: inventorySessionId,
             pageCursor: cursor,
-            limit: limit
+            limit: limit,
+            supportedProtocolVersions: [.value_1, .value_2]
         )
         let (responseCode, output) = try await client.blue.catbird.chat.getLeafRecoveryInbox(input: input)
         guard (200 ... 299).contains(responseCode), let output else {
@@ -1642,7 +1644,10 @@ public final class MLSAPIClient {
         logger.debug("Fetching Welcome message for conversation: \(convoId)")
         let acceptedHashes = Set((keyPackageHashes ?? []).map { $0.lowercased() })
         let snapshot = try await getCanonicalInventoryAggregateSnapshot()
-        let welcome = snapshot.pendingWelcomeItems
+        let welcome = snapshot.pendingWelcomeItems.compactMap { item -> BlueCatbirdChatDefs.WelcomeView? in
+            guard case .blueCatbirdChatDefsWelcomeView(let welcome) = item else { return nil }
+            return welcome
+        }
             .filter {
                 $0.conversationId == convoId
                     && $0.status == .value_pending

@@ -278,6 +278,26 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     XCTAssertEqual(recoveryCursors.map { $0 ?? "nil" }, ["nil", "recovery-2"])
   }
 
+  func testPendingWelcomeScopeChangeFailsBeforeInventoryCompletion() async {
+    do {
+      _ = try await MLSInventorySessionAssembler.assemble(
+        fetchConversations: { self.conversationPage(cursor: $0) },
+        fetchPendingWelcomes: { _, cursor in
+          self.welcomePage(cursor: cursor, scopeByte: 0x7f)
+        },
+        fetchLeafRecoveryInbox: { _, _ in
+          XCTFail("scope mismatch must stop before recovery paging")
+          return self.recoveryPage(cursor: nil)
+        }
+      )
+      XCTFail("a changed retained-reader scope must fail closed")
+    } catch let error as MLSInventorySessionError {
+      XCTAssertEqual(error, .continuationChanged(.pendingWelcomes))
+    } catch {
+      XCTFail("unexpected inventory error: \(error)")
+    }
+  }
+
   func testManagerOuterReconnectRetainsFailedFenceAndDoesNotFetchNewInventory() async throws {
     let snapshot = MLSCanonicalInventorySnapshot(
       inventorySessionId: "session-1",
@@ -1586,7 +1606,7 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
         .init(removal),
         .init(close),
       ],
-      pendingWelcomeItems: [welcome],
+      pendingWelcomeItems: [.init(welcome)],
       leafRecoveryItems: [.init(recoveryWork)]
     )
 
@@ -1630,6 +1650,61 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       XCTAssertEqual(error, .unsupportedLeafRecoveryItem)
     } catch {
       XCTFail("unexpected inventory reconciliation error: \(error)")
+    }
+  }
+
+  func testDirectRequestWelcomeUsesDedicatedActionAndNeverOrdinaryWelcomeImport() async throws {
+    let recipient = try DID(didString: "did:plc:request-recipient")
+    let requestWelcome = BlueCatbirdChatDefs.DirectRequestWelcomeView(
+      welcomeId: "request-welcome-1",
+      conversationId: "550e8400-e29b-41d4-a716-446655440099",
+      transitionSeq: 8,
+      coordinates: makeCoordinate(conversationId: "550e8400-e29b-41d4-a716-446655440099"),
+      status: .value_pending,
+      opaqueWelcome: Bytes(data: Data([0x01, 0x02])),
+      sha256: Bytes(data: Data(repeating: 0x03, count: 32)),
+      recipientDid: recipient,
+      recipientDeviceId: "550e8400-e29b-41d4-a716-446655440098",
+      provenance: BlueCatbirdChatDefs.DirectRequestWelcomeProvenance(
+        requestId: "550e8400-e29b-41d4-a716-446655440097",
+        preparationDigest: Bytes(data: Data(repeating: 0x04, count: 32)),
+        contextHash: Bytes(data: Data(repeating: 0x05, count: 32)),
+        grantId: "550e8400-e29b-41d4-a716-446655440096",
+        grantRevision: 1,
+        keyPackageRef: Bytes(data: Data(repeating: 0x06, count: 32)),
+        importUntil: expiry
+      )
+    )
+    let snapshot = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "session-1",
+      snapshotEventCursor: "cursor-1",
+      snapshotExpiresAt: expiry.date,
+      conversationItems: [],
+      pendingWelcomeItems: [.init(requestWelcome)],
+      leafRecoveryItems: []
+    )
+    var ordinaryImports = 0
+    var requestIDs: [String] = []
+    try await MLSCanonicalInventoryReconciler.reconcile(
+      snapshot,
+      actions: MLSCanonicalInventoryActionSet(
+        onPendingWelcome: { _ in ordinaryImports += 1 },
+        onPendingDirectRequestWelcome: { requestIDs.append($0.conversationId) }
+      )
+    )
+    XCTAssertEqual(ordinaryImports, 0)
+    XCTAssertEqual(requestIDs, [requestWelcome.conversationId])
+
+    do {
+      try await MLSCanonicalInventoryReconciler.reconcile(
+        snapshot,
+        actions: MLSCanonicalInventoryActionSet(onPendingWelcome: { _ in
+          XCTFail("A request Welcome must never reach ordinary import")
+        })
+      )
+      XCTFail("Missing direct-request routing must fail inventory completion")
+    } catch let error as MLSCanonicalInventoryActionMissingError {
+      XCTAssertEqual(error, .pendingDirectRequestWelcome)
     }
   }
 
@@ -2235,7 +2310,8 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
     cursor: String?,
     session: String = "session-1",
     omitContinuation: Bool = false,
-    repeatedContinuation: Bool = false
+    repeatedContinuation: Bool = false,
+    scopeByte: UInt8 = 0x42
   ) -> BlueCatbirdChatGetConversations.Output {
     BlueCatbirdChatGetConversations.Output(
       items: [],
@@ -2245,13 +2321,15 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
         ? nil
         : (repeatedContinuation ? "conversation-2" : (cursor == nil ? "conversation-2" : nil)),
       hasMore: repeatedContinuation || cursor == nil,
-      snapshotExpiresAt: expiry
+      snapshotExpiresAt: expiry,
+      inventoryScope: requestInventoryScope(byte: scopeByte)
     )
   }
 
   private func welcomePage(
     cursor: String?,
-    session: String = "session-1"
+    session: String = "session-1",
+    scopeByte: UInt8 = 0x42
   ) -> BlueCatbirdChatGetPendingWelcomes.Output {
     BlueCatbirdChatGetPendingWelcomes.Output(
       items: [],
@@ -2259,13 +2337,15 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       snapshotEventCursor: "event-1",
       nextPageCursor: cursor == nil ? "welcome-2" : nil,
       hasMore: cursor == nil,
-      snapshotExpiresAt: expiry
+      snapshotExpiresAt: expiry,
+      inventoryScope: requestInventoryScope(byte: scopeByte)
     )
   }
 
   private func recoveryPage(
     cursor: String?,
-    session: String = "session-1"
+    session: String = "session-1",
+    scopeByte: UInt8 = 0x42
   ) -> BlueCatbirdChatGetLeafRecoveryInbox.Output {
     BlueCatbirdChatGetLeafRecoveryInbox.Output(
       items: [],
@@ -2273,7 +2353,17 @@ final class MLSInventoryAndDurableEventTests: XCTestCase {
       snapshotEventCursor: "event-1",
       nextPageCursor: cursor == nil ? "recovery-2" : nil,
       hasMore: cursor == nil,
-      snapshotExpiresAt: expiry
+      snapshotExpiresAt: expiry,
+      inventoryScope: requestInventoryScope(byte: scopeByte)
+    )
+  }
+
+  private func requestInventoryScope(
+    byte: UInt8
+  ) -> BlueCatbirdChatDefs.DirectRequestInventoryScope {
+    BlueCatbirdChatDefs.DirectRequestInventoryScope(
+      supportedProtocolVersions: [.value_1, .value_2],
+      scopeDigest: Bytes(data: Data(repeating: byte, count: 32))
     )
   }
 

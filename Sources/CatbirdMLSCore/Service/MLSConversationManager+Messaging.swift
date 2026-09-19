@@ -476,7 +476,7 @@ public extension MLSConversationManager {
   /// Resolve a caller-supplied identifier to the canonical stable UUID
   /// required by Rust's public mutation API. Raw group hex remains confined to
   /// low-level MLS crypto paths.
-  private func rustConversationID(for requestedID: String) async throws -> String {
+  internal func rustConversationID(for requestedID: String) async throws -> String {
     guard let userDid else { throw MLSConversationError.noAuthentication }
     let groupHint = conversations[requestedID]?.groupId
     let resolved = try await database.read { db in
@@ -2186,6 +2186,12 @@ public extension MLSConversationManager {
 
     for event in events {
       switch event.kind {
+      case .requestReceived:
+        conversationsNeedingFollowup.insert(event.conversationId)
+        logger.info(
+          "🦀 [MLS-FULL-RUST] event=requestReceived source=\(source, privacy: .public) convo=\(event.conversationId.prefix(16), privacy: .private)"
+        )
+
       case .conversationUpdated:
         conversationsNeedingFollowup.insert(event.conversationId)
         logger.info(
