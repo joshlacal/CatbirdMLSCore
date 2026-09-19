@@ -15,11 +15,12 @@ class RebuildPreservationTests(unittest.TestCase):
             workspace = Path(directory)
             core = workspace / "CatbirdMLSCore"
             native = workspace / "catbird-mls"
+            atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
             sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
-            for path in (scripts, sources, framework, native, fake_bin):
+            for path in (scripts, sources, framework, native, atproto / "src", fake_bin):
                 path.mkdir(parents=True, exist_ok=True)
 
             shutil.copy2(ROOT / "Scripts" / "rebuild-ffi.sh", scripts / "rebuild-ffi.sh")
@@ -30,6 +31,8 @@ class RebuildPreservationTests(unittest.TestCase):
             (scripts / "rebuild-ffi.sh").chmod(0o755)
             (native / "Cargo.toml").write_text("[package]\nname = 'fixture'\n")
             (native / "Cargo.lock").write_text("version = 4\n")
+            (atproto / "Cargo.toml").write_text("[package]\nname = 'catbird-atproto'\n")
+            (atproto / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
             (native / "src").mkdir()
             (native / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
             (native / "CatbirdMLSFFI.xcframework").mkdir()
@@ -87,11 +90,12 @@ class RebuildPreservationTests(unittest.TestCase):
             workspace = Path(directory)
             core = workspace / "CatbirdMLSCore"
             native = workspace / "catbird-mls"
+            atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
             sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
-            for path in (scripts, sources, framework, native / "src", fake_bin):
+            for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
                 path.mkdir(parents=True, exist_ok=True)
 
             shutil.copy2(ROOT / "Scripts" / "rebuild-ffi.sh", scripts / "rebuild-ffi.sh")
@@ -105,6 +109,8 @@ class RebuildPreservationTests(unittest.TestCase):
             (native / "Cargo.toml").write_text("[package]\nname = 'fixture'\n")
             (native / "Cargo.lock").write_text("version = 4\n")
             (native / "src" / "lib.rs").write_text("pub fn before() {}\n")
+            (atproto / "Cargo.toml").write_text("[package]\nname = 'catbird-atproto'\n")
+            (atproto / "src" / "lib.rs").write_text("pub fn dependency() {}\n")
 
             builder = native / "create-xcframework.sh"
             builder.write_text(
@@ -131,7 +137,69 @@ class RebuildPreservationTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Native source changed during FFI generation", result.stderr + result.stdout)
+            self.assertIn(
+                "Native source or local path dependency changed during FFI generation",
+                result.stderr + result.stdout,
+            )
+            self.assertEqual((framework / "old-binary").read_text(), "old framework")
+            self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "old binding")
+
+    def test_rebuild_rejects_local_path_dependency_change_during_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            core = workspace / "CatbirdMLSCore"
+            native = workspace / "catbird-mls"
+            atproto = workspace / "catbird-atproto"
+            scripts = core / "Scripts"
+            sources = core / "Sources" / "CatbirdMLS"
+            framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
+            fake_bin = workspace / "bin"
+            for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
+                path.mkdir(parents=True, exist_ok=True)
+
+            shutil.copy2(ROOT / "Scripts" / "rebuild-ffi.sh", scripts / "rebuild-ffi.sh")
+            shutil.copy2(
+                ROOT / "Scripts" / "apple-artifact-manifest.py",
+                scripts / "apple-artifact-manifest.py",
+            )
+            (scripts / "rebuild-ffi.sh").chmod(0o755)
+            (framework / "old-binary").write_text("old framework")
+            (sources / "CatbirdMLS.swift").write_text("old binding")
+            (native / "Cargo.toml").write_text("[package]\nname = 'fixture'\n")
+            (native / "Cargo.lock").write_text("version = 4\n")
+            (native / "src" / "lib.rs").write_text("pub fn native() {}\n")
+            (atproto / "Cargo.toml").write_text("[package]\nname = 'catbird-atproto'\n")
+            (atproto / "src" / "lib.rs").write_text("pub fn before() {}\n")
+
+            builder = native / "create-xcframework.sh"
+            builder.write_text(
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "printf 'pub fn after() {}\\n' > ../catbird-atproto/src/lib.rs\n"
+                "mkdir -p CatbirdMLSFFI.xcframework build/bindings\n"
+                "printf 'new framework' > CatbirdMLSFFI.xcframework/new-binary\n"
+                "printf 'new binding' > build/bindings/CatbirdMLS.swift\n"
+            )
+            builder.chmod(0o755)
+            xcrun = fake_bin / "xcrun"
+            xcrun.write_text("#!/bin/sh\nexit 0\n")
+            xcrun.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+            result = subprocess.run(
+                [str(scripts / "rebuild-ffi.sh")],
+                cwd=core,
+                env=environment,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Native source or local path dependency changed during FFI generation",
+                result.stderr + result.stdout,
+            )
             self.assertEqual((framework / "old-binary").read_text(), "old framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "old binding")
 

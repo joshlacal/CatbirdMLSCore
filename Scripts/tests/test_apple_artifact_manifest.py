@@ -46,6 +46,8 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.native / "uniffi.toml", "[bindings.swift]\n")
         write(self.native / "src/lib.rs", "pub fn binding_input() {}\n")
         write(self.native / "src/orchestrator/direct_request_types.rs", "pub enum RequestPreview {}\n")
+        write(self.atproto / "Cargo.toml", "[package]\nname = 'catbird-atproto'\n")
+        write(self.atproto / "src/lib.rs", "pub fn generated_contract() {}\n")
         write(self.core / "Package.swift", "// fixture\n")
         write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct Generated {}\n")
         schema = self.petrel_catbird / "lexicons/blue/catbird/chat/blue.catbird.chat.prepareDirectRequest.json"
@@ -134,6 +136,15 @@ class AppleArtifactManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "framework file map"):
             self.module.verify_manifest(path)
 
+    def test_verify_rejects_changed_local_path_dependency(self):
+        manifest = self.build()
+        path = self.root / "manifest.json"
+        self.module.write_manifest(path, manifest)
+        write(self.atproto / "src/lib.rs", "pub fn changed_contract() {}\n")
+
+        with self.assertRaisesRegex(RuntimeError, "catbird-atproto source fingerprint"):
+            self.module.verify_manifest(path)
+
     def test_verify_rejects_tampered_manifest_identity(self):
         manifest = self.build()
         manifest["build"]["cargo_profile"] = "debug"
@@ -149,6 +160,15 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.native / "build/bindings/CatbirdMLS.swift", "derived\n")
 
         self.assertEqual(before, self.module.native_source_fingerprint(self.native))
+
+    def test_source_bundle_fingerprint_includes_local_path_dependencies(self):
+        before = self.module.source_bundle_fingerprint(self.native, [self.atproto])
+        write(self.atproto / "src/lib.rs", "pub fn changed_contract() {}\n")
+
+        self.assertNotEqual(
+            before,
+            self.module.source_bundle_fingerprint(self.native, [self.atproto]),
+        )
 
 
 if __name__ == "__main__":

@@ -78,6 +78,24 @@ def native_source_fingerprint(native):
     return native_source_record(native)["sha256"]
 
 
+def source_bundle_record(native, dependencies=()):
+    native = Path(native).resolve()
+    dependency_records = {
+        Path(dependency).resolve().name: native_source_record(dependency)
+        for dependency in sorted((Path(path).resolve() for path in dependencies), key=str)
+    }
+    record = {
+        "native": native_source_record(native),
+        "local_path_dependencies": dependency_records,
+    }
+    record["sha256"] = canonical_sha256(record)
+    return record
+
+
+def source_bundle_fingerprint(native, dependencies=()):
+    return source_bundle_record(native, dependencies)["sha256"]
+
+
 def run_output(*arguments, cwd=None):
     result = subprocess.run(arguments, cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
@@ -101,7 +119,21 @@ def jj_identity(path):
     ).splitlines()
     if len(output) != 2:
         raise RuntimeError(f"Could not read exact JJ identity for {path}")
-    return {"jj_commit": output[0], "jj_change": output[1]}
+    parent = run_output(
+        "jj",
+        "log",
+        "--no-graph",
+        "-r",
+        "@-",
+        "-T",
+        "commit_id",
+        cwd=path,
+    )
+    return {
+        "jj_commit": output[0],
+        "jj_change": output[1],
+        "parent_jj_commit": parent,
+    }
 
 
 def repository_record(path, identity):
@@ -207,6 +239,7 @@ def build_manifest(
     }
     identities = identities or {name: jj_identity(path) for name, path in repositories.items()}
     source = native_source_record(native)
+    atproto_source = native_source_record(atproto)
     manifest = {
         "schema_version": 1,
         "scope": "apple-native-uniffi",
@@ -222,6 +255,9 @@ def build_manifest(
             },
             "native_source_sha256": source["sha256"],
             "native_source_files": source["files"],
+            "local_path_dependencies": {
+                "catbird-atproto": atproto_source,
+            },
             "cargo_lock_sha256": sha256_file(native / "Cargo.lock"),
             "schemas": schema_record(petrel_catbird),
         },
@@ -293,6 +329,18 @@ def verify_manifest(path):
         manifest["source"]["native_source_sha256"],
         "native source fingerprint",
     )
+    atproto_record = manifest["source"]["local_path_dependencies"]["catbird-atproto"]
+    atproto = Path(manifest["source"]["repositories"]["catbird-atproto"]["path"])
+    require_equal(
+        native_source_fingerprint(atproto),
+        atproto_record["sha256"],
+        "catbird-atproto source fingerprint",
+    )
+    require_equal(
+        native_source_record(atproto)["files"],
+        atproto_record["files"],
+        "catbird-atproto source file map",
+    )
     require_equal(
         sha256_file(native / "Cargo.lock"),
         manifest["source"]["cargo_lock_sha256"],
@@ -320,7 +368,12 @@ def verify_manifest(path):
         repository = Path(record["path"])
         if (repository / ".jj").exists():
             current = jj_identity(repository)
-            require_equal(current, {"jj_commit": record["jj_commit"], "jj_change": record["jj_change"]}, f"{name} JJ identity")
+            expected_identity = {
+                key: record[key]
+                for key in ("jj_commit", "jj_change", "parent_jj_commit")
+                if key in record
+            }
+            require_equal(current, expected_identity, f"{name} JJ identity")
     return manifest
 
 
@@ -329,6 +382,7 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
     fingerprint = subparsers.add_parser("source-fingerprint")
     fingerprint.add_argument("--native", required=True, type=Path)
+    fingerprint.add_argument("--dependency", action="append", default=[], type=Path)
     generate = subparsers.add_parser("generate")
     generate.add_argument("--core", required=True, type=Path)
     generate.add_argument("--native", required=True, type=Path)
@@ -347,7 +401,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "source-fingerprint":
-        print(native_source_fingerprint(args.native))
+        print(source_bundle_fingerprint(args.native, args.dependency))
     elif args.command == "generate":
         manifest = build_manifest(
             core=args.core,
