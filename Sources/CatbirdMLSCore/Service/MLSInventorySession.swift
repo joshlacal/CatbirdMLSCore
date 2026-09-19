@@ -86,6 +86,7 @@ internal struct MLSCanonicalInventorySnapshot {
   internal let conversationItems: [BlueCatbirdChatDefs.ConversationInventoryItem]
   internal let pendingWelcomeItems: [BlueCatbirdChatDefs.WelcomeView]
   internal let leafRecoveryItems: [BlueCatbirdChatDefs.LeafRecoveryInboxItem]
+  internal let directRequestScope: BlueCatbirdChatDefs.DirectRequestInventoryScope?
 
   internal var completion: MLSInventorySessionCompletion {
     MLSInventorySessionCompletion(
@@ -114,6 +115,8 @@ internal enum MLSInventorySessionAssembler {
     var conversationCursor: String?
     var conversationItems: [BlueCatbirdChatDefs.ConversationInventoryItem] = []
     var firstMetadata: InventoryPageMetadata?
+    var directRequestScope: BlueCatbirdChatDefs.DirectRequestInventoryScope?
+    var didCaptureDirectRequestScope = false
     var seenConversationCursors: Set<String> = []
 
     while true {
@@ -127,6 +130,14 @@ internal enum MLSInventorySessionAssembler {
         domain: .conversations
       )
       try validate(metadata, against: &firstMetadata, domain: .conversations)
+      if didCaptureDirectRequestScope {
+        guard directRequestScope == page.inventoryScope else {
+          throw MLSInventorySessionError.continuationChanged(.conversations)
+        }
+      } else {
+        directRequestScope = page.inventoryScope
+        didCaptureDirectRequestScope = true
+      }
       conversationItems.append(contentsOf: page.items)
       guard page.hasMore else { break }
       guard let nextCursor = page.nextPageCursor else {
@@ -221,7 +232,8 @@ internal enum MLSInventorySessionAssembler {
       snapshotExpiresAt: firstMetadata.expiresAt,
       conversationItems: conversationItems,
       pendingWelcomeItems: pendingWelcomeItems,
-      leafRecoveryItems: leafRecoveryItems
+      leafRecoveryItems: leafRecoveryItems,
+      directRequestScope: directRequestScope
     )
   }
 

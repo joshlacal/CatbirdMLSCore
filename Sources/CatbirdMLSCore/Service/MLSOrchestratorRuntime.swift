@@ -143,6 +143,25 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     }
   }
 
+  @discardableResult
+  public func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
+    try bridge.startDirectRequest(input: input)
+  }
+
+  @discardableResult
+  public func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+    try bridge.resumeDirectRequest(draftId: draftId)
+  }
+
+  @discardableResult
+  public func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+    try bridge.cancelDirectRequest(draftId: draftId)
+  }
+
+  public func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
+    try bridge.refreshRequestPreview(conversationId: conversationId)
+  }
+
   public func startupReconcile() throws -> FfiStartupReconcileReport {
     try bridge.startupReconcile()
   }

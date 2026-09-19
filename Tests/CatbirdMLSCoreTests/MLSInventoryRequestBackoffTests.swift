@@ -216,7 +216,7 @@ final class MLSInventoryRequestBackoffTests: XCTestCase {
       guard case NetworkError.invalidContentType = error else { return XCTFail("Success still requires JSON content type") }
     }
     let valid = Data("""
-      {"items":[],"inventorySessionId":"retained-session","snapshotEventCursor":"opaque-cursor","hasMore":false,"snapshotExpiresAt":"2026-09-05T20:00:00.000Z"}
+      {"items":[],"inventorySessionId":"retained-session","snapshotEventCursor":"opaque-cursor","hasMore":false,"snapshotExpiresAt":"2026-09-05T20:00:00.000Z","inventoryScope":{"supportedProtocolVersions":["1","2"],"scopeDigest":"AQ=="}}
       """.utf8)
     let http = HTTPURLResponse(url: wrongType.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
     let decoded = try MLSAPIClient.decodeInitialConversationInventory(data: valid, response: http)

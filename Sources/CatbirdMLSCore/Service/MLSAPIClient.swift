@@ -569,11 +569,8 @@ public final class MLSAPIClient {
         limit: Int = 50,
         cursor: String? = nil
     ) async throws -> BlueCatbirdChatGetConversations.Output {
-        let input = BlueCatbirdChatGetConversations.Parameters(
-            actorDeviceId: try await requireActorDeviceId(),
-            pageCursor: cursor,
-            limit: limit
-        )
+        let input = Self.canonicalConversationInventoryParameters(
+            actorDeviceId: try await requireActorDeviceId(), limit: limit, cursor: cursor)
         if cursor == nil {
             // Preserve response headers until the shared fresh-allocation gate
             // observes them. The same generated DTO and error parser remain the
@@ -593,7 +590,35 @@ public final class MLSAPIClient {
                 message: "Failed to fetch canonical conversation inventory"
             )
         }
+        try Self.validateDirectRequestInventoryScope(output)
         return output
+    }
+
+    internal static func canonicalConversationInventoryParameters(
+        actorDeviceId: String,
+        limit: Int,
+        cursor: String?
+    ) -> BlueCatbirdChatGetConversations.Parameters {
+        BlueCatbirdChatGetConversations.Parameters(
+            actorDeviceId: actorDeviceId,
+            pageCursor: cursor,
+            limit: limit,
+            supportedProtocolVersions: [.value_1, .value_2]
+        )
+    }
+
+    internal static func validateDirectRequestInventoryScope(
+        _ output: BlueCatbirdChatGetConversations.Output
+    ) throws {
+        guard let scope = output.inventoryScope else {
+            throw MLSAPIError.invalidResponse(
+                message: "Version-two conversation inventory omitted its retained request scope")
+        }
+        guard Set(scope.supportedProtocolVersions.map(\.rawValue)) == Set(["1", "2"]),
+              !scope.scopeDigest.data.isEmpty else {
+            throw MLSAPIError.invalidResponse(
+                message: "Version-two conversation inventory returned an invalid request scope")
+        }
     }
 
     internal static func decodeInitialConversationInventory(
@@ -608,6 +633,7 @@ public final class MLSAPIClient {
                 throw NetworkError.invalidContentType(expected: "application/json", actual: contentType)
             }
             if let output = try? JSONDecoder().decode(BlueCatbirdChatGetConversations.Output.self, from: data) {
+                try validateDirectRequestInventoryScope(output)
                 return output
             }
         } else if let error = ATProtoErrorParser.parse(
@@ -744,19 +770,58 @@ public final class MLSAPIClient {
             afterSeq: afterSeq,
             limit: limit
         )
-        let messages = output.entries.compactMap { entry -> BlueCatbirdChatDefs.ApplicationEntry? in
-            guard case let .blueCatbirdChatDefsApplicationEntry(app) = entry else {
-                return nil
-            }
-            return app
-        }
+        let page = Self.classifyCanonicalEntries(
+            output.entries, hasMore: output.hasMore, nextAfterSeq: output.nextAfterSeq)
         return (
-            messages,
-            Self.canonicalContinuationAfterSeq(
-                hasMore: output.hasMore,
-                nextAfterSeq: output.nextAfterSeq
-            )
+            page.applicationEntries,
+            page.lastSeq
         )
+    }
+
+    public struct CanonicalEntryPage {
+        public let applicationEntries: [BlueCatbirdChatDefs.ApplicationEntry]
+        public let directRequestEntries: [BlueCatbirdChatDefs.DirectRequestEntry]
+        public let directRequestAcceptanceEntries: [BlueCatbirdChatDefs.DirectRequestAcceptanceEntry]
+        public let lastSeq: Int?
+    }
+
+    internal static func classifyCanonicalEntries(
+        _ entries: [BlueCatbirdChatDefs.ConversationEntry],
+        hasMore: Bool,
+        nextAfterSeq: Int
+    ) -> CanonicalEntryPage {
+        var applications: [BlueCatbirdChatDefs.ApplicationEntry] = []
+        var requests: [BlueCatbirdChatDefs.DirectRequestEntry] = []
+        var acceptances: [BlueCatbirdChatDefs.DirectRequestAcceptanceEntry] = []
+        for entry in entries {
+            switch entry {
+            case let .blueCatbirdChatDefsApplicationEntry(value): applications.append(value)
+            case let .blueCatbirdChatDefsDirectRequestEntry(value): requests.append(value)
+            case let .blueCatbirdChatDefsDirectRequestAcceptanceEntry(value): acceptances.append(value)
+            default: break
+            }
+        }
+        return CanonicalEntryPage(
+            applicationEntries: applications,
+            directRequestEntries: requests,
+            directRequestAcceptanceEntries: acceptances,
+            lastSeq: canonicalContinuationAfterSeq(
+                hasMore: hasMore, nextAfterSeq: nextAfterSeq)
+        )
+    }
+
+    /// Reads canonical entries without turning encrypted direct-request control
+    /// entries into ordinary application messages. Rust owns decrypt/import;
+    /// hosts may use the two typed request arrays only for retained projection.
+    public func getCanonicalRequestAwareEntryPage(
+        conversationId: String,
+        afterSeq: Int,
+        limit: Int = 100
+    ) async throws -> CanonicalEntryPage {
+        let output = try await getCanonicalEntries(
+            conversationId: conversationId, afterSeq: afterSeq, limit: limit)
+        return Self.classifyCanonicalEntries(
+            output.entries, hasMore: output.hasMore, nextAfterSeq: output.nextAfterSeq)
     }
 
     /// Mint a one-use ticket bound to the exact inventory snapshot cursor.
@@ -867,7 +932,8 @@ public final class MLSAPIClient {
             snapshotEventCursor: snapshot.snapshotEventCursor,
             nextPageCursor: nil,
             hasMore: false,
-            snapshotExpiresAt: ATProtocolDate(date: snapshot.snapshotExpiresAt)
+            snapshotExpiresAt: ATProtocolDate(date: snapshot.snapshotExpiresAt),
+            inventoryScope: snapshot.directRequestScope
         )
     }
 

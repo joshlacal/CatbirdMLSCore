@@ -7,6 +7,48 @@ import PetrelCatbird
 import Synchronization
 
 extension MLSConversationManager {
+  // MARK: - Encrypted Direct Requests
+
+  /// Starts one Rust-owned encrypted direct request. The host passes typed
+  /// intent only; Rust owns preparation, publication, retry, and journaling.
+  @discardableResult
+  public func startDirectRequest(input: DirectRequestInput) async throws -> DirectRequestOutcome {
+    try throwIfShuttingDown("startDirectRequest")
+    return try await withRustAuthoritativeRuntime(operation: "startDirectRequest") { runtime in
+      try runtime.startDirectRequest(input: input)
+    }
+  }
+
+  /// Resumes the exact Rust-owned draft operation identified by `draftId`.
+  @discardableResult
+  public func resumeDirectRequest(draftId: String) async throws -> DirectRequestOutcome {
+    try throwIfShuttingDown("resumeDirectRequest")
+    return try await withRustAuthoritativeRuntime(operation: "resumeDirectRequest") { runtime in
+      try runtime.resumeDirectRequest(draftId: draftId)
+    }
+  }
+
+  /// Requests durable cancellation of the exact Rust-owned draft operation.
+  @discardableResult
+  public func cancelDirectRequest(draftId: String) async throws -> DirectRequestOutcome {
+    try throwIfShuttingDown("cancelDirectRequest")
+    return try await withRustAuthoritativeRuntime(operation: "cancelDirectRequest") { runtime in
+      try runtime.cancelDirectRequest(draftId: draftId)
+    }
+  }
+
+  /// Refreshes receive-preview readiness without coupling it to send readiness
+  /// or independently mutating consent state in Swift.
+  public func refreshRequestPreview(conversationId: String) async throws -> DirectRequestView {
+    try throwIfShuttingDown("refreshRequestPreview")
+    return try await withRustAuthoritativeRuntime(
+      operation: "refreshRequestPreview",
+      requiresDeviceAuthorization: false
+    ) { runtime in
+      try runtime.refreshRequestPreview(conversationId: conversationId)
+    }
+  }
+
   // MARK: - Direct Conversation Lookup
 
   /// Find an existing active 1:1 conversation with the given DID.
