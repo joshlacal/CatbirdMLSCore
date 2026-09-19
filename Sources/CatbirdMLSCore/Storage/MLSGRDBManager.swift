@@ -5746,6 +5746,12 @@ public actor MLSGRDBManager {
       try MLSPushRegistrationJournal.createTable(in: db)
     }
 
+    // v40: Protected canonical conversation snapshots and exact alias
+    // retirement receipts for the Rust-authorized atomic projection callback.
+    migrator.registerMigration("v40_conversation_projection_commit") { db in
+      try MLSConversationProjectionCommit.createTables(in: db)
+    }
+
     return migrator
   }
 

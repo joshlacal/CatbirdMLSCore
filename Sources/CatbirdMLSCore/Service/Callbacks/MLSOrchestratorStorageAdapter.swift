@@ -67,6 +67,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     do {
       try dbPool.write { db in
         try MLSCanonicalPolicyProjection.createTable(in: db)
+        try MLSConversationProjectionCommit.createTables(in: db)
         try db.execute(sql: """
           CREATE TABLE IF NOT EXISTS mls_orchestrator_terminal_access (
             user_did TEXT NOT NULL,
@@ -166,6 +167,14 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     groupID: String? = nil,
     allowMissingCanonicalRead: Bool = false
   ) throws -> String {
+    let normalizedOwner = MLSStorageHelpers.normalizeDID(userDID)
+    if let canonical = try MLSConversationProjectionCommit.canonicalIDForRetiredAlias(
+      ownerDID: normalizedOwner,
+      conversationID: requestedID,
+      in: db
+    ) {
+      return canonical
+    }
     if let resolved = try MLSStorageHelpers.resolveCanonicalConversationIDSync(
       in: db,
       userDID: userDID,
@@ -204,6 +213,15 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
   }
 
   // MARK: - Conversation Operations
+
+  public func commitConversationProjectionJson(requestJson: String) throws -> String {
+    try MLSConversationProjectionCommit.commit(
+      requestJSON: requestJson,
+      adapterUserDID: userDID,
+      dbPool: dbPool,
+      context: mlsContext
+    )
+  }
 
   public func ensureConversationExists(
     userDid: String,
@@ -292,6 +310,13 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
         .filter(MLSConversationModel.Columns.currentUserDID == normalizedDID)
         .order(MLSConversationModel.Columns.lastMessageAt.desc)
         .fetchAll(db)
+        .filter {
+          try !MLSConversationProjectionCommit.isRetiredAlias(
+            ownerDID: normalizedDID,
+            conversationID: $0.conversationID,
+            in: db
+          )
+        }
 
       guard !conversations.isEmpty else { return [] }
 
