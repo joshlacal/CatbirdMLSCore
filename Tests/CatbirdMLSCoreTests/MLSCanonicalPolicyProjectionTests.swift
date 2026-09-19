@@ -87,6 +87,14 @@ final class MLSCanonicalPolicyProjectionTests: XCTestCase {
       XCTAssertThrowsError(try MLSCanonicalPolicyProjection.decode(withRawField(key, value),
         conversationID: cid, groupID: Data(repeating: 0xab, count: 32)), "Invalid routing value: \(key)=\(value)")
     }
+    XCTAssertThrowsError(
+      try MLSCanonicalPolicyProjection.decode(
+        withRawField("directRequest", "{}"),
+        conversationID: cid,
+        groupID: Data(repeating: 0xab, count: 32)
+      ),
+      "Malformed v2 authority state must not degrade to an ordinary v1 conversation"
+    )
   }
 
   func testPendingAcceptanceAtSameEpochSurvivesReopenAndRejectsStalePending() async throws {

@@ -37,6 +37,12 @@ enum MLSCanonicalPolicyProjection {
     let data = Data(json.utf8)
     try validateReadRoutingExtensions(data)
     let state = try JSONDecoder().decode(BlueCatbirdChatDefs.ConversationState.self, from: data)
+    guard !containsNonNullDirectRequest(data) || state.directRequest != nil else {
+      // Generated optional-field decoding deliberately degrades malformed
+      // forward-compatible values to nil. `directRequest` is an authority
+      // discriminator, so malformed v2 state must never look like explicit v1.
+      throw ValidationError.invalidSnapshot
+    }
     let coordinates = state.coordinates
     let maximum = 9_007_199_254_740_991
     guard isCanonicalUUID(conversationID),
@@ -151,6 +157,12 @@ enum MLSCanonicalPolicyProjection {
         throw ValidationError.invalidSnapshot
       }
     }
+  }
+
+  private static func containsNonNullDirectRequest(_ data: Data) -> Bool {
+    guard let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let value = fields["directRequest"] else { return false }
+    return !(value is NSNull)
   }
 
   private static func sameLeafIdentity(_ lhs: BlueCatbirdChatDefs.DeviceLeafView,

@@ -1,10 +1,50 @@
 import CatbirdMLS
 @testable import CatbirdMLSCore
+import Foundation
+import GRDB
 import Petrel
 import PetrelCatbird
 import XCTest
 
 final class MLSDirectRequestTests: XCTestCase {
+  private let projectionConversationID = "550e8400-e29b-41d4-a716-446655440000"
+  private let projectionMessageID = "650e8400-e29b-41d4-a716-446655440000"
+  private var tempDirectory: URL!
+  private var dbPool: DatabasePool!
+  private var context: MlsContext!
+
+  override func setUp() async throws {
+    try await super.setUp()
+    tempDirectory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("MLSDirectRequestTests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+    dbPool = try DatabasePool(path: tempDirectory.appendingPathComponent("messages.sqlite").path)
+    try MLSGRDBManager.makeMigrator().migrate(dbPool)
+    context = try MlsContext(
+      storagePath: tempDirectory.appendingPathComponent("native.sqlite").path,
+      encryptionKey: String(repeating: "ab", count: 32),
+      keychain: InMemoryKeychainAccess()
+    )
+    try context.setContentRootKey(key: Data(repeating: 0x5A, count: 32))
+  }
+
+  override func tearDown() async throws {
+    if let context {
+      context.clearContentRootKey()
+      try? context.flushAndPrepareClose()
+    }
+    context = nil
+    if let dbPool {
+      try? dbPool.close()
+    }
+    dbPool = nil
+    if let tempDirectory {
+      try? FileManager.default.removeItem(at: tempDirectory)
+    }
+    tempDirectory = nil
+    try await super.tearDown()
+  }
+
   func testRuntimeRoutesDirectRequestLifecycleThroughNativeBridge() throws {
     let bridge = RecordingDirectRequestBridge()
     let runtime = MLSOrchestratorRuntime(
@@ -137,6 +177,181 @@ final class MLSDirectRequestTests: XCTestCase {
     XCTAssertEqual(
       BlueCatbirdChatDefs.ConversationEntry.blueCatbirdChatDefsDirectRequestEntry(request).entryID,
       "request-entry"
+    )
+  }
+
+  func testAcceptedProjectionIsIdempotentAndFencesFirstMessageAndTerminalState() throws {
+    let userDID = "did:plc:receiver"
+    let adapter = try makeProjectionAdapter(userDID: userDID)
+    let pending = requestView(consent: .incomingPending, stateVersion: 4)
+    try adapter.persistDirectRequestView(pending)
+
+    try dbPool.read { db in
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 0)
+    }
+
+    let accepted = requestView(
+      consent: .accepted,
+      stateVersion: 5,
+      canSend: true
+    )
+    try adapter.persistDirectRequestView(accepted)
+    try adapter.persistDirectRequestView(accepted)
+
+    try dbPool.read { db in
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 1)
+      let message = try XCTUnwrap(MLSMessageModel.fetchOne(db))
+      XCTAssertEqual(message.messageID, projectionMessageID)
+      XCTAssertEqual(message.conversationID, projectionConversationID)
+      XCTAssertEqual(message.senderID, "did:plc:sender")
+      XCTAssertEqual(message.decryptedPayload(context: context)?.text, "protected introduction")
+      XCTAssertEqual(
+        try String.fetchOne(
+          db,
+          sql: "SELECT history_projected_message_id FROM mls_direct_request_projection"
+        ),
+        projectionMessageID
+      )
+    }
+
+    // A stale inventory echo cannot demote accepted consent.
+    try adapter.persistDirectRequestView(pending)
+    try dbPool.read { db in
+      XCTAssertEqual(
+        try String.fetchOne(db, sql: "SELECT consent FROM mls_direct_request_projection"),
+        "accepted"
+      )
+    }
+
+    let replacedMessage = requestView(
+      consent: .accepted,
+      stateVersion: 6,
+      firstMessageID: "750e8400-e29b-41d4-a716-446655440000",
+      canSend: true
+    )
+    XCTAssertThrowsError(try adapter.persistDirectRequestView(replacedMessage))
+    try dbPool.read { db in
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 1)
+      XCTAssertEqual(
+        try String.fetchOne(db, sql: "SELECT first_message_id FROM mls_direct_request_projection"),
+        projectionMessageID
+      )
+    }
+
+    let closed = requestView(consent: .closed, stateVersion: 6)
+    try adapter.persistDirectRequestView(closed)
+    XCTAssertThrowsError(
+      try adapter.persistDirectRequestView(
+        requestView(consent: .accepted, stateVersion: 7, canSend: true)
+      )
+    )
+    try dbPool.read { db in
+      XCTAssertEqual(
+        try String.fetchOne(db, sql: "SELECT consent FROM mls_direct_request_projection"),
+        "closed"
+      )
+    }
+  }
+
+  func testFailedProjectionRollsBackAndCorrectedRetryMaterializesOnce() throws {
+    let adapter = try makeProjectionAdapter(userDID: "did:plc:receiver")
+    let invalid = requestView(
+      consent: .accepted,
+      stateVersion: 5,
+      receivedAt: "not-a-canonical-timestamp",
+      canSend: true
+    )
+    XCTAssertThrowsError(try adapter.persistDirectRequestView(invalid))
+    try dbPool.read { db in
+      XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM mls_direct_request_projection"), 0)
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 0)
+    }
+
+    let corrected = requestView(consent: .accepted, stateVersion: 5, canSend: true)
+    try adapter.persistDirectRequestView(corrected)
+    try adapter.persistDirectRequestView(corrected)
+    try dbPool.read { db in
+      XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM mls_direct_request_projection"), 1)
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 1)
+    }
+  }
+
+  func testMissingRequestProjectionDoesNotDefaultToLegacyOrdinaryMessaging() throws {
+    let userDID = "did:plc:receiver"
+    _ = try makeProjectionAdapter(userDID: userDID)
+    try dbPool.read { db in
+      XCTAssertEqual(
+        try MLSDirectRequestProjection.classifyConversation(
+          userDID: userDID,
+          conversationID: projectionConversationID,
+          in: db
+        ),
+        .unknown
+      )
+    }
+
+    let adapter = MLSOrchestratorStorageAdapter(
+      dbPool: dbPool,
+      userDID: userDID,
+      mlsContext: context
+    )
+    try adapter.persistDirectRequestView(requestView(consent: .incomingPending, stateVersion: 4))
+    try dbPool.read { db in
+      XCTAssertEqual(
+        try MLSDirectRequestProjection.classifyConversation(
+          userDID: userDID,
+          conversationID: projectionConversationID,
+          in: db
+        ),
+        .requestAwaitingProjection
+      )
+    }
+  }
+
+  private func makeProjectionAdapter(userDID: String) throws -> MLSOrchestratorStorageAdapter {
+    let adapter = MLSOrchestratorStorageAdapter(
+      dbPool: dbPool,
+      userDID: userDID,
+      mlsContext: context
+    )
+    try adapter.ensureConversationExists(
+      userDid: userDID,
+      conversationId: projectionConversationID,
+      groupId: String(repeating: "01", count: 32)
+    )
+    return adapter
+  }
+
+  private func requestView(
+    consent: RequestConsent,
+    stateVersion: UInt64,
+    firstMessageID: String? = nil,
+    receivedAt: String = "2026-09-19T12:00:00.000Z",
+    canSend: Bool = false
+  ) -> DirectRequestView {
+    DirectRequestView(
+      introduction: RequestIntroductionMetadata(
+        senderDid: "did:plc:sender",
+        senderDeviceId: "550e8400-e29b-41d4-a716-446655440001",
+        receivedAt: receivedAt,
+        epoch: 2,
+        sequenceNumber: 4
+      ),
+      conversationId: projectionConversationID,
+      firstMessageId: firstMessageID ?? projectionMessageID,
+      consent: consent,
+      crypto: .ready,
+      preview: .ready(text: "protected introduction", invitation: nil),
+      capabilities: RequestCapabilities(
+        canPreview: true,
+        canAccept: consent == .incomingPending,
+        canClose: consent != .closed,
+        canSend: canSend,
+        canEmitReceipts: canSend,
+        canAdminister: canSend
+      ),
+      stateVersion: stateVersion,
+      generation: 1
     )
   }
 }

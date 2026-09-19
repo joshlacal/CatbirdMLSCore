@@ -2,6 +2,17 @@ import CatbirdMLS
 import Foundation
 import GRDB
 
+/// Whether an Apple conversation may use the legacy ordinary-message path.
+/// Only a retained canonical v1 policy can grant that classification. Missing
+/// local state remains unknown so an inventory or notification race cannot
+/// bypass Rust request consent.
+public enum MLSDirectRequestConversationClassification: String, Sendable, Equatable {
+  case verifiedRequest
+  case requestAwaitingProjection
+  case legacyV1
+  case unknown
+}
+
 /// Replayable host projection of Rust-owned encrypted request state. The
 /// authoritative journal remains native; these rows feed Apple presentation
 /// and record whether the accepted introduction reached normal history.
@@ -72,6 +83,35 @@ enum MLSDirectRequestProjection {
       """)
   }
 
+  static func classifyConversation(
+    userDID: String,
+    conversationID: String,
+    in db: Database
+  ) throws -> MLSDirectRequestConversationClassification {
+    let normalizedDID = MLSStorageHelpers.normalizeDID(userDID)
+    if try db.tableExists("mls_direct_request_projection"),
+       try Bool.fetchOne(
+         db,
+         sql: """
+           SELECT EXISTS(
+             SELECT 1 FROM mls_direct_request_projection
+             WHERE current_user_did = ? AND conversation_id = ?
+           )
+           """,
+         arguments: [normalizedDID, conversationID]
+       ) == true {
+      return .requestAwaitingProjection
+    }
+    guard let policy = try MLSCanonicalPolicyProjection.storedState(
+      userDID: normalizedDID,
+      conversationID: conversationID,
+      in: db
+    ) else {
+      return .unknown
+    }
+    return policy.directRequest == nil ? .legacyV1 : .requestAwaitingProjection
+  }
+
   static func persist(
     _ view: DirectRequestView,
     userDID: String,
@@ -110,6 +150,10 @@ enum MLSDirectRequestProjection {
       let previousConsent: String = previous["consent"]
       if previousConsent == "closed", consentString(view.consent) != "closed" {
         throw ProjectionError.staleOrConflictingView
+      }
+      if let projectedMessageID: String = previous["history_projected_message_id"],
+         view.firstMessageId != projectedMessageID {
+        throw ProjectionError.conflictingHistory
       }
     }
 
@@ -254,20 +298,11 @@ enum MLSDirectRequestProjection {
       .filter(MLSConversationModel.Columns.conversationID == view.conversationId)
       .fetchCount(db) == 1 else { return }
 
-    if let existing = try MLSMessageModel
+    let existing = try MLSMessageModel
       .filter(MLSMessageModel.Columns.currentUserDID == userDID)
       .filter(MLSMessageModel.Columns.messageID == messageID)
       .fetchOne(db)
-    {
-      guard existing.conversationID == view.conversationId,
-            existing.senderID == MLSStorageHelpers.normalizeDID(introduction.senderDid),
-            existing.epoch == epoch,
-            existing.sequenceNumber == sequence,
-            existing.timestamp == timestamp,
-            existing.decryptedPayload(context: context)?.text == text else {
-        throw ProjectionError.conflictingHistory
-      }
-    } else {
+    if existing == nil {
       try MLSStorageHelpers.savePayloadSync(
         context: context,
         in: db,
@@ -290,6 +325,24 @@ enum MLSDirectRequestProjection {
           messageID,
           userDID,
         ])
+    }
+
+    // `savePayloadSync` may intentionally suppress a row at a durable deletion
+    // fence. Never record projection success unless the exact accepted
+    // introduction is now present; otherwise a later retry must remain able to
+    // repair the host projection without asking Rust to publish again.
+    guard let materialized = try MLSMessageModel
+      .filter(MLSMessageModel.Columns.currentUserDID == userDID)
+      .filter(MLSMessageModel.Columns.messageID == messageID)
+      .fetchOne(db),
+      materialized.conversationID == view.conversationId,
+      materialized.senderID == MLSStorageHelpers.normalizeDID(introduction.senderDid),
+      materialized.epoch == epoch,
+      materialized.sequenceNumber == sequence,
+      materialized.timestamp == timestamp,
+      materialized.decryptedPayload(context: context)?.text == text
+    else {
+      throw ProjectionError.conflictingHistory
     }
 
     try db.execute(sql: """

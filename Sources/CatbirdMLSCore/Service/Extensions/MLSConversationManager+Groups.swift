@@ -75,6 +75,33 @@ extension MLSConversationManager {
     return views
   }
 
+  /// Classifies the conversation before presentation chooses an ordinary or
+  /// request-gated path. A missing Rust projection does not authorize ordinary
+  /// messaging: only a retained, strictly decoded canonical v1 policy does.
+  public func classifyDirectRequestConversation(
+    conversationId: String
+  ) async throws -> MLSDirectRequestConversationClassification {
+    try throwIfShuttingDown("classifyDirectRequestConversation")
+    let capturedGeneration = sessionGeneration
+    let views = try await listDirectRequestViews()
+    if views.contains(where: { $0.conversationId == conversationId }) {
+      try validateSessionGeneration(capturedGeneration: capturedGeneration)
+      return .verifiedRequest
+    }
+    guard let userDID = userDid else {
+      throw MLSConversationError.contextNotInitialized
+    }
+    let classification = try await databaseManager.read(for: userDID) { db in
+      try MLSDirectRequestProjection.classifyConversation(
+        userDID: userDID,
+        conversationID: conversationId,
+        in: db
+      )
+    }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return classification
+  }
+
   /// Reads the last authenticated request-delivery policy projection. `nil`
   /// means Rust has no verified value for the current account revision.
   public func getDirectRequestDeliveryEnabled() async throws -> Bool? {
