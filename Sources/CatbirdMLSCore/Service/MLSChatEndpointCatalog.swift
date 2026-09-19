@@ -35,6 +35,7 @@ public enum MLSChatEndpointCatalog {
     route("getConversationState", requiresSignedRequest: false),
     route("getConversations", requiresSignedRequest: false),
     route("getDevices", requiresSignedRequest: false),
+    route("getDeviceKey", requiresSignedRequest: false),
     route("getEntries", requiresSignedRequest: false),
     route("getLeafRecoveryInbox", requiresSignedRequest: false),
     route("getOwnDevices", requiresSignedRequest: false),
