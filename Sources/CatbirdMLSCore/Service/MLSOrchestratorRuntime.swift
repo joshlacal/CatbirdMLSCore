@@ -202,6 +202,16 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     return view
   }
 
+  public func getGroupInvitationReference(
+    conversationId: String,
+    recipientDid: String
+  ) throws -> GroupInvitationReference? {
+    try bridge.getGroupInvitationReference(
+      conversationId: conversationId,
+      recipientDid: recipientDid
+    )
+  }
+
   public func startupReconcile() throws -> FfiStartupReconcileReport {
     try bridge.startupReconcile()
   }

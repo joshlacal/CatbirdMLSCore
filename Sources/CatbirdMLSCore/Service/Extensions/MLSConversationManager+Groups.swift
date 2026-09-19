@@ -112,6 +112,27 @@ extension MLSConversationManager {
     return view
   }
 
+  /// Returns the authenticated invitation reference for sending a group note
+  /// through an existing direct request. Reading the reference does not accept
+  /// either conversation.
+  public func getGroupInvitationReference(
+    conversationId: String,
+    recipientDid: String
+  ) async throws -> GroupInvitationReference? {
+    try throwIfShuttingDown("getGroupInvitationReference")
+    let capturedGeneration = sessionGeneration
+    let invitation = try await withRustAuthoritativeRuntime(
+      operation: "getGroupInvitationReference"
+    ) { runtime in
+      try runtime.getGroupInvitationReference(
+        conversationId: conversationId,
+        recipientDid: recipientDid
+      )
+    }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return invitation
+  }
+
   // MARK: - Direct Conversation Lookup
 
   /// Find an existing active 1:1 conversation with the given DID.

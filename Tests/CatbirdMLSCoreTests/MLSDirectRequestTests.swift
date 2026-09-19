@@ -26,6 +26,7 @@ final class MLSDirectRequestTests: XCTestCase {
       text: "protected introduction",
       invitation: invitation
     )
+    bridge.groupInvitation = invitation
 
     XCTAssertEqual(
       try runtime.startDirectRequest(input: input),
@@ -50,12 +51,21 @@ final class MLSDirectRequestTests: XCTestCase {
       try runtime.closeDirectRequest(conversationId: "conversation-1"),
       bridge.preview
     )
+    XCTAssertEqual(
+      try runtime.getGroupInvitationReference(
+        conversationId: "group-conversation",
+        recipientDid: "did:plc:bob"
+      ),
+      invitation
+    )
     XCTAssertEqual(bridge.startedInput, input)
     XCTAssertEqual(bridge.resumedDraftId, input.draftId)
     XCTAssertEqual(bridge.cancelledDraftId, input.draftId)
     XCTAssertEqual(bridge.refreshedConversationId, "conversation-1")
     XCTAssertEqual(bridge.deliveryEnabled, true)
     XCTAssertEqual(bridge.closedConversationId, "conversation-1")
+    XCTAssertEqual(bridge.invitationConversationId, "group-conversation")
+    XCTAssertEqual(bridge.invitationRecipientDid, "did:plc:bob")
   }
 
   func testCanonicalInventoryOptsIntoVersionTwoAndRequiresRetainedScope() throws {
@@ -138,7 +148,17 @@ private final class RecordingDirectRequestBridge: OrchestratorBridge {
   var refreshedConversationId: String?
   var deliveryEnabled: Bool?
   var closedConversationId: String?
+  var invitationConversationId: String?
+  var invitationRecipientDid: String?
+  var groupInvitation: GroupInvitationReference?
   let preview = DirectRequestView(
+    introduction: RequestIntroductionMetadata(
+      senderDid: "did:plc:alice",
+      senderDeviceId: "device-a",
+      receivedAt: "2026-09-19T12:00:00.000Z",
+      epoch: 1,
+      sequenceNumber: 4
+    ),
     conversationId: "conversation-1",
     firstMessageId: "message-1",
     consent: .incomingPending,
@@ -199,5 +219,14 @@ private final class RecordingDirectRequestBridge: OrchestratorBridge {
   override func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
     closedConversationId = conversationId
     return preview
+  }
+
+  override func getGroupInvitationReference(
+    conversationId: String,
+    recipientDid: String
+  ) throws -> GroupInvitationReference? {
+    invitationConversationId = conversationId
+    invitationRecipientDid = recipientDid
+    return groupInvitation
   }
 }
