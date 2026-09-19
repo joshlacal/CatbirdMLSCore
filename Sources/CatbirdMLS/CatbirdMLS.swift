@@ -17046,6 +17046,13 @@ extension FfiConverterCallbackInterfaceOrchestratorEventCallback: FfiConverter {
  * can use actors/dispatch internally.
  */
 public protocol OrchestratorStorageCallback: AnyObject {
+    /**
+     * Commit an account-scoped canonical projection and exact alias retirement
+     * in one durable host transaction. See ConversationProjectionCommitRequest
+     * and ConversationProjectionCommitOutcome for the strict JSON contract.
+     */
+    func commitConversationProjectionJson(requestJson: String) throws -> String
+
     func ensureConversationExists(userDid: String, conversationId: String, groupId: String) throws
 
     func updateJoinInfo(conversationId: String, userDid: String, joinMethod: String, joinEpoch: UInt64) throws
@@ -17193,6 +17200,30 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
     /// Create the VTable using a series of closures.
     /// Swift automatically converts these into C callback functions.
     static var vtable: UniffiVTableCallbackInterfaceOrchestratorStorageCallback = .init(
+        commitConversationProjectionJson: { (
+            uniffiHandle: UInt64,
+            requestJson: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.commitConversationProjectionJson(
+                    requestJson: FfiConverterString.lift(requestJson)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         ensureConversationExists: { (
             uniffiHandle: UInt64,
             userDid: RustBuffer,
@@ -20886,115 +20917,118 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_sequencer_equivocation() != 33784 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 57265 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_commit_conversation_projection_json() != 17244 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_update_join_info() != 28185 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 24774 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation() != 4483 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_update_join_info() != 42059 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_conversations() != 25284 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation() != 53428 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_conversations() != 26753 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_conversations() != 58388 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 59265 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_conversations() != 5927 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_account_exit() != 48006 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 41822 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 3588 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_account_exit() != 43369 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 43017 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 10063 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 41915 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 29082 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 8939 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 22899 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 56843 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 24442 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 54946 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 59341 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 18893 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 11463 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 61853 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 5422 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 51219 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 38193 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 49648 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 49281 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 47648 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 33710 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 27190 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 41796 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 29037 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 4276 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 31022 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 4993 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 10381 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 23879 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 52807 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 50265 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 16379 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 18570 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 61257 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 64969 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 11542 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 38235 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 51909 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 9654 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 58386 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 31307 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 37167 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 53691 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 59214 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 42244 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 17620 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 19689 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 41919 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 25003 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 55384 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 17248 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 64867 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 42352 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 36579 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 36495 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 31409 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 59622 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 992 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 58750 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 40264 {
         return InitializationResult.apiChecksumMismatch
     }
 

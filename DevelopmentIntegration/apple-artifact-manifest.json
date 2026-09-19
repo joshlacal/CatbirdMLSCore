@@ -26,52 +26,52 @@
         "size_bytes": 2251
       },
       "ios-arm64/Headers/CatbirdMLSFFI.h": {
-        "sha256": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
-        "size_bytes": 225357
+        "sha256": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
+        "size_bytes": 226178
       },
       "ios-arm64/Headers/module.modulemap": {
         "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
         "size_bytes": 66
       },
       "ios-arm64/libCatbirdMLSFFI.a": {
-        "sha256": "e5944015d3766b1b17ecb083130a642a10bf2ee4691b7f1ea83e56b592216f88",
-        "size_bytes": 888089384
+        "sha256": "c6112b3e7d95ca4daed8929b52ae5d654203ae2531d70228df77acdadfd6732e",
+        "size_bytes": 895915992
       },
       "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": {
-        "sha256": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
-        "size_bytes": 225357
+        "sha256": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
+        "size_bytes": 226178
       },
       "ios-arm64_x86_64-maccatalyst/Headers/module.modulemap": {
         "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
         "size_bytes": 66
       },
       "ios-arm64_x86_64-maccatalyst/libCatbirdMLSFFI.a": {
-        "sha256": "4c879bb1c334dc7bfbe1dcff603efe9b3e4afbd22feeeffa2e7b0aa3e1030c7b",
-        "size_bytes": 1768355376
+        "sha256": "9dad40900eeb799db4e316015e883fb76a7e4f265a27805722e55a5d4482d8b1",
+        "size_bytes": 1780235992
       },
       "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": {
-        "sha256": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
-        "size_bytes": 225357
+        "sha256": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
+        "size_bytes": 226178
       },
       "ios-arm64_x86_64-simulator/Headers/module.modulemap": {
         "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
         "size_bytes": 66
       },
       "ios-arm64_x86_64-simulator/libCatbirdMLSFFI.a": {
-        "sha256": "4973d40a0064e902c5f80fdcd5f6c9a6bd67141a150dde84c3465b61c9b6624e",
-        "size_bytes": 1766284440
+        "sha256": "2e67395f08ecf94ed066fb8a7054dbe5c10ae0385a2a313bdbef75a00e31d54d",
+        "size_bytes": 1778432560
       },
       "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": {
-        "sha256": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
-        "size_bytes": 225357
+        "sha256": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
+        "size_bytes": 226178
       },
       "macos-arm64_x86_64/Headers/module.modulemap": {
         "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
         "size_bytes": 66
       },
       "macos-arm64_x86_64/libCatbirdMLSFFI.a": {
-        "sha256": "7b0a5d558ed39cfaa4ad59f4b006bf6c0751174a84ed256ddaf41cf2d3eeadbb",
-        "size_bytes": 1773289360
+        "sha256": "d8b44ef7ecc879dfe146146fa81f8801c5493dc44631d83d70b9814d2f80d661",
+        "size_bytes": 1785294144
       }
     },
     "libraries": [
@@ -120,29 +120,29 @@
       }
     ],
     "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework",
-    "sha256": "ac52dafbbb02d86284836617799faae0807e1abd6f8fd4dde84f80a41787b548"
+    "sha256": "c6dc1a32e44a3be493bb02b8253bc3da512aba893580e4370452c111e3c3be7d"
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "f9bc2399020bb13fee00c40155f8ca4369166229bde47d95deadcbff1035e480"
+    "canonical_sha256": "fc0aa32a9a4d01d66f4e033d64889cf4770764ccb0c3d2925a041e662fcc0152"
   },
   "interface": {
     "generated_swift": {
       "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift",
-      "sha256": "5bc78633c6d5d52633372d513a03b59b08af629f4954173f8c4f0e95070c9789",
-      "size_bytes": 816476
+      "sha256": "26310692a2011719206e193304aa7edd050e5ae95ee646348f0a55dba5eccf35",
+      "size_bytes": 818081
     },
     "native_headers": {
-      "ios-arm64/Headers/CatbirdMLSFFI.h": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
+      "ios-arm64/Headers/CatbirdMLSFFI.h": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
       "ios-arm64/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
-      "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
+      "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
       "ios-arm64_x86_64-maccatalyst/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
-      "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
+      "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
       "ios-arm64_x86_64-simulator/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
-      "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": "80144a4018e4bc084861c5ce7eddaa212a3704f97718eba79841202c0a7fb151",
+      "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": "db288cd9f58d8c598a0572c68c6f214073a36037da57b42c7f462e292ec59e5d",
       "macos-arm64_x86_64/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f"
     },
-    "sha256": "21b7c4835a56db6e242a24ccdba26740e6a8f33cbf58ae3e5eb9b9f4c836672e"
+    "sha256": "410acc4b27de31f678122fbc569461f37f1abb72eddb3eee6cd99fea90d24a6f"
   },
   "package": {
     "local_dependencies": {
@@ -153,7 +153,7 @@
     "manifest_sha256": "8a41e8b441c76eeea0650ab0f236763a7267b34b209dc53ab8cbfe0fe06ee1f5",
     "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/CatbirdMLSCore"
   },
-  "qualification": "unreviewed-candidate",
+  "qualification": "reviewed-source",
   "schema_version": 1,
   "scope": "apple-native-uniffi",
   "selected_inputs": {
@@ -2571,8 +2571,8 @@
         "size_bytes": 96393
       },
       "src/api.rs": {
-        "sha256": "79b94215058573bece528464c0253bd7446d7169069a46e37e883cfa2a4cf52e",
-        "size_bytes": 393482
+        "sha256": "7daac4372ca23b90f68613522f16350eb823b674078cda6c3eafd401b9ae7847",
+        "size_bytes": 395632
       },
       "src/atproto_bytes.rs": {
         "sha256": "fee289989c5514031fd95d41a0389ec7da8f2e17eed44a510e22f143c74e8c91",
@@ -2763,16 +2763,16 @@
         "size_bytes": 20257
       },
       "src/chat_v2/transcript/contract.rs": {
-        "sha256": "dde6800e67601f855d3af17e205ef5ccef2a1052e2d755888e82f86cf748c6ef",
-        "size_bytes": 22996
+        "sha256": "adeca6fc50576f7f1df6c3e0399485d2bb44113fe1ec7552c9bc9055518fcdae",
+        "size_bytes": 23007
       },
       "src/chat_v2/transcript/contract_tests.rs": {
         "sha256": "8cd4a525c1b88a986b2a6bcf6318860684243c03a17cda96d1bcee0cc9e62f78",
         "size_bytes": 12867
       },
       "src/chat_v2/transcript/direct_request.rs": {
-        "sha256": "61114b538db5b6934619b37b26f6df03f5d11cbff693752b7f6ae6d354a02fa4",
-        "size_bytes": 45210
+        "sha256": "81e4167c70d10f8787495f2c989426783be951a98b71e3827ec961822800697a",
+        "size_bytes": 60635
       },
       "src/chat_v2/transcript/domain_vector_tests.rs": {
         "sha256": "44222d3bf9ed60696c2ce56a11f9ec414eeffe2153403b9d4c8f727384e2b209",
@@ -2831,8 +2831,8 @@
         "size_bytes": 17607
       },
       "src/client_bridge.rs": {
-        "sha256": "0cad9d5e107620a23d6c3856e7ce884f94058ebdfbecc27fe6e843b0298642eb",
-        "size_bytes": 46186
+        "sha256": "9629e3093a4a541acf4152effe5c9a139fea09c774f841fb6ed66789a7ae6b65",
+        "size_bytes": 47038
       },
       "src/engine.rs": {
         "sha256": "555e3eb1cd974c7f419083cb92df5423598c764673f5ef1ca44978715b83b6b6",
@@ -2887,16 +2887,16 @@
         "size_bytes": 211326
       },
       "src/orchestrator/account_exit.rs": {
-        "sha256": "cf05d37532da134d6b3cecead1be6a02229cd289a5e9e24b1a51fad0314a9ace",
-        "size_bytes": 29217
+        "sha256": "1e863d99b4529e7110646ea86ef04f156791361f479a38e9ff41032e8f086b38",
+        "size_bytes": 34933
       },
       "src/orchestrator/account_removal.rs": {
         "sha256": "6a37544864c2e16e18f22c76b339f924a21efd3a90cdfb68f18ea01a6adb5b59",
         "size_bytes": 21799
       },
       "src/orchestrator/admission.rs": {
-        "sha256": "d01c4098d37063bc65f25028d08042ca2418f9352878a73f1953e9ae6124d418",
-        "size_bytes": 40392
+        "sha256": "d8e51abbfb5d1a9c4a3e54836294c0565fc1e01d08f7d65ad802bf8e3fdde0aa",
+        "size_bytes": 40732
       },
       "src/orchestrator/api_client.rs": {
         "sha256": "a49cabd1b9296fc959fe7b173fb2f818cc7dbdadff256682b8a4946451459e87",
@@ -2907,8 +2907,8 @@
         "size_bytes": 14694
       },
       "src/orchestrator/canonical_transport.rs": {
-        "sha256": "3900613f23e73624b32ecbc4f2617f9761c93028ec85f324434b538938a8bac7",
-        "size_bytes": 195552
+        "sha256": "9bce7927e0c91800a48549eeaa48891a0b98e30e620e76f167cf897c912f17f0",
+        "size_bytes": 195489
       },
       "src/orchestrator/canonical_transport_tests.rs": {
         "sha256": "f50dcbc0f1fd34569a9821954823e9606f46cbf924cf194231cdb1353219d0a9",
@@ -2951,20 +2951,20 @@
         "size_bytes": 30526
       },
       "src/orchestrator/direct_request_commands.rs": {
-        "sha256": "5325a008be38c5338749aa6ae111da70c00ebc4628c0038a3584e1edf23a51f2",
-        "size_bytes": 45027
+        "sha256": "32bc33ffd859d66a972a47f7e023a4292a5e52a904f797bf1b86a522106f8b76",
+        "size_bytes": 46036
       },
       "src/orchestrator/direct_request_controls.rs": {
         "sha256": "8f9841fa71d37481abbf831b6ef6c441a8808c2d1ca6cef9237e3b717b887742",
         "size_bytes": 8272
       },
       "src/orchestrator/direct_request_intent.rs": {
-        "sha256": "ce5ffa753785cc63d9bf8460147b712da2c8396eb1a0ae37a57f87c08a8f3a59",
-        "size_bytes": 17054
+        "sha256": "082b1356a64b36c270d704c8680ea22a61d037c91530d8f2160bdc4a2136f630",
+        "size_bytes": 17150
       },
       "src/orchestrator/direct_request_journal.rs": {
-        "sha256": "0228f72187c4dcc227a3d3a5f63797359820b8311d8c7989aeebff91558da377",
-        "size_bytes": 36090
+        "sha256": "f396f1c3fcdeeb2347e105289c501f27ac453235831f2001f890766a29b7f258",
+        "size_bytes": 36124
       },
       "src/orchestrator/direct_request_keys.rs": {
         "sha256": "ae051da18d85fd687b0991af5e940253923f01c6ab3ef3a7ed8807daaf1e10c5",
@@ -2979,24 +2979,24 @@
         "size_bytes": 2531
       },
       "src/orchestrator/direct_request_projection.rs": {
-        "sha256": "464814c0ca6f961b761c0e4d10177953ad6aef397a5bb194ef5062379127cca7",
-        "size_bytes": 15604
+        "sha256": "3ab9dc74b97b83823fb6321c549725557880cae6524eff21dc19b958f8efae59",
+        "size_bytes": 16464
       },
       "src/orchestrator/direct_request_receive.rs": {
-        "sha256": "5f5b93811b9b847311cd597a264b1580b5849176a31ef10f28439def2314fa51",
-        "size_bytes": 26337
+        "sha256": "0b64ff18d673d1ea577e813c3825084301f4e1548627ec27d6c446655e33e837",
+        "size_bytes": 33154
       },
       "src/orchestrator/direct_request_shared_crypto.rs": {
-        "sha256": "8c7c730ef5d44858d620c9adb4a201bc3651afecc5f748904b764855ad67ddd9",
-        "size_bytes": 14325
+        "sha256": "52dab526fa978a400ebaee23ff7be8f9226e8f1cfe9f112f80a0a2984372eb1c",
+        "size_bytes": 15459
       },
       "src/orchestrator/direct_request_types.rs": {
         "sha256": "f61e0b0564524d3197885b9c47416927ca6be800b2d325602e1a733f06955a03",
         "size_bytes": 4769
       },
       "src/orchestrator/direct_requests.rs": {
-        "sha256": "076f1d825d4f0d2aa037933daf346a700f99ccd8ec6bb82559adf0394257b122",
-        "size_bytes": 16965
+        "sha256": "3b1070c9f4b06416e9c5dab44bc41bd315b509d0faa0326fb1309c5ebedc9669",
+        "size_bytes": 17190
       },
       "src/orchestrator/error.rs": {
         "sha256": "225d4b05a613d6638f46fca8fcc85dc4df9e7dfd8b32eb93d7432c3c5504847e",
@@ -3011,8 +3011,8 @@
         "size_bytes": 7630
       },
       "src/orchestrator/groups.rs": {
-        "sha256": "12b6d421f8c37b97fda1a7baebb5ca455b4c22d16a22ab3f592b688a1cb7dcf7",
-        "size_bytes": 319314
+        "sha256": "fe164a352069791b323138e119c8d23dfc6677b0e44aa5e7b3788dd3868aa259",
+        "size_bytes": 318572
       },
       "src/orchestrator/incoming.rs": {
         "sha256": "ed44eed4f58f64380f2d24cba1fcd7c3cd24e3b0f57223d7ee6751c1b768e03f",
@@ -3035,20 +3035,20 @@
         "size_bytes": 15311
       },
       "src/orchestrator/messaging.rs": {
-        "sha256": "b16918d4c812f324be5e8d9add8fd1e1d7b3282961b519dd64f5f615f10f81fb",
-        "size_bytes": 110410
+        "sha256": "bcf305011ff78e2d7a56fbbf6b2484d7dd82bc120bca43f7724f4bab0e595be1",
+        "size_bytes": 111728
       },
       "src/orchestrator/mls_provider.rs": {
-        "sha256": "cca3e347b479d454f3e872420f9749b976e83db654090236964e515ab73772aa",
-        "size_bytes": 36956
+        "sha256": "4acc7adf35e94e4ce2d26ee43e8afa85df2e4e949280bcc9509e7a7cd233be36",
+        "size_bytes": 39583
       },
       "src/orchestrator/mod.rs": {
-        "sha256": "19265ce247fdfc7568075035e762ad8803539b1a695542a77707498479922b9b",
-        "size_bytes": 2980
+        "sha256": "fc7aed7c3416679e4d55c9f1e62e8e2116b70a2ef270d413abadcb218c9341c6",
+        "size_bytes": 2870
       },
       "src/orchestrator/orchestrator.rs": {
-        "sha256": "6d637bbedc21657d1dd69e3421997a6168b7627343f6f6a2c0d742596b06887a",
-        "size_bytes": 67578
+        "sha256": "8bdcad07313b3e33a8ea66a29c5956be54dd288ac8b4f7a496c3c8c44ffa2514",
+        "size_bytes": 69166
       },
       "src/orchestrator/ordering.rs": {
         "sha256": "2513c177cf0f33d31d276a03b9c3113bea077adc70b9d84ca98815413ba03bd6",
@@ -3059,8 +3059,8 @@
         "size_bytes": 5849
       },
       "src/orchestrator/projection_commit.rs": {
-        "sha256": "26aa203d4d7e560ef04de1f2466ac226f565f0c5818b128914cf787e85bf5c3f",
-        "size_bytes": 8050
+        "sha256": "1d48bcc124e832e40e47e206b75ae5dfb6562c5b15b70eb8481176e87b5c462c",
+        "size_bytes": 9889
       },
       "src/orchestrator/recovery.rs": {
         "sha256": "ebc85348713cec107ce93888fcf1ba90febdb1ea9ef82ce78c4182d6118e6c76",
@@ -3079,8 +3079,8 @@
         "size_bytes": 29070
       },
       "src/orchestrator/sync.rs": {
-        "sha256": "7b13872287ad1314b881cbbddb88aec4bd0f96f6a845dd894005dde1e02261e0",
-        "size_bytes": 60567
+        "sha256": "58d463c772388bb67c02a2782ca8791fd5a08f7f1caa454a6e6f2ddd0b49ae44",
+        "size_bytes": 72628
       },
       "src/orchestrator/terminal_lifecycle.rs": {
         "sha256": "94b0cad0ac1515c362f9a0d456af7f9b932efbb72a53a41c4e027dd1fe97e3ff",
@@ -3103,8 +3103,8 @@
         "size_bytes": 6277
       },
       "src/orchestrator_bridge.rs": {
-        "sha256": "ddf31e810896a6e0861e475bac74d977a05e52370f119e53598ba39a09258386",
-        "size_bytes": 242442
+        "sha256": "c315071a5bf63b5696e8b1c52eac71a8aadf9b86bddddbefe674f2abcc60e519",
+        "size_bytes": 243834
       },
       "src/platform_lifecycle.rs": {
         "sha256": "26c0872fc96b2dcb1583ee3ec3ba5855acd2774cafc5de08816d6b923099e1e1",
@@ -3163,12 +3163,12 @@
         "size_bytes": 15031
       },
       "tests/clean_chat_direct_request_crypto.rs": {
-        "sha256": "918d6084d4c3be12711b0a6ded18dae9c0051ba28ea2fad283d6d84b7a1e1744",
-        "size_bytes": 33890
+        "sha256": "66554df10f31a4c731442817e64f2bcbd4d8d705b63412828991ecfdcada8815",
+        "size_bytes": 34557
       },
       "tests/clean_chat_direct_request_lifecycle.rs": {
-        "sha256": "f5e17dca22749795130a6be85c1f1d611352e3e03d63a0d010c3465994996375",
-        "size_bytes": 53137
+        "sha256": "57c74dab3f5d8ddce64dca26ffa08887f4e3b0458b5a3293bcebb319a290038d",
+        "size_bytes": 58357
       },
       "tests/clean_chat_direct_request_preview.rs": {
         "sha256": "fb8456a77cea3147b20e34d33fde494f6fd2c007c4c8556976c9c949df7900ef",
@@ -3187,8 +3187,8 @@
         "size_bytes": 38987
       },
       "tests/clean_chat_lifecycle_tests.rs": {
-        "sha256": "71f2157f9ecf9723789d128bc509c9940e2631da5b013b13417edba91fd53d3a",
-        "size_bytes": 14109
+        "sha256": "b7640ab5431a4876a9a6a173b9202382cd377bf48c0253c5bc46fc80c31dc866",
+        "size_bytes": 14277
       },
       "tests/clean_chat_recovery_conflict_tests.rs": {
         "sha256": "ed0db1a66d8c95d6d8aa466978afea8db64ab29c932b2ddf17e49cbe2bf06735",
@@ -3314,25 +3314,29 @@
         "sha256": "91d0a5bb2e74e3ad67c29fe39c9a1c5dc715a44747921cdfb9df7f1197791717",
         "size_bytes": 51781
       },
+      "tests/message_send_actor_fence_tests.rs": {
+        "sha256": "12a3ed50aff6a7b24366475158145b9a12dda2fe331a8d96955947b601040d83",
+        "size_bytes": 5079
+      },
       "tests/messaging_security_hardening_tests.rs": {
-        "sha256": "cba04d68607883584c2ac9d2460c3ba52ec23003f44a515ceb5527187293a7d8",
-        "size_bytes": 98104
+        "sha256": "8956b21bb77798d291e89bc38fb8801c40cca94ec01b0307ddbe756e8b378a39",
+        "size_bytes": 104143
       },
       "tests/mls_delete_fail_closed_tests.rs": {
         "sha256": "a61a1932f91c875a381380656d8a443d1cdf2f7c5d17e6859e537352ce1e6220",
         "size_bytes": 3553
       },
       "tests/mock_api_client.rs": {
-        "sha256": "dfb8fc71bc0d7640a0c067f810304ac58760941483cf4f93828ba1f78c578d31",
-        "size_bytes": 195900
+        "sha256": "c6c2a2c193b784df1d68388dced4cd6a6febf82c22059bba28b40343476a9f96",
+        "size_bytes": 196691
       },
       "tests/mock_credentials.rs": {
-        "sha256": "5f2e8dabb8ac64a587eaffe891ad4d31efec7edde2a430d28adafa0a839bbeac",
-        "size_bytes": 12487
+        "sha256": "99329d3956dc5c5e408cf4b804db2747fc7a3431d68162145bf77e72a659093f",
+        "size_bytes": 13757
       },
       "tests/mock_storage.rs": {
-        "sha256": "30f73186177da3b403f450382e78df23994bbbf518a7aa2160ee89ab67e0e5c0",
-        "size_bytes": 78102
+        "sha256": "851505a2184e5fdc6ed93c9e1a165ccb1060c5e68d529181f30b16a54345a552",
+        "size_bytes": 83062
       },
       "tests/native_decrypt_error_class_tests.rs": {
         "sha256": "7c115db934976d8f4829d3279ebdd94941e7f5b9e0b2d43445728754a8213ed7",
@@ -3367,8 +3371,8 @@
         "size_bytes": 95742
       },
       "tests/resolved_conversation_context_tests.rs": {
-        "sha256": "077663dcee37ff9df39fffde6bd0aa48e48db747e5b2dbfe3bc1fe361336eef9",
-        "size_bytes": 94140
+        "sha256": "ec4288fcce3521ded0b2d8ac34c29866fae7e857378c9c25af6e1e7e87358b73",
+        "size_bytes": 94713
       },
       "tests/roster_omission_security_tests.rs": {
         "sha256": "d12f38c511df723580afa7aac3fd1c4f05868c3d157ceca25cbc82fa05cf0d67",
@@ -3419,7 +3423,7 @@
         "size_bytes": 186
       }
     },
-    "native_source_sha256": "90e8c012cd3f757e6cbc9ba52d5d01cca945fd97ca90b50173793d2dcad2422b",
+    "native_source_sha256": "12ec8aca1ded342e33bd10fa86c77447724d38c215008af432194397e0005676",
     "repositories": {
       "Petrel": {
         "jj_change": "pvysxykvkrpywupknlnztqnmwqmkunmq",
@@ -3434,16 +3438,16 @@
         "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/.builds/t07-final-463ff42c/PetrelCatbird"
       },
       "catbird-atproto": {
-        "jj_change": "yornvlyqnplwstnlmszpwsxxvyumzuyp",
-        "jj_commit": "b67f564935bb223ee2c9152872c5ba7c8306671f",
-        "parent_jj_commit": "ef150724e91642a4cceba15610b0ae59de7dd35a",
-        "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/.builds/t07-final-463ff42c/catbird-atproto"
+        "jj_change": "pqwryuwpwpkwknstzztxuklqutlnuvwk",
+        "jj_commit": "a92f8e65f684c727c58605820beac3e955a02f74",
+        "parent_jj_commit": "86f8dd9f80781b9766c4e77b437e972ccca23a2d",
+        "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/.builds/t07-final-38b4fd60/catbird-atproto"
       },
       "catbird-mls": {
-        "jj_change": "wwxwqrkwtwxyoxqvsuruosslnsotylzr",
-        "jj_commit": "1389d512cddd93980ce3f5306607f024fd1b7676",
-        "parent_jj_commit": "7455395bfecff432c08f55b706b1c63b6e4874d5",
-        "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/.builds/t07-final-463ff42c/catbird-mls"
+        "jj_change": "szktlokompwwwymlsmuluvsnrokznszz",
+        "jj_commit": "0bb96d69373f057ac9da3ad61f4427e0d202833d",
+        "parent_jj_commit": "37a0bd0c50ff0334ea60f44c66515cabab5f43e6",
+        "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/.builds/t07-final-38b4fd60/catbird-mls"
       }
     },
     "schemas": {
