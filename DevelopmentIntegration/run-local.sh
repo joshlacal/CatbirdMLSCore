@@ -35,4 +35,6 @@ printf 'Apple dependency provenance: %s\n' "$provenance" >&2
 swift_subcommand=$2
 shift 2
 exec python3 "$integration_dir/run-local-command.py" \
-    --config-dir "$config_dir" "$swift_subcommand" "$@"
+    --config-dir "$config_dir" \
+    --provenance "$provenance" \
+    "$swift_subcommand" "$@"

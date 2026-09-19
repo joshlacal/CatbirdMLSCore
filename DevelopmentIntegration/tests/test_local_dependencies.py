@@ -194,6 +194,31 @@ class LocalCommandTests(unittest.TestCase):
             self.assertEqual(len(retained), 1)
             self.assertEqual(retained[0].read_text(), "local resolution")
 
+    def test_rejects_package_identity_change_from_recorded_provenance(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance.json"
+            provenance.write_text(json.dumps({
+                "packages": {
+                    "Petrel": {
+                        "path": str(root),
+                        "jj_commit": "expected-commit",
+                        "jj_change": "expected-change",
+                    }
+                }
+            }))
+            original = runner.current_jj_identity
+            runner.current_jj_identity = lambda _: {
+                "jj_commit": "different-commit",
+                "jj_change": "expected-change",
+            }
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Petrel changed during local integration"):
+                    runner.verify_package_identities(provenance)
+            finally:
+                runner.current_jj_identity = original
+
 
 if __name__ == "__main__":
     unittest.main()
