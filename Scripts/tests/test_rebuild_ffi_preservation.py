@@ -56,6 +56,7 @@ class RebuildPreservationTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
             environment["FFI_BACKUP_TIMESTAMP"] = "20260919T120000Z"
+            environment["CATBIRD_MLS_NATIVE_DIR"] = str(native)
             result = subprocess.run(
                 [str(scripts / "rebuild-ffi.sh")],
                 cwd=core,

@@ -32,14 +32,22 @@ ensure_ios_sdk() {
 ensure_ios_sdk
 
 core_scripts_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+core_dir="$(CDPATH= cd -- "$core_scripts_dir/.." && pwd)"
 artifact_manifest_tool="$core_scripts_dir/apple-artifact-manifest.py"
 if [ ! -f "$artifact_manifest_tool" ]; then
     echo "❌ Apple artifact manifest tool is absent: $artifact_manifest_tool"
     exit 1
 fi
 
-# Navigate to catbird-mls build directory
-cd "$core_scripts_dir/../../catbird-mls"
+# An immutable JJ build workspace may be selected while the shared native
+# feature workspace continues evolving. The default remains the exact sibling.
+native_dir="${CATBIRD_MLS_NATIVE_DIR:-$core_dir/../catbird-mls}"
+if [ ! -d "$native_dir" ] || [ ! -f "$native_dir/create-xcframework.sh" ]; then
+    echo "❌ CATBIRD_MLS_NATIVE_DIR is not a catbird-mls source tree: $native_dir"
+    exit 1
+fi
+native_dir="$(CDPATH= cd -- "$native_dir" && pwd)"
+cd "$native_dir"
 
 backup_timestamp="${FFI_BACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 case "$backup_timestamp" in
@@ -48,7 +56,7 @@ case "$backup_timestamp" in
         exit 1
         ;;
 esac
-backup_root="../CatbirdMLSCore/_trash/ffi-rebuild/$backup_timestamp"
+backup_root="$core_dir/_trash/ffi-rebuild/$backup_timestamp"
 if [ -e "$backup_root" ]; then
     echo "❌ FFI backup destination already exists: $backup_root"
     exit 1
@@ -98,23 +106,23 @@ fi
 
 # Reject generator drift before either output can replace the reviewed pair.
 if [ "${FFI_VERIFY_COMMITTED_BINDINGS:-0}" = "1" ]; then
-    cmp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift
+    cmp build/bindings/CatbirdMLS.swift "$core_dir/Sources/CatbirdMLS/CatbirdMLS.swift"
 fi
 
 echo ""
 echo "🗃️  Step 2: Preserving prior Core artifacts..."
-preserve_if_present ../CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework CatbirdMLSFFI.xcframework
-preserve_if_present ../CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift CatbirdMLS.swift
-preserve_if_present ../CatbirdMLSCore/Sources/CatbirdMLS/MLSFFI.swift MLSFFI.swift
+preserve_if_present "$core_dir/Sources/CatbirdMLSFFI.xcframework" CatbirdMLSFFI.xcframework
+preserve_if_present "$core_dir/Sources/CatbirdMLS/CatbirdMLS.swift" CatbirdMLS.swift
+preserve_if_present "$core_dir/Sources/CatbirdMLS/MLSFFI.swift" MLSFFI.swift
 
 echo ""
 echo "📋 Step 3: Copying XCFramework to CatbirdMLSCore..."
-cp -R CatbirdMLSFFI.xcframework ../CatbirdMLSCore/Sources/
+cp -R CatbirdMLSFFI.xcframework "$core_dir/Sources/"
 echo "✅ XCFramework copied"
 
 echo ""
 echo "📄 Step 4: Updating Swift bindings..."
-cp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/
+cp build/bindings/CatbirdMLS.swift "$core_dir/Sources/CatbirdMLS/"
 echo "✅ Swift bindings updated"
 
 echo ""
