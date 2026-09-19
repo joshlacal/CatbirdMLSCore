@@ -109,6 +109,58 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
     XCTAssertEqual(new.host, "new.example", "A forced native refresh must not remain pinned to the previous PDS")
   }
 
+  func testDirectRequestReceiptAuthorityFetchesFixedDocumentAndPreservesBytes() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [AuthorizationURLProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel(); AuthorizationURLProtocol.handler = nil }
+    let document = Data(#"{"id":"did:web:chat.catbird.blue","verificationMethod":[]}"#.utf8)
+    AuthorizationURLProtocol.handler = { request in
+      XCTAssertEqual(request.url?.absoluteString, "https://chat.catbird.blue/.well-known/did.json")
+      XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+      return (200, document)
+    }
+
+    XCTAssertEqual(
+      try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(session: session),
+      document
+    )
+  }
+
+  func testDirectRequestReceiptAuthorityRejectsWrongDID() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [AuthorizationURLProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel(); AuthorizationURLProtocol.handler = nil }
+    AuthorizationURLProtocol.handler = { _ in
+      (200, Data(#"{"id":"did:web:attacker.example","verificationMethod":[]}"#.utf8))
+    }
+
+    do {
+      _ = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(session: session)
+      XCTFail("A different DID document cannot become the receipt authority")
+    } catch {}
+  }
+
+  func testCredentialCallbackRejectsReencodedOrOversizeReceiptAuthority() throws {
+    let valid = Data(#"{"id":"did:web:chat.catbird.blue"}"#.utf8)
+    let adapter = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { valid }
+    )
+    XCTAssertEqual(try adapter.directRequestReceiptAuthorityDocument(), valid)
+
+    let wrong = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { Data(#"{"id":"did:web:wrong.example"}"#.utf8) }
+    )
+    XCTAssertThrowsError(try wrong.directRequestReceiptAuthorityDocument())
+
+    let oversized = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { Data(repeating: 0x20, count: 1_048_577) }
+    )
+    XCTAssertThrowsError(try oversized.directRequestReceiptAuthorityDocument())
+  }
+
   func testFailedPublicationDeniesSyncAndSendThenRetriesForSameSession() async throws {
     struct FailedPublication: Error {}
     let gate = MLSDeviceAuthorizationGate()

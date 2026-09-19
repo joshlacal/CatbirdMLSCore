@@ -3,6 +3,8 @@ import Petrel
 import PetrelCatbird
 
 extension MLSPublicPDSReader {
+  static let directRequestReceiptAuthorityDID = "did:web:chat.catbird.blue"
+
   static let authorizationSession: URLSession = {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
@@ -40,6 +42,28 @@ extension MLSPublicPDSReader {
           endpoint.host != nil, endpoint.user == nil, endpoint.password == nil,
           endpoint.fragment == nil else { throw ReaderError.invalidEndpoint }
     return endpoint
+  }
+
+  /// Fetch the fixed direct-request receipt authority without redirects or cache reuse.
+  /// Rust validates the authority method and key; Swift retains the exact authenticated
+  /// JSON bytes rather than re-encoding the document.
+  static func fetchDirectRequestReceiptAuthorityDocument(
+    session: URLSession = authorizationSession
+  ) async throws -> Data {
+    let did = directRequestReceiptAuthorityDID
+    let url = try SpaceHostResolver.didDocumentURL(for: did)
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.timeoutInterval = 10.0
+    let (data, response) = try await session.data(for: request)
+    guard let http = response as? HTTPURLResponse,
+          http.statusCode == 200,
+          http.url == url,
+          data.count <= 1_048_576
+    else { throw ReaderError.invalidResponse }
+    let document = try JSONDecoder().decode(DIDDocument.self, from: data)
+    guard document.id == did else { throw ReaderError.invalidResponse }
+    return data
   }
 
   struct AuthorizedDeviceRecord: Equatable {

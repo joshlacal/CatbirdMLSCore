@@ -98,6 +98,30 @@ final class MLSConversationProjectionCommitTests: XCTestCase {
         }
     }
 
+    func testObservedAliasEpochMayPrecedeCurrentCanonicalEpoch() throws {
+        let owner = "did:plc:receiver"
+        let groupID = String(repeating: "de", count: 32)
+        try insertPair(
+            owner: owner,
+            groupID: groupID,
+            canonicalEpoch: 9,
+            aliasEpoch: 7,
+            nativeConversationID: groupID
+        )
+        let adapter = MLSOrchestratorStorageAdapter(
+            dbPool: database,
+            userDID: owner,
+            mlsContext: context
+        )
+
+        XCTAssertEqual(
+            try outcome(adapter.commitConversationProjectionJson(
+                requestJson: request(owner: owner, groupID: groupID, canonicalEpoch: 9, aliasEpoch: 7)
+            )),
+            .retired(2)
+        )
+    }
+
     func testCrossAccountOwnerIsRejectedBeforeWrites() throws {
         let adapter = MLSOrchestratorStorageAdapter(
             dbPool: database,
@@ -119,10 +143,30 @@ final class MLSConversationProjectionCommitTests: XCTestCase {
         }
     }
 
-    private func insertPair(owner: String, groupID: String, epoch: Int64) throws {
+    private func insertPair(
+        owner: String,
+        groupID: String,
+        epoch: Int64
+    ) throws {
+        try insertPair(
+            owner: owner,
+            groupID: groupID,
+            canonicalEpoch: epoch,
+            aliasEpoch: epoch,
+            nativeConversationID: stableID
+        )
+    }
+
+    private func insertPair(
+        owner: String,
+        groupID: String,
+        canonicalEpoch: Int64,
+        aliasEpoch: Int64,
+        nativeConversationID: String
+    ) throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         try database.write { db in
-            for id in [stableID, groupID] {
+            for (id, epoch) in [(stableID, canonicalEpoch), (groupID, aliasEpoch)] {
                 try MLSConversationModel(
                     conversationID: id,
                     currentUserDID: owner,
@@ -136,11 +180,16 @@ final class MLSConversationProjectionCommitTests: XCTestCase {
             INSERT INTO mls_orchestrator_group_state
               (group_id, conversation_id, epoch, members_json, updated_at)
             VALUES (?, ?, ?, ?, ?)
-            """, arguments: [groupID, stableID, epoch, Data("[]".utf8), now])
+            """, arguments: [groupID, nativeConversationID, canonicalEpoch, Data("[]".utf8), now])
         }
     }
 
-    private func request(owner: String, groupID: String, aliasEpoch: UInt64) throws -> String {
+    private func request(
+        owner: String,
+        groupID: String,
+        canonicalEpoch: UInt64 = 7,
+        aliasEpoch: UInt64
+    ) throws -> String {
         let unknown: [String: Any] = [
             "generation": NSNull(),
             "stateVersion": NSNull(),
@@ -150,7 +199,7 @@ final class MLSConversationProjectionCommitTests: XCTestCase {
         let canonical: [String: Any] = [
             "groupId": groupID,
             "conversationId": stableID,
-            "epoch": 7,
+            "epoch": canonicalEpoch,
             "members": [],
             "metadata": NSNull(),
             "createdAt": "2026-09-19T12:00:00Z",
@@ -164,7 +213,7 @@ final class MLSConversationProjectionCommitTests: XCTestCase {
             "canonicalGroupId": groupID,
             "aliasConversationId": groupID,
             "aliasGroupId": groupID,
-            "canonicalIncarnation": 7,
+            "canonicalIncarnation": canonicalEpoch,
             "aliasIncarnation": aliasEpoch,
             "canonicalLifecycle": unknown,
             "aliasLifecycle": unknown,

@@ -40,6 +40,18 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  internal func directRequestReceiptAuthorityDocument() throws -> Data {
+    do {
+      return try blocking {
+        try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument()
+      }
+    } catch {
+      throw OrchestratorBridgeError.Credential(
+        message: "receipt_authority_unavailable: The direct-request receipt authority could not be verified. \(error.localizedDescription)"
+      )
+    }
+  }
+
   public func isAuthenticatedAs(did: String) -> Bool {
     (try? blocking { await self.apiClient.isAuthenticatedAs(did) }) ?? false
   }
@@ -436,14 +448,14 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       throw malformedCanonicalEnvelope()
     }
     return FfiIncomingEnvelope(
+      canonicalEntryJson: canonicalEntryJson,
       conversationId: conversationId,
       senderDid: senderDid.description,
       ciphertext: ciphertext,
       timestamp: timestamp,
       serverMessageId: entryId,
       serverSequence: UInt64(sequence),
-      serverEpoch: UInt64(epoch),
-      canonicalEntryJson: canonicalEntryJson
+      serverEpoch: UInt64(epoch)
     )
   }
 

@@ -165,7 +165,10 @@ extension MLSConversationManager {
         mlsContext: context,
         databasePool: databasePool,
         apiClient: apiAdapter,
-        authorizedDeviceKeyResolver: { did in try apiAdapter.authorizedDeviceKeys(userDid: did) }
+        authorizedDeviceKeyResolver: { did in try apiAdapter.authorizedDeviceKeys(userDid: did) },
+        receiptAuthorityDocumentResolver: {
+          try apiAdapter.directRequestReceiptAuthorityDocument()
+        }
       )
       // Keep canonical live mutations on the Rust signer seam. The weak
       // capture avoids making the API client retain the orchestrator runtime;

@@ -267,10 +267,9 @@ enum MLSConversationProjectionCommit {
                       row.epoch >= 0,
                       UInt64(row.epoch) == view.epoch,
                       let native = try Row.fetchOne(db, sql: """
-                      SELECT conversation_id, epoch FROM mls_orchestrator_group_state
+                      SELECT epoch FROM mls_orchestrator_group_state
                       WHERE group_id = ?
                       """, arguments: [view.groupHex]),
-                      (native["conversation_id"] as String?) == canonicalID,
                       (native["epoch"] as Int64?) == Int64(view.epoch)
                 else { return .fenceMismatch }
             }
