@@ -219,6 +219,40 @@ class LocalCommandTests(unittest.TestCase):
             finally:
                 runner.current_jj_identity = original
 
+    def test_core_identity_guard_allows_only_runner_retained_resolution(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance.json"
+            provenance.write_text(json.dumps({
+                "packages": {
+                    "CatbirdMLSCore": {
+                        "path": str(root),
+                        "jj_commit": "expected-commit",
+                        "jj_change": "expected-change",
+                    }
+                }
+            }))
+            original_identity = runner.current_jj_identity
+            original_paths = runner.changed_paths_from_commit
+            runner.current_jj_identity = lambda _: {
+                "jj_commit": "retention-commit",
+                "jj_change": "expected-change",
+            }
+            runner.changed_paths_from_commit = lambda _path, _commit: [
+                "_trash/local-integration-resolutions/run-local-Package.resolved"
+            ]
+            try:
+                runner.verify_package_identities(provenance)
+                runner.changed_paths_from_commit = lambda _path, _commit: [
+                    "Sources/CatbirdMLSCore/Changed.swift"
+                ]
+                with self.assertRaisesRegex(RuntimeError, "CatbirdMLSCore changed"):
+                    runner.verify_package_identities(provenance)
+            finally:
+                runner.current_jj_identity = original_identity
+                runner.changed_paths_from_commit = original_paths
+
 
 if __name__ == "__main__":
     unittest.main()

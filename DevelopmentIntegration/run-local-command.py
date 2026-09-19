@@ -42,12 +42,39 @@ def current_jj_identity(path):
     return {"jj_commit": lines[0], "jj_change": lines[1]}
 
 
+def changed_paths_from_commit(path, commit):
+    result = subprocess.run(
+        ["jj", "diff", "--from", commit, "--to", "@", "--name-only"],
+        cwd=path,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Could not compare JJ identity for {path}:\n{result.stdout}{result.stderr}"
+        )
+    return [line for line in result.stdout.splitlines() if line]
+
+
 def verify_package_identities(provenance_path):
     provenance = json.loads(Path(provenance_path).read_text())
     for name, record in provenance["packages"].items():
         current = current_jj_identity(record["path"])
         expected = {key: record[key] for key in ("jj_commit", "jj_change")}
         if current != expected:
+            # This runner deliberately retains SwiftPM's local resolution in
+            # Core's tracked _trash tree. That preservation write changes the
+            # working-copy commit after the command even when every build input
+            # stayed byte-identical. Accept only that exact runner-owned path;
+            # source, manifest, artifact, and dependency changes still fail.
+            retained_prefix = "_trash/local-integration-resolutions/"
+            if (
+                name == "CatbirdMLSCore"
+                and current["jj_change"] == expected["jj_change"]
+                and (changed := changed_paths_from_commit(record["path"], expected["jj_commit"]))
+                and all(path.startswith(retained_prefix) for path in changed)
+            ):
+                continue
             raise RuntimeError(
                 f"{name} changed during local integration; expected {expected}, found {current}"
             )
