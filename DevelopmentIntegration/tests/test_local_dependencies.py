@@ -143,6 +143,16 @@ class ResolutionGuardTests(unittest.TestCase):
                 },
             )
 
+    def test_local_framework_requires_verified_artifact_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            framework = root / "CatbirdMLSFFI.xcframework"
+            framework.mkdir()
+            manifest = root / "apple-artifact-manifest.json"
+
+            with self.assertRaisesRegex(RuntimeError, "identity manifest is absent"):
+                self.verifier.verify_local_ffi_manifest(framework, manifest)
+
 
 if __name__ == "__main__":
     unittest.main()

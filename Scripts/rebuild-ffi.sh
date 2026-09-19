@@ -31,12 +31,32 @@ ensure_ios_sdk() {
 
 ensure_ios_sdk
 
+core_scripts_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+artifact_manifest_tool="$core_scripts_dir/apple-artifact-manifest.py"
+if [ ! -f "$artifact_manifest_tool" ]; then
+    echo "❌ Apple artifact manifest tool is absent: $artifact_manifest_tool"
+    exit 1
+fi
+
 # Navigate to catbird-mls build directory
-cd "$(dirname "$0")/../../catbird-mls"
+cd "$core_scripts_dir/../../catbird-mls"
+
+# Capture the full generator-relevant Rust input before the long multi-target
+# build. A mutable JJ working copy can otherwise change while the generator is
+# running and leave artifacts whose recorded revision does not describe them.
+source_fingerprint_before="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD")"
 
 # Run the XCFramework build script
 echo "📦 Step 1: Building XCFramework..."
 ./create-xcframework.sh
+
+source_fingerprint_after="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD")"
+if [ "$source_fingerprint_before" != "$source_fingerprint_after" ]; then
+    echo "❌ Native source changed during FFI generation; refusing to install mixed-input artifacts."
+    echo "   Before: $source_fingerprint_before"
+    echo "   After:  $source_fingerprint_after"
+    exit 1
+fi
 
 if [ ! -d "CatbirdMLSFFI.xcframework" ]; then
     echo "❌ XCFramework build produced no CatbirdMLSFFI.xcframework"

@@ -15,6 +15,8 @@ HERE = Path(__file__).resolve().parent
 CORE = HERE.parent.resolve()
 WORKSPACE = CORE.parent.resolve()
 SELECTED_INPUTS = WORKSPACE / ".superpowers" / "sdd" / "2026-09-19-encrypted-message-requests" / "selected-inputs.json"
+APPLE_ARTIFACT_MANIFEST = HERE / "apple-artifact-manifest.json"
+APPLE_ARTIFACT_TOOL = CORE / "Scripts" / "apple-artifact-manifest.py"
 
 
 def run(*arguments, cwd=CORE, environment=None):
@@ -235,12 +237,31 @@ def ffi_identity(manifest):
     }
 
 
+def verify_local_ffi_manifest(framework, manifest_path=APPLE_ARTIFACT_MANIFEST):
+    framework = canonical(framework)
+    manifest_path = canonical(manifest_path)
+    if not framework.is_dir():
+        return
+    if not manifest_path.is_file():
+        raise RuntimeError(
+            f"Local FFI identity manifest is absent: {manifest_path}. "
+            "Regenerate the native artifact and its canonical manifest together."
+        )
+    run(
+        "python3",
+        str(APPLE_ARTIFACT_TOOL),
+        "verify",
+        str(manifest_path),
+    )
+
+
 def collect():
     environment = os.environ.copy()
     environment["CATBIRD_MLS_LOCAL_INTEGRATION"] = "1"
     framework = CORE / "Sources" / "CatbirdMLSFFI.xcframework"
     if framework.is_dir():
         environment["CATBIRD_MLS_FFI_PATH"] = str(framework.resolve())
+        verify_local_ffi_manifest(framework)
     else:
         environment.pop("CATBIRD_MLS_FFI_PATH", None)
     selected = selected_records()
