@@ -5739,6 +5739,13 @@ public actor MLSGRDBManager {
       try MLSDirectRequestProjection.createTables(in: db)
     }
 
+    // v39: Durable signed push-registration generations. Pending rows retain
+    // the exact signed request so an uncertain transport outcome is retried
+    // byte-for-byte; later acknowledged generations fence older attempts.
+    migrator.registerMigration("v39_push_registration_journal") { db in
+      try MLSPushRegistrationJournal.createTable(in: db)
+    }
+
     return migrator
   }
 

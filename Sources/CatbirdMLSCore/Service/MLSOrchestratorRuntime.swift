@@ -1,4 +1,5 @@
 import CatbirdMLS
+import CryptoKit
 import Foundation
 import GRDB
 import OSLog
@@ -491,6 +492,56 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       throw MLSConversationError.operationFailed("This device's signing identity is unavailable.")
     }
     return (deviceId, try localContext.identityPublicKey(identity: identity))
+  }
+
+  func currentPushSigningAuthority() throws -> MLSPushSigningAuthority {
+    guard let localContext,
+          let identity = try credentialAdapter?.getMlsDid(userDid: userDID),
+          let deviceID = try credentialAdapter?.getDeviceUuid(userDid: userDID),
+          identity == "\(userDID)#\(deviceID)",
+          let device = try bridge.listDevices().first(where: { $0.deviceId == deviceID }),
+          device.status == "active",
+          let keyID = device.keyId,
+          let publicKey = device.signaturePublicKey,
+          let authGeneration = device.authGeneration,
+          authGeneration > 0
+    else { throw MLSPushRegistrationError.signingAuthorityUnavailable }
+    let custodyKey = try localContext.identityPublicKey(identity: identity)
+    guard custodyKey == publicKey,
+          MLSOrchestratorCredentialAdapter.keyIdentifier(forPublicKey: publicKey) == keyID
+    else { throw MLSPushRegistrationError.signingAuthorityUnavailable }
+    return MLSPushSigningAuthority(
+      actorDID: userDID,
+      deviceID: deviceID,
+      keyID: keyID,
+      authGeneration: authGeneration,
+      publicKey: publicKey
+    )
+  }
+
+  func signPushRegistrationTranscript(
+    _ transcript: Data,
+    expectedAuthority: MLSPushSigningAuthority
+  ) throws -> Data {
+    guard !transcript.isEmpty,
+          try currentPushSigningAuthority() == expectedAuthority,
+          let localContext,
+          let identity = try credentialAdapter?.getMlsDid(userDid: userDID)
+    else { throw MLSPushRegistrationError.signingAuthorityChanged }
+    let signature = try localContext.signWithIdentityKey(identity: identity, payload: transcript)
+    guard let verifier = try? Curve25519.Signing.PublicKey(rawRepresentation: expectedAuthority.publicKey),
+          verifier.isValidSignature(signature, for: transcript)
+    else { throw MLSPushRegistrationError.invalidSignature }
+    guard try currentPushSigningAuthority() == expectedAuthority else {
+      throw MLSPushRegistrationError.signingAuthorityChanged
+    }
+    return signature
+  }
+
+  func requireCurrentPushSigningAuthority(_ expected: MLSPushSigningAuthority) throws {
+    guard try currentPushSigningAuthority() == expected else {
+      throw MLSPushRegistrationError.signingAuthorityChanged
+    }
   }
 
   public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo? {
