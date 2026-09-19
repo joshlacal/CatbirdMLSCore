@@ -38,29 +38,58 @@ cd "$(dirname "$0")/../../catbird-mls"
 echo "📦 Step 1: Building XCFramework..."
 ./create-xcframework.sh
 
+if [ ! -d "CatbirdMLSFFI.xcframework" ]; then
+    echo "❌ XCFramework build produced no CatbirdMLSFFI.xcframework"
+    exit 1
+fi
+if [ ! -f "build/bindings/CatbirdMLS.swift" ]; then
+    echo "❌ XCFramework build produced no Swift bindings"
+    exit 1
+fi
+
 # Reject generator drift before either output can replace the reviewed pair.
 if [ "${FFI_VERIFY_COMMITTED_BINDINGS:-0}" = "1" ]; then
     cmp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift
 fi
 
+backup_timestamp="${FFI_BACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+case "$backup_timestamp" in
+    *[!0-9TZ]*)
+        echo "❌ FFI_BACKUP_TIMESTAMP contains unsafe characters: $backup_timestamp"
+        exit 1
+        ;;
+esac
+backup_root="../CatbirdMLSCore/_trash/ffi-rebuild/$backup_timestamp"
+if [ -e "$backup_root" ]; then
+    echo "❌ FFI backup destination already exists: $backup_root"
+    exit 1
+fi
+mkdir -p "$backup_root"
+
+preserve_if_present() {
+    source_path="$1"
+    destination_name="$2"
+    if [ -e "$source_path" ]; then
+        mv "$source_path" "$backup_root/$destination_name"
+        echo "🗃️  Preserved $source_path at $backup_root/$destination_name"
+    fi
+}
+
 echo ""
-echo "📋 Step 2: Copying XCFramework to CatbirdMLSCore..."
-rm -rf ../CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework
+echo "🗃️  Step 2: Preserving prior Core artifacts..."
+preserve_if_present ../CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework CatbirdMLSFFI.xcframework
+preserve_if_present ../CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift CatbirdMLS.swift
+preserve_if_present ../CatbirdMLSCore/Sources/CatbirdMLS/MLSFFI.swift MLSFFI.swift
+
+echo ""
+echo "📋 Step 3: Copying XCFramework to CatbirdMLSCore..."
 cp -R CatbirdMLSFFI.xcframework ../CatbirdMLSCore/Sources/
 echo "✅ XCFramework copied"
 
 echo ""
-echo "📄 Step 3: Updating Swift bindings..."
-if [ -f "build/bindings/CatbirdMLS.swift" ]; then
-    # Remove any stale bindings (e.g. old MLSFFI.swift from pre-consolidation)
-    rm -f ../CatbirdMLSCore/Sources/CatbirdMLS/MLSFFI.swift
-    cp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/
-    echo "✅ Swift bindings updated"
-else
-    echo "⚠️  Warning: build/bindings/CatbirdMLS.swift not found"
-    echo "   The XCFramework was built but Swift bindings weren't generated"
-    exit 1
-fi
+echo "📄 Step 4: Updating Swift bindings..."
+cp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/
+echo "✅ Swift bindings updated"
 
 echo ""
 echo "✅ FFI rebuild complete!"

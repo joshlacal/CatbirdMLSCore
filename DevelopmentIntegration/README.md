@@ -1,6 +1,6 @@
-# Unreleased MLS local integration
+# Exact Apple sibling integration
 
-This recipe builds the current handwritten sources with their matching generated native ABI and a narrowly updated SDK. It does not publish a release or change the primary app project's published package references.
+This recipe opts the standalone Core package into the exact `Petrel` and `PetrelCatbird` siblings in the same isolated workspace. Normal package evaluation remains pinned to the published revisions and release FFI artifact.
 
 Run from CatbirdMLSCore:
 
@@ -8,17 +8,12 @@ Run from CatbirdMLSCore:
 DevelopmentIntegration/run-local.sh swift test --scratch-path .build-local-integration
 ```
 
-The wrapper reconstructs and verifies the SDK, then sets `CATBIRD_MLS_LOCAL_INTEGRATION=1` for the supplied build command. Without this explicit selection, the unreleased package manifest stops with a diagnostic. Do not select an arbitrary sibling checkout.
+The wrapper sets `CATBIRD_MLS_LOCAL_INTEGRATION=1`, creates a command-scoped SwiftPM mirror so PetrelCatbird's transitive remote edge resolves to the same exact Petrel sibling, and injects that configuration into `swift build`, `swift test`, `swift package`, or `swift run`. It aborts if the resolved graph contains a remote or wrong-path Petrel identity.
 
-`prepare-local.py` fetches exactly PetrelCatbird revision `0e68066f0024d05d820be64c0e999771f829d3aa`, materializes its Package.swift, Sources and Tests, and applies precisely two generated overlays:
+Each invocation writes a provenance record under `.build/LocalIntegration/provenance/`. The record includes the selected-input manifest hash, current and baseline JJ identities, exact sibling paths, generated Swift hash, and FFI identity. JJ-only isolated workspaces are supported; a Git HEAD is recorded only when the working copy exposes one.
 
-- `BlueCatbirdChatGetConversationState.swift`: optional `pendingLeafRecoveryRequests` and current generator output.
-- `BlueCatbirdChatSubmitTransition.swift`: `SignedOperationExpired` error case.
+If `Sources/CatbirdMLSFFI.xcframework` exists, the wrapper opts into that exact local framework and records its complete file hash map. Otherwise it records the pinned `v1.5.18` release URL and checksum. Merely leaving an ignored framework in `Sources` does not change a normal build.
 
-Every resulting file must match `petrel-sdk-manifest.json`. The 141-file SDK manifest digest is `c0e6f3bb032b0e10efbbaed5542c3ac660b1eea0f0148adc0cfbf408afdb40c8`. The fixed destination is `.build/LocalIntegration/PetrelCatbird-c0e6f3bb032b0e10`; it is generated local state and stays ignored. Re-running verifies existing contents and refuses changes or extra files. Published Petrel remains pinned at `dd2ad04bafa1176d45e18be13267349f2d5ec33a`.
+`prepare-local.py` is retained as a compatibility entry point and now delegates to the same verifier. Its previous fixed remote reconstruction inputs and overlays remain retained as historical evidence but are not selected.
 
-The native framework is `Sources/CatbirdMLSFFI.xcframework`, paired with legitimate generated `Sources/CatbirdMLS/CatbirdMLS.swift`. Its final shared-native source digest and per-artifact hashes must be recorded after the reviewed V3 build. Never pair these bindings with the earlier released framework.
-
-The Apple integration owner prepares an isolated development app project from a preserved source snapshot, changing only its Core and PetrelCatbird package references to the canonical Core and this fixed SDK. The canonical app project keeps its published references. Run that development project's Xcode command through this wrapper so package-manifest evaluation receives the explicit local selection.
-
-Before canonical integration, archive the exact existing manifest, generated bindings and old native artifact fallback. Record before/after hashes and verify the final local package, native slices and app build together. The local integration remains unpublished; release pins are unchanged until a separately coordinated release.
+`Scripts/rebuild-ffi.sh` preserves the prior framework, generated Swift binding, and any stale legacy binding under `_trash/ffi-rebuild/<UTC timestamp>/` before installing new outputs. Final FFI generation is deferred until the native request API is frozen; this prerequisite does not generate or modify bindings.

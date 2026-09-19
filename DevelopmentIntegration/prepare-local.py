@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reconstruct/verify the sole approved local SDK; no dirty sibling input."""
+"""Compatibility entry point for exact sibling verification and provenance.
+
+The older fixed-SDK reconstruction implementation remains below for retained
+historical evidence, but is unreachable when this file is run as a command.
+"""
 import argparse
 import hashlib
 import json
@@ -7,9 +11,18 @@ from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import tempfile
+import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+
+if __name__ == "__main__":
+    arguments = [sys.executable, str(HERE / "verify-local-dependencies.py")]
+    arguments.extend(argument for argument in sys.argv[1:] if argument != "--verify-only")
+    raise SystemExit(subprocess.call(arguments))
+
+# Retained pre-T07a implementation. The compatibility dispatch above prevents
+# it from selecting the obsolete reconstructed SDK.
 REVISION = "0e68066f0024d05d820be64c0e999771f829d3aa"
 REMOTE = "https://github.com/joshlacal/PetrelCatbird.git"
 EXPECTED_DIGEST = "c0e6f3bb032b0e10efbbaed5542c3ac660b1eea0f0148adc0cfbf408afdb40c8"
@@ -106,6 +119,3 @@ def main():
         if stage.exists():
             shutil.rmtree(stage)
 
-
-if __name__ == "__main__":
-    main()
