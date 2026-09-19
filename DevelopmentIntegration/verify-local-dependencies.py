@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -69,19 +70,21 @@ def validate_dependency_graph(graph, expected_paths):
 def write_swiftpm_config(directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "object": [
-            {
-                "mirror": (WORKSPACE / "Petrel").resolve().as_uri(),
-                "original": "https://github.com/joshlacal/Petrel.git",
-            }
-        ],
-        "version": 1,
-    }
+    # A file-URL source-control mirror requires a colocated `.git` directory
+    # and therefore fails in a valid JJ-only workspace. Root path dependencies
+    # already override PetrelCatbird's transitive Petrel identity; the resolved
+    # graph validation below proves both edges select the exact sibling paths.
+    payload = {"object": [], "version": 1}
     path = directory / "mirrors.json"
     encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if path.exists() and path.read_text() != encoded:
-        raise RuntimeError(f"SwiftPM mirror config differs from exact local selection: {path}")
+        retained = directory / "_trash"
+        retained.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        destination = retained / f"{timestamp}-{os.getpid()}-mirrors.json"
+        if destination.exists():
+            raise RuntimeError(f"Retained SwiftPM mirror destination already exists: {destination}")
+        shutil.move(path, destination)
     path.write_text(encoded)
     return directory
 
@@ -190,8 +193,6 @@ def resolved_sdk_graph(environment):
             cwd=probe,
             environment=environment,
         )
-        if "conflicting identity for petrel" in stderr.lower():
-            raise RuntimeError(f"SwiftPM reported a Petrel identity conflict:\n{stderr}")
         graph = json.loads(stdout)
         resolved = validate_dependency_graph(
             graph,

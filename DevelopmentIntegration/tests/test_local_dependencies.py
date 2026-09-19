@@ -10,10 +10,18 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT.parent
 SCRIPT = ROOT / "DevelopmentIntegration" / "verify-local-dependencies.py"
+RUNNER = ROOT / "DevelopmentIntegration" / "run-local-command.py"
 
 
 def load_verifier():
     spec = importlib.util.spec_from_file_location("local_dependencies", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location("local_dependency_runner", RUNNER)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -126,22 +134,30 @@ class ResolutionGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "wrong local path"):
             self.verifier.validate_dependency_graph(graph, self.expected)
 
-    def test_writes_scoped_mirror_for_transitive_petrel_edge(self):
+    def test_writes_empty_mirror_config_for_jj_only_siblings(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self.verifier.write_swiftpm_config(Path(directory))
             mirrors = json.loads((config / "mirrors.json").read_text())
             self.assertEqual(
                 mirrors,
-                {
-                    "object": [
-                        {
-                            "mirror": (WORKSPACE / "Petrel").resolve().as_uri(),
-                            "original": "https://github.com/joshlacal/Petrel.git",
-                        }
-                    ],
-                    "version": 1,
-                },
+                {"object": [], "version": 1},
             )
+
+    def test_preserves_stale_mirror_config_before_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.mkdir()
+            (config / "mirrors.json").write_text('{"object":[{"mirror":"stale"}],"version":1}\n')
+
+            self.verifier.write_swiftpm_config(config)
+
+            self.assertEqual(
+                json.loads((config / "mirrors.json").read_text()),
+                {"object": [], "version": 1},
+            )
+            retained = list((config / "_trash").glob("*-mirrors.json"))
+            self.assertEqual(len(retained), 1)
+            self.assertIn("stale", retained[0].read_text())
 
     def test_local_framework_requires_verified_artifact_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -152,6 +168,31 @@ class ResolutionGuardTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "identity manifest is absent"):
                 self.verifier.verify_local_ffi_manifest(framework, manifest)
+
+
+class LocalCommandTests(unittest.TestCase):
+    def test_preserves_remote_lock_and_retains_local_resolution(self):
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config"
+            config.mkdir()
+            executable = root / "fake-swift"
+            executable.write_text(
+                "#!/bin/sh\n"
+                "printf 'local resolution' > Package.resolved\n"
+                "exit 0\n"
+            )
+            executable.chmod(0o755)
+            (root / "Package.resolved").write_text("remote resolution")
+
+            code = runner.run(["test", "--filter", "Example"], config, root, str(executable))
+
+            self.assertEqual(code, 0)
+            self.assertEqual((root / "Package.resolved").read_text(), "remote resolution")
+            retained = list((root / "_trash/local-integration-resolutions").glob("*local-Package.resolved"))
+            self.assertEqual(len(retained), 1)
+            self.assertEqual(retained[0].read_text(), "local resolution")
 
 
 if __name__ == "__main__":
