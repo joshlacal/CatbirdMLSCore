@@ -5733,6 +5733,12 @@ public actor MLSGRDBManager {
       try MLSConversationDeletionMarkerModel.createTable(in: db)
     }
 
+    // v38: Replayable Apple presentation projection for Rust-owned encrypted
+    // direct requests. Preview payloads are field-encrypted before insertion.
+    migrator.registerMigration("v38_direct_request_projection") { db in
+      try MLSDirectRequestProjection.createTables(in: db)
+    }
+
     return migrator
   }
 

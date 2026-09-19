@@ -878,6 +878,42 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
   }
 
+  /// Applies a Rust-authoritative request view to the protected host
+  /// projection. Accepted introductions are materialized into ordinary message
+  /// history in the same transaction and deduplicated by firstMessageId.
+  func persistDirectRequestView(_ view: DirectRequestView) throws {
+    try persistDirectRequestViews([view])
+  }
+
+  func persistDirectRequestViews(_ views: [DirectRequestView]) throws {
+    try dbPool.write { db in
+      for view in views {
+        try MLSDirectRequestProjection.persist(
+          view,
+          userDID: userDID,
+          context: mlsContext,
+          in: db
+        )
+      }
+    }
+  }
+
+  func persistDirectRequestOperation(
+    _ outcome: DirectRequestOutcome,
+    draftID: String,
+    recipientDID: String?
+  ) throws {
+    try dbPool.write { db in
+      try MLSDirectRequestProjection.persistOperation(
+        outcome,
+        draftID: draftID,
+        recipientDID: recipientDID,
+        userDID: userDID,
+        in: db
+      )
+    }
+  }
+
   public func getMessages(
     conversationId: String,
     limit: UInt32,

@@ -22,7 +22,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   public let bridge: OrchestratorBridge
 
   private let localContext: MlsContext?
-  private let storageAdapter: OrchestratorStorageCallback?
+  private let storageAdapter: MLSOrchestratorStorageAdapter?
   private let apiClient: OrchestratorApiCallback?
   private let credentialAdapter: OrchestratorCredentialCallback?
   private let eventCallback: OrchestratorEventCallback?
@@ -145,21 +145,61 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
 
   @discardableResult
   public func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
-    try bridge.startDirectRequest(input: input)
+    let outcome = try bridge.startDirectRequest(input: input)
+    try storageAdapter?.persistDirectRequestOperation(
+      outcome,
+      draftID: input.draftId,
+      recipientDID: input.recipientDid
+    )
+    return outcome
   }
 
   @discardableResult
   public func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
-    try bridge.resumeDirectRequest(draftId: draftId)
+    let outcome = try bridge.resumeDirectRequest(draftId: draftId)
+    try storageAdapter?.persistDirectRequestOperation(
+      outcome,
+      draftID: draftId,
+      recipientDID: nil
+    )
+    return outcome
   }
 
   @discardableResult
   public func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
-    try bridge.cancelDirectRequest(draftId: draftId)
+    let outcome = try bridge.cancelDirectRequest(draftId: draftId)
+    try storageAdapter?.persistDirectRequestOperation(
+      outcome,
+      draftID: draftId,
+      recipientDID: nil
+    )
+    return outcome
   }
 
   public func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
-    try bridge.refreshRequestPreview(conversationId: conversationId)
+    let view = try bridge.refreshRequestPreview(conversationId: conversationId)
+    try storageAdapter?.persistDirectRequestView(view)
+    return view
+  }
+
+  public func listDirectRequestViews() throws -> [DirectRequestView] {
+    let views = try bridge.listDirectRequestViews()
+    try storageAdapter?.persistDirectRequestViews(views)
+    return views
+  }
+
+  public func getDirectRequestDeliveryEnabled() throws -> Bool? {
+    try bridge.getDirectRequestDeliveryEnabled()
+  }
+
+  public func setDirectRequestDeliveryEnabled(enabled: Bool) throws {
+    try bridge.setDirectRequestDeliveryEnabled(enabled: enabled)
+  }
+
+  public func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
+    let view = try bridge.closeDirectRequest(conversationId: conversationId)
+    try storageAdapter?.persistDirectRequestView(view)
+    return view
   }
 
   public func startupReconcile() throws -> FfiStartupReconcileReport {

@@ -356,6 +356,60 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         epoch: body.next.epoch
       )
 
+    case let .blueCatbirdChatDefsDirectRequestEntry(message):
+      guard case let .blueCatbirdChatDefsDirectRequestPublicationBody(body) =
+        message.signedRequest.body,
+        body.conversationId == message.conversationId,
+        body.next.conversationId == message.conversationId
+      else {
+        throw malformedCanonicalEnvelope()
+      }
+      return try canonicalControlEnvelope(
+        entry: entry,
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
+      )
+
+    case let .blueCatbirdChatDefsDirectRequestAcceptanceEntry(message):
+      guard case let .blueCatbirdChatDefsDirectRequestAcceptanceBody(body) =
+        message.signedRequest.body,
+        body.prior.conversationId == message.conversationId,
+        body.next.conversationId == message.conversationId
+      else {
+        throw malformedCanonicalEnvelope()
+      }
+      return try canonicalControlEnvelope(
+        entry: entry,
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
+      )
+
+    case let .blueCatbirdChatDefsConversationCloseEntry(message):
+      guard case let .blueCatbirdChatDefsConversationCloseBody(body) =
+        message.signedRequest.body,
+        body.prior.conversationId == message.conversationId,
+        body.retired.conversationId == message.conversationId
+      else {
+        throw malformedCanonicalEnvelope()
+      }
+      return try canonicalControlEnvelope(
+        entry: entry,
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.prior.epoch
+      )
+
     default:
       return nil
     }
@@ -370,7 +424,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
     entryId: BlueCatbirdChatDefs.OperationId,
     sequence: Int,
-    epoch: Int
+    epoch: Int,
+    canonicalEntryJson: String? = nil
   ) throws -> FfiIncomingEnvelope {
     let timestamp = receivedAt.iso8601String
     guard MLSSystemMessagePresentation.canonicalUUID(conversationId),
@@ -387,7 +442,36 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       timestamp: timestamp,
       serverMessageId: entryId,
       serverSequence: UInt64(sequence),
-      serverEpoch: UInt64(epoch)
+      serverEpoch: UInt64(epoch),
+      canonicalEntryJson: canonicalEntryJson
+    )
+  }
+
+  /// Retains the complete signed control row for Rust verification and
+  /// dispatch. Returning nil here would let the page cursor advance past an
+  /// unprocessed request transition.
+  private static func canonicalControlEnvelope(
+    entry: BlueCatbirdChatDefs.ConversationEntry,
+    conversationId: BlueCatbirdChatDefs.OperationId,
+    senderDid: BlueCatbirdChatDefs.BareDid,
+    receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
+    entryId: BlueCatbirdChatDefs.OperationId,
+    sequence: Int,
+    epoch: Int
+  ) throws -> FfiIncomingEnvelope {
+    let encoded = try JSONEncoder().encode(entry)
+    guard let json = String(data: encoded, encoding: .utf8) else {
+      throw malformedCanonicalEnvelope()
+    }
+    return try canonicalEnvelope(
+      conversationId: conversationId,
+      senderDid: senderDid,
+      ciphertext: Data(),
+      receivedAt: receivedAt,
+      entryId: entryId,
+      sequence: sequence,
+      epoch: epoch,
+      canonicalEntryJson: json
     )
   }
 

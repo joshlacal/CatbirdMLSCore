@@ -14,39 +14,102 @@ extension MLSConversationManager {
   @discardableResult
   public func startDirectRequest(input: DirectRequestInput) async throws -> DirectRequestOutcome {
     try throwIfShuttingDown("startDirectRequest")
-    return try await withRustAuthoritativeRuntime(operation: "startDirectRequest") { runtime in
+    let capturedGeneration = sessionGeneration
+    let outcome = try await withRustAuthoritativeRuntime(operation: "startDirectRequest") { runtime in
       try runtime.startDirectRequest(input: input)
     }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return outcome
   }
 
   /// Resumes the exact Rust-owned draft operation identified by `draftId`.
   @discardableResult
   public func resumeDirectRequest(draftId: String) async throws -> DirectRequestOutcome {
     try throwIfShuttingDown("resumeDirectRequest")
-    return try await withRustAuthoritativeRuntime(operation: "resumeDirectRequest") { runtime in
+    let capturedGeneration = sessionGeneration
+    let outcome = try await withRustAuthoritativeRuntime(operation: "resumeDirectRequest") { runtime in
       try runtime.resumeDirectRequest(draftId: draftId)
     }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return outcome
   }
 
   /// Requests durable cancellation of the exact Rust-owned draft operation.
   @discardableResult
   public func cancelDirectRequest(draftId: String) async throws -> DirectRequestOutcome {
     try throwIfShuttingDown("cancelDirectRequest")
-    return try await withRustAuthoritativeRuntime(operation: "cancelDirectRequest") { runtime in
+    let capturedGeneration = sessionGeneration
+    let outcome = try await withRustAuthoritativeRuntime(operation: "cancelDirectRequest") { runtime in
       try runtime.cancelDirectRequest(draftId: draftId)
     }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return outcome
   }
 
   /// Refreshes receive-preview readiness without coupling it to send readiness
   /// or independently mutating consent state in Swift.
   public func refreshRequestPreview(conversationId: String) async throws -> DirectRequestView {
     try throwIfShuttingDown("refreshRequestPreview")
-    return try await withRustAuthoritativeRuntime(
+    let capturedGeneration = sessionGeneration
+    let view = try await withRustAuthoritativeRuntime(
       operation: "refreshRequestPreview",
       requiresDeviceAuthorization: false
     ) { runtime in
       try runtime.refreshRequestPreview(conversationId: conversationId)
     }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return view
+  }
+
+  /// Returns Rust-owned request projections for the current account.
+  public func listDirectRequestViews() async throws -> [DirectRequestView] {
+    try throwIfShuttingDown("listDirectRequestViews")
+    let capturedGeneration = sessionGeneration
+    let views = try await withRustAuthoritativeRuntime(
+      operation: "listDirectRequestViews",
+      requiresDeviceAuthorization: false
+    ) { runtime in
+      try runtime.listDirectRequestViews()
+    }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return views
+  }
+
+  /// Reads the last authenticated request-delivery policy projection. `nil`
+  /// means Rust has no verified value for the current account revision.
+  public func getDirectRequestDeliveryEnabled() async throws -> Bool? {
+    try throwIfShuttingDown("getDirectRequestDeliveryEnabled")
+    let capturedGeneration = sessionGeneration
+    let enabled = try await withRustAuthoritativeRuntime(
+      operation: "getDirectRequestDeliveryEnabled",
+      requiresDeviceAuthorization: false
+    ) { runtime in
+      try runtime.getDirectRequestDeliveryEnabled()
+    }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return enabled
+  }
+
+  /// Updates request delivery through the Rust-owned authenticated operation.
+  public func setDirectRequestDeliveryEnabled(_ enabled: Bool) async throws {
+    try throwIfShuttingDown("setDirectRequestDeliveryEnabled")
+    let capturedGeneration = sessionGeneration
+    try await withRustAuthoritativeRuntime(operation: "setDirectRequestDeliveryEnabled") { runtime in
+      try runtime.setDirectRequestDeliveryEnabled(enabled: enabled)
+    }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+  }
+
+  /// Closes a request only after Rust verifies the canonical Closed state.
+  @discardableResult
+  public func closeDirectRequest(conversationId: String) async throws -> DirectRequestView {
+    try throwIfShuttingDown("closeDirectRequest")
+    let capturedGeneration = sessionGeneration
+    let view = try await withRustAuthoritativeRuntime(operation: "closeDirectRequest") { runtime in
+      try runtime.closeDirectRequest(conversationId: conversationId)
+    }
+    try validateSessionGeneration(capturedGeneration: capturedGeneration)
+    return view
   }
 
   // MARK: - Direct Conversation Lookup
@@ -1583,8 +1646,16 @@ extension MLSConversationManager {
   public func declineConversationRequest(convoId: String) async throws {
     logger.info("❌ Declining chat request: \(convoId.prefix(16))...")
 
-    // Declining uses the same flow as leaving - we leave the MLS group on the server
-    // and delete all local data. The sender will see we've left.
+    if protocolAuthorityMode.usesRustForDecisions {
+      let requestViews = try await listDirectRequestViews()
+      if requestViews.contains(where: { $0.conversationId == convoId }) {
+        _ = try await closeDirectRequest(conversationId: convoId)
+        logger.info("❌ Encrypted request closed with canonical verification: \(convoId.prefix(16))...")
+        return
+      }
+    }
+
+    // Version-one invitations retain their existing leave-and-delete flow.
     try await leaveConversation(convoId: convoId)
 
     logger.info("❌ Chat request declined and removed: \(convoId.prefix(16))...")
