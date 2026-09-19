@@ -41,6 +41,35 @@ fi
 # Navigate to catbird-mls build directory
 cd "$core_scripts_dir/../../catbird-mls"
 
+backup_timestamp="${FFI_BACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+case "$backup_timestamp" in
+    *[!0-9TZ]*)
+        echo "❌ FFI_BACKUP_TIMESTAMP contains unsafe characters: $backup_timestamp"
+        exit 1
+        ;;
+esac
+backup_root="../CatbirdMLSCore/_trash/ffi-rebuild/$backup_timestamp"
+if [ -e "$backup_root" ]; then
+    echo "❌ FFI backup destination already exists: $backup_root"
+    exit 1
+fi
+mkdir -p "$backup_root"
+
+preserve_if_present() {
+    source_path="$1"
+    destination_name="$2"
+    if [ -e "$source_path" ]; then
+        mv "$source_path" "$backup_root/$destination_name"
+        echo "🗃️  Preserved $source_path at $backup_root/$destination_name"
+    fi
+}
+
+echo "🗃️  Preserving prior native generator outputs..."
+preserve_if_present CatbirdMLSFFI.xcframework native-CatbirdMLSFFI.xcframework
+preserve_if_present build/frameworks native-build-frameworks
+preserve_if_present build/bindings native-build-bindings
+preserve_if_present build/libs native-build-libs
+
 # Capture the full generator-relevant Rust input before the long multi-target
 # build. A mutable JJ working copy can otherwise change while the generator is
 # running and leave artifacts whose recorded revision does not describe them.
@@ -71,29 +100,6 @@ fi
 if [ "${FFI_VERIFY_COMMITTED_BINDINGS:-0}" = "1" ]; then
     cmp build/bindings/CatbirdMLS.swift ../CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift
 fi
-
-backup_timestamp="${FFI_BACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-case "$backup_timestamp" in
-    *[!0-9TZ]*)
-        echo "❌ FFI_BACKUP_TIMESTAMP contains unsafe characters: $backup_timestamp"
-        exit 1
-        ;;
-esac
-backup_root="../CatbirdMLSCore/_trash/ffi-rebuild/$backup_timestamp"
-if [ -e "$backup_root" ]; then
-    echo "❌ FFI backup destination already exists: $backup_root"
-    exit 1
-fi
-mkdir -p "$backup_root"
-
-preserve_if_present() {
-    source_path="$1"
-    destination_name="$2"
-    if [ -e "$source_path" ]; then
-        mv "$source_path" "$backup_root/$destination_name"
-        echo "🗃️  Preserved $source_path at $backup_root/$destination_name"
-    fi
-}
 
 echo ""
 echo "🗃️  Step 2: Preserving prior Core artifacts..."

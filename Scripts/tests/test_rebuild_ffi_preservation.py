@@ -32,6 +32,10 @@ class RebuildPreservationTests(unittest.TestCase):
             (native / "Cargo.lock").write_text("version = 4\n")
             (native / "src").mkdir()
             (native / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
+            (native / "CatbirdMLSFFI.xcframework").mkdir()
+            (native / "CatbirdMLSFFI.xcframework" / "old-native").write_text("old native framework")
+            (native / "build" / "bindings").mkdir(parents=True)
+            (native / "build" / "bindings" / "old-binding").write_text("old native binding")
             (framework / "old-binary").write_text("old framework")
             (sources / "CatbirdMLS.swift").write_text("old binding")
             (sources / "MLSFFI.swift").write_text("stale binding")
@@ -65,6 +69,14 @@ class RebuildPreservationTests(unittest.TestCase):
             self.assertEqual((backup / "CatbirdMLSFFI.xcframework" / "old-binary").read_text(), "old framework")
             self.assertEqual((backup / "CatbirdMLS.swift").read_text(), "old binding")
             self.assertEqual((backup / "MLSFFI.swift").read_text(), "stale binding")
+            self.assertEqual(
+                (backup / "native-CatbirdMLSFFI.xcframework" / "old-native").read_text(),
+                "old native framework",
+            )
+            self.assertEqual(
+                (backup / "native-build-bindings" / "old-binding").read_text(),
+                "old native binding",
+            )
             self.assertEqual((core / "Sources" / "CatbirdMLSFFI.xcframework" / "new-binary").read_text(), "new framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "new binding")
             self.assertFalse((sources / "MLSFFI.swift").exists())
