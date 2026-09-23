@@ -17,6 +17,15 @@ import PetrelCatbird
 /// from a `listRecords` `value` object with a vanilla `JSONDecoder`, so no decoder registry is
 /// needed.
 enum MLSPublicPDSReader {
+  static let publicReadSession: URLSession = {
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current {
+      do { return try fixture.makeSession() }
+      catch { preconditionFailure("Invalid debug fixture public session") }
+    }
+    #endif
+    return URLSession.shared
+  }()
   static let deviceCollection = "blue.catbird.chat.device"
   static let declarationCollection = "blue.catbird.chat.declaration"
 
@@ -63,7 +72,7 @@ enum MLSPublicPDSReader {
   static func fetchDeviceSignatureKeys(
     did: String,
     resolvePDS: @Sendable (String) async throws -> URL,
-    session: URLSession = .shared
+    session: URLSession = publicReadSession
   ) async throws -> [Data] {
     let pds = try await resolvePDS(did)
     guard let url = deviceRecordsListURL(pds: pds, did: did) else {
@@ -116,7 +125,7 @@ enum MLSPublicPDSReader {
   static func fetchDeclaration(
     did: String,
     resolvePDS: @Sendable (String) async throws -> URL,
-    session: URLSession = .shared
+    session: URLSession = publicReadSession
   ) async throws -> BlueCatbirdChatDeclaration? {
     let pds = try await resolvePDS(did)
     guard let url = declarationGetRecordURL(pds: pds, did: did) else {

@@ -48,3 +48,4 @@ _trash/ffi-rebuild/*/CatbirdMLSFFI.xcframework/
 .letta/
 
 StressTest/.build/
+_trash/ffi-rebuild/*/CatbirdMLS.swift
