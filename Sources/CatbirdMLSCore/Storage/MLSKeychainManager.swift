@@ -270,7 +270,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
   // MARK: - Initialization
 
-  private init() {}
+  init() {}
 
   // MARK: - Encryption Key Management (for encrypted storage)
 
