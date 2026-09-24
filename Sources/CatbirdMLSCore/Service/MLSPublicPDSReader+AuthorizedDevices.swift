@@ -5,13 +5,17 @@ import PetrelCatbird
 extension MLSPublicPDSReader {
   static let directRequestReceiptAuthorityDID = "did:web:chat.catbird.blue"
 
-  static let authorizationSession: URLSession = {
+  static var authorizationSession: URLSession {
     #if DEBUG && canImport(Network) && canImport(Security)
     if let fixture = DebugFixtureTransport.current {
       do { return try fixture.makeSession() }
       catch { preconditionFailure("Invalid debug fixture authorization session") }
     }
     #endif
+    return defaultAuthorizationSession
+  }
+
+  private static let defaultAuthorizationSession: URLSession = {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
