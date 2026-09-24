@@ -9,6 +9,9 @@ import Foundation
 import Security
 import OSLog
 import Synchronization
+#if DEBUG && os(macOS)
+import Petrel
+#endif
 /// Manages secure storage of MLS cryptographic materials in Keychain
 public final class MLSKeychainManager: @unchecked Sendable {
 
@@ -70,6 +73,43 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// The Keychain service name. Defaults to "blue.catbird.mls".
   /// Set to a different value for standalone daemons to avoid conflicts with the main app.
   public var serviceName: String = "blue.catbird.mls"
+
+  internal func effectiveServiceName(service: String? = nil) -> String {
+    let target = service ?? serviceName
+    #if DEBUG && os(macOS)
+    if let fixture = Petrel.DebugFixtureTransport.current, let host = fixture.origin.host {
+      return "blue.catbird.fixture.\(host).\(target)"
+    }
+    #endif
+    return target
+  }
+
+  internal func applyAccessGroupAndProtection(to query: inout [String: Any], accessible: CFString? = nil, synchronizable: Bool? = false) throws {
+    if let accessGroup = effectiveAccessGroup {
+      query[kSecAttrAccessGroup as String] = accessGroup
+      if !skipDataProtection {
+        if let accessible {
+          query[kSecAttrAccessible as String] = accessible
+        }
+        if let synchronizable {
+          query[kSecAttrSynchronizable as String] = synchronizable ? (kCFBooleanTrue as Any) : (accessible != nil ? (false as Any) : (kSecAttrSynchronizableAny as Any))
+        }
+        #if os(macOS) || targetEnvironment(macCatalyst)
+        query[kSecUseDataProtectionKeychain as String] = true
+        #endif
+      }
+      return
+    }
+    #if DEBUG && os(macOS)
+    if Petrel.DebugFixtureTransport.current != nil {
+      if let synchronizable {
+        query[kSecAttrSynchronizable as String] = synchronizable ? (kCFBooleanTrue as Any) : (accessible != nil ? (false as Any) : (kSecAttrSynchronizableAny as Any))
+      }
+      return
+    }
+    #endif
+    throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
+  }
 
   /// When true, omits `kSecAttrAccessible` and `kSecAttrSynchronizable` from keychain queries.
   /// Set this to `true` for CLI daemons running outside the app sandbox, where the Data
@@ -638,7 +678,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     expectedLength: Int? = nil,
     accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
   ) throws {
-    let targetService = service ?? serviceName
+    let targetService = effectiveServiceName(service: service)
     if let expectedLength, data.count != expectedLength {
       throw MLSStorageInitializationError.validationFailed(
         details: "Supplied key \(key) length mismatch: expected \(expectedLength), got \(data.count)"
@@ -681,21 +721,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecValueData as String: data,
     ]
 
-    if !skipDataProtection {
-      query[kSecAttrAccessible as String] = accessible
-      query[kSecAttrSynchronizable as String] = false
-    }
-
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: accessible)
 
     let status = SecItemAdd(query as CFDictionary, nil)
     if status == errSecSuccess {
@@ -723,7 +749,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     length: Int = 32,
     accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
   ) throws -> Data {
-    let targetService = service ?? serviceName
+    let targetService = effectiveServiceName(service: service)
     if let existing = try retrieveKeyStrict(forKey: key, service: targetService, expectedLength: length) {
       return existing
     }
@@ -751,21 +777,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecValueData as String: candidate,
     ]
 
-    if !skipDataProtection {
-      query[kSecAttrAccessible as String] = accessible
-      query[kSecAttrSynchronizable as String] = false
-    }
-
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: accessible)
 
     let status = SecItemAdd(query as CFDictionary, nil)
     if status == errSecSuccess {
@@ -789,7 +801,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     expectedLength: Int? = nil,
     accessible: CFString = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
   ) throws -> Data {
-    let targetService = service ?? serviceName
+    let targetService = effectiveServiceName(service: service)
     if let expectedLength, data.count != expectedLength {
       throw MLSStorageInitializationError.validationFailed(
         details: "Supplied key \(key) length mismatch: expected \(expectedLength), got \(data.count)"
@@ -821,21 +833,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecValueData as String: data,
     ]
 
-    if !skipDataProtection {
-      query[kSecAttrAccessible as String] = accessible
-      query[kSecAttrSynchronizable as String] = false
-    }
-
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: accessible)
 
     let status = SecItemAdd(query as CFDictionary, nil)
     if status == errSecSuccess {
@@ -857,7 +855,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     expectedLength: Int? = nil,
     synchronizable: Bool = false
   ) throws -> Data? {
-    let targetService = service ?? serviceName
+    let targetService = effectiveServiceName(service: service)
 
     if let fake = Self.activeFakeStorage {
       if let data = try fake.get(service: targetService, account: key) {
@@ -879,20 +877,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecMatchLimit as String: kSecMatchLimitOne,
     ]
 
-    if !skipDataProtection {
-      query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
-    }
-
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: nil, synchronizable: synchronizable)
 
     var result: AnyObject?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -928,23 +913,15 @@ public final class MLSKeychainManager: @unchecked Sendable {
       return try fake.hasAny(service: service)
     }
 
+    let targetService = effectiveServiceName(service: service)
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
+      kSecAttrService as String: targetService,
       kSecMatchLimit as String: kSecMatchLimitOne,
       kSecReturnAttributes as String: true,
     ]
 
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: nil)
 
     var result: AnyObject?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -961,7 +938,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
   /// Strict exact delete
   func deleteStrict(forKey key: String, service: String? = nil) throws {
-    let targetService = service ?? serviceName
+    let targetService = effectiveServiceName(service: service)
 
     if let fake = Self.activeFakeStorage {
       let status = try fake.delete(service: targetService, account: key)
@@ -977,16 +954,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrService as String: targetService,
     ]
 
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: nil)
 
     let status = SecItemDelete(query as CFDictionary)
     guard status == errSecSuccess || status == errSecItemNotFound else {
@@ -1004,21 +972,13 @@ public final class MLSKeychainManager: @unchecked Sendable {
       throw KeychainError.deleteFailed(status)
     }
 
+    let targetService = effectiveServiceName(service: service)
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
+      kSecAttrService as String: targetService,
     ]
 
-    #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
-      query[kSecUseDataProtectionKeychain as String] = true
-    }
-    #endif
-
-    guard let accessGroup = effectiveAccessGroup else {
-      throw MLSStorageInitializationError.appGroupUnavailable("blue.catbird.shared")
-    }
-    query[kSecAttrAccessGroup as String] = accessGroup
+    try applyAccessGroupAndProtection(to: &query, accessible: nil)
 
     let status = SecItemDelete(query as CFDictionary)
     guard status == errSecSuccess || status == errSecItemNotFound else {
@@ -1034,22 +994,27 @@ public final class MLSKeychainManager: @unchecked Sendable {
     // Delete existing item first (must match synchronizable flag)
     try? delete(forKey: key, synchronizable: synchronizable)
 
+    let targetService = effectiveServiceName()
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: serviceName,
+      kSecAttrService as String: targetService,
       kSecValueData as String: data,
     ]
 
-    // Data Protection attributes are unavailable for non-sandboxed CLI tools on macOS;
-    // including them produces errSecNoSuchAttr (-25303).
+    #if DEBUG && os(macOS)
+    let isFixture = Petrel.DebugFixtureTransport.current != nil
+    #else
+    let isFixture = false
+    #endif
+
     if !skipDataProtection {
       query[kSecAttrAccessible as String] = accessible
       query[kSecAttrSynchronizable as String] = synchronizable
     }
 
     #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
+    if !skipDataProtection && !isFixture {
       query[kSecUseDataProtectionKeychain as String] = true
     }
     #endif
@@ -1064,10 +1029,10 @@ public final class MLSKeychainManager: @unchecked Sendable {
       var updateQuery: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrAccount as String: key,
-        kSecAttrService as String: serviceName,
+        kSecAttrService as String: targetService,
       ]
       #if os(macOS) || targetEnvironment(macCatalyst)
-      if !skipDataProtection {
+      if !skipDataProtection && !isFixture {
         updateQuery[kSecUseDataProtectionKeychain as String] = true
       }
       #endif
@@ -1090,20 +1055,27 @@ public final class MLSKeychainManager: @unchecked Sendable {
   }
 
   public func retrieve(forKey key: String, synchronizable: Bool = false) throws -> Data? {
+    let targetService = effectiveServiceName()
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: serviceName,
+      kSecAttrService as String: targetService,
       kSecReturnData as String: true,
       kSecMatchLimit as String: kSecMatchLimitOne,
     ]
+
+    #if DEBUG && os(macOS)
+    let isFixture = Petrel.DebugFixtureTransport.current != nil
+    #else
+    let isFixture = false
+    #endif
 
     if !skipDataProtection {
       query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
     }
 
     #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
+    if !skipDataProtection && !isFixture {
       query[kSecUseDataProtectionKeychain as String] = true
     }
     #endif
@@ -1128,14 +1100,21 @@ public final class MLSKeychainManager: @unchecked Sendable {
   }
 
   public func delete(forKey key: String, synchronizable: Bool = false) throws {
+    let targetService = effectiveServiceName()
     var query: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrAccount as String: key,
-      kSecAttrService as String: serviceName,
+      kSecAttrService as String: targetService,
     ]
 
+    #if DEBUG && os(macOS)
+    let isFixture = Petrel.DebugFixtureTransport.current != nil
+    #else
+    let isFixture = false
+    #endif
+
     #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection {
+    if !skipDataProtection && !isFixture {
       query[kSecUseDataProtectionKeychain as String] = true
     }
     #endif

@@ -786,6 +786,21 @@ final class MLSStorageCutoverTests: XCTestCase {
     _ = MLSKeychainManager.sharedAccessGroup()
   }
 
+  func test14b_NonFixtureModeThrowsWhenAccessGroupCannotBeResolved() {
+    let manager = MLSKeychainManager()
+    manager.accessGroup = nil
+    manager.skipDataProtection = true
+    // When effectiveAccessGroup is nil and no DebugFixtureTransport is active,
+    // strict operations must fail closed with appGroupUnavailable.
+    var query: [String: Any] = [:]
+    XCTAssertThrowsError(try manager.applyAccessGroupAndProtection(to: &query)) { error in
+      guard case MLSStorageInitializationError.appGroupUnavailable = error else {
+        XCTFail("Expected appGroupUnavailable error, got: \(error)")
+        return
+      }
+    }
+  }
+
   // MARK: - 15. Keychain keys include cleanSuffix
 
   func test15_KeychainConversationAndInviteKeysContainCleanSuffix() throws {
