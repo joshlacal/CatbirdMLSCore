@@ -270,7 +270,13 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
   // MARK: - Initialization
 
-  init() {}
+  private init() {}
+
+  #if DEBUG
+  internal static func makeForTesting() -> MLSKeychainManager {
+    MLSKeychainManager()
+  }
+  #endif
 
   // MARK: - Encryption Key Management (for encrypted storage)
 

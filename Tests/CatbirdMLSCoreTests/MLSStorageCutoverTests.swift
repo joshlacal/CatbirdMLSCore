@@ -787,7 +787,7 @@ final class MLSStorageCutoverTests: XCTestCase {
   }
 
   func test14b_NonFixtureModeThrowsWhenAccessGroupCannotBeResolved() {
-    let manager = MLSKeychainManager()
+    let manager = MLSKeychainManager.makeForTesting()
     manager.accessGroup = nil
     manager.skipDataProtection = true
     // When effectiveAccessGroup is nil and no DebugFixtureTransport is active,
