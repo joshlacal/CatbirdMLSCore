@@ -1482,7 +1482,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
     }
 
     return FfiConversationView(
-      canonicalStateJson: try MLSCanonicalPolicyProjection.json(for: model, in: db),
+      canonicalStateJson: (try? MLSCanonicalPolicyProjection.json(for: model, in: db)) ?? nil,
       groupId: model.groupID.hexEncodedString(),
       conversationId: model.conversationID,
       epoch: UInt64(model.epoch),
