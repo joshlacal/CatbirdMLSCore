@@ -20,7 +20,57 @@ final class C35CrossClientParityTests: XCTestCase {
       .appendingPathComponent("docs/generated-artifacts/encrypted-requests/evidence/c35/c35_canonical_request_corpus.json")
   }
 
+  private func roundtripFfi(_ view: DirectRequestView) throws -> DirectRequestView {
+    let buf = FfiConverterTypeDirectRequestView_lower(view)
+    return try FfiConverterTypeDirectRequestView_lift(buf)
+  }
+
   func testC35CrossClientParityAgainstCoreReference() throws {
+    // 1. Verify frozen artifact identities
+    let rootURL = corpusURL
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let ffiBinaryURL = rootURL.appendingPathComponent("CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework/macos-arm64_x86_64/libCatbirdMLSFFI.a")
+    let swiftBindingURL = rootURL.appendingPathComponent("CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift")
+
+    let ffiBinaryData = try Data(contentsOf: ffiBinaryURL)
+    let ffiBinarySha256 = SHA256.hash(data: ffiBinaryData).map { String(format: "%02x", $0) }.joined()
+    print("Loaded libCatbirdMLSFFI.a sha256: \(ffiBinarySha256)")
+    XCTAssertEqual(ffiBinarySha256, "63f6b91407e374c2ce3a916a3aa55420566abd5613a895f63878609cda29925c")
+
+    let swiftBindingData = try Data(contentsOf: swiftBindingURL)
+    let swiftBindingSha256 = SHA256.hash(data: swiftBindingData).map { String(format: "%02x", $0) }.joined()
+    print("Loaded CatbirdMLS.swift sha256: \(swiftBindingSha256)")
+    XCTAssertEqual(swiftBindingSha256, "26310692a2011719206e193304aa7edd050e5ae95ee646348f0a55dba5eccf35")
+
+    // 2. Call real UniFFI entry points on the linked xcframework
+    let buildId = getFfiBuildId()
+    let buildInfo = getFfiBuildInfo()
+    let capsVersion = securityStorageCapabilitiesVersion()
+    print("Native FFI build ID: \(buildId)")
+    print("Native security storage capabilities version: \(capsVersion)")
+    XCTAssertEqual(capsVersion, 3, "Contract version must be 3 from native function")
+    XCTAssertFalse(buildId.isEmpty, "Native FFI build ID must not be empty")
+
+    // Verify native MlsContext construction
+    let tempContextDir = FileManager.default.temporaryDirectory.appendingPathComponent("C35MlsContext-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempContextDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempContextDir) }
+    let contextPath = tempContextDir.appendingPathComponent("context.db").path
+    let keychain = InMemoryKeychainAccess()
+    let nativeContext = try MlsContext(
+      storagePath: contextPath,
+      encryptionKey: String(repeating: "ab", count: 32),
+      keychain: keychain
+    )
+    try nativeContext.setContentRootKey(key: Data(repeating: 0x42, count: 32))
+    try nativeContext.flushAndPrepareClose()
+
+    // 3. Load canonical corpus
     let data = try Data(contentsOf: corpusURL)
     guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
           let stageA = json["stageA_projection"] as? [String: Any],
@@ -114,19 +164,19 @@ final class C35CrossClientParityTests: XCTestCase {
       let stateVersion = UInt64((req["stateVersion"] as! NSNumber).uint64Value)
       let generation = UInt64((req["generation"] as! NSNumber).uint64Value)
 
-      projectedViews.append(
-        DirectRequestView(
-          introduction: introduction,
-          conversationId: conversationId,
-          firstMessageId: firstMessageId,
-          consent: consent,
-          crypto: crypto,
-          preview: preview,
-          capabilities: capabilities,
-          stateVersion: stateVersion,
-          generation: generation
-        )
+      let rawView = DirectRequestView(
+        introduction: introduction,
+        conversationId: conversationId,
+        firstMessageId: firstMessageId,
+        consent: consent,
+        crypto: crypto,
+        preview: preview,
+        capabilities: capabilities,
+        stateVersion: stateVersion,
+        generation: generation
       )
+      let ffiView = try roundtripFfi(rawView)
+      projectedViews.append(ffiView)
     }
 
     XCTAssertEqual(projectedViews.count, 4)
@@ -135,6 +185,16 @@ final class C35CrossClientParityTests: XCTestCase {
     print("C35 SWIFT Stage A Digest: \(digestA)")
     XCTAssertEqual(digestA, expectedDigestA, "Swift Stage A digest must match core reference")
 
+    // Counterfactual 1: mutate Request 1 text in Stage A and verify digest changes
+    var mutatedStageAViews = projectedViews
+    if case .ready(let text, let inv) = mutatedStageAViews[0].preview {
+      mutatedStageAViews[0].preview = .ready(text: text + " [MUTATED]", invitation: inv)
+    }
+    mutatedStageAViews[0] = try roundtripFfi(mutatedStageAViews[0])
+    let mutatedJsonA = canonicalJSON(from: mutatedStageAViews)
+    let mutatedDigestA = sha256Hex(of: mutatedJsonA)
+    print("C35 SWIFT Counterfactual Stage A Mutated Digest: \(mutatedDigestA)")
+    XCTAssertNotEqual(mutatedDigestA, expectedDigestA, "Mutated corpus must change Stage A digest")
     // =========================================================================
     // Stage B: Offline Hydration from Persisted State
     // =========================================================================
@@ -177,7 +237,8 @@ final class C35CrossClientParityTests: XCTestCase {
         for row in rows {
           let viewJSON: String = row["view_json"]
           let parsed = try parseDirectRequestView(from: viewJSON)
-          hydratedViews.append(parsed)
+          let ffiHydrated = try roundtripFfi(parsed)
+          hydratedViews.append(ffiHydrated)
         }
       }
     }
@@ -213,6 +274,7 @@ final class C35CrossClientParityTests: XCTestCase {
       canEmitReceipts: true,
       canAdminister: true
     )
+    transitionViews[idx1] = try roundtripFfi(transitionViews[idx1])
 
     // 2. Close Request 2 (OutgoingPending -> Closed)
     guard let idx2 = transitionViews.firstIndex(where: { $0.conversationId == "11111111-c35a-4000-8000-000000000002" }) else {
@@ -230,6 +292,7 @@ final class C35CrossClientParityTests: XCTestCase {
       canEmitReceipts: false,
       canAdminister: false
     )
+    transitionViews[idx2] = try roundtripFfi(transitionViews[idx2])
 
     // 3. Close Request 4 (IncomingPending -> Closed)
     guard let idx4 = transitionViews.firstIndex(where: { $0.conversationId == "11111111-c35a-4000-8000-000000000004" }) else {
@@ -247,6 +310,7 @@ final class C35CrossClientParityTests: XCTestCase {
       canEmitReceipts: false,
       canAdminister: false
     )
+    transitionViews[idx4] = try roundtripFfi(transitionViews[idx4])
 
     // 4. Fence: Stale IncomingPending echo cannot demote Accepted Request 1
     let staleVersion: UInt64 = 1
@@ -260,8 +324,17 @@ final class C35CrossClientParityTests: XCTestCase {
     let digestC = sha256Hex(of: jsonC)
     print("C35 SWIFT Stage C Digest: \(digestC)")
     XCTAssertEqual(digestC, expectedDigestC, "Swift Stage C digest must match core reference")
-  }
 
+    // Counterfactual 2: mutate Stage C (revert Request 2 Close) and verify digest changes
+    var mutatedStageCViews = transitionViews
+    mutatedStageCViews[idx2].consent = .outgoingPending
+    mutatedStageCViews[idx2] = try roundtripFfi(mutatedStageCViews[idx2])
+    let mutatedJsonC = canonicalJSON(from: mutatedStageCViews)
+    let mutatedDigestC = sha256Hex(of: mutatedJsonC)
+    print("C35 SWIFT Counterfactual Stage C Mutated Digest: \(mutatedDigestC)")
+    XCTAssertNotEqual(mutatedDigestC, expectedDigestC, "Mutated transition must change Stage C digest")
+    print("C35 SWIFT PARITY: ALL STAGES AND COUNTERFACTUALS PASS")
+  }
   // MARK: - Helpers
 
   private func consentString(_ consent: RequestConsent) -> String {
