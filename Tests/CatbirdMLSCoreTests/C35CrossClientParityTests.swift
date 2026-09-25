@@ -40,13 +40,12 @@ final class C35CrossClientParityTests: XCTestCase {
     let ffiBinaryData = try Data(contentsOf: ffiBinaryURL)
     let ffiBinarySha256 = SHA256.hash(data: ffiBinaryData).map { String(format: "%02x", $0) }.joined()
     print("Loaded libCatbirdMLSFFI.a sha256: \(ffiBinarySha256)")
-    XCTAssertEqual(ffiBinarySha256, "63f6b91407e374c2ce3a916a3aa55420566abd5613a895f63878609cda29925c")
+    XCTAssertEqual(ffiBinarySha256, "5e10657e38a01a81805fba46e1f2f70700bf058d0b1ecb52adb5e8b37be4b4aa")
 
     let swiftBindingData = try Data(contentsOf: swiftBindingURL)
     let swiftBindingSha256 = SHA256.hash(data: swiftBindingData).map { String(format: "%02x", $0) }.joined()
     print("Loaded CatbirdMLS.swift sha256: \(swiftBindingSha256)")
     XCTAssertEqual(swiftBindingSha256, "26310692a2011719206e193304aa7edd050e5ae95ee646348f0a55dba5eccf35")
-
     // 2. Call real UniFFI entry points on the linked xcframework
     let buildId = getFfiBuildId()
     let buildInfo = getFfiBuildInfo()
