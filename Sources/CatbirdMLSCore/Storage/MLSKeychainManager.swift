@@ -77,8 +77,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   internal func effectiveServiceName(service: String? = nil) -> String {
     let target = service ?? serviceName
     #if DEBUG && os(macOS)
-    if let fixture = Petrel.DebugFixtureTransport.current, let host = fixture.origin.host {
-      return "blue.catbird.fixture.\(host).\(target)"
+    if Petrel.DebugFixtureTransport.current != nil {
+      return "blue.catbird.fixture.\(target)"
     }
     #endif
     return target
