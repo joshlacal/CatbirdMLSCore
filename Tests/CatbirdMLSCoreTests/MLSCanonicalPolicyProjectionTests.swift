@@ -413,6 +413,31 @@ final class MLSCanonicalPolicyProjectionTests: XCTestCase {
     expectEqual(acceptedAfterAccept.first?.conversationID, cid)
   }
 
+  /// A suspension close racing foreground resume closed the pool the manager
+  /// (and its Rust runtime) held; every later Rust op failed forever with
+  /// "SQLite error 21: Connection is closed". Recovery must recognise that
+  /// error and rebind a live pool.
+  func testClosedManagerPoolIsRecognisedAndRebound() async throws {
+    let did = "did:plc:" + String((0..<24).map { _ in "abcdefghijklmnopqrstuvwxyz234567".randomElement()! })
+    let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let api = await MLSAPIClient(client: client, environment: .custom(serviceDID: "did:web:example.com#atproto_mls"))
+    let manager = MLSConversationManager(apiClient: api, database: try DatabaseQueue(), userDid: did,
+      atProtoClient: client, protocolAuthorityMode: .rustFull)
+    let closed = try await manager.databaseManager.getDatabasePool(for: did)
+    manager.database = closed
+    try closed.close()
+    var surfaced: Error?
+    do { _ = try await manager.database.read { _ in () } } catch { surfaced = error }
+    let grdb = try XCTUnwrap(surfaced)
+    XCTAssertTrue(MLSConversationManager.isClosedContextError(grdb))
+    XCTAssertTrue(MLSConversationManager.isClosedContextError(
+      OrchestratorBridgeError.Storage(message: "UnexpectedUniFFICallbackError(reason: \"\(grdb)\")")))
+
+    await manager.rebindDatabaseIfClosed()
+    XCTAssertFalse(manager.database as AnyObject === closed)
+    _ = try await manager.database.read { db in try Int.fetchOne(db, sql: "SELECT 1") }
+  }
+
   private func makeManager(epoch: Int64 = 0) async throws -> MLSConversationManager {
     let db = try DatabasePool(path: directory.appendingPathComponent("messages.sqlite").path)
     try MLSGRDBManager.makeMigrator().migrate(db)

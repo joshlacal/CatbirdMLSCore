@@ -324,6 +324,7 @@ extension MLSConversationManager {
           logger.warning("🔄 [MLS-AUTHORITY] Context closed during \(operation) on active account — re-resolving context and retrying once")
           invalidateOrchestratorRuntime(reason: "recovering from closed context in \(operation)")
           try? await MLSCoreContext.shared.reloadContext(for: userDid)
+          await rebindDatabaseIfClosed()
           if let freshRuntime = await ensureOrchestratorRuntime() {
             do {
               let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
@@ -366,6 +367,9 @@ extension MLSConversationManager {
       || lower.contains("database closed")
       || lower.contains("database is closed")
       || lower.contains("storage is closed")
+      // GRDB `DatabaseError.connectionIsClosed()` (SQLITE_MISUSE) from a storage
+      // callback on a pool closed by a suspension that raced foreground resume.
+      || lower.contains("connection is closed")
   }
 
   private func isUserActive(_ did: String) -> Bool {

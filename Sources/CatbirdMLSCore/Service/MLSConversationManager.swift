@@ -580,6 +580,22 @@ public final class MLSConversationManager {
         onDatabaseRefreshed?(newPool)
     }
 
+    /// A suspension close that races a foreground resume can close the pool this
+    /// manager (and the Rust runtime built from it) holds after the storage
+    /// manager has already reopened another, so `refreshDatabaseIfNeeded`'s
+    /// cache check passes. Probe the pool actually held here and rebind it.
+    func rebindDatabaseIfClosed() async {
+        guard let userDid, (try? await database.read { _ in () }) == nil else { return }
+        // The first call evicts a dead cached pool and throws; the second opens.
+        for _ in 0..<2 {
+            guard let pool = try? await databaseManager.getDatabasePool(for: userDid) else { continue }
+            database = pool
+            onDatabaseRefreshed?(pool)
+            logger.warning("🔄 [DB-REFRESH] Rebound closed database pool for \(userDid.prefix(20))...")
+            return
+        }
+    }
+
     /// Stop all network streams and pause synchronization
     /// Call this BEFORE beginning shutdown sequence
     public func stopAllStreams() {
