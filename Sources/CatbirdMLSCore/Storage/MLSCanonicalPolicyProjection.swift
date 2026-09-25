@@ -65,7 +65,10 @@ enum MLSCanonicalPolicyProjection {
         throw ValidationError.invalidSnapshot
       }
       if participant.status == .value_pending {
-        guard participant.leafCount == 0, participant.invitationProvenance != nil else {
+        // Mirrors core admission::validate_conversation_policy: a request-born
+        // group gives the pending recipient real leaves before consent.
+        guard participant.leafCount == 0 || state.directRequest != nil,
+              participant.invitationProvenance != nil else {
           throw ValidationError.invalidSnapshot
         }
       }
