@@ -241,10 +241,10 @@ enum MLSCanonicalPolicyProjection {
     let decoded = try JSONDecoder().decode(BlueCatbirdChatDefs.ConversationState.self, from: Data(json.utf8))
     let state = try decode(json, conversationID: conversationID,
       groupID: decoded.coordinates.groupId.data)
-    let normUserDID = userDID.lowercased()
+    // Exact bytes, as core admission compares DIDs; never case-fold identity.
     guard state.coordinates.generation == (row["generation"] as Int),
           state.coordinates.stateVersion == (row["state_version"] as Int),
-          state.participants.contains(where: { $0.userDid.description.lowercased() == normUserDID }) else {
+          state.participants.contains(where: { $0.userDid.description == userDID }) else {
       throw ValidationError.invalidSnapshot
     }
     return state

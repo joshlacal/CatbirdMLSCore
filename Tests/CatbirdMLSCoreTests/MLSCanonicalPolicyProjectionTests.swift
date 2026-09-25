@@ -128,6 +128,24 @@ final class MLSCanonicalPolicyProjectionTests: XCTestCase {
     XCTAssertEqual(state.participants[1].leafCount, 2)
   }
 
+  /// Core adopts DIDs byte-exact (`BareDid::parse` rejects uppercase) and
+  /// matches participants with `==` (admission.rs), so a case variant of the
+  /// account is never the participant. The Swift projection must agree.
+  func testParticipantIdentityIsByteExactLikeCore() async throws {
+    let manager = try await makeManager()
+    expectTrue(try await apply(manager, json: snapshot()))
+    let queue = try DatabaseQueue(path: directory.appendingPathComponent("messages.sqlite").path)
+    let variantDID = "did:plc:" + account.dropFirst("did:plc:".count).uppercased()
+    try await queue.write { [account, cid] db in
+      XCTAssertNotNil(try MLSCanonicalPolicyProjection.storedState(userDID: account, conversationID: cid, in: db))
+      try db.execute(sql: """
+        UPDATE mls_orchestrator_canonical_policy SET user_did = ?
+        WHERE user_did = ? AND conversation_id = ?
+        """, arguments: [variantDID, account, cid])
+      XCTAssertThrowsError(try MLSCanonicalPolicyProjection.storedState(userDID: variantDID, conversationID: cid, in: db))
+    }
+  }
+
   func testPendingAcceptanceAtSameEpochSurvivesReopenAndRejectsStalePending() async throws {
     let manager = try await makeManager()
     expectTrue(try await apply(manager, json: snapshot()))
