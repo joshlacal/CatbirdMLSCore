@@ -1540,9 +1540,30 @@ public extension MLSConversationManager {
         epoch: message.epoch,
         seq: message.seq
       )
-    case .nonApplication:
-      throw MLSConversationError.invalidMessage
-    case .controlMessage:
+    case .nonApplication, .controlMessage:
+      // If the message was already processed and stored (e.g. by prior sync or concurrent delivery),
+      // the orchestrator dedup returns None (mapped to .nonApplication). Retrieve the already-decrypted
+      // payload from local storage instead of failing with invalidMessage.
+      if let userDid = userDid,
+         let stored = try? await storage.fetchMessage(
+           messageID: message.id,
+           currentUserDID: userDid,
+           database: database
+         ),
+         let context = try? await MLSCoreContext.shared.getContext(for: userDid) {
+        let payload = stored.decryptedPayload(context: context)
+        let text = payload?.text ?? stored.plaintext ?? ""
+        return DecryptedMLSMessage(
+          id: message.id,
+          convoId: message.convoId,
+          text: text,
+          senderDID: stored.senderID,
+          createdAt: message.createdAt.date,
+          embed: payload?.embed,
+          epoch: message.epoch,
+          seq: message.seq
+        )
+      }
       throw MLSConversationError.invalidMessage
     }
   }
