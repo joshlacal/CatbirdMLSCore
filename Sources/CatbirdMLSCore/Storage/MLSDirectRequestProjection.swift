@@ -339,7 +339,7 @@ enum MLSDirectRequestProjection {
       materialized.senderID == MLSStorageHelpers.normalizeDID(introduction.senderDid),
       materialized.epoch == epoch,
       materialized.sequenceNumber == sequence,
-      materialized.timestamp == timestamp,
+      milliseconds(materialized.timestamp) == milliseconds(timestamp),
       materialized.decryptedPayload(context: context)?.text == text
     else {
       throw ProjectionError.conflictingHistory
@@ -447,5 +447,12 @@ enum MLSDirectRequestProjection {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.date(from: value)
+  }
+
+  /// Canonical receipts carry millisecond instants. A stored `Date` does not
+  /// round-trip bit-exactly (about half of all millisecond values differ in
+  /// the last binary digits), so identity compares the canonical precision.
+  private static func milliseconds(_ date: Date) -> Int64 {
+    Int64((date.timeIntervalSince1970 * 1000).rounded())
   }
 }

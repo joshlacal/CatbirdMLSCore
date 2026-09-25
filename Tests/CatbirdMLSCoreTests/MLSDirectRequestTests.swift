@@ -276,6 +276,38 @@ final class MLSDirectRequestTests: XCTestCase {
     }
   }
 
+  /// Rust's `materialize_accepted_request_introduction` and the host projection
+  /// both write the accepted introduction; whichever lands first, the other
+  /// must recognise the same message. `.001` does not survive a stored-`Date`
+  /// round trip bit-exactly, which used to surface as `conflictingHistory`.
+  func testRustMaterializedIntroductionSatisfiesHostProjection() throws {
+    let userDID = "did:plc:receiver"
+    let adapter = try makeProjectionAdapter(userDID: userDID)
+    try adapter.persistDirectRequestView(
+      requestView(consent: .incomingPending, stateVersion: 4, receivedAt: "2026-09-19T12:00:00.001Z"))
+    try adapter.storeMessage(message: FfiMessage(
+      id: projectionMessageID, conversationId: projectionConversationID,
+      senderDid: "did:plc:sender", text: "protected introduction",
+      timestamp: "2026-09-19T12:00:00.001+00:00", epoch: 2, sequenceNumber: 4,
+      isOwn: false, deliveryStatus: nil, payloadJson: nil))
+    try adapter.persistDirectRequestView(
+      requestView(consent: .accepted, stateVersion: 5, receivedAt: "2026-09-19T12:00:00.001Z", canSend: true))
+    try dbPool.read { db in
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 1)
+    }
+  }
+
+  func testHostProjectedIntroductionAcceptsMillisecondInstantsThatDoNotRoundTrip() throws {
+    let adapter = try makeProjectionAdapter(userDID: "did:plc:receiver")
+    let accepted = requestView(
+      consent: .accepted, stateVersion: 5, receivedAt: "2026-09-19T12:00:00.005Z", canSend: true)
+    try adapter.persistDirectRequestView(accepted)
+    try adapter.persistDirectRequestView(accepted)
+    try dbPool.read { db in
+      XCTAssertEqual(try MLSMessageModel.fetchCount(db), 1)
+    }
+  }
+
   func testMissingRequestProjectionDoesNotDefaultToLegacyOrdinaryMessaging() throws {
     let userDID = "did:plc:receiver"
     _ = try makeProjectionAdapter(userDID: userDID)
