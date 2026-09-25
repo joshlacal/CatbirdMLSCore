@@ -74,14 +74,22 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Set to a different value for standalone daemons to avoid conflicts with the main app.
   public var serviceName: String = "blue.catbird.mls"
 
+  static let fixtureServicePrefix = "blue.catbird.fixture."
+
+  /// Maps a service to its isolated fixture-launch service. Idempotent: the strict store paths
+  /// pass an already-mapped service back into `retrieveKeyStrict`, which must not map it twice.
+  internal static func serviceName(_ target: String, fixtureLaunch: Bool) -> String {
+    guard fixtureLaunch, !target.hasPrefix(fixtureServicePrefix) else { return target }
+    return fixtureServicePrefix + target
+  }
+
   internal func effectiveServiceName(service: String? = nil) -> String {
     let target = service ?? serviceName
     #if DEBUG && os(macOS)
-    if Petrel.DebugFixtureTransport.current != nil {
-      return "blue.catbird.fixture.\(target)"
-    }
-    #endif
+    return Self.serviceName(target, fixtureLaunch: Petrel.DebugFixtureTransport.current != nil)
+    #else
     return target
+    #endif
   }
 
   internal func applyAccessGroupAndProtection(to query: inout [String: Any], accessible: CFString? = nil, synchronizable: Bool? = false) throws {
