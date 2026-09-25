@@ -253,6 +253,63 @@ final class C35CrossClientParityTests: XCTestCase {
     print("C35 SWIFT Stage B Digest: \(digestB)")
     XCTAssertEqual(digestB, expectedDigestB, "Swift Stage B digest must match core reference")
 
+    // Counterfactual Stage B: corrupting one persisted row in SQLite database changes only Stage B digest
+    do {
+      let corruptDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("C35ParityCorrupt-\(UUID().uuidString)")
+      try FileManager.default.createDirectory(at: corruptDir, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: corruptDir) }
+      let corruptDbPath = corruptDir.appendingPathComponent("c35_corrupt.sqlite").path
+
+      let dbQueue = try DatabaseQueue(path: corruptDbPath)
+      try dbQueue.write { db in
+        try db.execute(sql: """
+          CREATE TABLE mls_direct_request_projection (
+            conversation_id TEXT PRIMARY KEY,
+            view_json TEXT NOT NULL,
+            consent TEXT NOT NULL,
+            state_version INTEGER NOT NULL
+          )
+        """)
+
+        for view in projectedViews {
+          let viewJSON = canonicalJSON(from: [view])
+          let singleJSON = String(viewJSON.dropFirst().dropLast())
+          try db.execute(
+            sql: "INSERT INTO mls_direct_request_projection VALUES (?, ?, ?, ?)",
+            arguments: [view.conversationId, singleJSON, consentString(view.consent), Int64(view.stateVersion)]
+          )
+        }
+
+        var corruptedView0 = projectedViews[0]
+        if case .ready(let text, let inv) = corruptedView0.preview {
+          corruptedView0.preview = .ready(text: text + " [STAGE_B_MUTATED]", invitation: inv)
+        }
+        let corruptedJSON = String(canonicalJSON(from: [corruptedView0]).dropFirst().dropLast())
+        try db.execute(
+          sql: "UPDATE mls_direct_request_projection SET view_json = ? WHERE conversation_id = ?",
+          arguments: [corruptedJSON, corruptedView0.conversationId]
+        )
+      }
+
+      var corruptHydratedViews: [DirectRequestView] = []
+      let reopenedQueue = try DatabaseQueue(path: corruptDbPath)
+      try reopenedQueue.read { db in
+        let rows = try Row.fetchAll(db, sql: "SELECT view_json FROM mls_direct_request_projection ORDER BY conversation_id")
+        for row in rows {
+          let viewJSON: String = row["view_json"]
+          let parsed = try parseDirectRequestView(from: viewJSON)
+          corruptHydratedViews.append(try roundtripFfi(parsed))
+        }
+      }
+
+      let corruptJsonB = canonicalJSON(from: corruptHydratedViews)
+      let corruptDigestB = sha256Hex(of: corruptJsonB)
+      print("C35 SWIFT Counterfactual Stage B Mutated Digest: \(corruptDigestB)")
+      XCTAssertNotEqual(corruptDigestB, expectedDigestB, "Corrupting persisted row on disk must change Stage B digest")
+      XCTAssertEqual(corruptDigestB, "bc207c54bf1b280e9f9cf08dbb34abebe2add3acd987d28ed395cc15af1f72f8")
+    }
+
     // =========================================================================
     // Stage C: Consent State Transitions & Fencing
     // =========================================================================
