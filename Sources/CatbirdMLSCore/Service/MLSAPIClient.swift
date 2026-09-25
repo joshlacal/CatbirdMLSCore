@@ -731,6 +731,48 @@ public final class MLSAPIClient {
         }
         return output
     }
+
+    /// Read canonical entries for Rust ingestion. Rust verifies request control
+    /// rows against retained signed proofs, so each row must reach it as served:
+    /// a generated-DTO re-encode adds nested `$type` tags that change the row.
+    /// `entriesJSON[i]` is the untyped JSON of `output.entries[i]`.
+    public func getCanonicalEntriesRetainingJSON(
+        conversationId: String,
+        afterSeq: Int,
+        limit: Int
+    ) async throws -> (output: BlueCatbirdChatGetEntries.Output, entriesJSON: [Data]) {
+        var query = URLComponents()
+        query.queryItems = [
+            URLQueryItem(name: "actorDeviceId", value: try await requireActorDeviceId()),
+            URLQueryItem(name: "conversationId", value: conversationId),
+            URLQueryItem(name: "afterSeq", value: String(afterSeq)),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        let (data, response) = try await submitPreparedRequest(
+            method: "GET",
+            nsid: "blue.catbird.chat.getEntries",
+            body: nil,
+            query: Data((query.percentEncodedQuery ?? "").utf8)
+        )
+        guard (200 ... 299).contains(response.statusCode) else {
+            throw MLSAPIError.httpError(
+                statusCode: response.statusCode,
+                message: "Failed to fetch canonical conversation entries"
+            )
+        }
+        let canonical = try decodeCleanChatResponse(operation: .getEntries, responseJson: data)
+        let output = try JSONDecoder().decode(BlueCatbirdChatGetEntries.Output.self, from: canonical)
+        guard let page = try JSONSerialization.jsonObject(with: canonical) as? [String: Any],
+              let rows = page["entries"] as? [Any],
+              rows.count == output.entries.count
+        else {
+            throw MLSAPIError.invalidResponse(message: "Malformed canonical entries page")
+        }
+        let entriesJSON = try rows.map {
+            try JSONSerialization.data(withJSONObject: $0, options: [.withoutEscapingSlashes])
+        }
+        return (output, entriesJSON)
+    }
     /// Read canonical conversation state for a given conversation.
     public func getCanonicalConversationView(
         conversationId: String

@@ -105,22 +105,22 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     toEpoch: UInt32?
   ) throws -> FfiMessagesPage {
     let result = try blocking {
-      let output = try await self.apiClient.getCanonicalEntries(
+      let page = try await self.apiClient.getCanonicalEntriesRetainingJSON(
         conversationId: convoId,
         afterSeq: cursor.flatMap(Int.init) ?? 0,
         limit: Int(limit)
       )
       return (
-        entries: output.entries,
+        entries: zip(page.output.entries, page.entriesJSON).map { $0 },
         lastSeq: MLSAPIClient.canonicalContinuationAfterSeq(
-          hasMore: output.hasMore,
-          nextAfterSeq: output.nextAfterSeq
+          hasMore: page.output.hasMore,
+          nextAfterSeq: page.output.nextAfterSeq
         )
       )
     }
     return FfiMessagesPage(
       envelopes: try result.entries.compactMap {
-        try Self.incomingEnvelope($0, messageType: messageType)
+        try Self.incomingEnvelope($0.0, servedJSON: $0.1, messageType: messageType)
       },
       cursor: result.lastSeq.map(String.init)
     )
@@ -309,8 +309,11 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   /// entries, `"commit"` keeps every commit-bearing entry, and `nil` keeps
   /// both. Other entry kinds project to nil; malformed supported entries throw so
   /// the caller cannot advance its cursor past an unprocessed message.
+  /// `servedJSON` is the entry exactly as the service returned it; request
+  /// control rows are forwarded from it, never from a DTO re-encode.
   static func incomingEnvelope(
     _ entry: BlueCatbirdChatDefs.ConversationEntry,
+    servedJSON: Data,
     messageType: String? = nil
   ) throws -> FfiIncomingEnvelope? {
     let wantsApplication = messageType == nil || messageType == "app"
@@ -377,7 +380,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         throw malformedCanonicalEnvelope()
       }
       return try canonicalControlEnvelope(
-        entry: entry,
+        servedJSON: servedJSON,
         conversationId: message.conversationId,
         senderDid: body.actorDid,
         receivedAt: message.receivedAt,
@@ -395,7 +398,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         throw malformedCanonicalEnvelope()
       }
       return try canonicalControlEnvelope(
-        entry: entry,
+        servedJSON: servedJSON,
         conversationId: message.conversationId,
         senderDid: body.actorDid,
         receivedAt: message.receivedAt,
@@ -413,7 +416,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         throw malformedCanonicalEnvelope()
       }
       return try canonicalControlEnvelope(
-        entry: entry,
+        servedJSON: servedJSON,
         conversationId: message.conversationId,
         senderDid: body.actorDid,
         receivedAt: message.receivedAt,
@@ -463,7 +466,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   /// dispatch. Returning nil here would let the page cursor advance past an
   /// unprocessed request transition.
   private static func canonicalControlEnvelope(
-    entry: BlueCatbirdChatDefs.ConversationEntry,
+    servedJSON: Data,
     conversationId: BlueCatbirdChatDefs.OperationId,
     senderDid: BlueCatbirdChatDefs.BareDid,
     receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
@@ -471,8 +474,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     sequence: Int,
     epoch: Int
   ) throws -> FfiIncomingEnvelope {
-    let encoded = try JSONEncoder().encode(entry)
-    guard let json = String(data: encoded, encoding: .utf8) else {
+    guard let json = String(data: servedJSON, encoding: .utf8) else {
       throw malformedCanonicalEnvelope()
     }
     return try canonicalEnvelope(
