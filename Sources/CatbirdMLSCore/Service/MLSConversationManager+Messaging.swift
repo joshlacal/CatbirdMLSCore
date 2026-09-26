@@ -2280,7 +2280,7 @@ public extension MLSConversationManager {
 
     switch payload.messageType {
     case .text:
-      if senderDID != userDid {
+      if !MLSCredentialBinding.isSameAccount(senderDID, as: userDid) {
         enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
       }
 
@@ -3137,7 +3137,7 @@ public extension MLSConversationManager {
 
           // Enqueue delivery ack — proof of successful decryption.
           // Only ack messages from other users (not our own SSE echo).
-          if senderDID != userDid {
+          if !MLSCredentialBinding.isSameAccount(senderDID, as: userDid) {
             enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
           }
 

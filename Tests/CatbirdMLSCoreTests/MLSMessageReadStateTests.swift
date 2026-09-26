@@ -39,6 +39,45 @@ final class MLSMessageReadStateTests: XCTestCase {
     XCTAssertEqual(rows["msg-4"], false) // later message untouched
   }
 
+  /// Messages this account sent from a sibling device arrive with a device-qualified
+  /// sender identity (`did#deviceId`); they are own messages and must never count as unread.
+  /// A different DID that merely shares the account DID as a prefix is still another user.
+  func testUnreadCountExcludesOwnSiblingDeviceMessages() async throws {
+    let db = try DatabaseQueue()
+    try MLSGRDBManager.makeMigrator().migrate(db)
+
+    let conversationID = "convo-sibling"
+    let currentUserDID = "did:plc:reader"
+    try await ensureConversation(in: db, conversationID: conversationID, currentUserDID: currentUserDID)
+    let senders = [
+      "this-device": currentUserDID,
+      "sibling-device": "\(currentUserDID)#6f1c0a52-8e0e-4b4a-9d6e-2f6c1a1b2c3d",
+      "other-user": "did:plc:other#0b7e2e44-3a39-4f5e-8e63-7a0c1b2d3e4f",
+      "prefix-lookalike": "did:plc:readerx#1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+    ]
+    try await db.write { db in
+      for (index, (id, sender)) in senders.sorted(by: { $0.key < $1.key }).enumerated() {
+        try MLSMessageModel(
+          messageID: id,
+          currentUserDID: currentUserDID,
+          conversationID: conversationID,
+          senderID: sender,
+          contentType: "text",
+          timestamp: Date(timeIntervalSince1970: TimeInterval(index + 1)),
+          epoch: 1,
+          sequenceNumber: Int64(index + 1),
+          isRead: false,
+          processingState: "delivered"
+        ).insert(db)
+      }
+    }
+
+    let counts = try await db.read { db in
+      try MLSStorageHelpers.getUnreadCountsForAllConversationsSync(from: db, currentUserDID: currentUserDID)
+    }
+    XCTAssertEqual(counts[conversationID], 2, "only other-user and prefix-lookalike are unread")
+  }
+
   func testMarkMessageAsReadDoesNotAffectOtherConversationsOrUsers() async throws {
     let db = try DatabaseQueue()
     try MLSGRDBManager.makeMigrator().migrate(db)

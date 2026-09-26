@@ -1529,7 +1529,7 @@ public final class MLSOrchestratorStorageAdapter: OrchestratorStorageCallback, @
       timestamp: formatDate(model.timestamp) ?? "",
       epoch: UInt64(model.epoch),
       sequenceNumber: UInt64(model.sequenceNumber),
-      isOwn: model.senderID == userDID,
+      isOwn: MLSCredentialBinding.isSameAccount(model.senderID, as: userDID),
       deliveryStatus: deliveryStatus,
       payloadJson: payloadData.flatMap { String(data: $0, encoding: .utf8) }
     )
