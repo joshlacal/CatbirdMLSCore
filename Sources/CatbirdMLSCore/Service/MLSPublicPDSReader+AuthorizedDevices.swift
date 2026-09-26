@@ -32,14 +32,26 @@ extension MLSPublicPDSReader {
     }
   }
 
-  private static func isMatchingEndpoint(_ actual: URL?, expected: URL) -> Bool {
-    guard let actual,
-          actual.scheme == expected.scheme,
-          actual.host == expected.host,
-          actual.path == expected.path,
-          (actual.port == expected.port || (actual.port == 443 && expected.port == nil) || (actual.port == nil && expected.port == 443))
-    else { return false }
-    return true
+  /// Strict canonical URL normalization for production trust-path endpoint matching.
+  /// Builds URLComponents for both URLs, normalizes default HTTPS port 443 to nil,
+  /// and requires the full normalized URLs to be strictly equal (preserving scheme, host,
+  /// path, query, user, password, and fragment).
+  static func normalizeForTrustEvaluation(_ url: URL?) -> URL? {
+    guard let url, var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
+      return nil
+    }
+    if components.scheme?.lowercased() == "https", components.port == 443 {
+      components.port = nil
+    }
+    return components.url
+  }
+
+  static func isMatchingEndpoint(_ actual: URL?, expected: URL) -> Bool {
+    guard let normActual = normalizeForTrustEvaluation(actual),
+          let normExpected = normalizeForTrustEvaluation(expected) else {
+      return false
+    }
+    return normActual == normExpected
   }
 
   /// Bypass Petrel's non-expiring DID-to-PDS cache for authorization. The
