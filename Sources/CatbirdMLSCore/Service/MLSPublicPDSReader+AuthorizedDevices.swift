@@ -32,6 +32,16 @@ extension MLSPublicPDSReader {
     }
   }
 
+  private static func isMatchingEndpoint(_ actual: URL?, expected: URL) -> Bool {
+    guard let actual,
+          actual.scheme == expected.scheme,
+          actual.host == expected.host,
+          actual.path == expected.path,
+          (actual.port == expected.port || (actual.port == 443 && expected.port == nil) || (actual.port == nil && expected.port == 443))
+    else { return false }
+    return true
+  }
+
   /// Bypass Petrel's non-expiring DID-to-PDS cache for authorization. The
   /// native key-set cache is the only cache on this trust path.
   static func resolveCurrentPDS(did: String, session: URLSession = authorizationSession) async throws -> URL {
@@ -41,7 +51,7 @@ extension MLSPublicPDSReader {
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-          http.url == url, data.count <= 1_048_576 else { throw ReaderError.invalidResponse }
+          isMatchingEndpoint(http.url, expected: url), data.count <= 1_048_576 else { throw ReaderError.invalidResponse }
     let document = try JSONDecoder().decode(DIDDocument.self, from: data)
     guard document.id == did else { throw ReaderError.invalidResponse }
     let services = document.service.filter {
@@ -68,7 +78,7 @@ extension MLSPublicPDSReader {
     let (data, response) = try await session.data(for: request)
     guard let http = response as? HTTPURLResponse,
           http.statusCode == 200,
-          http.url == url,
+          isMatchingEndpoint(http.url, expected: url),
           data.count <= 1_048_576
     else { throw ReaderError.invalidResponse }
     let document = try JSONDecoder().decode(DIDDocument.self, from: data)
