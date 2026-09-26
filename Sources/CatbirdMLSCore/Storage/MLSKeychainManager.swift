@@ -74,22 +74,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
   /// Set to a different value for standalone daemons to avoid conflicts with the main app.
   public var serviceName: String = "blue.catbird.mls"
 
-  static let fixtureServicePrefix = "blue.catbird.fixture."
-
-  /// Maps a service to its isolated fixture-launch service. Idempotent: the strict store paths
-  /// pass an already-mapped service back into `retrieveKeyStrict`, which must not map it twice.
-  internal static func serviceName(_ target: String, fixtureLaunch: Bool) -> String {
-    guard fixtureLaunch, !target.hasPrefix(fixtureServicePrefix) else { return target }
-    return fixtureServicePrefix + target
-  }
-
   internal func effectiveServiceName(service: String? = nil) -> String {
-    let target = service ?? serviceName
-    #if DEBUG && os(macOS)
-    return Self.serviceName(target, fixtureLaunch: Petrel.DebugFixtureTransport.current != nil)
-    #else
-    return target
-    #endif
+    service ?? serviceName
   }
 
   internal func applyAccessGroupAndProtection(to query: inout [String: Any], accessible: CFString? = nil, synchronizable: Bool? = false) throws {
@@ -109,10 +95,9 @@ public final class MLSKeychainManager: @unchecked Sendable {
       return
     }
     #if DEBUG && os(macOS)
-    if Petrel.DebugFixtureTransport.current != nil {
-      if let synchronizable {
-        query[kSecAttrSynchronizable as String] = synchronizable ? (kCFBooleanTrue as Any) : (accessible != nil ? (false as Any) : (kSecAttrSynchronizableAny as Any))
-      }
+    // A runtime-fixture launch keeps its items in the fixture profile (Petrel.FixtureLaunch), which
+    // has no access groups or protection classes to apply.
+    if Petrel.FixtureLaunch.keychain != nil {
       return
     }
     #endif
@@ -169,7 +154,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
     ]
     
-    let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+    let addStatus = KeychainSecItem.add(addQuery as CFDictionary, nil)
     if addStatus != errSecSuccess && addStatus != errSecDuplicateItem {
       probeLogger.error("🔑 [Probe] SecItemAdd failed with status: \(addStatus)")
       // Continue anyway - the item might already exist from a previous probe
@@ -191,14 +176,14 @@ public final class MLSKeychainManager: @unchecked Sendable {
         kSecAttrService: probeService,
         kSecAttrAccount: probeAccount,
       ]
-      let delStatus = SecItemDelete(delQuery as CFDictionary)
+      let delStatus = KeychainSecItem.delete(delQuery as CFDictionary)
       if delStatus != errSecSuccess && delStatus != errSecItemNotFound {
         probeLogger.warning("🔑 [Probe] SecItemDelete failed with status: \(delStatus)")
       }
     }
 
     var item: CFTypeRef?
-    let matchStatus = SecItemCopyMatching(matchQuery as CFDictionary, &item)
+    let matchStatus = KeychainSecItem.copyMatching(matchQuery as CFDictionary, &item)
     
     guard matchStatus == errSecSuccess else {
       probeLogger.error("🔑 [Probe] SecItemCopyMatching failed with status: \(matchStatus)")
@@ -737,7 +722,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     try applyAccessGroupAndProtection(to: &query, accessible: accessible)
 
-    let status = SecItemAdd(query as CFDictionary, nil)
+    let status = KeychainSecItem.add(query as CFDictionary, nil)
     if status == errSecSuccess {
       return
     } else if status == errSecDuplicateItem {
@@ -793,7 +778,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     try applyAccessGroupAndProtection(to: &query, accessible: accessible)
 
-    let status = SecItemAdd(query as CFDictionary, nil)
+    let status = KeychainSecItem.add(query as CFDictionary, nil)
     if status == errSecSuccess {
       return candidate
     } else if status == errSecDuplicateItem {
@@ -849,7 +834,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     try applyAccessGroupAndProtection(to: &query, accessible: accessible)
 
-    let status = SecItemAdd(query as CFDictionary, nil)
+    let status = KeychainSecItem.add(query as CFDictionary, nil)
     if status == errSecSuccess {
       return data
     } else if status == errSecDuplicateItem {
@@ -894,7 +879,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     try applyAccessGroupAndProtection(to: &query, accessible: nil, synchronizable: synchronizable)
 
     var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    let status = KeychainSecItem.copyMatching(query as CFDictionary, &result)
 
     if status == errSecItemNotFound {
       return nil
@@ -938,7 +923,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     try applyAccessGroupAndProtection(to: &query, accessible: nil)
 
     var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    let status = KeychainSecItem.copyMatching(query as CFDictionary, &result)
     if status == errSecItemNotFound {
       return false
     }
@@ -970,7 +955,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     try applyAccessGroupAndProtection(to: &query, accessible: nil)
 
-    let status = SecItemDelete(query as CFDictionary)
+    let status = KeychainSecItem.delete(query as CFDictionary)
     guard status == errSecSuccess || status == errSecItemNotFound else {
       throw KeychainError.deleteFailed(status)
     }
@@ -994,7 +979,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
 
     try applyAccessGroupAndProtection(to: &query, accessible: nil)
 
-    let status = SecItemDelete(query as CFDictionary)
+    let status = KeychainSecItem.delete(query as CFDictionary)
     guard status == errSecSuccess || status == errSecItemNotFound else {
       throw KeychainError.deleteFailed(status)
     }
@@ -1016,19 +1001,13 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecValueData as String: data,
     ]
 
-    #if DEBUG && os(macOS)
-    let isFixture = Petrel.DebugFixtureTransport.current != nil
-    #else
-    let isFixture = false
-    #endif
-
     if !skipDataProtection {
       query[kSecAttrAccessible as String] = accessible
       query[kSecAttrSynchronizable as String] = synchronizable
     }
 
     #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection && !isFixture {
+    if !skipDataProtection {
       query[kSecUseDataProtectionKeychain as String] = true
     }
     #endif
@@ -1037,7 +1016,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
-    let status = SecItemAdd(query as CFDictionary, nil)
+    let status = KeychainSecItem.add(query as CFDictionary, nil)
 
     if status == errSecDuplicateItem {
       var updateQuery: [String: Any] = [
@@ -1046,7 +1025,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
         kSecAttrService as String: targetService,
       ]
       #if os(macOS) || targetEnvironment(macCatalyst)
-      if !skipDataProtection && !isFixture {
+      if !skipDataProtection {
         updateQuery[kSecUseDataProtectionKeychain as String] = true
       }
       #endif
@@ -1056,7 +1035,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       let updateAttributes: [String: Any] = [
         kSecValueData as String: data
       ]
-      let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttributes as CFDictionary)
+      let updateStatus = KeychainSecItem.update(updateQuery as CFDictionary, updateAttributes as CFDictionary)
       guard updateStatus == errSecSuccess else {
         throw KeychainError.storeFailed(updateStatus)
       }
@@ -1078,18 +1057,12 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecMatchLimit as String: kSecMatchLimitOne,
     ]
 
-    #if DEBUG && os(macOS)
-    let isFixture = Petrel.DebugFixtureTransport.current != nil
-    #else
-    let isFixture = false
-    #endif
-
     if !skipDataProtection {
       query[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue as Any : kSecAttrSynchronizableAny
     }
 
     #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection && !isFixture {
+    if !skipDataProtection {
       query[kSecUseDataProtectionKeychain as String] = true
     }
     #endif
@@ -1099,7 +1072,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
     }
 
     var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    let status = KeychainSecItem.copyMatching(query as CFDictionary, &result)
 
     if status == errSecItemNotFound {
       return nil
@@ -1121,14 +1094,8 @@ public final class MLSKeychainManager: @unchecked Sendable {
       kSecAttrService as String: targetService,
     ]
 
-    #if DEBUG && os(macOS)
-    let isFixture = Petrel.DebugFixtureTransport.current != nil
-    #else
-    let isFixture = false
-    #endif
-
     #if os(macOS) || targetEnvironment(macCatalyst)
-    if !skipDataProtection && !isFixture {
+    if !skipDataProtection {
       query[kSecUseDataProtectionKeychain as String] = true
     }
     #endif
@@ -1141,7 +1108,7 @@ public final class MLSKeychainManager: @unchecked Sendable {
       query[kSecAttrAccessGroup as String] = accessGroup
     }
 
-    let status = SecItemDelete(query as CFDictionary)
+    let status = KeychainSecItem.delete(query as CFDictionary)
 
     guard status == errSecSuccess || status == errSecItemNotFound else {
       logger.error("Failed to delete keychain item: \(key), status: \(status)")

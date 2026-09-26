@@ -815,9 +815,9 @@ public actor MLSDeviceManager {
     }
 
     // Delete existing key first
-    SecItemDelete(query as CFDictionary)
+    KeychainSecItem.delete(query as CFDictionary)
 
-    let status = SecItemAdd(query as CFDictionary, nil)
+    let status = KeychainSecItem.add(query as CFDictionary, nil)
     if status == errSecDuplicateItem {
       // Update stale item in-place; fall back to delete+add if needed
       let updateQuery: [String: Any] = [
@@ -833,7 +833,7 @@ public actor MLSDeviceManager {
         updateAttributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
       }
 
-      let updateStatus = SecItemUpdate(
+      let updateStatus = KeychainSecItem.update(
         updateQuery as CFDictionary, updateAttributes as CFDictionary)
 
       if updateStatus == errSecSuccess {
@@ -844,8 +844,8 @@ public actor MLSDeviceManager {
       keychainLogger.error(
         "Failed to update duplicate MLS signature key (status: \(updateStatus)) - retrying with delete/add"
       )
-      SecItemDelete(updateQuery as CFDictionary)
-      let retryStatus = SecItemAdd(query as CFDictionary, nil)
+      KeychainSecItem.delete(updateQuery as CFDictionary)
+      let retryStatus = KeychainSecItem.add(query as CFDictionary, nil)
       guard retryStatus == errSecSuccess else {
         keychainLogger.error(
           "Failed to rewrite MLS signature key after duplicate (status: \(retryStatus))")
@@ -872,7 +872,7 @@ public actor MLSDeviceManager {
     ]
 
     var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    let status = KeychainSecItem.copyMatching(query as CFDictionary, &result)
 
     guard status == errSecSuccess, let keyData = result as? Data else {
       throw MLSError.operationFailed
@@ -889,7 +889,7 @@ public actor MLSDeviceManager {
       kSecAttrService as String: "blue.catbird.mls",
     ]
 
-    let status = SecItemDelete(query as CFDictionary)
+    let status = KeychainSecItem.delete(query as CFDictionary)
     // Ignore errSecItemNotFound - key might not exist
     guard status == errSecSuccess || status == errSecItemNotFound else {
       throw MLSError.operationFailed
@@ -912,9 +912,9 @@ public actor MLSDeviceManager {
     }
 
     // Delete existing UUID first
-    SecItemDelete(query as CFDictionary)
+    KeychainSecItem.delete(query as CFDictionary)
 
-    let status = SecItemAdd(query as CFDictionary, nil)
+    let status = KeychainSecItem.add(query as CFDictionary, nil)
     guard status == errSecSuccess else {
       throw MLSError.operationFailed
     }
@@ -930,7 +930,7 @@ public actor MLSDeviceManager {
     ]
 
     var result: AnyObject?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    let status = KeychainSecItem.copyMatching(query as CFDictionary, &result)
 
     guard status == errSecSuccess, let data = result as? Data,
       let uuid = String(data: data, encoding: .utf8)
@@ -949,7 +949,7 @@ public actor MLSDeviceManager {
       kSecAttrService as String: "blue.catbird.mls",
     ]
 
-    let status = SecItemDelete(query as CFDictionary)
+    let status = KeychainSecItem.delete(query as CFDictionary)
     // Ignore errSecItemNotFound - UUID might not exist
     guard status == errSecSuccess || status == errSecItemNotFound else {
       throw MLSError.operationFailed
