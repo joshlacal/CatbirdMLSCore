@@ -124,7 +124,7 @@
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "4dacf64c3f4125ed71af6b83b325c162dad24126481d6e85dd976e6887d53cac"
+    "canonical_sha256": "dfb5ac6eed916dd18005082e91b7d614047580b20103b7e7d707b298f684b33c"
   },
   "interface": {
     "generated_swift": {
@@ -2903,8 +2903,8 @@
         "size_bytes": 4122
       },
       "src/orchestrator/authenticated_inventory.rs": {
-        "sha256": "05627eb8c143b317820f8c54d2e960ca07c7db6c20df6d36fab82ee6929188c8",
-        "size_bytes": 15522
+        "sha256": "c560a88778cfb6f652aa9abc48c0ce2ef7a27944dcd6f2f009991de6f7d0b3d2",
+        "size_bytes": 15685
       },
       "src/orchestrator/canonical_transport.rs": {
         "sha256": "13f3b93e7bd42c9c4655195ffa9efd40fc1cee2973ab01aae7930e395ced578f",
@@ -3471,7 +3471,7 @@
         "size_bytes": 186
       }
     },
-    "native_source_sha256": "0edaeb41526ac57b8315aaa67cde1cdf8224b81924c612a3849cd3a47c5f95b6",
+    "native_source_sha256": "3ef3cd94001868ab80f7b419c5f8cde003c2b41a3958a1d9b452a31e715e871e",
     "repositories": {
       "Petrel": {
         "jj_change": "qmyuwmmmvumuwoprlqwoxzwowooxrmkn",
@@ -3492,9 +3492,9 @@
         "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/catbird-atproto"
       },
       "catbird-mls": {
-        "jj_change": "xtontwxlzykrmvkqmxwptxyrutllkzxp",
-        "jj_commit": "f763a2298dd671d02462a016eb7d3e6c82ab2f9d",
-        "parent_jj_commit": "337059652a0bec605dde7099e13187f246bb3001",
+        "jj_change": "yzxpxxptlpkpmpxpllrtkrryovsornto",
+        "jj_commit": "75b55ecabb9379d04276ffaad042fe84df7e6fa3",
+        "parent_jj_commit": "5e555fcd1c5ac52ad2fc430b2338c0f57d36812d",
         "path": "/Users/joshlacalamito/Developer/.workspaces/catbird-encrypted-requests-20260919/catbird-mls"
       }
     },
