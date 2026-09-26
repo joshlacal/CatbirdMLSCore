@@ -9,9 +9,7 @@ import Foundation
 import Security
 import OSLog
 import Synchronization
-#if DEBUG && os(macOS)
 import Petrel
-#endif
 /// Manages secure storage of MLS cryptographic materials in Keychain
 public final class MLSKeychainManager: @unchecked Sendable {
 
