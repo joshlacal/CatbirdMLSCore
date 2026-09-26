@@ -51,11 +51,13 @@ extension MLSConversationManager {
   public func refreshRequestPreview(conversationId: String) async throws -> DirectRequestView {
     try throwIfShuttingDown("refreshRequestPreview")
     let capturedGeneration = sessionGeneration
-    let view = try await withRustAuthoritativeRuntime(
-      operation: "refreshRequestPreview",
-      requiresDeviceAuthorization: false
-    ) { runtime in
-      try runtime.refreshRequestPreview(conversationId: conversationId)
+    let view = try await directRequestPreviewCoalescer.coalesce(conversationId: conversationId) { [self] in
+      try await withRustAuthoritativeRuntime(
+        operation: "refreshRequestPreview",
+        requiresDeviceAuthorization: false
+      ) { runtime in
+        try runtime.refreshRequestPreview(conversationId: conversationId)
+      }
     }
     try validateSessionGeneration(capturedGeneration: capturedGeneration)
     return view

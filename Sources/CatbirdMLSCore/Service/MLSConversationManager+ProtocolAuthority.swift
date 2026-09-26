@@ -267,12 +267,18 @@ extension MLSConversationManager {
   /// pool (or the main thread) starves the bounded pool: every blocked worker
   /// also spawns a `Task.detached` that needs a *free* cooperative worker to make
   /// progress, so under concurrency the pool deadlocks and the app hard-freezes.
-  /// GCD grows this concurrent pool on demand, so blocking its threads is safe.
+  /// GCD grows this concurrent pool on demand, but unbounded blocking calls
+  /// can saturate the thread pool and starve the Swift cooperative runtime (F81).
+  /// The async admission gate bounds active blocking threads to at most 4.
   private static let rustAuthorityExecutionQueue = DispatchQueue(
     label: "blue.catbird.mls.rust-authority",
     qos: .userInitiated,
     attributes: .concurrent
   )
+
+  /// Async admission gate bounding the number of concurrent synchronous Rust calls
+  /// occupying threads at once to prevent thread starvation and cooperative pool deadlock (F81).
+  internal static let rustAuthorityAdmissionGate = RustAuthorityAdmissionGate()
 
   internal func withRustAuthoritativeRuntime<T>(
     operation: String,
@@ -308,15 +314,21 @@ extension MLSConversationManager {
     // a genuinely escaping body, ARC owns its lifetime and there is no escape check to
     // race. The body still does not outlive this call — we await its completion before
     // returning.
-    do {
-      return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-        Self.rustAuthorityExecutionQueue.async {
-          continuation.resume(with: Result {
-            do { return try body(runtime) }
-            catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
-          })
+    func executeOnRustQueue(using activeRuntime: MLSOrchestratorRuntime) async throws -> T {
+      try await Self.rustAuthorityAdmissionGate.withPermit {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+          Self.rustAuthorityExecutionQueue.async {
+            continuation.resume(with: Result {
+              do { return try body(activeRuntime) }
+              catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
+            })
+          }
         }
       }
+    }
+
+    do {
+      return try await executeOnRustQueue(using: runtime)
     } catch {
       if Self.isClosedContextError(error) {
         let isForeground = !MLSCoreContext.isSuspensionInProgress && !MLSClient.isSuspensionInProgress
@@ -327,14 +339,7 @@ extension MLSConversationManager {
           await rebindDatabaseIfClosed()
           if let freshRuntime = await ensureOrchestratorRuntime() {
             do {
-              let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-                Self.rustAuthorityExecutionQueue.async {
-                  continuation.resume(with: Result {
-                    do { return try body(freshRuntime) }
-                    catch { throw MLSConversationLifecycleError.presentingDeviceAuthorization(error) }
-                  })
-                }
-              }
+              let result = try await executeOnRustQueue(using: freshRuntime)
               logger.info("✅ [MLS-AUTHORITY] Recovered from closed context in \(operation)")
               return result
             } catch {

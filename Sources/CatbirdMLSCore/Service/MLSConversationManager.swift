@@ -327,6 +327,9 @@ public final class MLSConversationManager {
     /// Serializes MLS message processing per conversation to avoid concurrent ratchet advances
     public let messageProcessingCoordinator = ConversationProcessingCoordinator()
 
+    /// Coalesces concurrent in-flight direct request preview refreshes for the same conversation ID (F81)
+    internal let directRequestPreviewCoalescer = DirectRequestPreviewCoalescer()
+
     /// Current coordination generation assigned at initialization
     /// Used to detect and abort stale tasks after account switches
     public let currentCoordinationGeneration: Int

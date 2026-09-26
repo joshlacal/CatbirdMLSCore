@@ -220,6 +220,10 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   }
 
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
+    // ponytail: sync FFI callback bridging async networking needs a free cooperative thread.
+    // Ceiling: Bound by RustAuthorityAdmissionGate (<= 4 concurrent calls) and preview coalescing,
+    // ensuring the Swift cooperative thread pool cannot starve.
+    // Upgrade path: UniFFI async foreign callbacks once core FFI re-freezes.
     let semaphore = DispatchSemaphore(value: 0)
     let lock = NSLock()
     var result: Result<T, Error>?
