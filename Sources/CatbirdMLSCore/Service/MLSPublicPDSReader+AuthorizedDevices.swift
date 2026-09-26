@@ -83,6 +83,23 @@ extension MLSPublicPDSReader {
     session: URLSession = authorizationSession
   ) async throws -> Data {
     let did = directRequestReceiptAuthorityDID
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = Petrel.DebugFixtureTransport.current {
+      let fixtureURL = fixture.origin.appendingPathComponent(".well-known/did.json")
+      var request = URLRequest(url: fixtureURL, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      request.setValue("chat.catbird.blue", forHTTPHeaderField: "Host")
+      request.timeoutInterval = 10.0
+      let (data, response) = try await session.data(for: request)
+      guard let http = response as? HTTPURLResponse,
+            http.statusCode == 200,
+            data.count <= 1_048_576
+      else { throw ReaderError.invalidResponse }
+      let document = try JSONDecoder().decode(DIDDocument.self, from: data)
+      guard document.id == did else { throw ReaderError.invalidResponse }
+      return data
+    }
+    #endif
     let url = try SpaceHostResolver.didDocumentURL(for: did)
     var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
     request.setValue("application/json", forHTTPHeaderField: "Accept")
