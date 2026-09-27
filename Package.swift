@@ -79,6 +79,10 @@ let package = Package(
         .library(
             name: "CatbirdMLSCore",
             targets: ["CatbirdMLSCore"]
+        ),
+        .executable(
+            name: "CatbirdMLSTestHost",
+            targets: ["CatbirdMLSTestHost"]
         )
     ],
     dependencies: [
@@ -118,6 +122,17 @@ let package = Package(
         .testTarget(
             name: "CatbirdMLSCoreTests",
             dependencies: ["CatbirdMLSCore"]
+        ),
+        .executableTarget(
+            name: "CatbirdMLSTestHost",
+            dependencies: [
+                "CatbirdMLSCore",
+                .product(name: "GRDB", package: "GRDB.swift")
+            ],
+            path: "Sources/CatbirdMLSTestHost",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
         )
     ]
 )
