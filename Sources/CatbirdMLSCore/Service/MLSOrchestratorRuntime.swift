@@ -38,6 +38,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     keychainManager: MLSKeychainManager = .shared,
     authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)? = nil,
     receiptAuthorityDocumentResolver: MLSOrchestratorCredentialAdapter.ReceiptAuthorityDocumentResolver? = nil,
+    chatDeclarationAuthorityResolver: MLSOrchestratorCredentialAdapter.ChatDeclarationAuthorityResolver? = nil,
     signingPublicKeyResolver: MLSOrchestratorCredentialAdapter.SigningPublicKeyResolver? = nil,
     signingBindingResolver: MLSOrchestratorCredentialAdapter.SigningBindingResolver? = nil,
     config: FfiOrchestratorConfig? = nil,
@@ -53,6 +54,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       keychainManager: keychainManager,
       authorizedDeviceKeyResolver: authorizedDeviceKeyResolver,
       receiptAuthorityDocumentResolver: receiptAuthorityDocumentResolver,
+      chatDeclarationAuthorityResolver: chatDeclarationAuthorityResolver,
       transcriptSigner: { identity, transcript in
         try mlsContext.signWithIdentityKey(identity: identity, payload: transcript)
       },

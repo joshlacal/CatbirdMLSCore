@@ -76,13 +76,38 @@ extension MLSPublicPDSReader {
     return endpoint
   }
 
-  /// Fetch the fixed direct-request receipt authority without redirects or cache reuse.
-  /// Rust validates the authority method and key; Swift retains the exact authenticated
-  /// JSON bytes rather than re-encoding the document.
+  /// Fetch only the coordinator DID selected by Rust, never a receipt-supplied URL.
+  /// The fixed local authority retains its existing fixture route; other authorities
+  /// use Petrel's public-address-validated and redirect-free DID resolver.
   static func fetchDirectRequestReceiptAuthorityDocument(
+    authorityDid did: String,
     session: URLSession = authorizationSession
   ) async throws -> Data {
-    let did = directRequestReceiptAuthorityDID
+    guard did.hasPrefix("did:web:") else { throw ReaderError.invalidResponse }
+    if did != directRequestReceiptAuthorityDID {
+      let url = try SpaceHostResolver.didDocumentURL(for: did)
+      guard let host = url.host?.lowercased(),
+            host != "localhost", host != "127.0.0.1", host != "::1"
+      else { throw ReaderError.invalidEndpoint }
+      let limits = NetworkResponseLimits(
+        maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
+      let document: DIDDocument
+      #if DEBUG && canImport(Network) && canImport(Security)
+      if let fixture = Petrel.DebugFixtureTransport.current {
+        guard fixture.permits(url) else { throw ReaderError.invalidEndpoint }
+        document = try await SpaceHostResolver.fetchDIDDocument(
+          for: did, urlSession: session, limits: limits)
+      } else {
+        document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+      }
+      #else
+      document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+      #endif
+      guard document.id == did else { throw ReaderError.invalidResponse }
+      let data = try JSONEncoder().encode(document)
+      guard data.count <= 1_048_576 else { throw ReaderError.invalidResponse }
+      return data
+    }
     #if DEBUG && canImport(Network) && canImport(Security)
     if let fixture = Petrel.DebugFixtureTransport.current {
       let fixtureURL = fixture.origin.appendingPathComponent(".well-known/did.json")

@@ -40,14 +40,30 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
-  internal func directRequestReceiptAuthorityDocument() throws -> Data {
+  internal func directRequestReceiptAuthorityDocument(expectedAuthorityDid: String) throws -> Data {
     do {
       return try blocking {
-        try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument()
+        try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+          authorityDid: expectedAuthorityDid)
       }
     } catch {
       throw OrchestratorBridgeError.Credential(
         message: "receipt_authority_unavailable: The direct-request receipt authority could not be verified. \(error.localizedDescription)"
+      )
+    }
+  }
+
+  internal func chatDeclarationAuthority(userDid: String) throws -> String? {
+    do {
+      return try blocking {
+        try await MLSPublicPDSReader.fetchDeclaration(
+          did: userDid,
+          resolvePDS: { did in try await MLSPublicPDSReader.resolveCurrentPDS(did: did) }
+        )?.deliveryService.didString()
+      }
+    } catch {
+      throw OrchestratorBridgeError.Credential(
+        message: "chat_declaration_unavailable: The account home could not be verified. \(error.localizedDescription)"
       )
     }
   }

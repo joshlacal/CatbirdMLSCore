@@ -123,6 +123,7 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
     }
 
     let fetched = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+      authorityDid: MLSPublicPDSReader.directRequestReceiptAuthorityDID,
       session: session
     )
     XCTAssertEqual(fetched, document)
@@ -138,27 +139,41 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
     }
 
     do {
-      _ = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(session: session)
+      _ = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+        authorityDid: MLSPublicPDSReader.directRequestReceiptAuthorityDID, session: session)
       XCTFail("A different DID document cannot become the receipt authority")
     } catch {}
   }
 
-  func testCredentialCallbackRejectsReencodedOrOversizeReceiptAuthority() throws {
+  func testDirectRequestReceiptAuthorityRejectsLoopbackPeerBeforeNetwork() async throws {
+    do {
+      _ = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+        authorityDid: "did:web:127.0.0.1")
+      XCTFail("A receipt authority cannot target a local endpoint")
+    } catch MLSPublicPDSReader.ReaderError.invalidEndpoint {}
+  }
+
+  func testCredentialCallbackBindsExpectedReceiptAuthorityAndRejectsOversize() throws {
+    let localDid = MLSPublicPDSReader.directRequestReceiptAuthorityDID
     let valid = Data(#"{"id":"did:web:chat.catbird.blue"}"#.utf8)
     let adapter = MLSOrchestratorCredentialAdapter(
-      receiptAuthorityDocumentResolver: { valid }
+      receiptAuthorityDocumentResolver: { expected in expected == localDid ? valid : nil }
     )
-    XCTAssertEqual(try adapter.directRequestReceiptAuthorityDocument(), valid)
+    XCTAssertEqual(try adapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: localDid), valid)
+    XCTAssertNil(try adapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: "did:web:peer.example"))
 
-    let wrong = MLSOrchestratorCredentialAdapter(
-      receiptAuthorityDocumentResolver: { Data(#"{"id":"did:web:wrong.example"}"#.utf8) }
+    let foreignDid = "did:web:peer.example"
+    let foreign = Data(#"{"id":"did:web:peer.example"}"#.utf8)
+    let foreignAdapter = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { _ in foreign }
     )
-    XCTAssertThrowsError(try wrong.directRequestReceiptAuthorityDocument())
+    XCTAssertEqual(try foreignAdapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: foreignDid), foreign)
+    XCTAssertThrowsError(try foreignAdapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: localDid))
 
     let oversized = MLSOrchestratorCredentialAdapter(
-      receiptAuthorityDocumentResolver: { Data(repeating: 0x20, count: 1_048_577) }
+      receiptAuthorityDocumentResolver: { _ in Data(repeating: 0x20, count: 1_048_577) }
     )
-    XCTAssertThrowsError(try oversized.directRequestReceiptAuthorityDocument())
+    XCTAssertThrowsError(try oversized.directRequestReceiptAuthorityDocument(expectedAuthorityDid: localDid))
   }
 
   func testFailedPublicationDeniesSyncAndSendThenRetriesForSameSession() async throws {

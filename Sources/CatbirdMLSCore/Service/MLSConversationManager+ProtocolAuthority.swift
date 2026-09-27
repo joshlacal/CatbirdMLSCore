@@ -166,8 +166,11 @@ extension MLSConversationManager {
         databasePool: databasePool,
         apiClient: apiAdapter,
         authorizedDeviceKeyResolver: { did in try apiAdapter.authorizedDeviceKeys(userDid: did) },
-        receiptAuthorityDocumentResolver: {
-          try apiAdapter.directRequestReceiptAuthorityDocument()
+        receiptAuthorityDocumentResolver: { did in
+          try apiAdapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: did)
+        },
+        chatDeclarationAuthorityResolver: { did in
+          try apiAdapter.chatDeclarationAuthority(userDid: did)
         }
       )
       // Keep canonical live mutations on the Rust signer seam. The weak
