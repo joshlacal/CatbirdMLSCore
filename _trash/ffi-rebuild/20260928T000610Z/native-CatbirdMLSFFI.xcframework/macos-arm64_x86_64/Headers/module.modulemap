@@ -1,0 +1,4 @@
+module CatbirdMLSFFI {
+    header "CatbirdMLSFFI.h"
+    export *
+}

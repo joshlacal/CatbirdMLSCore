@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import CatbirdMLS
 import Synchronization
+@testable import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSDeviceAuthorizationTests: XCTestCase {
@@ -89,10 +90,13 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
   }
 
   func testFreshDIDAuthorityResolutionObservesPDSMigration() async throws {
-    let config = URLSessionConfiguration.ephemeral
-    config.protocolClasses = [AuthorizationURLProtocol.self]
-    let session = URLSession(configuration: config)
-    defer { session.invalidateAndCancel(); AuthorizationURLProtocol.handler = nil }
+    NetworkService.setNetworkTestProtocolClasses([AuthorizationURLProtocol.self])
+    NetworkService.dnsResolverOverride = { _ in ["93.184.216.34"] }
+    defer {
+      NetworkService.setNetworkTestProtocolClasses(nil)
+      NetworkService.dnsResolverOverride = nil
+      AuthorizationURLProtocol.handler = nil
+    }
     func document(_ host: String) throws -> Data {
       try JSONSerialization.data(withJSONObject: ["id": did, "service": [[
         "id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": "https://\(host)"
@@ -103,8 +107,8 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
       XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
       return (200, responses.withLock { $0.removeFirst() })
     }
-    let old = try await MLSPublicPDSReader.resolveCurrentPDS(did: did, session: session)
-    let new = try await MLSPublicPDSReader.resolveCurrentPDS(did: did, session: session)
+    let old = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
+    let new = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
     XCTAssertEqual(old.host, "old.example")
     XCTAssertEqual(new.host, "new.example", "A forced native refresh must not remain pinned to the previous PDS")
   }

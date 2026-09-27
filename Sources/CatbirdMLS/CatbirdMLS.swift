@@ -16401,10 +16401,19 @@ extension FfiConverterCallbackInterfaceOrchestratorApiCallback: FfiConverter {
  */
 public protocol OrchestratorCredentialCallback: AnyObject {
     /**
-     * Authenticated resolution of did:web:chat.catbird.blue only. Rust checks
-     * the receipt method and persists the trusted historical method.
+     * Authenticated resolution of the expected authority DID document.
+     * Rust checks the receipt method and persists the trusted historical method.
      */
-    func directRequestReceiptAuthorityDocument() throws -> Data?
+    func directRequestReceiptAuthorityDocument(expectedAuthorityDid: String) throws -> Data?
+
+    /**
+     * Resolve verified account-home chat declaration for an actor DID from authenticated PDS.
+     * Returns:
+     * - Ok(Some(did)) if verified blue.catbird.chat.declaration/self declares deliveryService: did
+     * - Ok(None) ONLY when verified getRecord returns 404 RecordNotFound
+     * - Err(Credential) if declaration resolution is unavailable or failed (FAIL-CLOSED)
+     */
+    func getChatDeclarationAuthority(userDid: String) throws -> String?
 
     func storeSigningKey(userDid: String, keyData: Data) throws
 
@@ -16443,6 +16452,7 @@ private enum UniffiCallbackInterfaceOrchestratorCredentialCallback {
     static var vtable: UniffiVTableCallbackInterfaceOrchestratorCredentialCallback = .init(
         directRequestReceiptAuthorityDocument: { (
             uniffiHandle: UInt64,
+            expectedAuthorityDid: RustBuffer,
             uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -16452,10 +16462,35 @@ private enum UniffiCallbackInterfaceOrchestratorCredentialCallback {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return try uniffiObj.directRequestReceiptAuthorityDocument(
+                    expectedAuthorityDid: FfiConverterString.lift(expectedAuthorityDid)
                 )
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getChatDeclarationAuthority: { (
+            uniffiHandle: UInt64,
+            userDid: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getChatDeclarationAuthority(
+                    userDid: FfiConverterString.lift(userDid)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -20866,40 +20901,43 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 51954 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_direct_request_receipt_authority_document() != 17821 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_direct_request_receipt_authority_document() != 45119 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 6966 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_chat_declaration_authority() != 5598 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_signing_key() != 38112 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 56185 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_sign_clean_chat_transcript() != 48192 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_signing_key() != 46305 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 10047 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_sign_clean_chat_transcript() != 47109 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 52579 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 37606 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 30369 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 16244 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 46989 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 44480 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 13207 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 50333 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 3398 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 38649 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 30816 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 46254 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 26302 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 21594 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 10106 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantined() != 58743 {

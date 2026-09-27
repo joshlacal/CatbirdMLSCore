@@ -59,12 +59,25 @@ extension MLSPublicPDSReader {
   static func resolveCurrentPDS(did: String, session: URLSession = authorizationSession) async throws -> URL {
     guard !did.contains("#"), (try? DID(didString: did)) != nil else { throw ReaderError.invalidResponse }
     let url = try SpaceHostResolver.didDocumentURL(for: did)
-    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-          isMatchingEndpoint(http.url, expected: url), data.count <= 1_048_576 else { throw ReaderError.invalidResponse }
-    let document = try JSONDecoder().decode(DIDDocument.self, from: data)
+    let limits = NetworkResponseLimits(
+      maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
+    let document: DIDDocument
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current, fixture.permits(url) {
+      var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      let (data, response) = try await session.data(for: request)
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+            isMatchingEndpoint(http.url, expected: url), data.count <= 1_048_576 else {
+        throw ReaderError.invalidResponse
+      }
+      document = try JSONDecoder().decode(DIDDocument.self, from: data)
+    } else {
+      document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+    }
+    #else
+    document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+    #endif
     guard document.id == did else { throw ReaderError.invalidResponse }
     let services = document.service.filter {
       ($0.id == "#atproto_pds" || $0.id == "\(did)#atproto_pds") && $0.type == "AtprotoPersonalDataServer"

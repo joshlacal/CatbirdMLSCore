@@ -132,20 +132,26 @@ enum MLSPublicPDSReader {
       throw ReaderError.invalidEndpoint
     }
 
-    var request = URLRequest(url: url)
-    request.httpMethod = "GET"
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.timeoutInterval = 10.0
-    let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw ReaderError.invalidResponse
+    let limits = NetworkResponseLimits(maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
+    let (data, http) = try await SpaceHostResolver.fetchBoundedPublicJSON(
+      from: url, limits: limits, fixtureSession: session)
+    if (200...299).contains(http.statusCode) {
+      guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            envelope["uri"] as? String == "at://\(did)/\(declarationCollection)/self",
+            let value = envelope["value"] as? [String: Any],
+            value["$type"] as? String == declarationCollection
+      else { throw ReaderError.invalidResponse }
     }
     return try declaration(from: data, statusCode: http.statusCode)
   }
 
   static func declaration(from data: Data, statusCode: Int) throws -> BlueCatbirdChatDeclaration? {
     if (200...299).contains(statusCode) {
-      return try decodeDeclaration(fromGetRecordJSON: data)
+      let declaration = try decodeDeclaration(fromGetRecordJSON: data)
+      guard declaration.protocolVersion == "1",
+            declaration.deliveryService.didString().hasPrefix("did:web:")
+      else { throw ReaderError.invalidResponse }
+      return declaration
     }
     struct ErrorEnvelope: Decodable {
       let error: String
