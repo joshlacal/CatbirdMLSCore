@@ -385,6 +385,31 @@ public actor MLSRecoveryManager {
     persistence = store
   }
 
+  #if DEBUG
+  private var persistenceRebindHookForTesting: (@Sendable () -> Void)?
+  internal func setPersistenceRebindHookForTesting(_ hook: @escaping @Sendable () -> Void) {
+    persistenceRebindHookForTesting = hook
+  }
+  #endif
+
+  /// Switch future enqueues immediately, then finish the captured old tail.
+  /// Actor reentrancy must not append more operations with the old writer.
+  /// Failed old writes
+  /// retain their existing error logging; pool adoption does not reload or reset
+  /// the in-memory recovery policy.
+  internal func rebindPersistence(_ store: MLSRecoveryStatePersisting, generation: UInt64) async throws {
+    try MLSGRDBManager.requireCurrentStorageGeneration(generation)
+    let oldTail = persistTail
+    persistence = store
+    #if DEBUG
+    let hook = persistenceRebindHookForTesting
+    persistenceRebindHookForTesting = nil
+    hook?()
+    #endif
+    await oldTail?.value
+    try MLSGRDBManager.requireCurrentStorageGeneration(generation)
+  }
+
   /// Await completion of all enqueued write-through operations. Primarily
   /// for tests and orderly shutdown; production callers don't need to wait.
   public func flushPersistence() async {
