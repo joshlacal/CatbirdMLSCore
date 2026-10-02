@@ -36,11 +36,11 @@ let sdkDependencies: [Package.Dependency] = useLocalIntegration
     : [
         .package(
             url: "https://github.com/joshlacal/Petrel.git",
-            revision: "ffeabd3788ffb2c0f45c52794efbe36dfc7c3269"
+            revision: "329b5fbe412286ff4c094246b6f30c2989e58f94"
         ),
         .package(
             url: "https://github.com/joshlacal/PetrelCatbird.git",
-            revision: "ec7bee16132bf0770dcd11018349d3b16db573b5"
+            revision: "ff98deedc748777537f912fa4dcd208f9bbc840e"
         ),
     ]
 
