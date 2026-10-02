@@ -125,6 +125,27 @@ class AppleArtifactManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "native source fingerprint"):
             self.module.verify_manifest(path)
 
+    def test_verify_rejects_changed_embedded_contract_without_rust_changes(self):
+        contract = self.native / "src/orchestrator/generated/blue.catbird.chat.defs.json"
+        write(contract, '{"authorityDid":{"const":"did:web:chat.catbird.blue"}}\n')
+        manifest = self.build()
+        path = self.root / "manifest.json"
+        self.module.write_manifest(path, manifest)
+        write(contract, '{"authorityDid":{"ref":"#bareDid"}}\n')
+
+        with self.assertRaisesRegex(RuntimeError, "native source fingerprint"):
+            self.module.verify_manifest(path)
+
+    def test_source_fingerprint_includes_native_build_and_generator_scripts(self):
+        for relative in ("create-xcframework.sh", "scripts/generate_chat_schema.py"):
+            with self.subTest(relative=relative):
+                script = self.native / relative
+                write(script, "original\n")
+                before = self.module.native_source_fingerprint(self.native)
+                write(script, "changed\n")
+
+                self.assertNotEqual(before, self.module.native_source_fingerprint(self.native))
+
     def test_verify_rejects_changed_framework_library(self):
         manifest = self.build()
         path = self.root / "manifest.json"
@@ -158,6 +179,8 @@ class AppleArtifactManifestTests(unittest.TestCase):
         before = self.module.native_source_fingerprint(self.native)
         write(self.native / "target/aarch64-apple-ios/release/output", "derived\n")
         write(self.native / "build/bindings/CatbirdMLS.swift", "derived\n")
+        write(self.native / "_trash/previous-contract.json", "{}\n")
+        write(self.native / "build/contract.json", "{}\n")
 
         self.assertEqual(before, self.module.native_source_fingerprint(self.native))
 

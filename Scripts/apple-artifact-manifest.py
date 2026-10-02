@@ -17,7 +17,10 @@ EXCLUDED_NATIVE_PARTS = {
     "target",
     "CatbirdMLSFFI.xcframework",
 }
-NATIVE_SOURCE_SUFFIXES = {".rs", ".toml", ".lock"}
+# Rust embeds JSON contracts with include_str!, and shell/Python scripts drive
+# the native build and binding generation. A source receipt must detect changes
+# to those inputs even when the Rust declarations and UniFFI ABI stay identical.
+NATIVE_SOURCE_SUFFIXES = {".rs", ".toml", ".lock", ".json", ".sh", ".py"}
 
 
 def sha256_bytes(value):
