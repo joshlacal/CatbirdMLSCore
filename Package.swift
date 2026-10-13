@@ -65,8 +65,8 @@ let ffiTarget: Target = selectedFFIPath != nil
     ? .binaryTarget(name: "CatbirdMLSFFI", path: localFFI)
     : .binaryTarget(
         name: "CatbirdMLSFFI",
-        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.18/CatbirdMLSFFI.xcframework.zip",
-        checksum: "76c969aed946af97bc6e6a397952e7a77b166d1a69c679459f743c47720a6212"
+        url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.19/CatbirdMLSFFI.xcframework.zip",
+        checksum: "95ec7be2f2c415a152bdbeff5b739aa4e568fc460f3ab9c3f41d333d117b6349"
     )
 
 let package = Package(
