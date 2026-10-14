@@ -1560,7 +1560,7 @@ final class MLSStorageCutoverTests: XCTestCase {
     let isPendingInitial = await gate.hasPendingWelcome(for: convoID, userDID: testDID)
     XCTAssertTrue(isPendingInitial)
     // Backdate marker file by 60 seconds
-    let markerURL = await gate.markerURL(conversationID: convoID, userDID: testDID)
+    let markerURL = try await gate.markerURL(conversationID: convoID, userDID: testDID)
     XCTAssertTrue(FileManager.default.fileExists(atPath: markerURL.path))
     let oldDate = Date().addingTimeInterval(-60)
     try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: markerURL.path)

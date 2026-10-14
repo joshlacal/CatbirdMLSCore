@@ -106,6 +106,27 @@ final class MLSStorageLifecycleCutoverTests: XCTestCase {
     XCTAssertFalse(hasCleared)
   }
 
+  /// The shared gate must not freeze its directory at first use: once the storage
+  /// base moves, a cached path puts this process's marker somewhere the other
+  /// process never looks, and both win the same Welcome.
+  func testWelcomeGateFollowsCurrentStorageBase() async throws {
+    let gate = MLSWelcomeGate.shared
+    let did = "did:plc:gate-base-\(UUID().uuidString.lowercased())"
+    let convo = UUID().uuidString
+    _ = await gate.hasPendingWelcome(for: convo, userDID: did)
+
+    let movedBase = tempBaseDirectory.appendingPathComponent("moved", isDirectory: true)
+    try FileManager.default.createDirectory(at: movedBase, withIntermediateDirectories: true)
+    MLSStoragePaths.setBaseDirectoryOverride(movedBase)
+    defer { MLSStoragePaths.setBaseDirectoryOverride(tempBaseDirectory) }
+
+    try await gate.beginWelcomeProcessing(for: convo, userDID: did)
+    let marker = try await gate.markerURL(conversationID: convo, userDID: did)
+    XCTAssertTrue(marker.path.hasPrefix(movedBase.path), "Marker must live under the current base: \(marker.path)")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    await gate.completeWelcomeProcessing(for: convo, userDID: did)
+  }
+
   func testEpochCheckpointDrainWriters() async throws {
     let checkpoint = MLSEpochCheckpoint.shared
     let testDID = "did:plc:epoch_test_\(UUID().uuidString.lowercased())"

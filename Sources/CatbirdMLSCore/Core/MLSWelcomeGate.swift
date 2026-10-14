@@ -19,25 +19,23 @@ public actor MLSWelcomeGate {
 
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "WelcomeGate")
 
-  private let gateDirectory: URL
   private var unavailableUsers: Set<String> = []
 
+  private init() {}
 
-  private init() {
-    do {
-      gateDirectory = try MLSStoragePaths.welcomeGateDirectory()
-      try FileManager.default.createDirectory(at: gateDirectory, withIntermediateDirectories: true)
-    } catch {
-      fatalError("Required App Group container unavailable for MLSWelcomeGate: \(error.localizedDescription)")
-    }
+  /// Resolved on every call, never cached: the app and the NSE must agree on one
+  /// directory, and a path frozen at first use diverges from the other process
+  /// once the storage base changes (a test override, or a container that
+  /// was not yet available when the gate was first touched).
+  private func gateDirectory() throws -> URL {
+    try MLSStoragePaths.welcomeGateDirectory()
   }
 
   /// Atomically claim Welcome processing ownership for the given conversation.
   /// Uses exclusive create (O_EXCL) so only one process wins; losers throw.
   public func beginWelcomeProcessing(for conversationID: String, userDID: String) throws {
-    let url = markerURL(conversationID: conversationID, userDID: userDID)
-
     do {
+      let url = try markerURL(conversationID: conversationID, userDID: userDID)
       try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
       let fd = open(url.path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
       if fd >= 0 {
@@ -64,15 +62,15 @@ public actor MLSWelcomeGate {
 
   /// Mark that Welcome processing has completed for the given conversation.
   public func completeWelcomeProcessing(for conversationID: String, userDID: String) {
-    let url = markerURL(conversationID: conversationID, userDID: userDID)
     do {
+      let url = try markerURL(conversationID: conversationID, userDID: userDID)
       if try MLSStoragePaths.fileExistsStrict(at: url) {
         try FileManager.default.removeItem(at: url)
       }
       unavailableUsers.remove(userDID)
       logger.info("✅ [WelcomeGate] Complete Welcome: convo=\(conversationID.prefix(16))..., user=\(userDID.prefix(20), privacy: .private)")
     } catch {
-      logger.critical("🚨 [WelcomeGate] Failed to remove welcome marker at \(url.path): \(error.localizedDescription)")
+      logger.critical("🚨 [WelcomeGate] Failed to remove welcome marker for \(conversationID.prefix(16)): \(error.localizedDescription)")
     }
   }
   /// Cross-process check: is Welcome currently pending for this conversation?
@@ -81,11 +79,11 @@ public actor MLSWelcomeGate {
       return true
     }
 
-    let url = markerURL(conversationID: conversationID, userDID: userDID)
     do {
+      let url = try markerURL(conversationID: conversationID, userDID: userDID)
       guard try MLSStoragePaths.fileExistsStrict(at: url) else { return false }
     } catch {
-      logger.critical("🚨 [WelcomeGate] Failed strict existence check for \(url.path): \(error.localizedDescription), failing closed")
+      logger.critical("🚨 [WelcomeGate] Failed strict existence check for \(conversationID.prefix(16)): \(error.localizedDescription), failing closed")
       return true
     }
 
@@ -96,7 +94,7 @@ public actor MLSWelcomeGate {
   public func clearAll(for userDID: String) throws {
     let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let userComponent = MLSStoragePaths.didHash(normalized)
-    let userDir = gateDirectory.appendingPathComponent(userComponent, isDirectory: true)
+    let userDir = try gateDirectory().appendingPathComponent(userComponent, isDirectory: true)
     if try MLSStoragePaths.fileExistsStrict(at: userDir) {
       try FileManager.default.removeItem(at: userDir)
     }
@@ -131,11 +129,11 @@ public actor MLSWelcomeGate {
 
   // MARK: - Private
 
-  func markerURL(conversationID: String, userDID: String) -> URL {
+  func markerURL(conversationID: String, userDID: String) throws -> URL {
     let normalized = userDID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let userComponent = MLSStoragePaths.didHash(normalized)
     let convoDigest = SHA256.hash(data: Data(conversationID.utf8)).compactMap { String(format: "%02x", $0) }.joined()
-    return gateDirectory
+    return try gateDirectory()
       .appendingPathComponent(userComponent, isDirectory: true)
       .appendingPathComponent("\(convoDigest).pending", isDirectory: false)
   }

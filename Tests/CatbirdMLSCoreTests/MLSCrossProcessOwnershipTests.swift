@@ -107,7 +107,7 @@ final class MLSCrossProcessOwnershipTests: XCTestCase {
     var nseWins = 0
     for round in 0..<rounds {
       let conversationID = UUID().uuidString
-      let marker = await MLSWelcomeGate.shared.markerURL(conversationID: conversationID, userDID: did)
+      let marker = try await MLSWelcomeGate.shared.markerURL(conversationID: conversationID, userDID: did)
       try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
 
       // Both owners claim at one shared instant; the second process is skewed by
