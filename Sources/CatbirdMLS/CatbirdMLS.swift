@@ -8610,6 +8610,71 @@ public func FfiConverterTypeFFIKeyPackageSyncResult_lower(_ value: FfiKeyPackage
     return FfiConverterTypeFFIKeyPackageSyncResult.lower(value)
 }
 
+/**
+ * One extra HTTP header of a Labyrinth request
+ * ([`OrchestratorAPICallback::submit_labyrinth_request`]).
+ */
+public struct FfiLabyrinthHeader {
+    public var name: String
+    public var value: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+}
+
+extension FfiLabyrinthHeader: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthHeader, rhs: FfiLabyrinthHeader) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(value)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFILabyrinthHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthHeader {
+        return
+            try FfiLabyrinthHeader(
+                name: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthHeader, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFILabyrinthHeader_lift(_ buf: RustBuffer) throws -> FfiLabyrinthHeader {
+    return try FfiConverterTypeFFILabyrinthHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFILabyrinthHeader_lower(_ value: FfiLabyrinthHeader) -> RustBuffer {
+    return FfiConverterTypeFFILabyrinthHeader.lower(value)
+}
+
 public struct FfiLeaveResult {
     public var conversationId: String
     public var groupId: String?
@@ -15997,6 +16062,71 @@ public protocol OrchestratorApiCallback: AnyObject {
     func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair]
 
     func getGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String) throws -> Data
+
+    /**
+     * Send one `blue.catbird.labyrinth.*` XRPC to the account's mls-ds.
+     *
+     * Attach an atproto service-auth JWT whose `lxm` is `nsid` and whose
+     * `aud` is the delivery service, exactly as for
+     * `submit_prepared_request`. `path` is `/xrpc/{nsid}` plus the
+     * already-encoded query string (it carries `actorDeviceId`); send it
+     * verbatim. Send every `headers` entry unchanged: on procedures they
+     * are `catbird-labyrinth-write` and `catbird-labyrinth-write-signature`,
+     * the device-signed write body mls-ds verifies. `body` is the JSON
+     * body of a procedure (`method` = `POST`), absent on queries (`GET`).
+     * Return the raw response, including non-2xx statuses with their
+     * atproto error body: Rust maps the error names.
+     */
+    func submitLabyrinthRequest(method: String, nsid: String, path: String, body: Data?, headers: [FfiLabyrinthHeader]) throws -> FfiGatewayResponse
+
+    /**
+     * True once the platform implements the three `*_labyrinth_mailbox_keys`
+     * methods below. Rust then publishes every epoch to the PDS as well and
+     * cross-checks peers' PDS records against mls-ds ([CB-28], [CB-29]).
+     */
+    func labyrinthPdsEnabled() -> Bool
+
+    /**
+     * `com.atproto.repo.putRecord` of `record` (JSON, `$type` included) into
+     * the signed-in account's repo, collection
+     * `blue.catbird.labyrinth.mailboxKeys`, rkey `rkey` (`self` or a
+     * 12-digit epoch number). Create or replace.
+     */
+    func putLabyrinthMailboxKeys(rkey: String, record: Data) throws
+
+    /**
+     * `com.atproto.repo.getRecord` of `blue.catbird.labyrinth.mailboxKeys`
+     * / `rkey` from `did`'s repo (resolve its PDS). Return the record value
+     * JSON, or `None` when the record (or the repo) does not exist.
+     */
+    func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data?
+
+    /**
+     * Delete every `blue.catbird.labyrinth.mailboxKeys` record in the
+     * signed-in account's repo (account deletion).
+     */
+    func deleteLabyrinthMailboxKeys() throws
+
+    /**
+     * True once the platform implements `submit_labyrinth_space_request`
+     * against a PDS that serves `com.atproto.space.*`. Together with
+     * `labyrinth_pds_enabled`, a new history mailbox then goes into the
+     * account's own Space instead of mls-ds. Report false for a PDS
+     * without Spaces (bsky.social today).
+     */
+    func labyrinthSpaceEnabled() -> Bool
+
+    /**
+     * Send one `com.atproto.space.*` XRPC to the signed-in account's own
+     * PDS with its OAuth (DPoP) session, the way `com.atproto.repo.*` calls
+     * go: no service auth and no extra headers. `nsid` always starts with
+     * `com.atproto.space.`; `path` is `/xrpc/{nsid}` plus the
+     * already-encoded query string, sent verbatim; `body` is the JSON body
+     * of a procedure (`method` = `POST`), absent on queries (`GET`).
+     * Return the raw response, including non-2xx statuses with their
+     * atproto error body.
+     */
+    func submitLabyrinthSpaceRequest(method: String, nsid: String, path: String, body: Data?) throws -> FfiGatewayResponse
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -16331,6 +16461,184 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
             }
 
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        submitLabyrinthRequest: { (
+            uniffiHandle: UInt64,
+            method: RustBuffer,
+            nsid: RustBuffer,
+            path: RustBuffer,
+            body: RustBuffer,
+            headers: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiGatewayResponse in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.submitLabyrinthRequest(
+                    method: FfiConverterString.lift(method),
+                    nsid: FfiConverterString.lift(nsid),
+                    path: FfiConverterString.lift(path),
+                    body: FfiConverterOptionData.lift(body),
+                    headers: FfiConverterSequenceTypeFFILabyrinthHeader.lift(headers)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        labyrinthPdsEnabled: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.labyrinthPdsEnabled(
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        putLabyrinthMailboxKeys: { (
+            uniffiHandle: UInt64,
+            rkey: RustBuffer,
+            record: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.putLabyrinthMailboxKeys(
+                    rkey: FfiConverterString.lift(rkey),
+                    record: FfiConverterData.lift(record)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getLabyrinthMailboxKeys: { (
+            uniffiHandle: UInt64,
+            did: RustBuffer,
+            rkey: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getLabyrinthMailboxKeys(
+                    did: FfiConverterString.lift(did),
+                    rkey: FfiConverterString.lift(rkey)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        deleteLabyrinthMailboxKeys: { (
+            uniffiHandle: UInt64,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.deleteLabyrinthMailboxKeys(
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        labyrinthSpaceEnabled: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.labyrinthSpaceEnabled(
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        submitLabyrinthSpaceRequest: { (
+            uniffiHandle: UInt64,
+            method: RustBuffer,
+            nsid: RustBuffer,
+            path: RustBuffer,
+            body: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiGatewayResponse in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.submitLabyrinthSpaceRequest(
+                    method: FfiConverterString.lift(method),
+                    nsid: FfiConverterString.lift(nsid),
+                    path: FfiConverterString.lift(path),
+                    body: FfiConverterOptionData.lift(body)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -19262,6 +19570,31 @@ private struct FfiConverterSequenceTypeFFIKeyPackageRef: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeFFILabyrinthHeader: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthHeader]
+
+    static func write(_ value: [FfiLabyrinthHeader], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFFILabyrinthHeader.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthHeader] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthHeader]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFFILabyrinthHeader.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeFFIMemberView: FfiConverterRustBuffer {
     typealias SwiftType = [FfiMemberView]
 
@@ -20899,6 +21232,27 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 51954 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_labyrinth_request() != 28172 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_labyrinth_pds_enabled() != 55486 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_labyrinth_mailbox_keys() != 29703 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_labyrinth_mailbox_keys() != 20714 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_delete_labyrinth_mailbox_keys() != 7392 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_labyrinth_space_enabled() != 4102 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_labyrinth_space_request() != 39964 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_direct_request_receipt_authority_document() != 45119 {

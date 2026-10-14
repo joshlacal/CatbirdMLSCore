@@ -235,6 +235,51 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  // MARK: - Labyrinth history backup (catbird-mls feature `labyrinth`)
+  //
+  // UniFFI callback methods cannot be cfg-gated, so they are in every build.
+  // iOS does not implement Labyrinth yet: these mirror the Rust refusing
+  // defaults, and only a `labyrinth` build would call them.
+
+  public func submitLabyrinthRequest(
+    method: String,
+    nsid: String,
+    path: String,
+    body: Data?,
+    headers: [FfiLabyrinthHeader]
+  ) throws -> FfiGatewayResponse {
+    throw OrchestratorBridgeError.Api(message: "this gateway does not implement Labyrinth requests (\(nsid))")
+  }
+
+  public func labyrinthPdsEnabled() -> Bool {
+    false
+  }
+
+  public func putLabyrinthMailboxKeys(rkey: String, record: Data) throws {
+    throw OrchestratorBridgeError.Api(message: "PDS mailboxKeys publication is not implemented")
+  }
+
+  public func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data? {
+    throw OrchestratorBridgeError.Api(message: "PDS mailboxKeys lookup is not implemented")
+  }
+
+  public func deleteLabyrinthMailboxKeys() throws {
+    throw OrchestratorBridgeError.Api(message: "PDS mailboxKeys deletion is not implemented")
+  }
+
+  public func labyrinthSpaceEnabled() -> Bool {
+    false
+  }
+
+  public func submitLabyrinthSpaceRequest(
+    method: String,
+    nsid: String,
+    path: String,
+    body: Data?
+  ) throws -> FfiGatewayResponse {
+    throw OrchestratorBridgeError.Api(message: "this gateway does not reach the account's PDS Space (\(nsid))")
+  }
+
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
     // ponytail: sync FFI callback bridging async networking needs a free cooperative thread.
     // Ceiling: Bound by RustAuthorityAdmissionGate (<= 4 concurrent calls) and preview coalescing,
