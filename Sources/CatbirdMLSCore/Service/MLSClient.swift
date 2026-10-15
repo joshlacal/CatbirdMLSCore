@@ -124,8 +124,14 @@ public actor MLSClient {
 
   /// Set suspension flag (idempotent). Call synchronously when scenePhase becomes inactive/background.
   public nonisolated static func markSuspensionInProgress(reason: String = "unknown") {
-    emergencyState.withLock { $0.suspensionInProgress = true }
-    LabyrinthCallbackGate.shared.suspend()
+    // The Labyrinth gate changes under the same lock as the flag, so a racing
+    // clear cannot leave it open while the flag is set. The callbacks in
+    // flight are cancelled once the lock is released.
+    let labyrinthInFlight = emergencyState.withLock { state in
+      state.suspensionInProgress = true
+      return LabyrinthCallbackGate.shared.shut()
+    }
+    labyrinthInFlight.forEach { $0() }
     MLSCoreContext.markSuspensionInProgress()
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
@@ -148,8 +154,8 @@ public actor MLSClient {
     emergencyState.withLock {
       $0.suspensionInProgress = false
       $0.cacheInvalidated = false
+      LabyrinthCallbackGate.shared.resume()
     }
-    LabyrinthCallbackGate.shared.resume()
     MLSCoreContext.clearSuspensionFlag()
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
@@ -161,11 +167,12 @@ public actor MLSClient {
   /// Emergency synchronous close of all Rust MLS contexts.
   /// Safe to call from any thread and without actor isolation.
   public nonisolated static func emergencyCloseAllContexts(reason: String = "unknown") {
-    emergencyState.withLock { state in
+    let labyrinthInFlight = emergencyState.withLock { state in
       state.suspensionInProgress = true
       state.cacheInvalidated = true
+      return LabyrinthCallbackGate.shared.shut()
     }
-    LabyrinthCallbackGate.shared.suspend()
+    labyrinthInFlight.forEach { $0() }
 
     MLSSuspensionFlightRecorder.shared.record(
       .flushStarted,

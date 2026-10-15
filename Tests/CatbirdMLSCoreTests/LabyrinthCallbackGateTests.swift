@@ -87,6 +87,25 @@ final class LabyrinthCallbackGateTests: XCTestCase {
     MLSClient.clearSuspensionFlag(reason: "gate test BGTask")
     XCTAssertEqual(try LabyrinthCallbackGate.shared.run { 4 }, 4)
   }
+
+  func testTheSharedGateEndsWithTheFlagWhenMarkAndClearRace() {
+    defer {
+      MLSCoreContext.clearSuspensionFlag()
+      MLSClient.clearSuspensionFlag(reason: "gate race test cleanup")
+      MLSConversationManager.resetSuspensionStateForTesting()
+    }
+    for round in 0..<20000 {
+      DispatchQueue.concurrentPerform(iterations: 2) { index in
+        if index == 0 {
+          MLSClient.markSuspensionInProgress(reason: "gate race test")
+        } else {
+          MLSClient.clearSuspensionFlag(reason: "gate race test")
+        }
+      }
+      let admitted = (try? LabyrinthCallbackGate.shared.run { true }) ?? false
+      XCTAssertEqual(admitted, !MLSClient.isSuspensionInProgress, "round \(round)")
+    }
+  }
 }
 
 private final class ErrorBox: @unchecked Sendable {

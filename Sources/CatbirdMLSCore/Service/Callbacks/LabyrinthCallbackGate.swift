@@ -48,11 +48,18 @@ final class LabyrinthCallbackGate: @unchecked Sendable {
 
   /// Refuses new callbacks and fails the ones in flight at once.
   func suspend() {
+    shut().forEach { $0() }
+  }
+
+  /// Refuses new callbacks and returns the cancellers of the ones in flight,
+  /// for a caller that shuts the gate under its own lock: it runs them once
+  /// that lock is released.
+  func shut() -> [@Sendable () -> Void] {
     lock.lock()
     suspended = true
     let pending = Array(cancellers.values)
     lock.unlock()
-    pending.forEach { $0() }
+    return pending
   }
 
   func resume() {
