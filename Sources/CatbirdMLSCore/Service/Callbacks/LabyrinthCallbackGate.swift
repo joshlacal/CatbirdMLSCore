@@ -2,12 +2,15 @@
 //  LabyrinthCallbackGate.swift
 //  CatbirdMLSCore
 //
-//  Bounds the synchronous Labyrinth callbacks. Rust holds its Labyrinth slot
-//  lock while one runs, and suspending the app takes that same lock on the
-//  main thread, so a callback must not wait out a slow network: each one gets
-//  a deadline, and suspension cancels the ones in flight and refuses new ones
-//  until the app resumes. Rust treats either failure as a transport error and
-//  retries the archive later.
+//  Bounds the synchronous callbacks Rust makes while it holds its Labyrinth
+//  slot lock: the Labyrinth requests and mailboxKeys records, and the
+//  canonical reads the archive flush makes. Suspending the app takes that
+//  same lock on the main thread, so a callback must not wait out a slow
+//  network: each one gets a deadline, and suspension cancels the ones in
+//  flight and refuses new ones until the app resumes. Rust retries the
+//  archive later. A failed Labyrinth request or canonical read is a transport
+//  error there; a failed mailboxKeys read counts towards quarantine until
+//  the FFI carries catbird-mls #20.
 //
 
 import Foundation
@@ -26,8 +29,12 @@ enum LabyrinthCallbackError: Error, LocalizedError, Equatable {
 
 final class LabyrinthCallbackGate: @unchecked Sendable {
   static let shared = LabyrinthCallbackGate()
-  /// The longest one callback may hold the calling Rust thread.
+  /// The longest one Labyrinth callback may hold the calling Rust thread.
   static let deadline: TimeInterval = 20
+  /// The same for a canonical read, which sync also makes and which can carry
+  /// a large page: the network layer's own idle timeout, so only a hung read
+  /// is cut short. Suspension still cancels it at once.
+  static let readDeadline: TimeInterval = 120
 
   private let lock = NSLock()
   private var suspended = false

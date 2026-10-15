@@ -82,7 +82,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     body: Data?,
     query: Data?
   ) throws -> FfiGatewayResponse {
-    let result = try blocking {
+    let submit = { () async throws -> FfiGatewayResponse in
       let (data, httpResponse) = try await self.apiClient.submitPreparedRequest(
         method: method,
         nsid: nsid,
@@ -95,7 +95,12 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         body: data
       )
     }
-    return result
+    // The Labyrinth archive flush reads getConversationState through here
+    // while Rust holds the lock suspension waits for, so reads go through
+    // the gate. Procedures do not: a mutation in flight is never abandoned
+    // with an unknown outcome.
+    guard method == "GET" else { return try blocking(submit) }
+    return try labyrinthBlocking(deadline: LabyrinthCallbackGate.readDeadline, submit)
   }
 
   public func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair] {
@@ -296,12 +301,15 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     throw OrchestratorBridgeError.Api(message: "this gateway does not reach the account's PDS Space (\(nsid))")
   }
 
-  /// `blocking` with a deadline, for the Labyrinth callbacks: Rust holds its
-  /// Labyrinth lock across each one, and suspend takes that lock on the main
-  /// thread (LabyrinthCallbackGate).
-  private func labyrinthBlocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
+  /// `blocking` with a deadline, for the callbacks Rust can make while it
+  /// holds its Labyrinth lock, which suspend takes on the main thread
+  /// (LabyrinthCallbackGate).
+  private func labyrinthBlocking<T>(
+    deadline: TimeInterval = LabyrinthCallbackGate.deadline,
+    _ operation: @escaping () async throws -> T
+  ) throws -> T {
     do {
-      return try LabyrinthCallbackGate.shared.run(operation)
+      return try LabyrinthCallbackGate.shared.run(deadline: deadline, operation)
     } catch {
       throw Self.bridgeError(from: error)
     }
