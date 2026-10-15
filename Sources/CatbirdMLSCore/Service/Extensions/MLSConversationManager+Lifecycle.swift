@@ -22,6 +22,7 @@ extension MLSConversationManager {
 
   internal nonisolated static func resetSuspensionStateForTesting() {
     _isSuspending.withLock { $0 = false }
+    LabyrinthCallbackGate.shared.resetForTesting()
     MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
   }
 

@@ -229,7 +229,19 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     reason: String,
     deadlineMs: UInt64 = 1_500
   ) throws -> FfiSuspendResult {
-    try bridge.prepareForSuspend(reason: reason, deadlineMs: deadlineMs)
+    try holdingLabyrinthCallbacks {
+      try bridge.prepareForSuspend(reason: reason, deadlineMs: deadlineMs)
+    }
+  }
+
+  /// Runs a bridge call that takes Rust's Labyrinth slot lock on this thread
+  /// (suspend, shutdown, emergency close). The archive worker holds that lock
+  /// while it makes gated callbacks, so the gate stays shut for the call: the
+  /// callbacks in flight fail at once, and none can start and keep the lock.
+  private func holdingLabyrinthCallbacks<T>(_ body: () throws -> T) rethrows -> T {
+    LabyrinthCallbackGate.shared.beginSuspensionHold()
+    defer { LabyrinthCallbackGate.shared.endSuspensionHold() }
+    return try body()
   }
 
   /// Prepare one canonical signed mutation through the Rust-owned signer.
@@ -261,7 +273,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   public func emergencyClose(reason: String) throws {
-    try bridge.emergencyClose(reason: reason)
+    try holdingLabyrinthCallbacks { try bridge.emergencyClose(reason: reason) }
   }
 
   public func storageLifecycleStatus() -> StorageLifecycleStatus {
@@ -692,7 +704,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   }
 
   public func shutdown() {
-    bridge.shutdown()
+    holdingLabyrinthCallbacks { bridge.shutdown() }
   }
 
   private func encodePayloadJson(_ payload: MLSMessagePayload) throws -> String {
