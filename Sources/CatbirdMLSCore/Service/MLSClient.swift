@@ -125,6 +125,7 @@ public actor MLSClient {
   /// Set suspension flag (idempotent). Call synchronously when scenePhase becomes inactive/background.
   public nonisolated static func markSuspensionInProgress(reason: String = "unknown") {
     emergencyState.withLock { $0.suspensionInProgress = true }
+    LabyrinthCallbackGate.shared.suspend()
     MLSCoreContext.markSuspensionInProgress()
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
@@ -142,12 +143,13 @@ public actor MLSClient {
   }
 
   /// Clear suspension flag (idempotent). Call when the app returns to foreground, or when BGTasks
-  /// need to run MLS work while the app is backgrounded.
+  /// need to run MLS work while the app is backgrounded. Reopens the Labyrinth callbacks too.
   public nonisolated static func clearSuspensionFlag(reason: String = "unknown") {
     emergencyState.withLock {
       $0.suspensionInProgress = false
       $0.cacheInvalidated = false
     }
+    LabyrinthCallbackGate.shared.resume()
     MLSCoreContext.clearSuspensionFlag()
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
@@ -163,6 +165,7 @@ public actor MLSClient {
       state.suspensionInProgress = true
       state.cacheInvalidated = true
     }
+    LabyrinthCallbackGate.shared.suspend()
 
     MLSSuspensionFlightRecorder.shared.record(
       .flushStarted,

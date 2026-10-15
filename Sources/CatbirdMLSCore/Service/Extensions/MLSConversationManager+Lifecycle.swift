@@ -15,16 +15,16 @@ extension MLSConversationManager {
   private static let _isSuspending = Mutex<Bool>(false)
 
   /// Check if MLS operations are suspended for app backgrounding
-  /// Setting it also suspends or resumes the Labyrinth callbacks, so a
-  /// callback in flight cannot hold Rust's Labyrinth lock through suspend.
+  /// Setting it also suspends the Labyrinth callbacks, so a callback in flight
+  /// cannot hold Rust's Labyrinth lock through suspend. They reopen with the
+  /// FFI suspension flag (`MLSClient.clearSuspensionFlag`), which a BGTask
+  /// clears to run MLS work while this flag stays set.
   public var isSuspending: Bool {
     get { Self._isSuspending.withLock { $0 } }
     set {
       Self._isSuspending.withLock { $0 = newValue }
       if newValue {
         LabyrinthCallbackGate.shared.suspend()
-      } else {
-        LabyrinthCallbackGate.shared.resume()
       }
     }
   }

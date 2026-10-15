@@ -72,6 +72,21 @@ final class LabyrinthCallbackGateTests: XCTestCase {
     MLSConversationManager.resetSuspensionStateForTesting()
     XCTAssertEqual(try LabyrinthCallbackGate.shared.run { 3 }, 3)
   }
+
+  func testTheSharedGateFollowsTheFFISuspensionFlag() throws {
+    defer {
+      MLSCoreContext.clearSuspensionFlag()
+      MLSClient.clearSuspensionFlag(reason: "gate test cleanup")
+      MLSConversationManager.resetSuspensionStateForTesting()
+    }
+    MLSClient.markSuspensionInProgress(reason: "gate test")
+    XCTAssertThrowsError(try LabyrinthCallbackGate.shared.run { 1 }) {
+      XCTAssertEqual($0 as? LabyrinthCallbackError, .suspended)
+    }
+    // A BGTask clears only the FFI flag before it runs MLS work.
+    MLSClient.clearSuspensionFlag(reason: "gate test BGTask")
+    XCTAssertEqual(try LabyrinthCallbackGate.shared.run { 4 }, 4)
+  }
 }
 
 private final class ErrorBox: @unchecked Sendable {

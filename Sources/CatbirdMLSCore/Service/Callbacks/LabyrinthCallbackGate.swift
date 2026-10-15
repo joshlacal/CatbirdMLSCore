@@ -7,10 +7,11 @@
 //  canonical reads the archive flush makes. Suspending the app takes that
 //  same lock on the main thread, so a callback must not wait out a slow
 //  network: each one gets a deadline, and suspension cancels the ones in
-//  flight and refuses new ones until the app resumes. Rust retries the
-//  archive later. A failed Labyrinth request or canonical read is a transport
-//  error there; a failed mailboxKeys read counts towards quarantine until
-//  the FFI carries catbird-mls #20.
+//  flight and refuses new ones until the FFI suspension flag clears, on
+//  foreground or when a BGTask runs MLS work. Rust retries the archive
+//  later. A failed Labyrinth request or canonical read is a transport error
+//  there; a failed mailboxKeys read counts towards quarantine until the FFI
+//  carries catbird-mls #20.
 //
 
 import Foundation
