@@ -1,3 +1,4 @@
+import CatbirdMLS
 import Foundation
 import XCTest
 @testable import CatbirdMLSCore
@@ -94,17 +95,85 @@ final class LabyrinthCallbackGateTests: XCTestCase {
       MLSClient.clearSuspensionFlag(reason: "gate race test cleanup")
       MLSConversationManager.resetSuspensionStateForTesting()
     }
+    // The flag write that mark, clear and the emergency close share, without
+    // their flight-recorder and logging side effects.
     for round in 0..<20000 {
       DispatchQueue.concurrentPerform(iterations: 2) { index in
-        if index == 0 {
-          MLSClient.markSuspensionInProgress(reason: "gate race test")
-        } else {
-          MLSClient.clearSuspensionFlag(reason: "gate race test")
-        }
+        MLSClient.writeSuspensionFlag(index == 0, cacheInvalidated: nil).forEach { $0() }
       }
       let admitted = (try? LabyrinthCallbackGate.shared.run { true }) ?? false
       XCTAssertEqual(admitted, !MLSClient.isSuspensionInProgress, "round \(round)")
     }
+  }
+
+  func testASuspensionHoldOutlastsResume() throws {
+    let gate = LabyrinthCallbackGate()
+    gate.beginSuspensionHold()
+    gate.resume()
+    XCTAssertThrowsError(try gate.run { 1 }) {
+      XCTAssertEqual($0 as? LabyrinthCallbackError, .suspended)
+    }
+    gate.endSuspensionHold()
+    XCTAssertEqual(try gate.run { 2 }, 2)
+  }
+
+  func testRuntimeCallsThatTakeRustsLabyrinthLockHoldTheGate() throws {
+    defer { MLSConversationManager.resetSuspensionStateForTesting() }
+    let bridge = GateProbeBridge()
+    let runtime = MLSOrchestratorRuntime(userDID: "did:plc:gate", mode: .rustFull, bridge: bridge)
+    _ = try runtime.prepareForSuspend(reason: "gate test")
+    runtime.shutdown()
+    try runtime.emergencyClose(reason: "gate test")
+    XCTAssertEqual(
+      bridge.admittedDuring,
+      ["prepareForSuspend": false, "shutdown": false, "emergencyClose": false]
+    )
+    XCTAssertEqual(try LabyrinthCallbackGate.shared.run { 1 }, 1)
+  }
+
+  func testABackgroundTaskClearDuringSuspensionWaitsForTheHold() throws {
+    defer {
+      MLSCoreContext.clearSuspensionFlag()
+      MLSClient.clearSuspensionFlag(reason: "gate hold test cleanup")
+      MLSConversationManager.resetSuspensionStateForTesting()
+    }
+    LabyrinthCallbackGate.shared.beginSuspensionHold()
+    MLSClient.markSuspensionInProgress(reason: "gate hold test")
+    MLSClient.clearSuspensionFlag(reason: "gate hold test BGTask")
+    XCTAssertThrowsError(try LabyrinthCallbackGate.shared.run { 1 })
+    LabyrinthCallbackGate.shared.endSuspensionHold()
+    XCTAssertEqual(try LabyrinthCallbackGate.shared.run { 2 }, 2)
+  }
+}
+
+/// Records whether the shared gate admits a callback while each lifecycle
+/// call that takes Rust's Labyrinth lock is running.
+private final class GateProbeBridge: OrchestratorBridge {
+  private(set) var admittedDuring: [String: Bool] = [:]
+
+  init() {
+    super.init(noPointer: .init())
+  }
+
+  required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+    super.init(unsafeFromRawPointer: pointer)
+  }
+
+  private func probe(_ call: String) {
+    admittedDuring[call] = (try? LabyrinthCallbackGate.shared.run { true }) ?? false
+  }
+
+  override func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult {
+    probe("prepareForSuspend")
+    return FfiSuspendResult(acceptingNewWork: false, interruptedContexts: 0)
+  }
+
+  override func shutdown() {
+    probe("shutdown")
+  }
+
+  override func emergencyClose(reason: String) throws {
+    probe("emergencyClose")
   }
 }
 

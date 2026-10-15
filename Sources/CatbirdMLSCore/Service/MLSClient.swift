@@ -122,16 +122,30 @@ public actor MLSClient {
     emergencyState.withLock { $0.suspensionInProgress }
   }
 
-  /// Set suspension flag (idempotent). Call synchronously when scenePhase becomes inactive/background.
-  public nonisolated static func markSuspensionInProgress(reason: String = "unknown") {
-    // The Labyrinth gate changes under the same lock as the flag, so a racing
-    // clear cannot leave it open while the flag is set. The callbacks in
-    // flight are cancelled once the lock is released.
-    let labyrinthInFlight = emergencyState.withLock { state in
-      state.suspensionInProgress = true
+  /// Writes the suspension flag and the shared Labyrinth gate in one critical
+  /// section, so a racing mark and clear always leave them agreeing. When it
+  /// shuts the gate it returns the cancellers of the callbacks in flight, for
+  /// the caller to run once the lock is released.
+  internal nonisolated static func writeSuspensionFlag(
+    _ inProgress: Bool,
+    cacheInvalidated: Bool?
+  ) -> [@Sendable () -> Void] {
+    emergencyState.withLock { state in
+      state.suspensionInProgress = inProgress
+      if let cacheInvalidated {
+        state.cacheInvalidated = cacheInvalidated
+      }
+      guard inProgress else {
+        LabyrinthCallbackGate.shared.resume()
+        return []
+      }
       return LabyrinthCallbackGate.shared.shut()
     }
-    labyrinthInFlight.forEach { $0() }
+  }
+
+  /// Set suspension flag (idempotent). Call synchronously when scenePhase becomes inactive/background.
+  public nonisolated static func markSuspensionInProgress(reason: String = "unknown") {
+    writeSuspensionFlag(true, cacheInvalidated: nil).forEach { $0() }
     MLSCoreContext.markSuspensionInProgress()
     MLSSuspensionFlightRecorder.shared.record(
       .suspensionPrepare,
@@ -151,11 +165,7 @@ public actor MLSClient {
   /// Clear suspension flag (idempotent). Call when the app returns to foreground, or when BGTasks
   /// need to run MLS work while the app is backgrounded. Reopens the Labyrinth callbacks too.
   public nonisolated static func clearSuspensionFlag(reason: String = "unknown") {
-    emergencyState.withLock {
-      $0.suspensionInProgress = false
-      $0.cacheInvalidated = false
-      LabyrinthCallbackGate.shared.resume()
-    }
+    _ = writeSuspensionFlag(false, cacheInvalidated: false)
     MLSCoreContext.clearSuspensionFlag()
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
@@ -167,12 +177,7 @@ public actor MLSClient {
   /// Emergency synchronous close of all Rust MLS contexts.
   /// Safe to call from any thread and without actor isolation.
   public nonisolated static func emergencyCloseAllContexts(reason: String = "unknown") {
-    let labyrinthInFlight = emergencyState.withLock { state in
-      state.suspensionInProgress = true
-      state.cacheInvalidated = true
-      return LabyrinthCallbackGate.shared.shut()
-    }
-    labyrinthInFlight.forEach { $0() }
+    writeSuspensionFlag(true, cacheInvalidated: true).forEach { $0() }
 
     MLSSuspensionFlightRecorder.shared.record(
       .flushStarted,

@@ -7,9 +7,11 @@
 //  canonical reads the archive flush makes. Suspending the app takes that
 //  same lock on the main thread, so a callback must not wait out a slow
 //  network: each one gets a deadline, and suspension cancels the ones in
-//  flight and refuses new ones until the FFI suspension flag clears, on
-//  foreground or when a BGTask runs MLS work. Rust retries the archive
-//  later. A failed Labyrinth request or canonical read is a transport error
+//  flight and refuses new ones. The shared gate follows MLSClient's FFI
+//  suspension flag, which clears on foreground or when a BGTask runs MLS
+//  work. The runtime calls that take that lock on the calling thread
+//  (suspend, shutdown, emergency close) also hold it shut until they return,
+//  whatever the flag does meanwhile. Rust retries the archive later. A failed Labyrinth request or canonical read is a transport error
 //  there; a failed mailboxKeys read counts towards quarantine until the FFI
 //  carries catbird-mls #20.
 //
@@ -44,6 +46,7 @@ final class LabyrinthCallbackGate: @unchecked Sendable {
 
   private let lock = NSLock()
   private var suspended = false
+  private var holds = 0
   private var cancellers: [UUID: @Sendable () -> Void] = [:]
 
   /// Refuses new callbacks and fails the ones in flight at once.
@@ -68,6 +71,29 @@ final class LabyrinthCallbackGate: @unchecked Sendable {
     lock.unlock()
   }
 
+  /// Keeps the gate shut until the matching `endSuspensionHold()`, even if
+  /// `resume()` runs meanwhile, and fails the callbacks in flight at once.
+  func beginSuspensionHold() {
+    lock.lock()
+    holds += 1
+    let pending = Array(cancellers.values)
+    lock.unlock()
+    pending.forEach { $0() }
+  }
+
+  func endSuspensionHold() {
+    lock.lock()
+    holds = max(0, holds - 1)
+    lock.unlock()
+  }
+
+  func resetForTesting() {
+    lock.lock()
+    suspended = false
+    holds = 0
+    lock.unlock()
+  }
+
   /// Runs `operation` for a synchronous callback and waits at most `deadline`.
   func run<T>(
     deadline: TimeInterval = LabyrinthCallbackGate.deadline,
@@ -76,7 +102,7 @@ final class LabyrinthCallbackGate: @unchecked Sendable {
     let call = Call<T>()
     let id = UUID()
     lock.lock()
-    if suspended {
+    if suspended || holds > 0 {
       lock.unlock()
       throw LabyrinthCallbackError.suspended
     }
