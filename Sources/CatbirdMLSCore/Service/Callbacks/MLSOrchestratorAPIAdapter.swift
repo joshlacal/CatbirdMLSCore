@@ -82,7 +82,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     body: Data?,
     query: Data?
   ) throws -> FfiGatewayResponse {
-    let result = try blocking {
+    let submit = { () async throws -> FfiGatewayResponse in
       let (data, httpResponse) = try await self.apiClient.submitPreparedRequest(
         method: method,
         nsid: nsid,
@@ -95,7 +95,12 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         body: data
       )
     }
-    return result
+    // The Labyrinth archive flush reads getConversationState through here
+    // while Rust holds the lock suspension waits for, so reads go through
+    // the gate. Procedures do not: a mutation in flight is never abandoned
+    // with an unknown outcome.
+    guard method == "GET" else { return try blocking(submit) }
+    return try labyrinthBlocking(deadline: LabyrinthCallbackGate.readDeadline, submit)
   }
 
   public func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair] {
@@ -250,7 +255,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     headers: [FfiLabyrinthHeader]
   ) throws -> FfiGatewayResponse {
     let pairs = headers.map { (name: $0.name, value: $0.value) }
-    return try blocking {
+    return try labyrinthBlocking {
       let (data, response) = try await self.apiClient.submitLabyrinthRequest(
         method: method, nsid: nsid, path: path, body: body, headers: pairs)
       return FfiGatewayResponse(
@@ -266,19 +271,19 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   }
 
   public func putLabyrinthMailboxKeys(rkey: String, record: Data) throws {
-    try blocking {
+    try labyrinthBlocking {
       try await self.apiClient.putLabyrinthMailboxKeys(rkey: rkey, record: record)
     }
   }
 
   public func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data? {
-    try blocking {
+    try labyrinthBlocking {
       try await self.apiClient.getLabyrinthMailboxKeys(did: did, rkey: rkey)
     }
   }
 
   public func deleteLabyrinthMailboxKeys() throws {
-    try blocking {
+    try labyrinthBlocking(deadline: LabyrinthCallbackGate.retractDeadline) {
       try await self.apiClient.deleteLabyrinthMailboxKeys()
     }
   }
@@ -294,6 +299,20 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     body: Data?
   ) throws -> FfiGatewayResponse {
     throw OrchestratorBridgeError.Api(message: "this gateway does not reach the account's PDS Space (\(nsid))")
+  }
+
+  /// `blocking` with a deadline, for the callbacks Rust can make while it
+  /// holds its Labyrinth lock, which suspend takes on the main thread
+  /// (LabyrinthCallbackGate).
+  private func labyrinthBlocking<T>(
+    deadline: TimeInterval = LabyrinthCallbackGate.deadline,
+    _ operation: @escaping () async throws -> T
+  ) throws -> T {
+    do {
+      return try LabyrinthCallbackGate.shared.run(deadline: deadline, operation)
+    } catch {
+      throw Self.bridgeError(from: error)
+    }
   }
 
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {

@@ -10,7 +10,8 @@
 //  proxies `atproto-proxy` requests with a fixed header allowlist and drops
 //  them, so these calls go straight to the delivery service with a
 //  service-auth token minted by `com.atproto.server.getServiceAuth`, the same
-//  token (aud = service DID, lxm = NSID) the PDS would mint when proxying.
+//  token (aud = `did#serviceId` service reference, lxm = NSID) the PDS would
+//  mint when proxying.
 //
 
 import Foundation
@@ -19,10 +20,9 @@ import Petrel
 extension MLSAPIClient {
   static let labyrinthNamespacePrefix = "blue.catbird.labyrinth."
   static let labyrinthMailboxKeysCollection = "blue.catbird.labyrinth.mailboxKeys"
-  /// mls-ds rejects service-auth tokens living longer than 60 s (exp - iat).
-  /// `exp` uses this device's clock and `iat` the PDS's, so leave margin.
-  private static let labyrinthServiceAuthLifetime: TimeInterval = 50
   private static let labyrinthEndpointCacheLifetime: TimeInterval = 600
+  private static let labyrinthPublicReadLimits = NetworkResponseLimits(
+    maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
 
   /// Errors from the Labyrinth transport. The adapter maps them to
   /// `OrchestratorBridgeError.Api`.
@@ -46,6 +46,24 @@ extension MLSAPIClient {
   static func splitServiceDID(_ serviceDID: String) -> (did: String, fragment: String) {
     guard let hash = serviceDID.firstIndex(of: "#") else { return (serviceDID, "#atproto_mls") }
     return (String(serviceDID[..<hash]), String(serviceDID[hash...]))
+  }
+
+  /// The service-auth `aud`: the full `did#serviceId` reference, which atproto
+  /// says new software should send and the service's own check matches exactly.
+  static func serviceAuthAudience(_ serviceDID: String) -> String {
+    let (did, fragment) = splitServiceDID(serviceDID)
+    return did + fragment
+  }
+
+  /// The cursor for the next `listRecords` page, or nil at the end. An empty
+  /// page can still carry a cursor; only its absence ends the listing. A
+  /// cursor seen before means the PDS is not advancing.
+  static func nextListRecordsCursor(_ page: [String: Any], seen: inout Set<String>) throws -> String? {
+    guard let cursor = page["cursor"] as? String, !cursor.isEmpty else { return nil }
+    guard seen.insert(cursor).inserted else {
+      throw LabyrinthTransportError.pdsFailure("listRecords repeated cursor")
+    }
+    return cursor
   }
 
   /// Validates what Rust asked for: only Labyrinth NSIDs, and a path that is
@@ -90,7 +108,7 @@ extension MLSAPIClient {
     let (did, fragment) = Self.splitServiceDID(serviceDID)
     let document = try await SpaceHostResolver.fetchDIDDocument(
       for: did,
-      limits: NetworkResponseLimits(maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576))
+      limits: Self.labyrinthPublicReadLimits)
     let endpoint = try Self.labyrinthServiceEndpoint(in: document, did: did, fragment: fragment)
     LabyrinthEndpointCache.shared.store(
       endpoint, for: serviceDID, lifetime: Self.labyrinthEndpointCacheLifetime)
@@ -115,10 +133,12 @@ extension MLSAPIClient {
       throw LabyrinthTransportError.invalidRequest("path \(path)")
     }
 
-    let (audience, _) = Self.splitServiceDID(mlsServiceDID)
-    let expiry = Int(Date().addingTimeInterval(Self.labyrinthServiceAuthLifetime).timeIntervalSince1970)
+    let audience = Self.serviceAuthAudience(mlsServiceDID)
+    // No `exp`: the PDS then sets both `iat` and `exp` (iat + 60 s) from its own
+    // clock, the most mls-ds accepts. An `exp` from this device's clock would
+    // fail whenever the device runs fast.
     let (status, output) = try await client.com.atproto.server.getServiceAuth(
-      input: .init(aud: audience, exp: expiry, lxm: try NSID(nsidString: nsid)))
+      input: .init(aud: audience, lxm: try NSID(nsidString: nsid)))
     guard (200...299).contains(status), let token = output?.token, !token.isEmpty else {
       throw LabyrinthTransportError.serviceAuthFailed(status)
     }
@@ -168,45 +188,71 @@ extension MLSAPIClient {
 
   /// `com.atproto.repo.getRecord` from `did`'s own PDS, unauthenticated.
   /// Returns the record value JSON, or nil when the record or repo is absent.
+  /// The PDS URL comes from the peer's own DID document, so the read goes
+  /// through Petrel's bounded public fetch (public addresses only, no
+  /// redirects, 1 MiB cap).
   public func getLabyrinthMailboxKeys(did: String, rkey: String) async throws -> Data? {
-    let pds = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
-    guard var components = URLComponents(
-      url: pds.appendingPathComponent("xrpc/com.atproto.repo.getRecord"),
-      resolvingAgainstBaseURL: false)
-    else {
+    let pds: URL
+    do {
+      pds = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
+    } catch let error where Self.isAbsentPDS(error) {
+      return nil
+    }
+    guard let url = Self.mailboxKeysGetRecordURL(pds: pds, did: did, rkey: rkey) else {
       throw LabyrinthTransportError.pdsFailure("bad PDS URL")
     }
+    let (data, http) = try await SpaceHostResolver.fetchBoundedPublicJSON(
+      from: url, limits: Self.labyrinthPublicReadLimits,
+      fixtureSession: MLSPublicPDSReader.authorizationSession)
+    return try Self.mailboxKeysValue(fromGetRecord: data, status: http.statusCode)
+  }
+
+  /// The unauthenticated `getRecord` URL on `pds`, keeping any base path.
+  static func mailboxKeysGetRecordURL(pds: URL, did: String, rkey: String) -> URL? {
+    guard pds.scheme?.lowercased() == "https",
+          var components = URLComponents(url: pds, resolvingAgainstBaseURL: false)
+    else { return nil }
+    var basePath = components.path
+    if basePath.hasSuffix("/") { basePath.removeLast() }
+    components.path = basePath + "/xrpc/com.atproto.repo.getRecord"
     components.queryItems = [
       URLQueryItem(name: "repo", value: did),
-      URLQueryItem(name: "collection", value: Self.labyrinthMailboxKeysCollection),
+      URLQueryItem(name: "collection", value: labyrinthMailboxKeysCollection),
       URLQueryItem(name: "rkey", value: rkey),
     ]
-    guard let url = components.url else { throw LabyrinthTransportError.pdsFailure("bad query") }
-    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.timeoutInterval = 15
-    let (data, response) = try await MLSPublicPDSReader.authorizationSession.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw LabyrinthTransportError.pdsFailure("non-HTTP response")
+    return components.url
+  }
+
+  /// True when resolving `did`'s PDS failed because there is none to read: the
+  /// DID document is gone (404, or 410 for a PLC tombstone) or names no usable
+  /// `#atproto_pds` service. Network and parse failures stay errors.
+  static func isAbsentPDS(_ error: Error) -> Bool {
+    if let reader = error as? MLSPublicPDSReader.ReaderError, case .invalidEndpoint = reader {
+      return true
     }
-    return try Self.mailboxKeysValue(fromGetRecord: data, status: http.statusCode)
+    if let resolution = error as? SpaceHostResolutionError,
+       case let .networkError(message) = resolution {
+      return message == "HTTP status 404" || message == "HTTP status 410"
+    }
+    return false
   }
 
   /// Maps a `getRecord` response to the record value JSON (nil = absent).
   static func mailboxKeysValue(fromGetRecord data: Data, status: Int) throws -> Data? {
-    let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     switch status {
     case 200:
+      let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
       guard let value = object?["value"] as? [String: Any] else {
         throw LabyrinthTransportError.pdsFailure("getRecord without a value")
       }
       return try JSONSerialization.data(withJSONObject: value)
     case 400, 404:
-      let error = object?["error"] as? String
-      if error == "RecordNotFound" || error == "RepoNotFound" || (status == 404 && error == nil) {
-        return nil
-      }
-      throw LabyrinthTransportError.pdsFailure("getRecord \(status) \(error ?? "")")
+      // The query is fixed and well formed, so these mean the record or its
+      // repo is not there. A PDS answers a deleted, deactivated or taken-down
+      // repo with 400 InvalidRequest ("Could not locate record"), and the
+      // AppView it pipes to with "Could not find repo". Rust then falls back
+      // to the delivery service's directory for that member.
+      return nil
     default:
       throw LabyrinthTransportError.pdsFailure("getRecord \(status)")
     }
@@ -217,6 +263,7 @@ extension MLSAPIClient {
   public func deleteLabyrinthMailboxKeys() async throws {
     guard let did = await authenticatedUserDID() else { throw MLSAPIError.noAuthentication }
     var cursor: String?
+    var seenCursors = Set<String>()
     var rkeys: [String] = []
     repeat {
       var query = [
@@ -234,7 +281,7 @@ extension MLSAPIClient {
       }
       let records = object["records"] as? [[String: Any]] ?? []
       rkeys += records.compactMap { ($0["uri"] as? String)?.split(separator: "/").last.map(String.init) }
-      cursor = records.isEmpty ? nil : object["cursor"] as? String
+      cursor = try Self.nextListRecordsCursor(object, seen: &seenCursors)
     } while cursor != nil
 
     for rkey in rkeys {
@@ -274,6 +321,7 @@ final class LabyrinthEndpointCache: @unchecked Sendable {
     configuration.urlCredentialStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    configuration.timeoutIntervalForResource = LabyrinthCallbackGate.deadline
     return URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
   }()
 
