@@ -238,8 +238,9 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   // MARK: - Labyrinth history backup (catbird-mls feature `labyrinth`)
   //
   // UniFFI callback methods cannot be cfg-gated, so they are in every build.
-  // iOS does not implement Labyrinth yet: these mirror the Rust refusing
-  // defaults, and only a `labyrinth` build would call them.
+  // Labyrinth XRPCs go straight to the delivery service with a service-auth
+  // token (MLSAPIClient+Labyrinth.swift): a PDS proxy would drop the signed
+  // write headers. mailboxKeys records live in the account's own repo.
 
   public func submitLabyrinthRequest(
     method: String,
@@ -248,23 +249,38 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     body: Data?,
     headers: [FfiLabyrinthHeader]
   ) throws -> FfiGatewayResponse {
-    throw OrchestratorBridgeError.Api(message: "this gateway does not implement Labyrinth requests (\(nsid))")
+    let pairs = headers.map { (name: $0.name, value: $0.value) }
+    return try blocking {
+      let (data, response) = try await self.apiClient.submitLabyrinthRequest(
+        method: method, nsid: nsid, path: path, body: body, headers: pairs)
+      return FfiGatewayResponse(
+        status: UInt16(clamping: response.statusCode),
+        contentType: response.value(forHTTPHeaderField: "Content-Type"),
+        body: data
+      )
+    }
   }
 
   public func labyrinthPdsEnabled() -> Bool {
-    false
+    true
   }
 
   public func putLabyrinthMailboxKeys(rkey: String, record: Data) throws {
-    throw OrchestratorBridgeError.Api(message: "PDS mailboxKeys publication is not implemented")
+    try blocking {
+      try await self.apiClient.putLabyrinthMailboxKeys(rkey: rkey, record: record)
+    }
   }
 
   public func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data? {
-    throw OrchestratorBridgeError.Api(message: "PDS mailboxKeys lookup is not implemented")
+    try blocking {
+      try await self.apiClient.getLabyrinthMailboxKeys(did: did, rkey: rkey)
+    }
   }
 
   public func deleteLabyrinthMailboxKeys() throws {
-    throw OrchestratorBridgeError.Api(message: "PDS mailboxKeys deletion is not implemented")
+    try blocking {
+      try await self.apiClient.deleteLabyrinthMailboxKeys()
+    }
   }
 
   public func labyrinthSpaceEnabled() -> Bool {
