@@ -283,7 +283,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   }
 
   public func deleteLabyrinthMailboxKeys() throws {
-    try labyrinthBlocking {
+    try labyrinthBlocking(deadline: LabyrinthCallbackGate.retractDeadline) {
       try await self.apiClient.deleteLabyrinthMailboxKeys()
     }
   }

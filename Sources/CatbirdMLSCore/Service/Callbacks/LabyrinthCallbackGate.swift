@@ -35,6 +35,11 @@ final class LabyrinthCallbackGate: @unchecked Sendable {
   /// a large page: the network layer's own idle timeout, so only a hung read
   /// is cut short. Suspension still cancels it at once.
   static let readDeadline: TimeInterval = 120
+  /// The same for retracting the account's `mailboxKeys`, which lists and
+  /// deletes every per-epoch record one request at a time. Suspension still
+  /// cancels it at once, and a retraction cut short keeps what it deleted:
+  /// the purge records its remote half as pending and retries it.
+  static let retractDeadline: TimeInterval = 120
 
   private let lock = NSLock()
   private var suspended = false
