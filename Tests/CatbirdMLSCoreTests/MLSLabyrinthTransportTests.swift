@@ -52,6 +52,30 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(Client.splitServiceDID("did:web:ds.example").fragment, "#atproto_mls")
   }
 
+  func testServiceAuthAudienceKeepsTheServiceFragment() {
+    XCTAssertEqual(
+      Client.serviceAuthAudience("did:web:chat.catbird.blue#atproto_mls"),
+      "did:web:chat.catbird.blue#atproto_mls")
+    XCTAssertEqual(Client.serviceAuthAudience("did:web:ds.example"), "did:web:ds.example#atproto_mls")
+  }
+
+  // MARK: - Record listing
+
+  func testListingFollowsTheCursorPastAnEmptyPage() throws {
+    var seen = Set<String>()
+    XCTAssertEqual(
+      try Client.nextListRecordsCursor(["records": [[String: Any]](), "cursor": "page2"], seen: &seen), "page2")
+    XCTAssertNil(try Client.nextListRecordsCursor(["records": [[String: Any]]()], seen: &seen))
+    XCTAssertNil(try Client.nextListRecordsCursor(["records": [[String: Any]](), "cursor": ""], seen: &seen))
+  }
+
+  func testListingRefusesARepeatedCursor() throws {
+    var seen = Set<String>()
+    _ = try Client.nextListRecordsCursor(["cursor": "a"], seen: &seen)
+    _ = try Client.nextListRecordsCursor(["cursor": "b"], seen: &seen)
+    XCTAssertThrowsError(try Client.nextListRecordsCursor(["cursor": "a"], seen: &seen))
+  }
+
   private func document(_ json: String) throws -> DIDDocument {
     try JSONDecoder().decode(DIDDocument.self, from: Data(json.utf8))
   }

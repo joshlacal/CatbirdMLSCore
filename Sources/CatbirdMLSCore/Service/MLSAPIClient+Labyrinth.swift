@@ -10,7 +10,8 @@
 //  proxies `atproto-proxy` requests with a fixed header allowlist and drops
 //  them, so these calls go straight to the delivery service with a
 //  service-auth token minted by `com.atproto.server.getServiceAuth`, the same
-//  token (aud = service DID, lxm = NSID) the PDS would mint when proxying.
+//  token (aud = `did#serviceId` service reference, lxm = NSID) the PDS would
+//  mint when proxying.
 //
 
 import Foundation
@@ -45,6 +46,24 @@ extension MLSAPIClient {
   static func splitServiceDID(_ serviceDID: String) -> (did: String, fragment: String) {
     guard let hash = serviceDID.firstIndex(of: "#") else { return (serviceDID, "#atproto_mls") }
     return (String(serviceDID[..<hash]), String(serviceDID[hash...]))
+  }
+
+  /// The service-auth `aud`: the full `did#serviceId` reference, which atproto
+  /// says new software should send and the service's own check matches exactly.
+  static func serviceAuthAudience(_ serviceDID: String) -> String {
+    let (did, fragment) = splitServiceDID(serviceDID)
+    return did + fragment
+  }
+
+  /// The cursor for the next `listRecords` page, or nil at the end. An empty
+  /// page can still carry a cursor; only its absence ends the listing. A
+  /// cursor seen before means the PDS is not advancing.
+  static func nextListRecordsCursor(_ page: [String: Any], seen: inout Set<String>) throws -> String? {
+    guard let cursor = page["cursor"] as? String, !cursor.isEmpty else { return nil }
+    guard seen.insert(cursor).inserted else {
+      throw LabyrinthTransportError.pdsFailure("listRecords repeated cursor")
+    }
+    return cursor
   }
 
   /// Validates what Rust asked for: only Labyrinth NSIDs, and a path that is
@@ -114,7 +133,7 @@ extension MLSAPIClient {
       throw LabyrinthTransportError.invalidRequest("path \(path)")
     }
 
-    let (audience, _) = Self.splitServiceDID(mlsServiceDID)
+    let audience = Self.serviceAuthAudience(mlsServiceDID)
     // No `exp`: the PDS then sets both `iat` and `exp` (iat + 60 s) from its own
     // clock, the most mls-ds accepts. An `exp` from this device's clock would
     // fail whenever the device runs fast.
@@ -244,6 +263,7 @@ extension MLSAPIClient {
   public func deleteLabyrinthMailboxKeys() async throws {
     guard let did = await authenticatedUserDID() else { throw MLSAPIError.noAuthentication }
     var cursor: String?
+    var seenCursors = Set<String>()
     var rkeys: [String] = []
     repeat {
       var query = [
@@ -261,7 +281,7 @@ extension MLSAPIClient {
       }
       let records = object["records"] as? [[String: Any]] ?? []
       rkeys += records.compactMap { ($0["uri"] as? String)?.split(separator: "/").last.map(String.init) }
-      cursor = records.isEmpty ? nil : object["cursor"] as? String
+      cursor = try Self.nextListRecordsCursor(object, seen: &seenCursors)
     } while cursor != nil
 
     for rkey in rkeys {
