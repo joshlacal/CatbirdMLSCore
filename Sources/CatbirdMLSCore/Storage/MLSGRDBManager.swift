@@ -3610,6 +3610,11 @@ public actor MLSGRDBManager {
 
   /// Check if an error indicates SQLite error 7 / resource exhaustion.
   private nonisolated func isSQLiteError7(_ error: Error) -> Bool {
+    // SQLite reports a closed connection as SQLITE_MISUSE (21) with the message
+    // "out of memory", so a GRDB error is classified by its result code alone.
+    if let databaseError = error as? DatabaseError {
+      return databaseError.resultCode == .SQLITE_NOMEM
+    }
     let desc = error.localizedDescription.lowercased()
     return desc.contains("sqlite error 7") || desc.contains("out of memory")
   }
