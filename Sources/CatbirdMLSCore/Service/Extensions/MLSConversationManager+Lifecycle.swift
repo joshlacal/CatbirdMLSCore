@@ -15,13 +15,23 @@ extension MLSConversationManager {
   private static let _isSuspending = Mutex<Bool>(false)
 
   /// Check if MLS operations are suspended for app backgrounding
+  /// Setting it also suspends or resumes the Labyrinth callbacks, so a
+  /// callback in flight cannot hold Rust's Labyrinth lock through suspend.
   public var isSuspending: Bool {
     get { Self._isSuspending.withLock { $0 } }
-    set { Self._isSuspending.withLock { $0 = newValue } }
+    set {
+      Self._isSuspending.withLock { $0 = newValue }
+      if newValue {
+        LabyrinthCallbackGate.shared.suspend()
+      } else {
+        LabyrinthCallbackGate.shared.resume()
+      }
+    }
   }
 
   internal nonisolated static func resetSuspensionStateForTesting() {
     _isSuspending.withLock { $0 = false }
+    LabyrinthCallbackGate.shared.resume()
     MLSContextFreeLifecycleSuspensionOwner.resetForTesting()
   }
 

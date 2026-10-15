@@ -99,16 +99,49 @@ final class MLSLabyrinthTransportTests: XCTestCase {
   }
 
   func testGetRecordMapsAbsentRecordsAndReposToNil() throws {
-    XCTAssertNil(try Client.mailboxKeysValue(
-      fromGetRecord: Data(#"{"error":"RecordNotFound","message":"x"}"#.utf8), status: 400))
-    XCTAssertNil(try Client.mailboxKeysValue(
-      fromGetRecord: Data(#"{"error":"RepoNotFound"}"#.utf8), status: 400))
+    let absent = [
+      (400, #"{"error":"RecordNotFound","message":"x"}"#),
+      // A PDS with no local account for the DID (deleted, deactivated, taken down).
+      (400, #"{"error":"InvalidRequest","message":"Could not locate record"}"#),
+      // The AppView a PDS pipes that request to.
+      (400, #"{"error":"InvalidRequest","message":"Could not find repo: did:plc:x"}"#),
+      (400, #"{"error":"RepoDeactivated"}"#),
+      (404, ""),
+    ]
+    for (status, body) in absent {
+      XCTAssertNil(try Client.mailboxKeysValue(fromGetRecord: Data(body.utf8), status: status), body)
+    }
   }
 
   func testGetRecordSurfacesOtherFailures() {
-    XCTAssertThrowsError(try Client.mailboxKeysValue(
-      fromGetRecord: Data(#"{"error":"InvalidRequest"}"#.utf8), status: 400))
     XCTAssertThrowsError(try Client.mailboxKeysValue(fromGetRecord: Data(), status: 500))
+    XCTAssertThrowsError(try Client.mailboxKeysValue(
+      fromGetRecord: Data(#"{"error":"RateLimitExceeded"}"#.utf8), status: 429))
     XCTAssertThrowsError(try Client.mailboxKeysValue(fromGetRecord: Data("{}".utf8), status: 200))
+  }
+
+  func testGetRecordURLKeepsThePDSBasePath() throws {
+    let url = try XCTUnwrap(Client.mailboxKeysGetRecordURL(
+      pds: try XCTUnwrap(URL(string: "https://pds.example/base/")), did: "did:plc:x", rkey: "self"))
+    let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+    XCTAssertEqual(components.host, "pds.example")
+    XCTAssertEqual(components.path, "/base/xrpc/com.atproto.repo.getRecord")
+    XCTAssertEqual(components.queryItems, [
+      URLQueryItem(name: "repo", value: "did:plc:x"),
+      URLQueryItem(name: "collection", value: "blue.catbird.labyrinth.mailboxKeys"),
+      URLQueryItem(name: "rkey", value: "self"),
+    ])
+    XCTAssertNil(Client.mailboxKeysGetRecordURL(
+      pds: try XCTUnwrap(URL(string: "http://pds.example")), did: "did:plc:x", rkey: "self"))
+  }
+
+  func testGoneOrPDSlessIdentitiesReadAsAbsent() {
+    XCTAssertTrue(Client.isAbsentPDS(MLSPublicPDSReader.ReaderError.invalidEndpoint))
+    XCTAssertTrue(Client.isAbsentPDS(SpaceHostResolutionError.networkError("HTTP status 404")))
+    XCTAssertTrue(Client.isAbsentPDS(SpaceHostResolutionError.networkError("HTTP status 410")))
+    XCTAssertFalse(Client.isAbsentPDS(SpaceHostResolutionError.networkError("HTTP status 503")))
+    XCTAssertFalse(Client.isAbsentPDS(SpaceHostResolutionError.networkError("The request timed out.")))
+    XCTAssertFalse(Client.isAbsentPDS(MLSPublicPDSReader.ReaderError.invalidResponse))
+    XCTAssertFalse(Client.isAbsentPDS(URLError(.notConnectedToInternet)))
   }
 }

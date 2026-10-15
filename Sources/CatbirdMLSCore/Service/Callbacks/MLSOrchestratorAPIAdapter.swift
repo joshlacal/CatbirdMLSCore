@@ -250,7 +250,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     headers: [FfiLabyrinthHeader]
   ) throws -> FfiGatewayResponse {
     let pairs = headers.map { (name: $0.name, value: $0.value) }
-    return try blocking {
+    return try labyrinthBlocking {
       let (data, response) = try await self.apiClient.submitLabyrinthRequest(
         method: method, nsid: nsid, path: path, body: body, headers: pairs)
       return FfiGatewayResponse(
@@ -266,19 +266,19 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   }
 
   public func putLabyrinthMailboxKeys(rkey: String, record: Data) throws {
-    try blocking {
+    try labyrinthBlocking {
       try await self.apiClient.putLabyrinthMailboxKeys(rkey: rkey, record: record)
     }
   }
 
   public func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data? {
-    try blocking {
+    try labyrinthBlocking {
       try await self.apiClient.getLabyrinthMailboxKeys(did: did, rkey: rkey)
     }
   }
 
   public func deleteLabyrinthMailboxKeys() throws {
-    try blocking {
+    try labyrinthBlocking {
       try await self.apiClient.deleteLabyrinthMailboxKeys()
     }
   }
@@ -294,6 +294,17 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     body: Data?
   ) throws -> FfiGatewayResponse {
     throw OrchestratorBridgeError.Api(message: "this gateway does not reach the account's PDS Space (\(nsid))")
+  }
+
+  /// `blocking` with a deadline, for the Labyrinth callbacks: Rust holds its
+  /// Labyrinth lock across each one, and suspend takes that lock on the main
+  /// thread (LabyrinthCallbackGate).
+  private func labyrinthBlocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
+    do {
+      return try LabyrinthCallbackGate.shared.run(operation)
+    } catch {
+      throw Self.bridgeError(from: error)
+    }
   }
 
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
