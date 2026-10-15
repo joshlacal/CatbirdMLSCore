@@ -3555,6 +3555,105 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult
 
     /**
+     * What background archiving and deletion could not do (show it):
+     * quarantined messages, members left out of a conversation's archive
+     * (with pin conflicts to resolve), dropped messages, and a pending
+     * remote deletion.
+     */
+    func labyrinthArchiveStatus() throws -> FfiLabyrinthArchiveStatus
+
+    /**
+     * Forget the recorded exclusions and dropped messages (the user saw them).
+     */
+    func labyrinthClearArchiveReports() throws
+
+    /**
+     * Create a recovery code. Show it to the user once; it is not stored.
+     */
+    func labyrinthCreateRecoveryCode() throws -> String
+
+    /**
+     * Delete the account's history backup everywhere: the server mailbox
+     * and every message the account archived (shown to others as removed),
+     * the PDS `mailboxKeys` records, and this device's state. This
+     * device's state is erased even if the server cannot be reached; the
+     * remote half is then retried (`remote_pending`).
+     */
+    func labyrinthDeleteAccount() throws -> FfiLabyrinthDeletion
+
+    /**
+     * Turn on encrypted history backup for the signed-in account on this
+     * device. Returns this device's Labyrinth device key (hex).
+     */
+    func labyrinthEnableBackup() throws -> String
+
+    /**
+     * Archive every queued sent message now. Call it when the app is about
+     * to suspend and at launch (a killed process leaves its queue saved).
+     * Returns how many messages were archived.
+     */
+    func labyrinthFlushArchive() throws -> UInt64
+
+    /**
+     * Store a conversation's archived history locally (new device).
+     */
+    func labyrinthImportHistory(conversationId: String) throws -> FfiLabyrinthImport
+
+    /**
+     * The conversations this account has backed-up history in. A
+     * non-empty `incomplete_sequencers` means the list is partial.
+     */
+    func labyrinthListThreads() throws -> FfiLabyrinthThreads
+
+    /**
+     * Decrypted history of a conversation in `[from_ms, until_ms)`.
+     */
+    func labyrinthLoadHistoryPage(conversationId: String, fromMs: UInt64?, untilMs: UInt64?) throws -> FfiLabyrinthHistory
+
+    /**
+     * A contact's history keys changed (they reset their backup): the
+     * safety-number change to show, like Signal. Fails if the new keys are
+     * not vouched for by one of the contact's current chat devices.
+     */
+    func labyrinthProposeRepin(did: String) throws -> FfiLabyrinthRepinProposal
+
+    /**
+     * The user accepted the new safety number: trust the contact's new
+     * history keys (`new_head_hex` from the proposal).
+     */
+    func labyrinthRepinPeer(did: String, newHeadHex: String) throws
+
+    /**
+     * Enroll this device into the account's backup with a recovery code.
+     * Returns this device's Labyrinth device key (hex).
+     */
+    func labyrinthRestoreWithRecoveryCode(code: String) throws -> String
+
+    /**
+     * Retry every quarantined message now. Returns how many there were.
+     */
+    func labyrinthRetryQuarantined() throws -> UInt64
+
+    /**
+     * Retry a pending remote account deletion now. Returns true when
+     * nothing is pending any more.
+     */
+    func labyrinthRetryRemoteDeletion() throws -> Bool
+
+    /**
+     * Revoke another device of this account from the backup.
+     */
+    func labyrinthRevokeDevice(deviceKeyHex: String) throws -> UInt64
+
+    /**
+     * Sign-out or account removal on this device: erase this device's
+     * backup state and queue. The account's backup on the server stays, so
+     * a later sign-in restores with a recovery code. Returns whether any
+     * state was saved.
+     */
+    func labyrinthSignOut() throws -> Bool
+
+    /**
      * Leave a conversation through the Rust-owned engine and return the
      * identifiers Swift needs to clean up local state immediately.
      */
@@ -4239,6 +4338,178 @@ open class OrchestratorBridge:
         return try FfiConverterTypeFFIJoinOrRejoinResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_join_or_rejoin(self.uniffiClonePointer(),
                                                                            FfiConverterString.lower(convoId), $0)
+        })
+    }
+
+    /**
+     * What background archiving and deletion could not do (show it):
+     * quarantined messages, members left out of a conversation's archive
+     * (with pin conflicts to resolve), dropped messages, and a pending
+     * remote deletion.
+     */
+    open func labyrinthArchiveStatus() throws -> FfiLabyrinthArchiveStatus {
+        return try FfiConverterTypeFfiLabyrinthArchiveStatus.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_archive_status(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Forget the recorded exclusions and dropped messages (the user saw them).
+     */
+    open func labyrinthClearArchiveReports() throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_clear_archive_reports(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    /**
+     * Create a recovery code. Show it to the user once; it is not stored.
+     */
+    open func labyrinthCreateRecoveryCode() throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_create_recovery_code(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Delete the account's history backup everywhere: the server mailbox
+     * and every message the account archived (shown to others as removed),
+     * the PDS `mailboxKeys` records, and this device's state. This
+     * device's state is erased even if the server cannot be reached; the
+     * remote half is then retried (`remote_pending`).
+     */
+    open func labyrinthDeleteAccount() throws -> FfiLabyrinthDeletion {
+        return try FfiConverterTypeFfiLabyrinthDeletion.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_delete_account(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Turn on encrypted history backup for the signed-in account on this
+     * device. Returns this device's Labyrinth device key (hex).
+     */
+    open func labyrinthEnableBackup() throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_enable_backup(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Archive every queued sent message now. Call it when the app is about
+     * to suspend and at launch (a killed process leaves its queue saved).
+     * Returns how many messages were archived.
+     */
+    open func labyrinthFlushArchive() throws -> UInt64 {
+        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_flush_archive(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Store a conversation's archived history locally (new device).
+     */
+    open func labyrinthImportHistory(conversationId: String) throws -> FfiLabyrinthImport {
+        return try FfiConverterTypeFfiLabyrinthImport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_import_history(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
+    /**
+     * The conversations this account has backed-up history in. A
+     * non-empty `incomplete_sequencers` means the list is partial.
+     */
+    open func labyrinthListThreads() throws -> FfiLabyrinthThreads {
+        return try FfiConverterTypeFfiLabyrinthThreads.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_list_threads(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Decrypted history of a conversation in `[from_ms, until_ms)`.
+     */
+    open func labyrinthLoadHistoryPage(conversationId: String, fromMs: UInt64?, untilMs: UInt64?) throws -> FfiLabyrinthHistory {
+        return try FfiConverterTypeFfiLabyrinthHistory.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_load_history_page(self.uniffiClonePointer(),
+                                                                                        FfiConverterString.lower(conversationId),
+                                                                                        FfiConverterOptionUInt64.lower(fromMs),
+                                                                                        FfiConverterOptionUInt64.lower(untilMs), $0)
+        })
+    }
+
+    /**
+     * A contact's history keys changed (they reset their backup): the
+     * safety-number change to show, like Signal. Fails if the new keys are
+     * not vouched for by one of the contact's current chat devices.
+     */
+    open func labyrinthProposeRepin(did: String) throws -> FfiLabyrinthRepinProposal {
+        return try FfiConverterTypeFfiLabyrinthRepinProposal.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_propose_repin(self.uniffiClonePointer(),
+                                                                                    FfiConverterString.lower(did), $0)
+        })
+    }
+
+    /**
+     * The user accepted the new safety number: trust the contact's new
+     * history keys (`new_head_hex` from the proposal).
+     */
+    open func labyrinthRepinPeer(did: String, newHeadHex: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_repin_peer(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(did),
+                                                                                 FfiConverterString.lower(newHeadHex), $0)
+        }
+    }
+
+    /**
+     * Enroll this device into the account's backup with a recovery code.
+     * Returns this device's Labyrinth device key (hex).
+     */
+    open func labyrinthRestoreWithRecoveryCode(code: String) throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_restore_with_recovery_code(self.uniffiClonePointer(),
+                                                                                                 FfiConverterString.lower(code), $0)
+        })
+    }
+
+    /**
+     * Retry every quarantined message now. Returns how many there were.
+     */
+    open func labyrinthRetryQuarantined() throws -> UInt64 {
+        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_retry_quarantined(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Retry a pending remote account deletion now. Returns true when
+     * nothing is pending any more.
+     */
+    open func labyrinthRetryRemoteDeletion() throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_retry_remote_deletion(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Revoke another device of this account from the backup.
+     */
+    open func labyrinthRevokeDevice(deviceKeyHex: String) throws -> UInt64 {
+        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_revoke_device(self.uniffiClonePointer(),
+                                                                                    FfiConverterString.lower(deviceKeyHex), $0)
+        })
+    }
+
+    /**
+     * Sign-out or account removal on this device: erase this device's
+     * backup state and queue. The account's backup on the server stays, so
+     * a later sign-in restores with a recovery code. Returns whether any
+     * state was saved.
+     */
+    open func labyrinthSignOut() throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_sign_out(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -10274,6 +10545,973 @@ public func FfiConverterTypeFfiKeyPackageBindingClassification_lower(_ value: Ff
     return FfiConverterTypeFfiKeyPackageBindingClassification.lower(value)
 }
 
+/**
+ * What background Labyrinth work could not do.
+ */
+public struct FfiLabyrinthArchiveStatus {
+    public var pending: UInt64
+    public var quarantined: [FfiLabyrinthQuarantined]
+    public var excludedMembers: [FfiLabyrinthExcludedMember]
+    public var dropped: [FfiLabyrinthDropped]
+    /**
+     * The last error of an account deletion whose remote half is pending.
+     */
+    public var remoteDeletionPending: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(pending: UInt64, quarantined: [FfiLabyrinthQuarantined], excludedMembers: [FfiLabyrinthExcludedMember], dropped: [FfiLabyrinthDropped],
+                /* 
+                    * The last error of an account deletion whose remote half is pending.
+                    */ remoteDeletionPending: String?)
+    {
+        self.pending = pending
+        self.quarantined = quarantined
+        self.excludedMembers = excludedMembers
+        self.dropped = dropped
+        self.remoteDeletionPending = remoteDeletionPending
+    }
+}
+
+extension FfiLabyrinthArchiveStatus: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthArchiveStatus, rhs: FfiLabyrinthArchiveStatus) -> Bool {
+        if lhs.pending != rhs.pending {
+            return false
+        }
+        if lhs.quarantined != rhs.quarantined {
+            return false
+        }
+        if lhs.excludedMembers != rhs.excludedMembers {
+            return false
+        }
+        if lhs.dropped != rhs.dropped {
+            return false
+        }
+        if lhs.remoteDeletionPending != rhs.remoteDeletionPending {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(pending)
+        hasher.combine(quarantined)
+        hasher.combine(excludedMembers)
+        hasher.combine(dropped)
+        hasher.combine(remoteDeletionPending)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthArchiveStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthArchiveStatus {
+        return
+            try FfiLabyrinthArchiveStatus(
+                pending: FfiConverterUInt64.read(from: &buf),
+                quarantined: FfiConverterSequenceTypeFfiLabyrinthQuarantined.read(from: &buf),
+                excludedMembers: FfiConverterSequenceTypeFfiLabyrinthExcludedMember.read(from: &buf),
+                dropped: FfiConverterSequenceTypeFfiLabyrinthDropped.read(from: &buf),
+                remoteDeletionPending: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthArchiveStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.pending, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthQuarantined.write(value.quarantined, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthExcludedMember.write(value.excludedMembers, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthDropped.write(value.dropped, into: &buf)
+        FfiConverterOptionString.write(value.remoteDeletionPending, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthArchiveStatus_lift(_ buf: RustBuffer) throws -> FfiLabyrinthArchiveStatus {
+    return try FfiConverterTypeFfiLabyrinthArchiveStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthArchiveStatus_lower(_ value: FfiLabyrinthArchiveStatus) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthArchiveStatus.lower(value)
+}
+
+/**
+ * What account deletion did.
+ */
+public struct FfiLabyrinthDeletion {
+    /**
+     * Publishers that could not retract their records.
+     */
+    public var publishersNotRetracted: UInt64
+    /**
+     * The remote half failed with this error and is retried in the
+     * background; this device's state is erased regardless.
+     */
+    public var remotePending: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * Publishers that could not retract their records.
+         */ publishersNotRetracted: UInt64,
+        /* 
+            * The remote half failed with this error and is retried in the
+            * background; this device's state is erased regardless.
+            */ remotePending: String?
+    ) {
+        self.publishersNotRetracted = publishersNotRetracted
+        self.remotePending = remotePending
+    }
+}
+
+extension FfiLabyrinthDeletion: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthDeletion, rhs: FfiLabyrinthDeletion) -> Bool {
+        if lhs.publishersNotRetracted != rhs.publishersNotRetracted {
+            return false
+        }
+        if lhs.remotePending != rhs.remotePending {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(publishersNotRetracted)
+        hasher.combine(remotePending)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthDeletion: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthDeletion {
+        return
+            try FfiLabyrinthDeletion(
+                publishersNotRetracted: FfiConverterUInt64.read(from: &buf),
+                remotePending: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthDeletion, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.publishersNotRetracted, into: &buf)
+        FfiConverterOptionString.write(value.remotePending, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDeletion_lift(_ buf: RustBuffer) throws -> FfiLabyrinthDeletion {
+    return try FfiConverterTypeFfiLabyrinthDeletion.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDeletion_lower(_ value: FfiLabyrinthDeletion) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthDeletion.lower(value)
+}
+
+/**
+ * A queued message dropped unarchived.
+ */
+public struct FfiLabyrinthDropped {
+    public var conversationId: String
+    public var messageId: String
+    public var reason: String
+    public var atMs: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, messageId: String, reason: String, atMs: UInt64) {
+        self.conversationId = conversationId
+        self.messageId = messageId
+        self.reason = reason
+        self.atMs = atMs
+    }
+}
+
+extension FfiLabyrinthDropped: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthDropped, rhs: FfiLabyrinthDropped) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.atMs != rhs.atMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(messageId)
+        hasher.combine(reason)
+        hasher.combine(atMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthDropped: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthDropped {
+        return
+            try FfiLabyrinthDropped(
+                conversationId: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf),
+                atMs: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthDropped, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterUInt64.write(value.atMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDropped_lift(_ buf: RustBuffer) throws -> FfiLabyrinthDropped {
+    return try FfiConverterTypeFfiLabyrinthDropped.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDropped_lower(_ value: FfiLabyrinthDropped) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthDropped.lower(value)
+}
+
+/**
+ * A member left out of a conversation's archive (it cannot read the
+ * messages archived meanwhile).
+ */
+public struct FfiLabyrinthExcludedMember {
+    public var conversationId: String
+    public var did: String
+    public var reason: String
+    /**
+     * A pin conflict: offer `labyrinth_propose_repin(did)`.
+     */
+    public var needsRepin: Bool
+    public var atMs: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, did: String, reason: String,
+                /* 
+                    * A pin conflict: offer `labyrinth_propose_repin(did)`.
+                    */ needsRepin: Bool, atMs: UInt64)
+    {
+        self.conversationId = conversationId
+        self.did = did
+        self.reason = reason
+        self.needsRepin = needsRepin
+        self.atMs = atMs
+    }
+}
+
+extension FfiLabyrinthExcludedMember: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthExcludedMember, rhs: FfiLabyrinthExcludedMember) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.did != rhs.did {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.needsRepin != rhs.needsRepin {
+            return false
+        }
+        if lhs.atMs != rhs.atMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(did)
+        hasher.combine(reason)
+        hasher.combine(needsRepin)
+        hasher.combine(atMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthExcludedMember: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthExcludedMember {
+        return
+            try FfiLabyrinthExcludedMember(
+                conversationId: FfiConverterString.read(from: &buf),
+                did: FfiConverterString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf),
+                needsRepin: FfiConverterBool.read(from: &buf),
+                atMs: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthExcludedMember, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.did, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterBool.write(value.needsRepin, into: &buf)
+        FfiConverterUInt64.write(value.atMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthExcludedMember_lift(_ buf: RustBuffer) throws -> FfiLabyrinthExcludedMember {
+    return try FfiConverterTypeFfiLabyrinthExcludedMember.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthExcludedMember_lower(_ value: FfiLabyrinthExcludedMember) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthExcludedMember.lower(value)
+}
+
+/**
+ * One page of decrypted history.
+ */
+public struct FfiLabyrinthHistory {
+    public var messages: [FfiLabyrinthMessage]
+    public var undecryptableCount: UInt64
+    public var spaceReadable: Bool
+    public var redacted: [FfiLabyrinthRedacted]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messages: [FfiLabyrinthMessage], undecryptableCount: UInt64, spaceReadable: Bool, redacted: [FfiLabyrinthRedacted]) {
+        self.messages = messages
+        self.undecryptableCount = undecryptableCount
+        self.spaceReadable = spaceReadable
+        self.redacted = redacted
+    }
+}
+
+extension FfiLabyrinthHistory: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthHistory, rhs: FfiLabyrinthHistory) -> Bool {
+        if lhs.messages != rhs.messages {
+            return false
+        }
+        if lhs.undecryptableCount != rhs.undecryptableCount {
+            return false
+        }
+        if lhs.spaceReadable != rhs.spaceReadable {
+            return false
+        }
+        if lhs.redacted != rhs.redacted {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messages)
+        hasher.combine(undecryptableCount)
+        hasher.combine(spaceReadable)
+        hasher.combine(redacted)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthHistory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthHistory {
+        return
+            try FfiLabyrinthHistory(
+                messages: FfiConverterSequenceTypeFfiLabyrinthMessage.read(from: &buf),
+                undecryptableCount: FfiConverterUInt64.read(from: &buf),
+                spaceReadable: FfiConverterBool.read(from: &buf),
+                redacted: FfiConverterSequenceTypeFfiLabyrinthRedacted.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthHistory, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiLabyrinthMessage.write(value.messages, into: &buf)
+        FfiConverterUInt64.write(value.undecryptableCount, into: &buf)
+        FfiConverterBool.write(value.spaceReadable, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthRedacted.write(value.redacted, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthHistory_lift(_ buf: RustBuffer) throws -> FfiLabyrinthHistory {
+    return try FfiConverterTypeFfiLabyrinthHistory.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthHistory_lower(_ value: FfiLabyrinthHistory) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthHistory.lower(value)
+}
+
+/**
+ * What importing a conversation's history stored.
+ */
+public struct FfiLabyrinthImport {
+    public var imported: UInt64
+    public var alreadyPresent: UInt64
+    public var skipped: UInt64
+    public var undecryptable: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(imported: UInt64, alreadyPresent: UInt64, skipped: UInt64, undecryptable: UInt64) {
+        self.imported = imported
+        self.alreadyPresent = alreadyPresent
+        self.skipped = skipped
+        self.undecryptable = undecryptable
+    }
+}
+
+extension FfiLabyrinthImport: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthImport, rhs: FfiLabyrinthImport) -> Bool {
+        if lhs.imported != rhs.imported {
+            return false
+        }
+        if lhs.alreadyPresent != rhs.alreadyPresent {
+            return false
+        }
+        if lhs.skipped != rhs.skipped {
+            return false
+        }
+        if lhs.undecryptable != rhs.undecryptable {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(imported)
+        hasher.combine(alreadyPresent)
+        hasher.combine(skipped)
+        hasher.combine(undecryptable)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthImport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthImport {
+        return
+            try FfiLabyrinthImport(
+                imported: FfiConverterUInt64.read(from: &buf),
+                alreadyPresent: FfiConverterUInt64.read(from: &buf),
+                skipped: FfiConverterUInt64.read(from: &buf),
+                undecryptable: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthImport, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.imported, into: &buf)
+        FfiConverterUInt64.write(value.alreadyPresent, into: &buf)
+        FfiConverterUInt64.write(value.skipped, into: &buf)
+        FfiConverterUInt64.write(value.undecryptable, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthImport_lift(_ buf: RustBuffer) throws -> FfiLabyrinthImport {
+    return try FfiConverterTypeFfiLabyrinthImport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthImport_lower(_ value: FfiLabyrinthImport) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthImport.lower(value)
+}
+
+/**
+ * One decrypted history message.
+ */
+public struct FfiLabyrinthMessage {
+    public var messageId: String
+    /**
+     * Absent for owner-archive copies, which carry no sender.
+     */
+    public var senderDid: String?
+    public var timestampMs: UInt64
+    /**
+     * The archived frame: the sent `MLSMessagePayload` JSON.
+     */
+    public var frame: Data
+    /**
+     * True for a copy from this account's own re-archive.
+     */
+    public var fromOwnerArchive: Bool
+    /**
+     * Another copy shares this message id ([CB-31]); show both.
+     */
+    public var conflict: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String,
+                /* 
+                    * Absent for owner-archive copies, which carry no sender.
+                    */ senderDid: String?, timestampMs: UInt64,
+                /* 
+                    * The archived frame: the sent `MLSMessagePayload` JSON.
+                    */ frame: Data,
+                /* 
+                    * True for a copy from this account's own re-archive.
+                    */ fromOwnerArchive: Bool,
+                /* 
+                    * Another copy shares this message id ([CB-31]); show both.
+                    */ conflict: Bool)
+    {
+        self.messageId = messageId
+        self.senderDid = senderDid
+        self.timestampMs = timestampMs
+        self.frame = frame
+        self.fromOwnerArchive = fromOwnerArchive
+        self.conflict = conflict
+    }
+}
+
+extension FfiLabyrinthMessage: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthMessage, rhs: FfiLabyrinthMessage) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.timestampMs != rhs.timestampMs {
+            return false
+        }
+        if lhs.frame != rhs.frame {
+            return false
+        }
+        if lhs.fromOwnerArchive != rhs.fromOwnerArchive {
+            return false
+        }
+        if lhs.conflict != rhs.conflict {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(senderDid)
+        hasher.combine(timestampMs)
+        hasher.combine(frame)
+        hasher.combine(fromOwnerArchive)
+        hasher.combine(conflict)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthMessage {
+        return
+            try FfiLabyrinthMessage(
+                messageId: FfiConverterString.read(from: &buf),
+                senderDid: FfiConverterOptionString.read(from: &buf),
+                timestampMs: FfiConverterUInt64.read(from: &buf),
+                frame: FfiConverterData.read(from: &buf),
+                fromOwnerArchive: FfiConverterBool.read(from: &buf),
+                conflict: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterOptionString.write(value.senderDid, into: &buf)
+        FfiConverterUInt64.write(value.timestampMs, into: &buf)
+        FfiConverterData.write(value.frame, into: &buf)
+        FfiConverterBool.write(value.fromOwnerArchive, into: &buf)
+        FfiConverterBool.write(value.conflict, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthMessage_lift(_ buf: RustBuffer) throws -> FfiLabyrinthMessage {
+    return try FfiConverterTypeFfiLabyrinthMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthMessage_lower(_ value: FfiLabyrinthMessage) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthMessage.lower(value)
+}
+
+/**
+ * A queued message the archive skips until retried.
+ */
+public struct FfiLabyrinthQuarantined {
+    public var conversationId: String
+    public var messageId: String
+    public var failures: UInt32
+    public var lastError: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, messageId: String, failures: UInt32, lastError: String?) {
+        self.conversationId = conversationId
+        self.messageId = messageId
+        self.failures = failures
+        self.lastError = lastError
+    }
+}
+
+extension FfiLabyrinthQuarantined: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthQuarantined, rhs: FfiLabyrinthQuarantined) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.failures != rhs.failures {
+            return false
+        }
+        if lhs.lastError != rhs.lastError {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(messageId)
+        hasher.combine(failures)
+        hasher.combine(lastError)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthQuarantined: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthQuarantined {
+        return
+            try FfiLabyrinthQuarantined(
+                conversationId: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterString.read(from: &buf),
+                failures: FfiConverterUInt32.read(from: &buf),
+                lastError: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthQuarantined, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterUInt32.write(value.failures, into: &buf)
+        FfiConverterOptionString.write(value.lastError, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthQuarantined_lift(_ buf: RustBuffer) throws -> FfiLabyrinthQuarantined {
+    return try FfiConverterTypeFfiLabyrinthQuarantined.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthQuarantined_lower(_ value: FfiLabyrinthQuarantined) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthQuarantined.lower(value)
+}
+
+/**
+ * One redacted history message.
+ */
+public struct FfiLabyrinthRedacted {
+    public var messageId: String
+    public var senderDid: String
+    public var timestampMs: UInt64
+    public var label: FfiLabyrinthRedactionLabel
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String, senderDid: String, timestampMs: UInt64, label: FfiLabyrinthRedactionLabel) {
+        self.messageId = messageId
+        self.senderDid = senderDid
+        self.timestampMs = timestampMs
+        self.label = label
+    }
+}
+
+extension FfiLabyrinthRedacted: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthRedacted, rhs: FfiLabyrinthRedacted) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.timestampMs != rhs.timestampMs {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(senderDid)
+        hasher.combine(timestampMs)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthRedacted: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRedacted {
+        return
+            try FfiLabyrinthRedacted(
+                messageId: FfiConverterString.read(from: &buf),
+                senderDid: FfiConverterString.read(from: &buf),
+                timestampMs: FfiConverterUInt64.read(from: &buf),
+                label: FfiConverterTypeFfiLabyrinthRedactionLabel.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthRedacted, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.senderDid, into: &buf)
+        FfiConverterUInt64.write(value.timestampMs, into: &buf)
+        FfiConverterTypeFfiLabyrinthRedactionLabel.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedacted_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRedacted {
+    return try FfiConverterTypeFfiLabyrinthRedacted.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedacted_lower(_ value: FfiLabyrinthRedacted) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthRedacted.lower(value)
+}
+
+/**
+ * A safety-number change to confirm before re-pinning a peer.
+ */
+public struct FfiLabyrinthRepinProposal {
+    public var did: String
+    public var pinnedEpoch: UInt64?
+    public var oldSafetyNumber: String?
+    public var newEpoch: UInt64
+    /**
+     * Pass back to `labyrinth_repin_peer` once the user accepts.
+     */
+    public var newHeadHex: String
+    public var newSafetyNumber: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(did: String, pinnedEpoch: UInt64?, oldSafetyNumber: String?, newEpoch: UInt64,
+                /* 
+                    * Pass back to `labyrinth_repin_peer` once the user accepts.
+                    */ newHeadHex: String, newSafetyNumber: String)
+    {
+        self.did = did
+        self.pinnedEpoch = pinnedEpoch
+        self.oldSafetyNumber = oldSafetyNumber
+        self.newEpoch = newEpoch
+        self.newHeadHex = newHeadHex
+        self.newSafetyNumber = newSafetyNumber
+    }
+}
+
+extension FfiLabyrinthRepinProposal: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthRepinProposal, rhs: FfiLabyrinthRepinProposal) -> Bool {
+        if lhs.did != rhs.did {
+            return false
+        }
+        if lhs.pinnedEpoch != rhs.pinnedEpoch {
+            return false
+        }
+        if lhs.oldSafetyNumber != rhs.oldSafetyNumber {
+            return false
+        }
+        if lhs.newEpoch != rhs.newEpoch {
+            return false
+        }
+        if lhs.newHeadHex != rhs.newHeadHex {
+            return false
+        }
+        if lhs.newSafetyNumber != rhs.newSafetyNumber {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(did)
+        hasher.combine(pinnedEpoch)
+        hasher.combine(oldSafetyNumber)
+        hasher.combine(newEpoch)
+        hasher.combine(newHeadHex)
+        hasher.combine(newSafetyNumber)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthRepinProposal: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRepinProposal {
+        return
+            try FfiLabyrinthRepinProposal(
+                did: FfiConverterString.read(from: &buf),
+                pinnedEpoch: FfiConverterOptionUInt64.read(from: &buf),
+                oldSafetyNumber: FfiConverterOptionString.read(from: &buf),
+                newEpoch: FfiConverterUInt64.read(from: &buf),
+                newHeadHex: FfiConverterString.read(from: &buf),
+                newSafetyNumber: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthRepinProposal, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.did, into: &buf)
+        FfiConverterOptionUInt64.write(value.pinnedEpoch, into: &buf)
+        FfiConverterOptionString.write(value.oldSafetyNumber, into: &buf)
+        FfiConverterUInt64.write(value.newEpoch, into: &buf)
+        FfiConverterString.write(value.newHeadHex, into: &buf)
+        FfiConverterString.write(value.newSafetyNumber, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRepinProposal_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRepinProposal {
+    return try FfiConverterTypeFfiLabyrinthRepinProposal.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRepinProposal_lower(_ value: FfiLabyrinthRepinProposal) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthRepinProposal.lower(value)
+}
+
+/**
+ * The conversations this account has history in.
+ */
+public struct FfiLabyrinthThreads {
+    public var conversationIds: [String]
+    /**
+     * Sequencer DSes mls-ds could not reach: the list may miss their
+     * conversations.
+     */
+    public var incompleteSequencers: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationIds: [String],
+                /* 
+                    * Sequencer DSes mls-ds could not reach: the list may miss their
+                    * conversations.
+                    */ incompleteSequencers: [String])
+    {
+        self.conversationIds = conversationIds
+        self.incompleteSequencers = incompleteSequencers
+    }
+}
+
+extension FfiLabyrinthThreads: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthThreads, rhs: FfiLabyrinthThreads) -> Bool {
+        if lhs.conversationIds != rhs.conversationIds {
+            return false
+        }
+        if lhs.incompleteSequencers != rhs.incompleteSequencers {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationIds)
+        hasher.combine(incompleteSequencers)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthThreads: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthThreads {
+        return
+            try FfiLabyrinthThreads(
+                conversationIds: FfiConverterSequenceString.read(from: &buf),
+                incompleteSequencers: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthThreads, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.conversationIds, into: &buf)
+        FfiConverterSequenceString.write(value.incompleteSequencers, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthThreads_lift(_ buf: RustBuffer) throws -> FfiLabyrinthThreads {
+    return try FfiConverterTypeFfiLabyrinthThreads.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthThreads_lower(_ value: FfiLabyrinthThreads) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthThreads.lower(value)
+}
+
 public struct FfiPeerBadErrorClassification {
     public var peerBad: Bool
     public var quarantineTriggerEligible: Bool
@@ -14015,6 +15253,77 @@ public func FfiConverterTypeFfiKeyPackageBindingStatus_lower(_ value: FfiKeyPack
 }
 
 extension FfiKeyPackageBindingStatus: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * How a redacted history message must be labelled.
+ */
+
+public enum FfiLabyrinthRedactionLabel {
+    /**
+     * Signed by one of the author's chat devices: "unsent".
+     */
+    case unsent
+    /**
+     * Signed by the conversation's sequencer DS: "deleted (account
+     * removed)".
+     */
+    case accountDeleted
+    /**
+     * Nothing proves why: "removed by server".
+     */
+    case removedByServer
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthRedactionLabel: FfiConverterRustBuffer {
+    typealias SwiftType = FfiLabyrinthRedactionLabel
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRedactionLabel {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .unsent
+
+        case 2: return .accountDeleted
+
+        case 3: return .removedByServer
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiLabyrinthRedactionLabel, into buf: inout [UInt8]) {
+        switch value {
+        case .unsent:
+            writeInt(&buf, Int32(1))
+
+        case .accountDeleted:
+            writeInt(&buf, Int32(2))
+
+        case .removedByServer:
+            writeInt(&buf, Int32(3))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedactionLabel_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRedactionLabel {
+    return try FfiConverterTypeFfiLabyrinthRedactionLabel.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedactionLabel_lower(_ value: FfiLabyrinthRedactionLabel) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthRedactionLabel.lower(value)
+}
+
+extension FfiLabyrinthRedactionLabel: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -19720,6 +21029,131 @@ private struct FfiConverterSequenceTypeFFISequencerReceipt: FfiConverterRustBuff
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeFfiLabyrinthDropped: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthDropped]
+
+    static func write(_ value: [FfiLabyrinthDropped], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthDropped.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthDropped] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthDropped]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthDropped.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthExcludedMember: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthExcludedMember]
+
+    static func write(_ value: [FfiLabyrinthExcludedMember], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthExcludedMember.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthExcludedMember] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthExcludedMember]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthExcludedMember.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthMessage: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthMessage]
+
+    static func write(_ value: [FfiLabyrinthMessage], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthMessage.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthMessage] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthMessage]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthMessage.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthQuarantined: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthQuarantined]
+
+    static func write(_ value: [FfiLabyrinthQuarantined], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthQuarantined.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthQuarantined] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthQuarantined]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthQuarantined.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthRedacted: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthRedacted]
+
+    static func write(_ value: [FfiLabyrinthRedacted], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthRedacted.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthRedacted] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthRedacted]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthRedacted.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuffer {
     typealias SwiftType = [GroupMemberDebugInfo]
 
@@ -21016,6 +22450,54 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_or_rejoin() != 36176 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_archive_status() != 48156 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_clear_archive_reports() != 53397 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_create_recovery_code() != 55022 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_delete_account() != 53128 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_enable_backup() != 48619 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_flush_archive() != 35191 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_import_history() != 50211 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_list_threads() != 27839 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_load_history_page() != 29804 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_propose_repin() != 328 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_repin_peer() != 16050 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_restore_with_recovery_code() != 46432 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_retry_quarantined() != 35706 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_retry_remote_deletion() != 46636 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_revoke_device() != 15568 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_sign_out() != 46632 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_conversation() != 20896 {
