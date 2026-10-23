@@ -4,6 +4,13 @@ import XCTest
 @testable import CatbirdMLSCore
 
 final class MLSLabyrinthTransportTests: XCTestCase {
+  func testSpaceCapabilityRequiresVerifiedLocalNativeArtifact() {
+    #if CATBIRD_MLS_VERIFIED_SPACE_FFI
+    XCTAssertTrue(MLSAPIClient.labyrinthSpaceTransportAvailable)
+    #else
+    XCTAssertFalse(MLSAPIClient.labyrinthSpaceTransportAvailable)
+    #endif
+  }
   private typealias Client = MLSAPIClient
   private typealias TransportError = MLSAPIClient.LabyrinthTransportError
 
@@ -44,6 +51,91 @@ final class MLSLabyrinthTransportTests: XCTestCase {
   }
 
   // MARK: - Service resolution
+
+  func testOwnerSpaceCallbackUsesOnlyItsPersonalMailbox() throws {
+    let did = "did:plc:alice"
+    let nsid = "com.atproto.space.listRecords"
+    let prefix = "/xrpc/\(nsid)?space=at://\(did)/space/blue.catbird.labyrinth.mailbox/self&repo="
+    let suffix = "&collection=blue.catbird.labyrinth.epoch&limit=50"
+    let query = try Client.validateLabyrinthSpaceRequest(
+      did: did, method: "GET", nsid: nsid, path: prefix + did + suffix, body: nil)
+    XCTAssertEqual(query?.first(where: { $0.name == "repo" })?.value, did)
+    for path in [prefix + "did:plc:bob" + suffix,
+                 prefix + did + suffix + "&repo=did:plc:bob",
+                 prefix + did + suffix + "#fragment",
+                 prefix.replacingOccurrences(of: "mailbox/self", with: "conversation/thread") + did + suffix] {
+      XCTAssertThrowsError(try Client.validateLabyrinthSpaceRequest(
+        did: did, method: "GET", nsid: nsid, path: path, body: nil))
+    }
+    XCTAssertThrowsError(try Client.validateLabyrinthSpaceRequest(
+      did: did, method: "GET", nsid: "com.atproto.space.getRepo",
+      path: "/xrpc/com.atproto.space.getRepo", body: nil))
+  }
+
+  func testOwnerSpaceWritesCannotEscapeMailboxCollections() throws {
+    let did = "did:plc:alice"
+    let nsid = "com.atproto.space.applyWrites"
+    func body(collection: String, repo: String = "did:plc:alice") throws -> Data {
+      try JSONSerialization.data(withJSONObject: [
+        "space": "at://\(did)/space/blue.catbird.labyrinth.mailbox/self", "repo": repo,
+        "writes": [["$type": "com.atproto.space.applyWrites#create", "collection": collection,
+                    "rkey": "0", "value": ["$type": collection]]],
+      ])
+    }
+    XCTAssertNoThrow(try Client.validateLabyrinthSpaceRequest(
+      did: did, method: "POST", nsid: nsid, path: "/xrpc/\(nsid)",
+      body: body(collection: "blue.catbird.labyrinth.epoch")))
+    for data in [try body(collection: "app.bsky.feed.post"),
+                 try body(collection: "blue.catbird.labyrinth.epoch", repo: "did:plc:bob")] {
+      XCTAssertThrowsError(try Client.validateLabyrinthSpaceRequest(
+        did: did, method: "POST", nsid: nsid, path: "/xrpc/\(nsid)", body: data))
+    }
+  }
+
+  func testConversationReadsBindCanonicalGenerationAndBatchCapability() throws {
+    let space = "at://did:plc:authority/space/blue.catbird.labyrinth.conversation/11111111-1111-4111-8111-111111111111"
+    let nsid = "com.atproto.space.getRecord"
+    let path = "/xrpc/\(nsid)?space=\(space)&repo=did:plc:bob&collection=blue.catbird.labyrinth.batch&rkey=immutable"
+    let parsed = try XCTUnwrap(Client.conversationSpaceRequest(
+      did: "did:plc:alice", method: "GET", nsid: nsid, path: path, body: nil))
+    XCTAssertEqual(parsed.repo, "did:plc:bob")
+    for bad in [path + "&repo=did:plc:alice", path + "&unexpected=1", path + "#fragment",
+                path.replacingOccurrences(of: "blue.catbird.labyrinth.batch", with: "app.bsky.feed.post"),
+                path.replacingOccurrences(of: "11111111-1111-4111-8111-111111111111", with: "old") ] {
+      XCTAssertThrowsError(try Client.conversationSpaceRequest(
+        did: "did:plc:alice", method: "GET", nsid: nsid, path: bad, body: nil))
+    }
+  }
+
+  func testConversationCleanupCannotReadOrDeleteForeignOwnedRecords() throws {
+    let space = "at://did:plc:authority/space/blue.catbird.labyrinth.conversation/11111111-1111-4111-8111-111111111111"
+    for repo in ["did:plc:alice", "did:plc:bob"] {
+      let nsid = "com.atproto.space.listRecords"
+      let path = "/xrpc/\(nsid)?space=\(space)&repo=\(repo)&collection=blue.catbird.labyrinth.batch&limit=100&excludeValues=true"
+      let body = try JSONSerialization.data(withJSONObject: ["space": space, "repo": repo,
+        "collection": "blue.catbird.labyrinth.batch", "rkey": "owned"])
+      if repo == "did:plc:alice" {
+        XCTAssertNotNil(try Client.conversationSpaceRequest(
+          did: repo, method: "GET", nsid: nsid, path: path, body: nil))
+        XCTAssertNotNil(try Client.conversationSpaceRequest(did: repo, method: "POST",
+          nsid: "com.atproto.space.deleteRecord", path: "/xrpc/com.atproto.space.deleteRecord", body: body))
+      } else {
+        XCTAssertThrowsError(try Client.conversationSpaceRequest(
+          did: "did:plc:alice", method: "GET", nsid: nsid, path: path, body: nil))
+        XCTAssertThrowsError(try Client.conversationSpaceRequest(did: "did:plc:alice", method: "POST",
+          nsid: "com.atproto.space.deleteRecord", path: "/xrpc/com.atproto.space.deleteRecord", body: body))
+      }
+    }
+  }
+
+  func testConversationInventoryIsRestrictedToHistorySpaces() throws {
+    let path = "/xrpc/com.atproto.space.listSpaces?spaceType=blue.catbird.labyrinth.conversation&limit=100"
+    XCTAssertNoThrow(try Client.validateConversationSpaceInventory(method: "GET", path: path, body: nil))
+    for bad in [path + "&did=did:plc:bob", path + "&spaceType=app.bsky.feed", path + "#fragment",
+                path.replacingOccurrences(of: "blue.catbird.labyrinth.conversation", with: "app.bsky.feed")] {
+      XCTAssertThrowsError(try Client.validateConversationSpaceInventory(method: "GET", path: bad, body: nil))
+    }
+  }
 
   func testSplitsServiceDIDIntoAudienceAndFragment() {
     let split = Client.splitServiceDID("did:web:chat.catbird.blue#atproto_mls")

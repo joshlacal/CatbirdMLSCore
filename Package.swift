@@ -36,11 +36,11 @@ let sdkDependencies: [Package.Dependency] = useLocalIntegration
     : [
         .package(
             url: "https://github.com/joshlacal/Petrel.git",
-            revision: "329b5fbe412286ff4c094246b6f30c2989e58f94"
+            revision: "89140e1aa1f41eead969732da87354b9732879c4"
         ),
         .package(
             url: "https://github.com/joshlacal/PetrelCatbird.git",
-            revision: "ff98deedc748777537f912fa4dcd208f9bbc840e"
+            revision: "b605441251441ede0848381f08192781b3519c51"
         ),
     ]
 
@@ -59,6 +59,19 @@ if let selectedFFIPath {
           selectedFFIPath.resolvingSymlinksInPath() == selectedFFIPath,
           FileManager.default.fileExists(atPath: selectedFFIPath.path) else {
         fatalError("CATBIRD_MLS_FFI_PATH must select the exact local framework at \(localFFIPath.path)")
+    }
+    // The public v1.5.21 artifact predates sequenced conversation Spaces and
+    // the accompanying deletion/key-authority fixes. Merely copying that old
+    // framework into Sources must not enable the new platform callback.
+    let marker = selectedFFIPath.appendingPathComponent("labyrinth-space-protocol.json")
+    guard let data = try? Data(contentsOf: marker),
+          let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          value["protocolVersion"] as? Int == 20261023,
+          let features = value["features"] as? [String], features.contains("labyrinth"),
+          let fingerprint = value["sourceFingerprint"] as? String,
+          fingerprint.count == 64,
+          fingerprint.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else {
+        fatalError("Local Spaces FFI requires the verified rebuild marker at \(marker.path)")
     }
 }
 let ffiTarget: Target = selectedFFIPath != nil
@@ -98,7 +111,7 @@ let package = Package(
                 "Petrel",
                 .product(name: "PetrelCatbird", package: "PetrelCatbird")
             ],
-            swiftSettings: [
+            swiftSettings: (selectedFFIPath != nil ? [.define("CATBIRD_MLS_VERIFIED_SPACE_FFI")] : []) + [
                 // Keep Swift 5 mode for UniFFI bindings compatibility
                 // UniFFI generates mutable global state that isn't Swift 6 compatible
                 .swiftLanguageMode(.v5)
@@ -121,7 +134,8 @@ let package = Package(
         ffiTarget,
         .testTarget(
             name: "CatbirdMLSCoreTests",
-            dependencies: ["CatbirdMLSCore"]
+            dependencies: ["CatbirdMLSCore"],
+            swiftSettings: selectedFFIPath != nil ? [.define("CATBIRD_MLS_VERIFIED_SPACE_FFI")] : []
         ),
         .executableTarget(
             name: "CatbirdMLSTestHost",

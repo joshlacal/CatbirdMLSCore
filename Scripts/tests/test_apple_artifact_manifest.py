@@ -52,6 +52,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct Generated {}\n")
         schema = self.petrel_catbird / "lexicons/blue/catbird/chat/blue.catbird.chat.prepareDirectRequest.json"
         write(schema, '{"lexicon":1}\n')
+        write(self.petrel_catbird / "lexicons/blue/catbird/labyrinth/blue.catbird.labyrinth.defs.json", '{"lexicon":1}\n')
 
         framework = self.core / "Sources/CatbirdMLSFFI.xcframework"
         library = framework / "ios-arm64/libCatbirdMLSFFI.a"
@@ -84,6 +85,14 @@ class AppleArtifactManifestTests(unittest.TestCase):
             name: {"jj_commit": f"{name}-commit", "jj_change": f"{name}-change"}
             for name in ("catbird-mls", "catbird-atproto", "Petrel", "PetrelCatbird")
         }
+        self.refresh_marker()
+
+    def refresh_marker(self):
+        write(self.core / "Sources/CatbirdMLSFFI.xcframework/labyrinth-space-protocol.json", json.dumps({
+            "protocolVersion": 20261023,
+            "features": ["labyrinth"],
+            "sourceFingerprint": self.module.source_bundle_fingerprint(self.native, [self.atproto]),
+        }))
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -112,7 +121,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
         self.assertEqual(
             manifest["framework"]["libraries"][0]["architectures"], ["arm64"]
         )
-        self.assertEqual(manifest["build"]["explicit_features"], [])
+        self.assertEqual(manifest["build"]["explicit_features"], ["labyrinth"])
         self.assertEqual(manifest["build"]["default_features"], True)
         self.assertEqual(len(manifest["identity"]["canonical_sha256"]), 64)
 
@@ -128,6 +137,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
     def test_verify_rejects_changed_embedded_contract_without_rust_changes(self):
         contract = self.native / "src/orchestrator/generated/blue.catbird.chat.defs.json"
         write(contract, '{"authorityDid":{"const":"did:web:chat.catbird.blue"}}\n')
+        self.refresh_marker()
         manifest = self.build()
         path = self.root / "manifest.json"
         self.module.write_manifest(path, manifest)
@@ -164,6 +174,19 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.atproto / "src/lib.rs", "pub fn changed_contract() {}\n")
 
         with self.assertRaisesRegex(RuntimeError, "catbird-atproto source fingerprint"):
+            self.module.verify_manifest(path)
+
+    def test_build_rejects_marker_from_an_older_native_source(self):
+        write(self.native / "src/lib.rs", "pub fn newer_source() {}\n")
+        with self.assertRaisesRegex(RuntimeError, "rebuild marker"):
+            self.build()
+
+    def test_verify_rejects_changed_labyrinth_contract(self):
+        manifest = self.build()
+        path = self.root / "manifest.json"
+        self.module.write_manifest(path, manifest)
+        write(self.petrel_catbird / "lexicons/blue/catbird/labyrinth/blue.catbird.labyrinth.defs.json", '{"lexicon":2}\n')
+        with self.assertRaisesRegex(RuntimeError, "schema file map"):
             self.module.verify_manifest(path)
 
     def test_verify_rejects_tampered_manifest_identity(self):

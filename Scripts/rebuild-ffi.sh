@@ -31,6 +31,19 @@ ensure_ios_sdk() {
 
 ensure_ios_sdk
 
+# This wrapper emits a Space-capable artifact marker. It must not certify an
+# artifact built with the feature disabled by an inherited environment value.
+export CATBIRD_MLS_FEATURES="${CATBIRD_MLS_FEATURES-labyrinth}"
+if ! python3 - "$CATBIRD_MLS_FEATURES" <<'PY'
+import re
+import sys
+sys.exit(0 if "labyrinth" in re.split(r"[\s,]+", sys.argv[1]) else 1)
+PY
+then
+    echo "❌ The verified Space rebuild requires CATBIRD_MLS_FEATURES to include labyrinth."
+    exit 1
+fi
+
 core_scripts_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 core_dir="$(CDPATH= cd -- "$core_scripts_dir/.." && pwd)"
 artifact_manifest_tool="$core_scripts_dir/apple-artifact-manifest.py"
@@ -124,6 +137,20 @@ preserve_if_present "$core_dir/Sources/CatbirdMLS/MLSFFI.swift" MLSFFI.swift
 echo ""
 echo "📋 Step 3: Copying XCFramework to CatbirdMLSCore..."
 cp -R CatbirdMLSFFI.xcframework "$core_dir/Sources/"
+# Written only after the complete native build and source-stability check.
+# This permits the explicit local package selector to expose Space callbacks;
+# ordinary builds using the older public artifact remain unavailable.
+python3 - "$core_dir/Sources/CatbirdMLSFFI.xcframework/labyrinth-space-protocol.json" "$source_fingerprint_after" "$CATBIRD_MLS_FEATURES" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+Path(sys.argv[1]).write_text(json.dumps({
+    "protocolVersion": 20261023,
+    "sourceFingerprint": sys.argv[2],
+    "features": sorted(set(filter(None, re.split(r"[\s,]+", sys.argv[3])))),
+}, sort_keys=True) + "\n")
+PY
 echo "✅ XCFramework copied"
 
 echo ""

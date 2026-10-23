@@ -15,8 +15,8 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 CORE = HERE.parent.resolve()
 WORKSPACE = CORE.parent.resolve()
-SELECTED_INPUTS = WORKSPACE / ".superpowers" / "sdd" / "2026-09-19-encrypted-message-requests" / "selected-inputs.json"
-APPLE_ARTIFACT_MANIFEST = HERE / "apple-artifact-manifest.json"
+SELECTED_INPUTS = HERE / "spaces-selected-inputs.json"
+APPLE_ARTIFACT_MANIFEST = HERE / "spaces-apple-artifact-manifest.json"
 APPLE_ARTIFACT_TOOL = CORE / "Scripts" / "apple-artifact-manifest.py"
 
 

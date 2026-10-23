@@ -17,6 +17,15 @@ import Foundation
 import Petrel
 
 extension MLSAPIClient {
+  /// Only the explicit local framework produced by the verified rebuild
+  /// enables Spaces. The older public binary remains a release gate.
+  static var labyrinthSpaceTransportAvailable: Bool {
+    #if CATBIRD_MLS_VERIFIED_SPACE_FFI
+    true
+    #else
+    false
+    #endif
+  }
   static let labyrinthNamespacePrefix = "blue.catbird.labyrinth."
   static let labyrinthMailboxKeysCollection = "blue.catbird.labyrinth.mailboxKeys"
   /// mls-ds rejects service-auth tokens living longer than 60 s (exp - iat).
@@ -148,6 +157,219 @@ extension MLSAPIClient {
   }
 
   // MARK: - PDS mailboxKeys records
+
+  /// Uses owner OAuth for this account's records and verified Space
+  /// credentials for a foreign sender's conversation ciphertext.
+  public func submitLabyrinthSpaceRequest(
+    method: String, nsid: String, path: String, body: Data?
+  ) async throws -> (data: Data, response: HTTPURLResponse) {
+    guard Self.labyrinthSpaceTransportAvailable else {
+      throw LabyrinthTransportError.invalidRequest("this native artifact does not enable Space history")
+    }
+    guard let did = await authenticatedUserDID() else { throw MLSAPIError.noAuthentication }
+    if nsid == "com.atproto.space.listSpaces" {
+      let query = try Self.validateConversationSpaceInventory(method: method, path: path, body: body)
+      return try await authenticatedRepoCall(method: method, endpoint: nsid, body: nil, query: query)
+    }
+    if let conversation = try Self.conversationSpaceRequest(
+      did: did, method: method, nsid: nsid, path: path, body: body) {
+      if method == "GET", conversation.repo != did {
+        // Petrel verifies the foreign record's fresh response MAC, URI and
+        // DRISL CID. Rust then binds that CID to the DS sequence reference.
+        let pds = try await MLSPublicPDSReader.resolveCurrentPDS(did: conversation.repo)
+        guard var url = URLComponents(
+          url: pds.appendingPathComponent("xrpc/\(nsid)"), resolvingAgainstBaseURL: false) else {
+          throw LabyrinthTransportError.invalidRequest("invalid conversation repo host")
+        }
+        url.queryItems = conversation.query
+        guard let target = url.url else {
+          throw LabyrinthTransportError.invalidRequest("invalid conversation record URL")
+        }
+        let credentials = SpaceCredentialManager(client: client, authorityHostProvider: { authority in
+          let doc = try await SpaceHostResolver.fetchDIDDocument(for: authority)
+          guard doc.id == authority else {
+            throw LabyrinthTransportError.serviceUnresolved("authority DID mismatch")
+          }
+          return try SpaceAuthorityEndpoints.extract(from: doc).spaceHost
+        })
+        return try await credentials.get(url: target, space: conversation.space, audience: conversation.repo)
+      }
+      return try await authenticatedRepoCall(
+        method: method, endpoint: nsid, body: body, query: conversation.query)
+    }
+    let query = try Self.validateLabyrinthSpaceRequest(
+      did: did, method: method, nsid: nsid, path: path, body: body)
+    return try await authenticatedRepoCall(method: method, endpoint: nsid, body: body, query: query)
+  }
+
+  struct ConversationSpaceRequest {
+    let space: SpaceRef
+    let repo: String
+    let query: [URLQueryItem]?
+  }
+
+  static func validateConversationSpaceInventory(
+    method: String, path: String, body: Data?
+  ) throws -> [URLQueryItem] {
+    guard method == "GET", body == nil, let url = URLComponents(string: path),
+          url.scheme == nil, url.host == nil, url.fragment == nil,
+          url.percentEncodedPath == "/xrpc/com.atproto.space.listSpaces" else {
+      throw LabyrinthTransportError.invalidRequest("invalid conversation inventory route")
+    }
+    var params: [String: String] = [:]
+    for item in url.queryItems ?? [] {
+      guard let value = item.value, params.updateValue(value, forKey: item.name) == nil else {
+        throw LabyrinthTransportError.invalidRequest("duplicate conversation inventory parameter")
+      }
+    }
+    guard params["spaceType"] == "blue.catbird.labyrinth.conversation",
+          Set(params.keys).isSubset(of: ["spaceType", "limit", "cursor"]) else {
+      throw LabyrinthTransportError.invalidRequest("conversation inventory is not scoped")
+    }
+    return url.queryItems ?? []
+  }
+
+  /// An exact conversation-record capability. Space placement and generation
+  /// have already been authenticated and pinned by the Rust sequencer client.
+  static func conversationSpaceRequest(
+    did: String, method: String, nsid: String, path: String, body: Data?
+  ) throws -> ConversationSpaceRequest? {
+    guard let url = URLComponents(string: path), url.scheme == nil, url.host == nil,
+          url.fragment == nil, url.percentEncodedPath == "/xrpc/\(nsid)" else {
+      throw LabyrinthTransportError.invalidRequest("invalid Space operation route")
+    }
+    let params: [String: Any]
+    if method == "GET" {
+      guard body == nil else { throw LabyrinthTransportError.invalidRequest("Space query body") }
+      var values: [String: String] = [:]
+      for item in url.queryItems ?? [] {
+        guard let value = item.value, values.updateValue(value, forKey: item.name) == nil else {
+          throw LabyrinthTransportError.invalidRequest("duplicate Space query parameter")
+        }
+      }
+      params = values
+    } else {
+      guard method == "POST", url.query == nil, let body,
+            let value = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        throw LabyrinthTransportError.invalidRequest("invalid Space write")
+      }
+      params = value
+    }
+    guard let ref = params["space"] as? String,
+          let space = try? SpaceRef(uriString: ref) else {
+      throw LabyrinthTransportError.invalidRequest("invalid Space reference")
+    }
+    guard space.spaceType == "blue.catbird.labyrinth.conversation" else { return nil }
+    guard let generation = UUID(uuidString: space.skey),
+          generation.uuidString.lowercased() == space.skey,
+          let repo = params["repo"] as? String, (try? DID(didString: repo)) != nil else {
+      throw LabyrinthTransportError.invalidRequest("invalid conversation generation or repo")
+    }
+    if method == "GET" {
+      guard params["collection"] as? String == "blue.catbird.labyrinth.batch" else {
+        throw LabyrinthTransportError.invalidRequest("invalid conversation record read")
+      }
+      if nsid == "com.atproto.space.getRecord" {
+        guard let rkey = params["rkey"] as? String, (try? RecordKey(keyString: rkey)) != nil,
+              Set(params.keys).isSubset(of: ["space", "repo", "collection", "rkey"]) else {
+          throw LabyrinthTransportError.invalidRequest("invalid conversation record key")
+        }
+      } else {
+        guard nsid == "com.atproto.space.listRecords", repo == did,
+              Set(params.keys).isSubset(of: ["space", "repo", "collection", "limit", "excludeValues"]) else {
+          throw LabyrinthTransportError.invalidRequest("conversation cleanup may list only owned records")
+        }
+      }
+    } else {
+      guard repo == did else {
+        throw LabyrinthTransportError.invalidRequest("conversation write is not owned by this account")
+      }
+      if nsid == "com.atproto.space.deleteRecord" {
+        guard params["collection"] as? String == "blue.catbird.labyrinth.batch",
+              let rkey = params["rkey"] as? String, (try? RecordKey(keyString: rkey)) != nil else {
+          throw LabyrinthTransportError.invalidRequest("invalid owned conversation record deletion")
+        }
+      } else {
+        guard nsid == "com.atproto.space.applyWrites",
+              let writes = params["writes"] as? [[String: Any]], writes.count == 1,
+            let write = writes.first,
+            write["$type"] as? String == "com.atproto.space.applyWrites#create",
+            write["collection"] as? String == "blue.catbird.labyrinth.batch",
+            let rkey = write["rkey"] as? String, (try? RecordKey(keyString: rkey)) != nil else {
+          throw LabyrinthTransportError.invalidRequest("invalid immutable conversation write")
+        }
+      }
+    }
+    return ConversationSpaceRequest(space: space, repo: repo, query: method == "GET" ? url.queryItems : nil)
+  }
+
+  /// The native callback is an account-bound mailbox capability, not a
+  /// general authenticated Space client. In particular a foreign repo or a
+  /// conversation Space must use the separately verified conversation path.
+  static func validateLabyrinthSpaceRequest(
+    did: String, method: String, nsid: String, path: String, body: Data?
+  ) throws -> [URLQueryItem]? {
+    let methods = [
+      "com.atproto.space.getRecord": "GET",
+      "com.atproto.space.listRecords": "GET",
+      "com.atproto.space.applyWrites": "POST",
+      "com.atproto.space.deleteRecord": "POST",
+    ]
+    guard methods[nsid] == method,
+          let components = URLComponents(string: path),
+          components.scheme == nil, components.host == nil, components.fragment == nil,
+          components.percentEncodedPath == "/xrpc/\(nsid)" else {
+      throw LabyrinthTransportError.invalidRequest("unsupported personal Space operation")
+    }
+    let parameters: [String: Any]
+    if method == "GET" {
+      guard body == nil else {
+        throw LabyrinthTransportError.invalidRequest("Space query has a body")
+      }
+      var values: [String: String] = [:]
+      for item in components.queryItems ?? [] {
+        guard let value = item.value, values.updateValue(value, forKey: item.name) == nil else {
+          throw LabyrinthTransportError.invalidRequest("duplicate or empty Space query parameter")
+        }
+      }
+      parameters = values
+    } else {
+      guard components.query == nil, let body,
+            let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+        throw LabyrinthTransportError.invalidRequest("invalid Space write body")
+      }
+      parameters = object
+    }
+    guard parameters["repo"] as? String == did,
+          parameters["space"] as? String == "at://\(did)/space/blue.catbird.labyrinth.mailbox/self" else {
+      throw LabyrinthTransportError.invalidRequest("Space operation is outside the account's mailbox")
+    }
+    let collections: Set<String> = [
+      "blue.catbird.labyrinth.device", "blue.catbird.labyrinth.epoch",
+      "blue.catbird.labyrinth.epochMember", "blue.catbird.labyrinth.virtualDevice",
+      "blue.catbird.labyrinth.ownerBatch",
+    ]
+    if nsid == "com.atproto.space.applyWrites" {
+      guard let writes = parameters["writes"] as? [[String: Any]],
+            !writes.isEmpty, writes.count <= 200,
+            writes.allSatisfy({ write in
+              guard let collection = write["collection"] as? String,
+                    let type = write["$type"] as? String else { return false }
+              return collections.contains(collection) && [
+                "com.atproto.space.applyWrites#create", "com.atproto.space.applyWrites#update",
+                "com.atproto.space.applyWrites#delete",
+              ].contains(type)
+            }) else {
+        throw LabyrinthTransportError.invalidRequest("invalid mailbox writes")
+      }
+    } else {
+      guard let collection = parameters["collection"] as? String,
+            collections.contains(collection) else {
+        throw LabyrinthTransportError.invalidRequest("invalid mailbox collection")
+      }
+    }
+    return method == "GET" ? components.queryItems : nil
+  }
 
   /// `com.atproto.repo.putRecord` of a `blue.catbird.labyrinth.mailboxKeys`
   /// record (`$type` included) into the signed-in account's repo.

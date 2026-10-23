@@ -284,7 +284,9 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   }
 
   public func labyrinthSpaceEnabled() -> Bool {
-    false
+    // This advertises the adapter capability. Rust probes the host and
+    // persists placement; an outage never creates a second mailbox.
+    MLSAPIClient.labyrinthSpaceTransportAvailable
   }
 
   public func submitLabyrinthSpaceRequest(
@@ -293,7 +295,15 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     path: String,
     body: Data?
   ) throws -> FfiGatewayResponse {
-    throw OrchestratorBridgeError.Api(message: "this gateway does not reach the account's PDS Space (\(nsid))")
+    try blocking {
+      let (data, response) = try await self.apiClient.submitLabyrinthSpaceRequest(
+        method: method, nsid: nsid, path: path, body: body)
+      return FfiGatewayResponse(
+        status: UInt16(clamping: response.statusCode),
+        contentType: response.value(forHTTPHeaderField: "Content-Type"),
+        body: data
+      )
+    }
   }
 
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {

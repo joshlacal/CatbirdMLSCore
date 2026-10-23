@@ -144,10 +144,10 @@ def repository_record(path, identity):
 
 
 def schema_record(petrel_catbird):
-    root = Path(petrel_catbird).resolve() / "lexicons/blue/catbird/chat"
+    root = Path(petrel_catbird).resolve() / "lexicons"
     if not root.is_dir():
-        raise RuntimeError(f"Chat schema directory is absent: {root}")
-    files = file_map(root, root.glob("*.json"))
+        raise RuntimeError(f"Overlay schema directory is absent: {root}")
+    files = file_map(root, root.rglob("*.json"))
     return {"root": str(root), "sha256": canonical_sha256(files), "files": files}
 
 
@@ -232,6 +232,11 @@ def build_manifest(
     petrel_catbird = Path(petrel_catbird).resolve()
     selected_inputs = Path(selected_inputs).resolve()
     framework = core / "Sources/CatbirdMLSFFI.xcframework"
+    marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
+    if marker.get("protocolVersion") != 20261023 or "labyrinth" not in marker.get("features", []):
+        raise RuntimeError("Native artifact lacks the required Space protocol/feature marker")
+    if marker.get("sourceFingerprint") != source_bundle_fingerprint(native, [atproto]):
+        raise RuntimeError("Native artifact rebuild marker does not match current source inputs")
     if not selected_inputs.is_file():
         raise RuntimeError(f"Selected input manifest is absent: {selected_inputs}")
     repositories = {
@@ -267,7 +272,8 @@ def build_manifest(
         "build": {
             "cargo_profile": "release",
             "default_features": True,
-            "explicit_features": [],
+            "explicit_features": marker["features"],
+            "space_protocol_version": marker["protocolVersion"],
             "apple_targets": [
                 "aarch64-apple-darwin",
                 "aarch64-apple-ios",
@@ -350,7 +356,7 @@ def verify_manifest(path):
         "Cargo.lock",
     )
     schema = manifest["source"]["schemas"]
-    current_schema = file_map(Path(schema["root"]), Path(schema["root"]).glob("*.json"))
+    current_schema = file_map(Path(schema["root"]), Path(schema["root"]).rglob("*.json"))
     require_equal(current_schema, schema["files"], "schema file map")
 
     package = manifest["package"]
