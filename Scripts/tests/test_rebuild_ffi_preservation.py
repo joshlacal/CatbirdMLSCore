@@ -98,6 +98,8 @@ class RebuildPreservationTests(unittest.TestCase):
             import json
             marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
             self.assertEqual(marker["artifactScope"], scope)
+            import hashlib
+            self.assertEqual(marker["generatedSwiftSHA256"], hashlib.sha256(b"new binding").hexdigest())
 
     def test_rebuild_retains_every_replaced_artifact(self):
         self.check_rebuild_retains_every_replaced_artifact("apple-all-targets")

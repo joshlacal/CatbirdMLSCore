@@ -150,7 +150,8 @@ cp -R "$framework_name" "$core_dir/Sources/"
 # Written only after the complete native build and source-stability check.
 # This permits the explicit local package selector to expose Space callbacks;
 # ordinary builds using the older public artifact remain unavailable.
-python3 - "$core_dir/Sources/$framework_name/labyrinth-space-protocol.json" "$source_fingerprint_after" "$CATBIRD_MLS_FEATURES" "$CATBIRD_MLS_APPLE_SCOPE" <<'PY'
+python3 - "$core_dir/Sources/$framework_name/labyrinth-space-protocol.json" "$source_fingerprint_after" "$CATBIRD_MLS_FEATURES" "$CATBIRD_MLS_APPLE_SCOPE" "$native_dir/build/bindings/CatbirdMLS.swift" <<'PY'
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -160,6 +161,7 @@ Path(sys.argv[1]).write_text(json.dumps({
     "sourceFingerprint": sys.argv[2],
     "features": sorted(set(filter(None, re.split(r"[\s,]+", sys.argv[3])))),
     "artifactScope": sys.argv[4],
+    "generatedSwiftSHA256": hashlib.sha256(Path(sys.argv[5]).read_bytes()).hexdigest(),
 }, sort_keys=True) + "\n")
 PY
 echo "✅ XCFramework copied"

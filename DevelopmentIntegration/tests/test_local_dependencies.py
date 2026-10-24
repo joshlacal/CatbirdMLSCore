@@ -80,7 +80,12 @@ class PackageSelectionTests(unittest.TestCase):
             ("CatbirdMLSFFISimulator.xcframework", "ios-arm64-simulator-only"),
         ):
             with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
-                package = Path(directory)
+                workspace = Path(directory).resolve()
+                package = workspace / "CatbirdMLSCore"
+                package.mkdir()
+                for sibling in ("Petrel", "PetrelCatbird"):
+                    (workspace / sibling).mkdir()
+                    (workspace / sibling / "Package.swift").write_text("// fixture manifest")
                 (package / "Package.swift").write_bytes((ROOT / "Package.swift").read_bytes())
                 framework = package / "Sources" / name
                 framework.mkdir(parents=True)
@@ -186,6 +191,29 @@ class ResolutionGuardTests(unittest.TestCase):
             retained = list((config / "_trash").glob("*-mirrors.json"))
             self.assertEqual(len(retained), 1)
             self.assertIn("stale", retained[0].read_text())
+
+    def test_provenance_hashes_selected_binding_and_rejects_mixed_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            core = Path(directory)
+            for name, value in (("CatbirdMLS", "public"), ("CatbirdMLSSpaces", "local")):
+                path = core / "Sources" / name / "CatbirdMLS.swift"
+                path.parent.mkdir(parents=True)
+                path.write_text(value)
+            public = {"targets": [
+                {"name": "CatbirdMLSFFI", "url": "https://example.test/public.zip"},
+                {"name": "CatbirdMLS", "path": "Sources/CatbirdMLS"},
+            ]}
+            local = {"targets": [
+                {"name": "CatbirdMLSFFI", "path": "Sources/CatbirdMLSFFISimulator.xcframework"},
+                {"name": "CatbirdMLS", "path": "Sources/CatbirdMLSSpaces"},
+            ]}
+            public_record = self.verifier.generated_binding_record(public, core)
+            local_record = self.verifier.generated_binding_record(local, core)
+            self.assertNotEqual(public_record["sha256"], local_record["sha256"])
+            self.assertTrue(local_record["path"].endswith("Sources/CatbirdMLSSpaces/CatbirdMLS.swift"))
+            local["targets"][1]["path"] = "Sources/CatbirdMLS"
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                self.verifier.generated_binding_record(local, core)
 
     def test_local_framework_requires_verified_artifact_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

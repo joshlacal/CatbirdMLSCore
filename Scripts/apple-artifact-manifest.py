@@ -266,6 +266,9 @@ def build_manifest(
         raise RuntimeError("Native artifact lacks the required Space protocol/feature marker")
     if marker.get("sourceFingerprint") != source_bundle_fingerprint(native, [atproto]):
         raise RuntimeError("Native artifact rebuild marker does not match current source inputs")
+    interface = interface_record(core, framework)
+    if marker.get("generatedSwiftSHA256") != interface["generated_swift"]["sha256"]:
+        raise RuntimeError("Native artifact rebuild marker does not match the generated Swift binding")
     artifact_scope = marker.get("artifactScope")
     framework_identity = framework_record(framework)
     validate_framework_scope(framework_identity, artifact_scope)
@@ -322,7 +325,7 @@ def build_manifest(
                 "CatbirdMLSFFI": str(framework),
             },
         },
-        "interface": interface_record(core, framework),
+        "interface": interface,
         "framework": framework_identity,
     }
     manifest["identity"] = {
@@ -402,6 +405,8 @@ def verify_manifest(path):
     require_equal(current_framework["libraries"], framework["libraries"], "framework architecture matrix")
     current_interface = interface_record(core, framework["path"])
     require_equal(current_interface, manifest["interface"], "generated interface")
+    marker = json.loads((Path(framework["path"]) / "labyrinth-space-protocol.json").read_text())
+    require_equal(marker.get("generatedSwiftSHA256"), current_interface["generated_swift"]["sha256"], "rebuild marker generated interface")
 
     for name, record in manifest["source"]["repositories"].items():
         repository = Path(record["path"])

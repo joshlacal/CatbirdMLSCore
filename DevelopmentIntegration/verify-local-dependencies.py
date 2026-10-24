@@ -239,6 +239,17 @@ def ffi_identity(manifest):
     }
 
 
+def generated_binding_record(manifest, core=CORE):
+    core = Path(core).resolve()
+    ffi = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLSFFI")
+    binding = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLS")
+    expected = "Sources/CatbirdMLSSpaces" if ffi.get("path") else "Sources/CatbirdMLS"
+    if binding.get("path") != expected:
+        raise RuntimeError("Generated binding target does not match the selected native artifact")
+    path = core / expected / "CatbirdMLS.swift"
+    return {"path": str(path), "sha256": hash_file(path)}
+
+
 def verify_local_ffi_manifest(framework, manifest_path=None):
     framework = canonical(framework)
     manifest_path = canonical(manifest_path or (
@@ -279,6 +290,7 @@ def collect():
     }
     for name, resolution in resolved.items():
         identities[name].update(resolution)
+    generated = generated_binding_record(manifest)
     return {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -288,7 +300,8 @@ def collect():
         },
         "packages": identities,
         "ffi": ffi_identity(manifest),
-        "generated_swift_sha256": hash_file(CORE / "Sources" / "CatbirdMLS" / "CatbirdMLS.swift"),
+        "generated_swift_path": generated["path"],
+        "generated_swift_sha256": generated["sha256"],
         "scope": "Apple local dependency and provenance prerequisite; no FFI generation or runtime qualification.",
     }
 

@@ -93,6 +93,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             "protocolVersion": 20261023,
             "features": ["labyrinth"],
             "artifactScope": "apple-all-targets",
+            "generatedSwiftSHA256": self.module.sha256_file(self.core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift"),
             "sourceFingerprint": self.module.source_bundle_fingerprint(self.native, [self.atproto]),
         }))
 
@@ -211,6 +212,11 @@ class AppleArtifactManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "catbird-atproto source fingerprint"):
             self.module.verify_manifest(path)
+
+    def test_build_rejects_binding_replaced_before_manifest_creation(self):
+        write(self.core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift", "public struct DifferentNativeMetadata {}\n")
+        with self.assertRaisesRegex(RuntimeError, "generated Swift binding"):
+            self.build()
 
     def test_build_rejects_marker_from_an_older_native_source(self):
         write(self.native / "src/lib.rs", "pub fn newer_source() {}\n")
