@@ -49,7 +49,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.atproto / "Cargo.toml", "[package]\nname = 'catbird-atproto'\n")
         write(self.atproto / "src/lib.rs", "pub fn generated_contract() {}\n")
         write(self.core / "Package.swift", "// fixture\n")
-        write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct Generated {}\n")
+        write(self.core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift", "public struct Generated {}\n")
         schema = self.petrel_catbird / "lexicons/blue/catbird/chat/blue.catbird.chat.prepareDirectRequest.json"
         write(schema, '{"lexicon":1}\n')
         write(self.petrel_catbird / "lexicons/blue/catbird/labyrinth/blue.catbird.labyrinth.defs.json", '{"lexicon":1}\n')

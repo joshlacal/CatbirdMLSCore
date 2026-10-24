@@ -64,6 +64,8 @@ class PackageSelectionTests(unittest.TestCase):
         locations = dependency_locations(manifest)
         self.assertEqual(locations["petrel"], ("remote", "https://github.com/joshlacal/Petrel.git"))
         self.assertEqual(locations["petrelcatbird"], ("remote", "https://github.com/joshlacal/PetrelCatbird.git"))
+        binding = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLS")
+        self.assertEqual(binding["path"], "Sources/CatbirdMLS")
 
     def test_opt_in_manifest_selects_exact_workspace_siblings(self):
         result, manifest = dump_package(local=True)
@@ -71,6 +73,32 @@ class PackageSelectionTests(unittest.TestCase):
         locations = dependency_locations(manifest)
         self.assertEqual(locations["petrel"], ("path", str((WORKSPACE / "Petrel").resolve())))
         self.assertEqual(locations["petrelcatbird"], ("path", str((WORKSPACE / "PetrelCatbird").resolve())))
+
+    def test_verified_framework_selects_matching_space_bindings(self):
+        for name, scope in (
+            ("CatbirdMLSFFI.xcframework", "apple-all-targets"),
+            ("CatbirdMLSFFISimulator.xcframework", "ios-arm64-simulator-only"),
+        ):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory)
+                (package / "Package.swift").write_bytes((ROOT / "Package.swift").read_bytes())
+                framework = package / "Sources" / name
+                framework.mkdir(parents=True)
+                (framework / "labyrinth-space-protocol.json").write_text(json.dumps({
+                    "protocolVersion": 20261023, "features": ["labyrinth"],
+                    "artifactScope": scope, "sourceFingerprint": "0" * 64,
+                }))
+                environment = os.environ.copy()
+                environment["CATBIRD_MLS_LOCAL_INTEGRATION"] = "1"
+                environment["CATBIRD_MLS_FFI_PATH"] = str(framework)
+                result = subprocess.run(
+                    ["swift", "package", "--package-path", str(package), "dump-package"],
+                    env=environment, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                manifest = json.loads(result.stdout)
+                binding = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLS")
+                self.assertEqual(binding["path"], "Sources/CatbirdMLSSpaces")
 
     def test_manifest_rejects_ambiguous_local_selection_value(self):
         result, _ = dump_package(extra_environment={"CATBIRD_MLS_LOCAL_INTEGRATION": "yes"})

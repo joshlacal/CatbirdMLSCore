@@ -1,9 +1,16 @@
 import Foundation
+import CatbirdMLS
 import Petrel
 import XCTest
 @testable import CatbirdMLSCore
 
 final class MLSLabyrinthTransportTests: XCTestCase {
+  func testGeneratedBindingsMatchSelectedNativeArtifact() {
+    // Any generated native call validates the complete UniFFI checksum table.
+    // Callback documentation can change checksums without changing signatures.
+    XCTAssertGreaterThan(securityStorageCapabilitiesVersion(), 0)
+  }
+
   func testSpaceCapabilityRequiresVerifiedLocalNativeArtifact() {
     #if CATBIRD_MLS_VERIFIED_SPACE_FFI
     XCTAssertTrue(MLSAPIClient.labyrinthSpaceTransportAvailable)

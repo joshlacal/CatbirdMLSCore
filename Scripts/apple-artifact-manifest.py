@@ -211,7 +211,7 @@ def validate_framework_scope(framework, scope):
 def interface_record(core, framework):
     core = Path(core).resolve()
     framework = Path(framework).resolve()
-    swift = core / "Sources/CatbirdMLS/CatbirdMLS.swift"
+    swift = core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift"
     if not swift.is_file():
         raise RuntimeError(f"Generated Swift binding is absent: {swift}")
     headers = {

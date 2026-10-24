@@ -36,11 +36,11 @@ let sdkDependencies: [Package.Dependency] = useLocalIntegration
     : [
         .package(
             url: "https://github.com/joshlacal/Petrel.git",
-            revision: "89140e1aa1f41eead969732da87354b9732879c4"
+            revision: "1fb8d578818afc2c2e2e34eba6d90b091a011e6f"
         ),
         .package(
             url: "https://github.com/joshlacal/PetrelCatbird.git",
-            revision: "b605441251441ede0848381f08192781b3519c51"
+            revision: "929b7fbecec5957c86c6e751825d8f4f80608ccc"
         ),
     ]
 
@@ -128,7 +128,7 @@ let package = Package(
         .target(
             name: "CatbirdMLS",
             dependencies: ["CatbirdMLSFFI"],
-            path: "Sources/CatbirdMLS",
+            path: selectedFFIPath != nil ? "Sources/CatbirdMLSSpaces" : "Sources/CatbirdMLS",
             swiftSettings: [
                 // Keep Swift 5 mode for auto-generated UniFFI bindings
                 // UniFFI generates mutable global state that isn't Swift 6 compatible

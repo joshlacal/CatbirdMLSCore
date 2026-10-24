@@ -54,6 +54,9 @@ fi
 core_scripts_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 core_dir="$(CDPATH= cd -- "$core_scripts_dir/.." && pwd)"
 artifact_manifest_tool="$core_scripts_dir/apple-artifact-manifest.py"
+# The public v1.5.21 artifact keeps its original generated interface.
+# Updated callback metadata has new UniFFI checksums even when signatures match.
+space_bindings_dir="$core_dir/Sources/CatbirdMLSSpaces"
 if [ ! -f "$artifact_manifest_tool" ]; then
     echo "❌ Apple artifact manifest tool is absent: $artifact_manifest_tool"
     exit 1
@@ -132,14 +135,14 @@ fi
 
 # Reject generator drift before either output can replace the reviewed pair.
 if [ "${FFI_VERIFY_COMMITTED_BINDINGS:-0}" = "1" ]; then
-    cmp build/bindings/CatbirdMLS.swift "$core_dir/Sources/CatbirdMLS/CatbirdMLS.swift"
+    cmp build/bindings/CatbirdMLS.swift "$space_bindings_dir/CatbirdMLS.swift"
 fi
 
 echo ""
 echo "🗃️  Step 2: Preserving prior Core artifacts..."
 preserve_if_present "$core_dir/Sources/$framework_name" "$framework_name"
-preserve_if_present "$core_dir/Sources/CatbirdMLS/CatbirdMLS.swift" CatbirdMLS.swift
-preserve_if_present "$core_dir/Sources/CatbirdMLS/MLSFFI.swift" MLSFFI.swift
+preserve_if_present "$space_bindings_dir/CatbirdMLS.swift" CatbirdMLSSpaces.swift
+preserve_if_present "$space_bindings_dir/MLSFFI.swift" MLSFFISpaces.swift
 
 echo ""
 echo "📋 Step 3: Copying XCFramework to CatbirdMLSCore..."
@@ -163,7 +166,8 @@ echo "✅ XCFramework copied"
 
 echo ""
 echo "📄 Step 4: Updating Swift bindings..."
-cp build/bindings/CatbirdMLS.swift "$core_dir/Sources/CatbirdMLS/"
+mkdir -p "$space_bindings_dir"
+cp build/bindings/CatbirdMLS.swift "$space_bindings_dir/"
 echo "✅ Swift bindings updated"
 
 echo ""

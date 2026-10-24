@@ -18,7 +18,7 @@ class RebuildPreservationTests(unittest.TestCase):
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
-            sources = core / "Sources" / "CatbirdMLS"
+            sources = core / "Sources" / "CatbirdMLSSpaces"
             framework = core / "Sources" / framework_name
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native, atproto / "src", fake_bin):
@@ -43,6 +43,9 @@ class RebuildPreservationTests(unittest.TestCase):
             (framework / "old-binary").write_text("old framework")
             (sources / "CatbirdMLS.swift").write_text("old binding")
             (sources / "MLSFFI.swift").write_text("stale binding")
+            public_sources = core / "Sources" / "CatbirdMLS"
+            public_sources.mkdir(parents=True)
+            (public_sources / "CatbirdMLS.swift").write_text("public release binding")
 
             other = core / "Sources" / "Unselected.xcframework"
             other.mkdir()
@@ -77,8 +80,8 @@ class RebuildPreservationTests(unittest.TestCase):
 
             backup = core / "_trash" / "ffi-rebuild" / "20260919T120000Z"
             self.assertEqual((backup / framework_name / "old-binary").read_text(), "old framework")
-            self.assertEqual((backup / "CatbirdMLS.swift").read_text(), "old binding")
-            self.assertEqual((backup / "MLSFFI.swift").read_text(), "stale binding")
+            self.assertEqual((backup / "CatbirdMLSSpaces.swift").read_text(), "old binding")
+            self.assertEqual((backup / "MLSFFISpaces.swift").read_text(), "stale binding")
             self.assertEqual(
                 (backup / ("native-" + framework_name) / "old-native").read_text(),
                 "old native framework",
@@ -90,6 +93,7 @@ class RebuildPreservationTests(unittest.TestCase):
             self.assertEqual((core / "Sources" / framework_name / "new-binary").read_text(), "new framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "new binding")
             self.assertFalse((sources / "MLSFFI.swift").exists())
+            self.assertEqual((public_sources / "CatbirdMLS.swift").read_text(), "public release binding")
             self.assertEqual((other / "keep").read_text(), "unselected framework")
             import json
             marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
@@ -108,7 +112,7 @@ class RebuildPreservationTests(unittest.TestCase):
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
-            sources = core / "Sources" / "CatbirdMLS"
+            sources = core / "Sources" / "CatbirdMLSSpaces"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
@@ -167,7 +171,7 @@ class RebuildPreservationTests(unittest.TestCase):
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
-            sources = core / "Sources" / "CatbirdMLS"
+            sources = core / "Sources" / "CatbirdMLSSpaces"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
