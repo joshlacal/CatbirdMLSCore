@@ -227,8 +227,9 @@ def ffi_identity(manifest):
     target = next(item for item in manifest["targets"] if item["name"] == "CatbirdMLSFFI")
     if target.get("path"):
         path = canonical(target["path"])
-        expected = (CORE / "Sources" / "CatbirdMLSFFI.xcframework").resolve()
-        if path != expected or not path.is_dir():
+        expected = {(CORE / "Sources" / name).resolve() for name in (
+            "CatbirdMLSFFI.xcframework", "CatbirdMLSFFISimulator.xcframework")}
+        if path not in expected or not path.is_dir():
             raise RuntimeError(f"Local FFI target resolved from wrong path: {path}")
         return {"kind": "local", "path": str(path), **hash_tree(path)}
     return {
@@ -238,9 +239,11 @@ def ffi_identity(manifest):
     }
 
 
-def verify_local_ffi_manifest(framework, manifest_path=APPLE_ARTIFACT_MANIFEST):
+def verify_local_ffi_manifest(framework, manifest_path=None):
     framework = canonical(framework)
-    manifest_path = canonical(manifest_path)
+    manifest_path = canonical(manifest_path or (
+        HERE / "spaces-simulator-artifact-manifest.json"
+        if framework.name == "CatbirdMLSFFISimulator.xcframework" else APPLE_ARTIFACT_MANIFEST))
     if not framework.is_dir():
         return
     if not manifest_path.is_file():
@@ -259,7 +262,9 @@ def verify_local_ffi_manifest(framework, manifest_path=APPLE_ARTIFACT_MANIFEST):
 def collect():
     environment = os.environ.copy()
     environment["CATBIRD_MLS_LOCAL_INTEGRATION"] = "1"
-    framework = CORE / "Sources" / "CatbirdMLSFFI.xcframework"
+    framework = canonical(environment.get("CATBIRD_MLS_FFI_PATH", CORE / "Sources" / "CatbirdMLSFFI.xcframework"))
+    if "CATBIRD_MLS_FFI_PATH" in environment and not framework.is_dir():
+        raise RuntimeError(f"Explicit native framework is absent: {framework}")
     if framework.is_dir():
         environment["CATBIRD_MLS_FFI_PATH"] = str(framework.resolve())
         verify_local_ffi_manifest(framework)

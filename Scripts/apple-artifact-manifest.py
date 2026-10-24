@@ -16,11 +16,21 @@ EXCLUDED_NATIVE_PARTS = {
     "build",
     "target",
     "CatbirdMLSFFI.xcframework",
+    "CatbirdMLSFFISimulator.xcframework",
 }
 # Rust embeds JSON contracts with include_str!, and shell/Python scripts drive
 # the native build and binding generation. A source receipt must detect changes
 # to those inputs even when the Rust declarations and UniFFI ABI stay identical.
 NATIVE_SOURCE_SUFFIXES = {".rs", ".toml", ".lock", ".json", ".sh", ".py"}
+
+APPLE_TARGETS = {
+    "apple-all-targets": [
+        "aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-macabi",
+        "aarch64-apple-ios-sim", "x86_64-apple-darwin", "x86_64-apple-ios",
+        "x86_64-apple-ios-macabi",
+    ],
+    "ios-arm64-simulator-only": ["aarch64-apple-ios-sim"],
+}
 
 
 def sha256_bytes(value):
@@ -180,6 +190,24 @@ def framework_record(framework):
     }
 
 
+def validate_framework_scope(framework, scope):
+    actual = {
+        (item["platform"], item["variant"], tuple(item["architectures"]))
+        for item in framework["libraries"]
+    }
+    expected = {
+        "apple-all-targets": {
+            ("ios", None, ("arm64",)),
+            ("ios", "simulator", ("arm64", "x86_64")),
+            ("ios", "maccatalyst", ("arm64", "x86_64")),
+            ("macos", None, ("arm64", "x86_64")),
+        },
+        "ios-arm64-simulator-only": {("ios", "simulator", ("arm64",))},
+    }.get(scope)
+    if expected is None or actual != expected or len(framework["libraries"]) != len(expected):
+        raise RuntimeError("Native framework architecture matrix does not match artifact scope")
+
+
 def interface_record(core, framework):
     core = Path(core).resolve()
     framework = Path(framework).resolve()
@@ -222,6 +250,7 @@ def build_manifest(
     petrel_catbird,
     selected_inputs,
     qualification,
+    framework=None,
     identities=None,
     toolchains=None,
 ):
@@ -231,12 +260,18 @@ def build_manifest(
     petrel = Path(petrel).resolve()
     petrel_catbird = Path(petrel_catbird).resolve()
     selected_inputs = Path(selected_inputs).resolve()
-    framework = core / "Sources/CatbirdMLSFFI.xcframework"
+    framework = Path(framework).resolve() if framework else core / "Sources/CatbirdMLSFFI.xcframework"
     marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
     if marker.get("protocolVersion") != 20261023 or "labyrinth" not in marker.get("features", []):
         raise RuntimeError("Native artifact lacks the required Space protocol/feature marker")
     if marker.get("sourceFingerprint") != source_bundle_fingerprint(native, [atproto]):
         raise RuntimeError("Native artifact rebuild marker does not match current source inputs")
+    artifact_scope = marker.get("artifactScope")
+    framework_identity = framework_record(framework)
+    validate_framework_scope(framework_identity, artifact_scope)
+    expected_name = "CatbirdMLSFFISimulator.xcframework" if artifact_scope == "ios-arm64-simulator-only" else "CatbirdMLSFFI.xcframework"
+    if framework != core / "Sources" / expected_name:
+        raise RuntimeError("Native framework path does not match artifact scope")
     if not selected_inputs.is_file():
         raise RuntimeError(f"Selected input manifest is absent: {selected_inputs}")
     repositories = {
@@ -250,7 +285,7 @@ def build_manifest(
     atproto_source = native_source_record(atproto)
     manifest = {
         "schema_version": 1,
-        "scope": "apple-native-uniffi",
+        "scope": "apple-native-uniffi-simulator-only" if artifact_scope == "ios-arm64-simulator-only" else "apple-native-uniffi",
         "qualification": qualification,
         "selected_inputs": {
             "path": str(selected_inputs),
@@ -274,15 +309,8 @@ def build_manifest(
             "default_features": True,
             "explicit_features": marker["features"],
             "space_protocol_version": marker["protocolVersion"],
-            "apple_targets": [
-                "aarch64-apple-darwin",
-                "aarch64-apple-ios",
-                "aarch64-apple-ios-macabi",
-                "aarch64-apple-ios-sim",
-                "x86_64-apple-darwin",
-                "x86_64-apple-ios",
-                "x86_64-apple-ios-macabi",
-            ],
+            "apple_artifact_scope": artifact_scope,
+            "apple_targets": APPLE_TARGETS[artifact_scope],
             "toolchains": toolchains or toolchain_record(),
         },
         "package": {
@@ -295,7 +323,7 @@ def build_manifest(
             },
         },
         "interface": interface_record(core, framework),
-        "framework": framework_record(framework),
+        "framework": framework_identity,
     }
     manifest["identity"] = {
         "algorithm": "sha256",
@@ -368,6 +396,8 @@ def verify_manifest(path):
 
     framework = manifest["framework"]
     current_framework = framework_record(framework["path"])
+    validate_framework_scope(current_framework, manifest["build"]["apple_artifact_scope"])
+    require_equal(manifest["build"]["apple_targets"], APPLE_TARGETS[manifest["build"]["apple_artifact_scope"]], "artifact target scope")
     require_equal(current_framework["files"], framework["files"], "framework file map")
     require_equal(current_framework["libraries"], framework["libraries"], "framework architecture matrix")
     current_interface = interface_record(core, framework["path"])
@@ -400,6 +430,7 @@ def main():
     generate.add_argument("--petrel-catbird", required=True, type=Path)
     generate.add_argument("--selected-inputs", required=True, type=Path)
     generate.add_argument("--output", required=True, type=Path)
+    generate.add_argument("--framework", type=Path)
     generate.add_argument(
         "--qualification",
         choices=("unreviewed-candidate", "reviewed-source"),
@@ -420,6 +451,7 @@ def main():
             petrel_catbird=args.petrel_catbird,
             selected_inputs=args.selected_inputs,
             qualification=args.qualification,
+            framework=args.framework,
         )
         write_manifest(args.output, manifest)
         print(manifest["identity"]["canonical_sha256"])

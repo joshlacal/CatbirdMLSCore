@@ -31,6 +31,13 @@ ensure_ios_sdk() {
 
 ensure_ios_sdk
 
+export CATBIRD_MLS_APPLE_SCOPE="${CATBIRD_MLS_APPLE_SCOPE:-apple-all-targets}"
+case "$CATBIRD_MLS_APPLE_SCOPE" in
+    apple-all-targets) framework_name="CatbirdMLSFFI.xcframework" ;;
+    ios-arm64-simulator-only) framework_name="CatbirdMLSFFISimulator.xcframework" ;;
+    *) echo "Unsupported Apple artifact scope: $CATBIRD_MLS_APPLE_SCOPE" >&2; exit 1 ;;
+esac
+
 # This wrapper emits a Space-capable artifact marker. It must not certify an
 # artifact built with the feature disabled by an inherited environment value.
 export CATBIRD_MLS_FEATURES="${CATBIRD_MLS_FEATURES-labyrinth}"
@@ -92,7 +99,7 @@ preserve_if_present() {
 }
 
 echo "🗃️  Preserving prior native generator outputs..."
-preserve_if_present CatbirdMLSFFI.xcframework native-CatbirdMLSFFI.xcframework
+preserve_if_present "$framework_name" "native-$framework_name"
 preserve_if_present build/frameworks native-build-frameworks
 preserve_if_present build/bindings native-build-bindings
 preserve_if_present build/libs native-build-libs
@@ -114,8 +121,8 @@ if [ "$source_fingerprint_before" != "$source_fingerprint_after" ]; then
     exit 1
 fi
 
-if [ ! -d "CatbirdMLSFFI.xcframework" ]; then
-    echo "❌ XCFramework build produced no CatbirdMLSFFI.xcframework"
+if [ ! -d "$framework_name" ]; then
+    echo "❌ XCFramework build produced no $framework_name"
     exit 1
 fi
 if [ ! -f "build/bindings/CatbirdMLS.swift" ]; then
@@ -130,17 +137,17 @@ fi
 
 echo ""
 echo "🗃️  Step 2: Preserving prior Core artifacts..."
-preserve_if_present "$core_dir/Sources/CatbirdMLSFFI.xcframework" CatbirdMLSFFI.xcframework
+preserve_if_present "$core_dir/Sources/$framework_name" "$framework_name"
 preserve_if_present "$core_dir/Sources/CatbirdMLS/CatbirdMLS.swift" CatbirdMLS.swift
 preserve_if_present "$core_dir/Sources/CatbirdMLS/MLSFFI.swift" MLSFFI.swift
 
 echo ""
 echo "📋 Step 3: Copying XCFramework to CatbirdMLSCore..."
-cp -R CatbirdMLSFFI.xcframework "$core_dir/Sources/"
+cp -R "$framework_name" "$core_dir/Sources/"
 # Written only after the complete native build and source-stability check.
 # This permits the explicit local package selector to expose Space callbacks;
 # ordinary builds using the older public artifact remain unavailable.
-python3 - "$core_dir/Sources/CatbirdMLSFFI.xcframework/labyrinth-space-protocol.json" "$source_fingerprint_after" "$CATBIRD_MLS_FEATURES" <<'PY'
+python3 - "$core_dir/Sources/$framework_name/labyrinth-space-protocol.json" "$source_fingerprint_after" "$CATBIRD_MLS_FEATURES" "$CATBIRD_MLS_APPLE_SCOPE" <<'PY'
 import json
 from pathlib import Path
 import re
@@ -149,6 +156,7 @@ Path(sys.argv[1]).write_text(json.dumps({
     "protocolVersion": 20261023,
     "sourceFingerprint": sys.argv[2],
     "features": sorted(set(filter(None, re.split(r"[\s,]+", sys.argv[3])))),
+    "artifactScope": sys.argv[4],
 }, sort_keys=True) + "\n")
 PY
 echo "✅ XCFramework copied"

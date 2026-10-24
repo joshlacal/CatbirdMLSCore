@@ -48,6 +48,8 @@ let sdkDependencies: [Package.Dependency] = useLocalIntegration
 // Merely leaving an ignored framework in Sources must not change package identity.
 let localFFI = "Sources/CatbirdMLSFFI.xcframework"
 let localFFIPath = packageRoot.appendingPathComponent(localFFI).standardizedFileURL
+let simulatorFFI = "Sources/CatbirdMLSFFISimulator.xcframework"
+let simulatorFFIPath = packageRoot.appendingPathComponent(simulatorFFI).standardizedFileURL
 let selectedFFIPath = environment["CATBIRD_MLS_FFI_PATH"].map {
     URL(fileURLWithPath: $0).standardizedFileURL
 }
@@ -55,10 +57,10 @@ if selectedFFIPath != nil && !useLocalIntegration {
     fatalError("CATBIRD_MLS_FFI_PATH requires CATBIRD_MLS_LOCAL_INTEGRATION=1")
 }
 if let selectedFFIPath {
-    guard selectedFFIPath == localFFIPath,
+    guard selectedFFIPath == localFFIPath || selectedFFIPath == simulatorFFIPath,
           selectedFFIPath.resolvingSymlinksInPath() == selectedFFIPath,
           FileManager.default.fileExists(atPath: selectedFFIPath.path) else {
-        fatalError("CATBIRD_MLS_FFI_PATH must select the exact local framework at \(localFFIPath.path)")
+        fatalError("CATBIRD_MLS_FFI_PATH must select an exact local release or simulator framework")
     }
     // The public v1.5.21 artifact predates sequenced conversation Spaces and
     // the accompanying deletion/key-authority fixes. Merely copying that old
@@ -67,6 +69,8 @@ if let selectedFFIPath {
     guard let data = try? Data(contentsOf: marker),
           let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           value["protocolVersion"] as? Int == 20261023,
+          value["artifactScope"] as? String == (selectedFFIPath == simulatorFFIPath
+            ? "ios-arm64-simulator-only" : "apple-all-targets"),
           let features = value["features"] as? [String], features.contains("labyrinth"),
           let fingerprint = value["sourceFingerprint"] as? String,
           fingerprint.count == 64,
@@ -75,7 +79,7 @@ if let selectedFFIPath {
     }
 }
 let ffiTarget: Target = selectedFFIPath != nil
-    ? .binaryTarget(name: "CatbirdMLSFFI", path: localFFI)
+    ? .binaryTarget(name: "CatbirdMLSFFI", path: selectedFFIPath == simulatorFFIPath ? simulatorFFI : localFFI)
     : .binaryTarget(
         name: "CatbirdMLSFFI",
         url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.21/CatbirdMLSFFI.xcframework.zip",

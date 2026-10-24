@@ -21,7 +21,9 @@ mkdir -p "$provenance_dir"
 provenance="$provenance_dir/apple-dependencies-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
 
 export CATBIRD_MLS_LOCAL_INTEGRATION=1
-if [ -d "$core_dir/Sources/CatbirdMLSFFI.xcframework" ]; then
+if [ -n "${CATBIRD_MLS_FFI_PATH:-}" ]; then
+    export CATBIRD_MLS_FFI_PATH
+elif [ -d "$core_dir/Sources/CatbirdMLSFFI.xcframework" ]; then
     export CATBIRD_MLS_FFI_PATH="$core_dir/Sources/CatbirdMLSFFI.xcframework"
 else
     unset CATBIRD_MLS_FFI_PATH

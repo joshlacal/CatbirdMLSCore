@@ -40,7 +40,9 @@ build/
 
 # FFI Binary Framework (built by CI/CD, download from releases)
 Sources/CatbirdMLSFFI.xcframework/
+Sources/CatbirdMLSFFISimulator.xcframework/
 CatbirdMLSFFI.xcframework.zip
+_trash/ffi-rebuild/
 _trash/ffi-rebuild/*/CatbirdMLSFFI.xcframework/
 .build-codex/
 

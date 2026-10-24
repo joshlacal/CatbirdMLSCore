@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RebuildPreservationTests(unittest.TestCase):
-    def test_rebuild_retains_every_replaced_artifact(self):
+    def check_rebuild_retains_every_replaced_artifact(self, scope):
+        framework_name = "CatbirdMLSFFISimulator.xcframework" if scope == "ios-arm64-simulator-only" else "CatbirdMLSFFI.xcframework"
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             core = workspace / "CatbirdMLSCore"
@@ -18,7 +19,7 @@ class RebuildPreservationTests(unittest.TestCase):
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
             sources = core / "Sources" / "CatbirdMLS"
-            framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
+            framework = core / "Sources" / framework_name
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native, atproto / "src", fake_bin):
                 path.mkdir(parents=True, exist_ok=True)
@@ -35,20 +36,24 @@ class RebuildPreservationTests(unittest.TestCase):
             (atproto / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
             (native / "src").mkdir()
             (native / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
-            (native / "CatbirdMLSFFI.xcframework").mkdir()
-            (native / "CatbirdMLSFFI.xcframework" / "old-native").write_text("old native framework")
+            (native / framework_name).mkdir()
+            (native / framework_name / "old-native").write_text("old native framework")
             (native / "build" / "bindings").mkdir(parents=True)
             (native / "build" / "bindings" / "old-binding").write_text("old native binding")
             (framework / "old-binary").write_text("old framework")
             (sources / "CatbirdMLS.swift").write_text("old binding")
             (sources / "MLSFFI.swift").write_text("stale binding")
 
+            other = core / "Sources" / "Unselected.xcframework"
+            other.mkdir()
+            (other / "keep").write_text("unselected framework")
+
             builder = native / "create-xcframework.sh"
             builder.write_text(
                 "#!/bin/sh\n"
                 "set -eu\n"
-                "mkdir -p CatbirdMLSFFI.xcframework build/bindings\n"
-                "printf 'new framework' > CatbirdMLSFFI.xcframework/new-binary\n"
+                f"mkdir -p {framework_name} build/bindings\n"
+                f"printf 'new framework' > {framework_name}/new-binary\n"
                 "printf 'new binding' > build/bindings/CatbirdMLS.swift\n"
             )
             builder.chmod(0o755)
@@ -58,6 +63,7 @@ class RebuildPreservationTests(unittest.TestCase):
 
             environment = os.environ.copy()
             environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+            environment["CATBIRD_MLS_APPLE_SCOPE"] = scope
             environment["FFI_BACKUP_TIMESTAMP"] = "20260919T120000Z"
             environment["CATBIRD_MLS_NATIVE_DIR"] = str(native)
             result = subprocess.run(
@@ -70,20 +76,30 @@ class RebuildPreservationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
             backup = core / "_trash" / "ffi-rebuild" / "20260919T120000Z"
-            self.assertEqual((backup / "CatbirdMLSFFI.xcframework" / "old-binary").read_text(), "old framework")
+            self.assertEqual((backup / framework_name / "old-binary").read_text(), "old framework")
             self.assertEqual((backup / "CatbirdMLS.swift").read_text(), "old binding")
             self.assertEqual((backup / "MLSFFI.swift").read_text(), "stale binding")
             self.assertEqual(
-                (backup / "native-CatbirdMLSFFI.xcframework" / "old-native").read_text(),
+                (backup / ("native-" + framework_name) / "old-native").read_text(),
                 "old native framework",
             )
             self.assertEqual(
                 (backup / "native-build-bindings" / "old-binding").read_text(),
                 "old native binding",
             )
-            self.assertEqual((core / "Sources" / "CatbirdMLSFFI.xcframework" / "new-binary").read_text(), "new framework")
+            self.assertEqual((core / "Sources" / framework_name / "new-binary").read_text(), "new framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "new binding")
             self.assertFalse((sources / "MLSFFI.swift").exists())
+            self.assertEqual((other / "keep").read_text(), "unselected framework")
+            import json
+            marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
+            self.assertEqual(marker["artifactScope"], scope)
+
+    def test_rebuild_retains_every_replaced_artifact(self):
+        self.check_rebuild_retains_every_replaced_artifact("apple-all-targets")
+
+    def test_simulator_rebuild_is_separate_and_marked_partial(self):
+        self.check_rebuild_retains_every_replaced_artifact("ios-arm64-simulator-only")
 
     def test_rebuild_rejects_native_source_change_during_generation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -55,29 +55,30 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.petrel_catbird / "lexicons/blue/catbird/labyrinth/blue.catbird.labyrinth.defs.json", '{"lexicon":1}\n')
 
         framework = self.core / "Sources/CatbirdMLSFFI.xcframework"
-        library = framework / "ios-arm64/libCatbirdMLSFFI.a"
-        header = framework / "ios-arm64/Headers/CatbirdMLSFFI.h"
-        modulemap = framework / "ios-arm64/Headers/module.modulemap"
-        library.parent.mkdir(parents=True, exist_ok=True)
-        library.write_bytes(b"archive")
-        write(header, "void ffi(void);\n")
-        write(modulemap, "module CatbirdMLSFFI {}\n")
+        libraries = []
+        for identifier, platform, variant, architectures in [
+            ("ios-arm64", "ios", None, ["arm64"]),
+            ("ios-arm64_x86_64-simulator", "ios", "simulator", ["arm64", "x86_64"]),
+            ("ios-arm64_x86_64-maccatalyst", "ios", "maccatalyst", ["arm64", "x86_64"]),
+            ("macos-arm64_x86_64", "macos", None, ["arm64", "x86_64"]),
+        ]:
+            folder = framework / identifier
+            folder.mkdir(parents=True)
+            (folder / "libCatbirdMLSFFI.a").write_bytes(b"archive")
+            write(folder / "Headers/CatbirdMLSFFI.h", "void ffi(void);\n")
+            write(folder / "Headers/module.modulemap", "module CatbirdMLSFFI {}\n")
+            item = {
+                "LibraryIdentifier": identifier,
+                "LibraryPath": "libCatbirdMLSFFI.a",
+                "HeadersPath": "Headers",
+                "SupportedArchitectures": architectures,
+                "SupportedPlatform": platform,
+            }
+            if variant:
+                item["SupportedPlatformVariant"] = variant
+            libraries.append(item)
         with (framework / "Info.plist").open("wb") as handle:
-            plistlib.dump(
-                {
-                    "AvailableLibraries": [
-                        {
-                            "LibraryIdentifier": "ios-arm64",
-                            "LibraryPath": "libCatbirdMLSFFI.a",
-                            "HeadersPath": "Headers",
-                            "SupportedArchitectures": ["arm64"],
-                            "SupportedPlatform": "ios",
-                        }
-                    ]
-                },
-                handle,
-                sort_keys=True,
-            )
+            plistlib.dump({"AvailableLibraries": libraries}, handle, sort_keys=True)
 
         self.selected = self.root / "selected-inputs.json"
         self.selected.write_text(json.dumps({"repos": []}) + "\n")
@@ -91,13 +92,14 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.core / "Sources/CatbirdMLSFFI.xcframework/labyrinth-space-protocol.json", json.dumps({
             "protocolVersion": 20261023,
             "features": ["labyrinth"],
+            "artifactScope": "apple-all-targets",
             "sourceFingerprint": self.module.source_bundle_fingerprint(self.native, [self.atproto]),
         }))
 
     def tearDown(self):
         self.temporary.cleanup()
 
-    def build(self):
+    def build(self, framework=None):
         return self.module.build_manifest(
             core=self.core,
             native=self.native,
@@ -107,6 +109,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             selected_inputs=self.selected,
             identities=self.identities,
             qualification="unreviewed-candidate",
+            framework=framework,
             toolchains={"rustc": "rustc fixture", "swift": "swift fixture"},
         )
 
@@ -124,6 +127,39 @@ class AppleArtifactManifestTests(unittest.TestCase):
         self.assertEqual(manifest["build"]["explicit_features"], ["labyrinth"])
         self.assertEqual(manifest["build"]["default_features"], True)
         self.assertEqual(len(manifest["identity"]["canonical_sha256"]), 64)
+
+    def test_partial_matrix_cannot_claim_full_release_scope(self):
+        framework = self.core / "Sources/CatbirdMLSFFI.xcframework"
+        with (framework / "Info.plist").open("rb") as handle:
+            value = plistlib.load(handle)
+        value["AvailableLibraries"] = value["AvailableLibraries"][:1]
+        with (framework / "Info.plist").open("wb") as handle:
+            plistlib.dump(value, handle)
+        with self.assertRaisesRegex(RuntimeError, "architecture matrix"):
+            self.build()
+
+    def test_simulator_artifact_has_distinct_scope_and_target_list(self):
+        full = self.core / "Sources/CatbirdMLSFFI.xcframework"
+        framework = self.core / "Sources/CatbirdMLSFFISimulator.xcframework"
+        full.rename(framework)
+        with (framework / "Info.plist").open("rb") as handle:
+            value = plistlib.load(handle)
+        simulator = next(item for item in value["AvailableLibraries"]
+                         if item.get("SupportedPlatformVariant") == "simulator")
+        simulator["SupportedArchitectures"] = ["arm64"]
+        value["AvailableLibraries"] = [simulator]
+        with (framework / "Info.plist").open("wb") as handle:
+            plistlib.dump(value, handle)
+        marker_path = framework / "labyrinth-space-protocol.json"
+        marker = json.loads(marker_path.read_text())
+        marker["artifactScope"] = "ios-arm64-simulator-only"
+        marker_path.write_text(json.dumps(marker))
+        manifest = self.build(framework)
+        self.assertEqual(manifest["scope"], "apple-native-uniffi-simulator-only")
+        self.assertEqual(manifest["build"]["apple_targets"], ["aarch64-apple-ios-sim"])
+        path = self.root / "simulator-manifest.json"
+        self.module.write_manifest(path, manifest)
+        self.module.verify_manifest(path)
 
     def test_verify_rejects_changed_native_source(self):
         manifest = self.build()
