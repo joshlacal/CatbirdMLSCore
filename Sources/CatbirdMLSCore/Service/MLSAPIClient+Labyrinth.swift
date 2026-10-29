@@ -264,6 +264,11 @@ extension MLSAPIClient {
     case let .spaceDeleted(_, message):
       // Upstream and Swan: 400 SpaceDeleted, the renewal deletion signal.
       return (400, "SpaceDeleted", message)
+    case let .authorizationRefused(_, name, message) where name == "SpaceNotFound":
+      // Petrel's form of the authority's 400 SpaceNotFound: the authority
+      // does not host the Space, or it is not public. Not a refusal of this
+      // reader, so keep the 400; labyrinth maps the name to NotFound.
+      return (400, name, message)
     case let .authorizationRefused(_, name, message):
       // This reader was refused (upstream 400, Swan 401, or any 403):
       // labyrinth's read refusal, on which history degrades.

@@ -113,9 +113,7 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(raw.status, 400)
     XCTAssertEqual(raw.error, "SpaceDeleted")
 
-    // Labyrinth matches the error name before the 403 status, so a
-    // SpaceNotFound refusal stays NotFound rather than Forbidden.
-    for name in ["NotAuthorized", "UserNotAuthorized", "AppNotAuthorized", "SpaceNotFound"] {
+    for name in ["NotAuthorized", "UserNotAuthorized", "AppNotAuthorized"] {
       raw = try rawResponse(.authorizationRefused(host: "authority.example", error: name, message: nil))
       XCTAssertEqual(raw.status, 403, name)
       XCTAssertEqual(raw.error, name)
@@ -131,6 +129,41 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(raw.status, 400)
     XCTAssertEqual(raw.error, "InvalidDelegationToken")
     XCTAssertEqual(raw.message, "token expired")
+  }
+
+  /// Petrel reports an authority's 400 SpaceNotFound as
+  /// `authorizationRefused(error: "SpaceNotFound")`. It is not a refusal of
+  /// this reader, so it keeps the authority's 400: labyrinth maps the name to
+  /// NotFound("space"), and nothing that reads the status first sees the 403
+  /// it turns into Forbidden.
+  func testSpaceNotFoundKeepsTheAuthority400() throws {
+    var raw = try rawResponse(.authorizationRefused(
+      host: "authority.example", error: "SpaceNotFound", message: "Space not found"))
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "SpaceNotFound")
+    XCTAssertEqual(raw.message, "Space not found")
+
+    let bare = SpaceCredentialError.authorizationRefused(
+      host: "authority.example", error: "SpaceNotFound", message: nil)
+    raw = try rawResponse(bare)
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "SpaceNotFound")
+    XCTAssertEqual(raw.message, bare.errorDescription)
+    // Petrel's description says this is not a deletion.
+    XCTAssertTrue(raw.message?.contains("does not mean it was deleted") == true)
+  }
+
+  /// Petrel reports an invalid client attestation (400 or 401) as
+  /// `tokenRejected(error: "InvalidClientAttestation")`. It stays a 400 with
+  /// its name, which labyrinth keeps retryable (Backend), not Forbidden.
+  func testInvalidClientAttestationStaysRetryable() throws {
+    let error = SpaceCredentialError.tokenRejected(
+      host: "authority.example", error: "InvalidClientAttestation", message: nil)
+    let raw = try rawResponse(error)
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "InvalidClientAttestation")
+    XCTAssertEqual(raw.message, error.errorDescription)
+    XCTAssertTrue(raw.message?.contains("client attestation") == true)
   }
 
   func testExchangeFailuresKeepTheAuthorityStatusAndErrorName() throws {
