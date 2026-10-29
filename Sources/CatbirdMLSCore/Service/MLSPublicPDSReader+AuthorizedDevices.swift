@@ -57,6 +57,14 @@ extension MLSPublicPDSReader {
   /// Bypass Petrel's non-expiring DID-to-PDS cache for authorization. The
   /// native key-set cache is the only cache on this trust path.
   static func resolveCurrentPDS(did: String, session: URLSession = authorizationSession) async throws -> URL {
+    try currentPDS(in: try await fetchValidatedDIDDocument(did: did, session: session), did: did)
+  }
+
+  /// A fresh fetch of `did`'s DID document, checked to be that DID's own
+  /// document. Never cached here.
+  static func fetchValidatedDIDDocument(
+    did: String, session: URLSession = authorizationSession
+  ) async throws -> DIDDocument {
     guard !did.contains("#"), (try? DID(didString: did)) != nil else { throw ReaderError.invalidResponse }
     let url = try SpaceHostResolver.didDocumentURL(for: did)
     let limits = NetworkResponseLimits(
@@ -78,6 +86,12 @@ extension MLSPublicPDSReader {
     #else
     document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
     #endif
+    guard document.id == did else { throw ReaderError.invalidResponse }
+    return document
+  }
+
+  /// The single HTTPS `#atproto_pds` endpoint of `did`'s own DID document.
+  static func currentPDS(in document: DIDDocument, did: String) throws -> URL {
     guard document.id == did else { throw ReaderError.invalidResponse }
     let services = document.service.filter {
       ($0.id == "#atproto_pds" || $0.id == "\(did)#atproto_pds") && $0.type == "AtprotoPersonalDataServer"

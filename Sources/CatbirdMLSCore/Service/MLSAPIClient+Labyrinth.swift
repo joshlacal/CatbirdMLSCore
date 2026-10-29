@@ -179,7 +179,10 @@ extension MLSAPIClient {
       if method == "GET", conversation.repo != did {
         // Petrel verifies the foreign record's fresh response MAC, URI and
         // DRISL CID. Rust then binds that CID to the DS sequence reference.
-        let pds = try await MLSPublicPDSReader.resolveCurrentPDS(did: conversation.repo)
+        // The repo's PDS and its author KEM key (below) come from one cached
+        // DID document, so a read fetches it once rather than twice.
+        let document = try await labyrinthDIDDocuments.document(for: conversation.repo)
+        let pds = try MLSPublicPDSReader.currentPDS(in: document, did: conversation.repo)
         guard var url = URLComponents(
           url: pds.appendingPathComponent("xrpc/\(nsid)"), resolvingAgainstBaseURL: false) else {
           throw LabyrinthTransportError.invalidRequest("invalid conversation repo host")
@@ -208,7 +211,7 @@ extension MLSAPIClient {
   /// one manager is kept per account instead of exchanging a fresh credential
   /// for every foreign record read. Another account replaces it.
   func labyrinthSpaceCredentialManager(for did: String) -> SpaceCredentialManager {
-    labyrinthSpaceCredentials.manager(for: did) { [client] in
+    labyrinthSpaceCredentials.manager(for: did) { [client, labyrinthDIDDocuments] in
       SpaceCredentialManager(
         client: client,
         authorityHostProvider: { authority in
@@ -226,13 +229,29 @@ extension MLSAPIClient {
           guard let token = output?.token else { throw SpaceCredentialError.missingDelegationToken }
           guard try await client.getDid() == did else { throw MLSAPIError.noAuthentication }
           return token
+        },
+        authorKEMKeyProvider: { repo, forceRefresh in
+          try await Self.labyrinthAuthorKEMKey(
+            repo: repo, forceRefresh: forceRefresh, documents: labyrinthDIDDocuments)
         })
     }
+  }
+
+  /// The author KEM key for a foreign conversation read, from the DID
+  /// document its PDS was resolved from. Petrel passes `forceRefresh` on its
+  /// retry after a response MAC mismatch; that always refetches, so a rotated
+  /// KEM key is still picked up.
+  static func labyrinthAuthorKEMKey(
+    repo: String, forceRefresh: Bool, documents: LabyrinthDIDDocumentCache
+  ) async throws -> String {
+    let document = try await documents.document(for: repo, forceRefresh: forceRefresh)
+    return try SpaceHostResolver.authorKEMKey(from: document, expectedDID: repo)
   }
 
   /// Drops the cached Space credentials (logout, account or environment switch).
   public func clearLabyrinthSpaceCredentials() {
     labyrinthSpaceCredentials.clear()
+    labyrinthDIDDocuments.clear()
   }
 
   /// A credential failure as the raw response the catbird-mls callback
@@ -638,5 +657,78 @@ final class LabyrinthSpaceCredentialStore: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     entry = nil
+  }
+}
+
+/// Recently fetched DID documents of foreign conversation repos, each already
+/// checked to be its DID's own document. A foreign record read needs the
+/// repo's PDS and its author KEM key; both come from one fetch through here.
+///
+/// Bounded to `capacity` DIDs and short-lived (`lifetime` seconds). A forced
+/// lookup always refetches and replaces the entry; failed fetches are not
+/// cached. Each caller still applies its own checks to the document.
+final class LabyrinthDIDDocumentCache: @unchecked Sendable {
+  typealias Fetch = @Sendable (String) async throws -> DIDDocument
+
+  static let defaultLifetime: TimeInterval = 60
+  static let defaultCapacity = 32
+
+  private let lock = NSLock()
+  private var entries: [String: (document: DIDDocument, expires: Date)] = [:]
+  private let lifetime: TimeInterval
+  private let capacity: Int
+  private let now: @Sendable () -> Date
+  private let fetch: Fetch
+
+  init(
+    lifetime: TimeInterval = LabyrinthDIDDocumentCache.defaultLifetime,
+    capacity: Int = LabyrinthDIDDocumentCache.defaultCapacity,
+    now: @escaping @Sendable () -> Date = { Date() },
+    fetch: @escaping Fetch = { did in try await MLSPublicPDSReader.fetchValidatedDIDDocument(did: did) }
+  ) {
+    self.lifetime = lifetime
+    self.capacity = max(1, capacity)
+    self.now = now
+    self.fetch = fetch
+  }
+
+  func document(for did: String, forceRefresh: Bool = false) async throws -> DIDDocument {
+    if !forceRefresh, let cached = cachedDocument(for: did) { return cached }
+    let document = try await fetch(did)
+    // The fetch checks this too; the cache never holds another DID's document.
+    guard document.id == did else { throw MLSPublicPDSReader.ReaderError.invalidResponse }
+    store(document, for: did)
+    return document
+  }
+
+  func clear() {
+    lock.lock()
+    defer { lock.unlock() }
+    entries.removeAll()
+  }
+
+  private func cachedDocument(for did: String) -> DIDDocument? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard let entry = entries[did] else { return nil }
+    guard entry.expires > now() else {
+      entries.removeValue(forKey: did)
+      return nil
+    }
+    return entry.document
+  }
+
+  private func store(_ document: DIDDocument, for did: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    let current = now()
+    if entries[did] == nil, entries.count >= capacity {
+      entries = entries.filter { $0.value.expires > current }
+      if entries.count >= capacity,
+         let oldest = entries.min(by: { $0.value.expires < $1.value.expires })?.key {
+        entries.removeValue(forKey: oldest)
+      }
+    }
+    entries[did] = (document, current.addingTimeInterval(lifetime))
   }
 }

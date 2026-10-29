@@ -79,6 +79,73 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertFalse(current === api.labyrinthSpaceCredentialManager(for: "did:plc:alice"))
   }
 
+  // MARK: - One DID document per foreign read (CM-5)
+
+  /// Each foreign record read fetched the repo's DID document twice: once
+  /// for its PDS and once in Petrel's default author KEM key provider.
+  func testForeignReadTakesPDSAndKEMKeyFromOneDocumentFetch() async throws {
+    let repo = "did:plc:author"
+    let fetches = DIDFetchCounter()
+    let documents = LabyrinthDIDDocumentCache(fetch: { did in
+      fetches.record(did)
+      return labyrinthAuthorDocument(did)
+    })
+    let document = try await documents.document(for: repo)
+    XCTAssertEqual(try MLSPublicPDSReader.currentPDS(in: document, did: repo), URL(string: "https://pds.example"))
+    let key = try await Client.labyrinthAuthorKEMKey(repo: repo, forceRefresh: false, documents: documents)
+    XCTAssertEqual(key, "did:key:" + labyrinthTestKEMMultibase)
+    XCTAssertEqual(fetches.count(repo), 1, "the PDS and the KEM key must share one fetch")
+
+    // Petrel retries once with forceRefresh after a MAC mismatch: always refetch.
+    _ = try await Client.labyrinthAuthorKEMKey(repo: repo, forceRefresh: true, documents: documents)
+    XCTAssertEqual(fetches.count(repo), 2)
+    _ = try await documents.document(for: repo)
+    XCTAssertEqual(fetches.count(repo), 2, "the refreshed document replaces the cached one")
+  }
+
+  func testDIDDocumentCacheIsShortLivedBoundedAndNeverKeepsFailures() async throws {
+    let clock = DIDCacheTestClock()
+    let fetches = DIDFetchCounter()
+    let documents = LabyrinthDIDDocumentCache(lifetime: 60, capacity: 2, now: { clock.now }, fetch: { did in
+      fetches.record(did)
+      if did == "did:plc:unreachable" { throw URLError(.timedOut) }
+      if did == "did:plc:impostor" { return labyrinthAuthorDocument("did:plc:someoneelse") }
+      return labyrinthAuthorDocument(did)
+    })
+
+    _ = try await documents.document(for: "did:plc:a")
+    clock.advance(59)
+    _ = try await documents.document(for: "did:plc:a")
+    XCTAssertEqual(fetches.count("did:plc:a"), 1)
+    clock.advance(2)
+    _ = try await documents.document(for: "did:plc:a")
+    XCTAssertEqual(fetches.count("did:plc:a"), 2, "an entry older than its lifetime is refetched")
+
+    // Capacity 2: a third DID evicts the entry closest to expiry.
+    clock.advance(1)
+    _ = try await documents.document(for: "did:plc:b")
+    clock.advance(1)
+    _ = try await documents.document(for: "did:plc:c")
+    _ = try await documents.document(for: "did:plc:c")
+    XCTAssertEqual(fetches.count("did:plc:c"), 1)
+    _ = try await documents.document(for: "did:plc:a")
+    XCTAssertEqual(fetches.count("did:plc:a"), 3, "the oldest entry was evicted")
+
+    for did in ["did:plc:unreachable", "did:plc:impostor"] {
+      for _ in 0..<2 {
+        do {
+          _ = try await documents.document(for: did)
+          XCTFail("\(did) must not resolve")
+        } catch {}
+      }
+      XCTAssertEqual(fetches.count(did), 2, "\(did): a failed or mismatched fetch is not cached")
+    }
+
+    documents.clear()
+    _ = try await documents.document(for: "did:plc:c")
+    XCTAssertEqual(fetches.count("did:plc:c"), 2)
+  }
+
   func testEnvironmentSwitchDropsCachedSpaceCredentials() async {
     let atProto = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let api = await MLSAPIClient(client: atProto)
@@ -354,4 +421,31 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertThrowsError(try Client.mailboxKeysValue(fromGetRecord: Data(), status: 500))
     XCTAssertThrowsError(try Client.mailboxKeysValue(fromGetRecord: Data("{}".utf8), status: 200))
   }
+}
+
+// MARK: - DID document cache fixtures
+
+private final class DIDFetchCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var counts: [String: Int] = [:]
+  func record(_ did: String) { lock.lock(); counts[did, default: 0] += 1; lock.unlock() }
+  func count(_ did: String) -> Int { lock.lock(); defer { lock.unlock() }; return counts[did, default: 0] }
+}
+
+private final class DIDCacheTestClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var current = Date(timeIntervalSince1970: 1_800_000_000)
+  var now: Date { lock.lock(); defer { lock.unlock() }; return current }
+  func advance(_ seconds: TimeInterval) { lock.lock(); current += seconds; lock.unlock() }
+}
+
+/// A P-256 Multikey from Petrel's KEM key tests.
+private let labyrinthTestKEMMultibase = "zDnaembgSGUhZULN2Caob4HLJPaxBh92N7rtH21TErzqf8HQo"
+
+private func labyrinthAuthorDocument(_ did: String) -> DIDDocument {
+  DIDDocument(
+    id: did,
+    verificationMethod: [VerificationMethod(
+      id: "#atproto_kem", type: "Multikey", controller: did, publicKeyMultibase: labyrinthTestKEMMultibase)],
+    service: [Service(id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://pds.example")])
 }

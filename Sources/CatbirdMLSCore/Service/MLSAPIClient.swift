@@ -166,6 +166,10 @@ public final class MLSAPIClient {
     /// Space credential is reused until it expires (MLSAPIClient+Labyrinth).
     let labyrinthSpaceCredentials = LabyrinthSpaceCredentialStore()
 
+    /// DID documents of foreign conversation repos, shared by a foreign read's
+    /// PDS resolution and its author KEM key lookup (MLSAPIClient+Labyrinth).
+    let labyrinthDIDDocuments = LabyrinthDIDDocumentCache()
+
     // MARK: - Initialization
 
     /// Initialize MLS API client with ATProtoClient and environment
