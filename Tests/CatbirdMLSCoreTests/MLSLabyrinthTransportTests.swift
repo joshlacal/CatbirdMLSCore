@@ -1,6 +1,6 @@
 import Foundation
 import CatbirdMLS
-import Petrel
+@testable import Petrel
 import XCTest
 @testable import CatbirdMLSCore
 
@@ -146,6 +146,88 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(fetches.count("did:plc:c"), 2)
   }
 
+  /// Petrel forces a refresh after a response MAC mismatch, so the cached
+  /// document is suspect. When that refetch fails or returns another DID's
+  /// document, the next read must fetch again rather than reuse it.
+  func testFailedForcedRefreshDropsTheCachedDocument() async throws {
+    let repo = "did:plc:author"
+    for failure in [DIDFetchMode.unreachable, .impostor] {
+      let fetches = DIDFetchCounter()
+      let mode = DIDFetchModeBox()
+      let documents = LabyrinthDIDDocumentCache(fetch: { did in
+        fetches.record(did)
+        switch mode.value {
+        case .normal: return labyrinthAuthorDocument(did)
+        case .unreachable: throw URLError(.timedOut)
+        case .impostor: return labyrinthAuthorDocument("did:plc:someoneelse")
+        }
+      })
+      _ = try await documents.document(for: repo)
+      mode.value = failure
+      do {
+        _ = try await Client.labyrinthAuthorKEMKey(repo: repo, forceRefresh: true, documents: documents)
+        XCTFail("\(failure): a failed forced refresh must throw")
+      } catch {}
+      XCTAssertEqual(fetches.count(repo), 2, "\(failure)")
+
+      mode.value = .normal
+      _ = try await documents.document(for: repo)
+      XCTAssertEqual(fetches.count(repo), 3, "\(failure): the suspect document must not be served again")
+    }
+  }
+
+  /// The wiring, not only the cache: the foreign read's PDS lookup and the
+  /// author KEM key provider of the credential manager that read uses both go
+  /// through this client's one cache, so a read fetches the repo's DID
+  /// document once. Every DID document fetch below is answered in-process.
+  func testForeignReadAndItsCredentialManagerShareOneDocumentFetch() async throws {
+    let repo = "did:plc:author"
+    let authority = "did:plc:authority"
+    let requests = DIDDocumentRequestLog()
+    let document = try JSONEncoder().encode(labyrinthAuthorDocument(repo))
+    LabyrinthDIDDocumentURLProtocol.handler = { request in
+      let path = request.url?.path ?? ""
+      requests.record(path)
+      return path == "/\(repo)" ? (200, document) : (404, Data(#"{"error":"NotFound"}"#.utf8))
+    }
+    NetworkService.setNetworkTestProtocolClasses([LabyrinthDIDDocumentURLProtocol.self])
+    NetworkService.dnsResolverOverride = { _ in ["93.184.216.34"] }
+    defer {
+      NetworkService.setNetworkTestProtocolClasses(nil)
+      NetworkService.dnsResolverOverride = nil
+      LabyrinthDIDDocumentURLProtocol.handler = nil
+    }
+
+    let atProto = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let api = await MLSAPIClient(client: atProto)
+    let space = "at://\(authority)/space/blue.catbird.labyrinth.conversation/11111111-1111-4111-8111-111111111111"
+    let nsid = "com.atproto.space.getRecord"
+    let conversation = try XCTUnwrap(Client.conversationSpaceRequest(
+      did: "did:plc:alice", method: "GET", nsid: nsid,
+      path: "/xrpc/\(nsid)?space=\(space)&repo=\(repo)&collection=blue.catbird.labyrinth.batch&rkey=immutable",
+      body: nil))
+
+    let target = try await api.labyrinthForeignRecordURL(nsid: nsid, conversation: conversation)
+    XCTAssertEqual(target.host, "pds.example")
+    XCTAssertEqual(target.path, "/xrpc/\(nsid)")
+    XCTAssertEqual(requests.count("/\(repo)"), 1)
+
+    // get() asks the KEM key provider for the MAC context before it exchanges
+    // a credential. The exchange then stops at the authority's DID document
+    // (404 here), which shows the provider ran.
+    let manager = api.labyrinthSpaceCredentialManager(for: "did:plc:alice")
+    do {
+      _ = try await manager.get(
+        url: try XCTUnwrap(URL(string: "http://127.0.0.1:9/xrpc/\(nsid)")),
+        space: conversation.space, audience: repo)
+      XCTFail("the credential exchange has no authority to reach")
+    } catch {}
+    XCTAssertEqual(requests.count("/\(authority)"), 1,
+                   "positive control: get() reached the credential exchange, after the KEM key provider")
+    XCTAssertEqual(requests.count("/\(repo)"), 1,
+                   "the KEM key must come from the document the read already fetched")
+  }
+
   func testEnvironmentSwitchDropsCachedSpaceCredentials() async {
     let atProto = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
     let api = await MLSAPIClient(client: atProto)
@@ -198,9 +280,9 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(raw.message, "token expired")
   }
 
-  /// Petrel reports an authority's 400 SpaceNotFound as
-  /// `authorizationRefused(error: "SpaceNotFound")`. It is not a refusal of
-  /// this reader, so it keeps the authority's 400: labyrinth maps the name to
+  /// Petrel reports an authority's SpaceNotFound (400 upstream, 404 in Swan)
+  /// as `authorizationRefused(error: "SpaceNotFound")`. It is not a refusal of
+  /// this reader, so it answers 400: labyrinth maps the name to
   /// NotFound("space"), and nothing that reads the status first sees the 403
   /// it turns into Forbidden.
   func testSpaceNotFoundKeepsTheAuthority400() throws {
@@ -209,6 +291,14 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(raw.status, 400)
     XCTAssertEqual(raw.error, "SpaceNotFound")
     XCTAssertEqual(raw.message, "Space not found")
+
+    // Swan's 404 has no message, so Petrel passes the raw body as the message.
+    let swanBody = #"{"error":"SpaceNotFound"}"#
+    raw = try rawResponse(.authorizationRefused(
+      host: "authority.example", error: "SpaceNotFound", message: swanBody))
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "SpaceNotFound")
+    XCTAssertEqual(raw.message, swanBody)
 
     let bare = SpaceCredentialError.authorizationRefused(
       host: "authority.example", error: "SpaceNotFound", message: nil)
@@ -234,11 +324,19 @@ final class MLSLabyrinthTransportTests: XCTestCase {
   }
 
   func testExchangeFailuresKeepTheAuthorityStatusAndErrorName() throws {
-    // Swan answers 404 {"error":"SpaceNotFound"} with no message, so Petrel
-    // keeps the raw body as the message.
-    var raw = try rawResponse(.exchangeFailed(statusCode: 404, message: #"{"error":"SpaceNotFound"}"#))
+    // A 404 without the SpaceNotFound name stays an exchange failure in
+    // Petrel, with its status and message.
+    var raw = try rawResponse(.exchangeFailed(statusCode: 404, message: "Not Found"))
     XCTAssertEqual(raw.status, 404)
-    XCTAssertEqual(raw.error, "SpaceNotFound")
+    XCTAssertNil(raw.error)
+    XCTAssertEqual(raw.message, "Not Found")
+
+    // With no message, Petrel keeps the raw body; its error name survives.
+    let body = #"{"error":"InternalServerError"}"#
+    raw = try rawResponse(.exchangeFailed(statusCode: 500, message: body))
+    XCTAssertEqual(raw.status, 500)
+    XCTAssertEqual(raw.error, "InternalServerError")
+    XCTAssertEqual(raw.message, body)
 
     raw = try rawResponse(.exchangeFailed(statusCode: 503, message: "conversation policy unavailable"))
     XCTAssertEqual(raw.status, 503)
@@ -430,6 +528,52 @@ private final class DIDFetchCounter: @unchecked Sendable {
   private var counts: [String: Int] = [:]
   func record(_ did: String) { lock.lock(); counts[did, default: 0] += 1; lock.unlock() }
   func count(_ did: String) -> Int { lock.lock(); defer { lock.unlock() }; return counts[did, default: 0] }
+}
+
+private enum DIDFetchMode { case normal, unreachable, impostor }
+
+private final class DIDFetchModeBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var current = DIDFetchMode.normal
+  var value: DIDFetchMode {
+    get { lock.lock(); defer { lock.unlock() }; return current }
+    set { lock.lock(); current = newValue; lock.unlock() }
+  }
+}
+
+private final class DIDDocumentRequestLog: @unchecked Sendable {
+  private let lock = NSLock()
+  private var paths: [String] = []
+  func record(_ path: String) { lock.lock(); paths.append(path); lock.unlock() }
+  func count(_ path: String) -> Int { lock.lock(); defer { lock.unlock() }; return paths.filter { $0 == path }.count }
+}
+
+/// Answers the DID document fetches Petrel's sessions make while
+/// `NetworkService` test protocol classes are set.
+private final class LabyrinthDIDDocumentURLProtocol: URLProtocol {
+  private static let lock = NSLock()
+  private nonisolated(unsafe) static var storedHandler: (@Sendable (URLRequest) throws -> (Int, Data))?
+  static var handler: (@Sendable (URLRequest) throws -> (Int, Data))? {
+    get { lock.lock(); defer { lock.unlock() }; return storedHandler }
+    set { lock.lock(); storedHandler = newValue; lock.unlock() }
+  }
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+  override func startLoading() {
+    guard let handler = Self.handler, let url = request.url else {
+      client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+      return
+    }
+    do {
+      let (status, data) = try handler(request)
+      let response = HTTPURLResponse(
+        url: url, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+      client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      client?.urlProtocol(self, didLoad: data)
+      client?.urlProtocolDidFinishLoading(self)
+    } catch { client?.urlProtocol(self, didFailWithError: error) }
+  }
+  override func stopLoading() {}
 }
 
 private final class DIDCacheTestClock: @unchecked Sendable {

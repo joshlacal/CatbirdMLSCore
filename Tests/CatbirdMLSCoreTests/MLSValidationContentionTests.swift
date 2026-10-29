@@ -173,8 +173,10 @@ final class MLSValidationContentionTests: XCTestCase {
     let did = did!
     let opener = Task { try await provider.getDatabasePool(for: did) }
     let coalescedWaiter = Task { try await provider.getDatabasePool(for: did) }
-    try await Task.sleep(for: .milliseconds(100))
-    XCTAssertFalse(try canAcquireExclusiveAdmissionLease(), "Open attempt must own admission")
+    // The open gives up after its ~1 s validation retry budget. A fixed sleep
+    // followed by a python3 child could outlast that budget under load, so
+    // suspend as soon as this process sees the open own admission.
+    try await waitUntilAdmissionLeaseIsHeld()
     MLSClient.markSuspensionInProgress(reason: "coalesced validation suspension")
     MLSCoreContext.markSuspensionInProgress()
     let initialClose = MLSGRDBManager.closeAllDatabasesForSuspension()
@@ -204,6 +206,33 @@ final class MLSValidationContentionTests: XCTestCase {
     XCTAssertTrue(MLSGRDBManager.closeAllDatabasesForSuspension().isComplete)
     XCTAssertTrue(try canAcquireExclusiveAdmissionLease(),
       "Independent process must acquire the actual flock after the open owner exits")
+  }
+
+  /// Polls the actual admission flock from this process through its own open
+  /// file description. flock locks on separate descriptions conflict even
+  /// within one process, so no child process is needed to observe it.
+  private func waitUntilAdmissionLeaseIsHeld(timeout: Duration = .seconds(10)) async throws {
+    let lease = try MLSStorageCoordinator.shared.leaseURL(
+      for: .swiftGRDB, userDID: did, type: "admission")
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    while ContinuousClock.now < deadline {
+      let fd = open(lease.path, O_RDWR)
+      if fd >= 0 {
+        defer { close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+          flock(fd, LOCK_UN)
+        } else {
+          let error = errno
+          if error == EWOULDBLOCK { return }
+          throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+        }
+      } else {
+        let error = errno
+        if error != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO) }
+      }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    XCTFail("Open attempt must own admission")
   }
 
   private func canAcquireExclusiveAdmissionLease() throws -> Bool {

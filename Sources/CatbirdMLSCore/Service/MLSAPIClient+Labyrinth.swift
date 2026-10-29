@@ -179,18 +179,7 @@ extension MLSAPIClient {
       if method == "GET", conversation.repo != did {
         // Petrel verifies the foreign record's fresh response MAC, URI and
         // DRISL CID. Rust then binds that CID to the DS sequence reference.
-        // The repo's PDS and its author KEM key (below) come from one cached
-        // DID document, so a read fetches it once rather than twice.
-        let document = try await labyrinthDIDDocuments.document(for: conversation.repo)
-        let pds = try MLSPublicPDSReader.currentPDS(in: document, did: conversation.repo)
-        guard var url = URLComponents(
-          url: pds.appendingPathComponent("xrpc/\(nsid)"), resolvingAgainstBaseURL: false) else {
-          throw LabyrinthTransportError.invalidRequest("invalid conversation repo host")
-        }
-        url.queryItems = conversation.query
-        guard let target = url.url else {
-          throw LabyrinthTransportError.invalidRequest("invalid conversation record URL")
-        }
+        let target = try await labyrinthForeignRecordURL(nsid: nsid, conversation: conversation)
         let credentials = labyrinthSpaceCredentialManager(for: did)
         do {
           return try await credentials.get(url: target, space: conversation.space, audience: conversation.repo)
@@ -204,6 +193,25 @@ extension MLSAPIClient {
     let query = try Self.validateLabyrinthSpaceRequest(
       did: did, method: method, nsid: nsid, path: path, body: body)
     return try await authenticatedRepoCall(method: method, endpoint: nsid, body: body, query: query)
+  }
+
+  /// The URL of a foreign conversation record on the repo's current PDS.
+  /// The PDS and the author KEM key (labyrinthSpaceCredentialManager) come
+  /// from one cached DID document, so a read fetches it once rather than twice.
+  func labyrinthForeignRecordURL(
+    nsid: String, conversation: ConversationSpaceRequest
+  ) async throws -> URL {
+    let document = try await labyrinthDIDDocuments.document(for: conversation.repo)
+    let pds = try MLSPublicPDSReader.currentPDS(in: document, did: conversation.repo)
+    guard var url = URLComponents(
+      url: pds.appendingPathComponent("xrpc/\(nsid)"), resolvingAgainstBaseURL: false) else {
+      throw LabyrinthTransportError.invalidRequest("invalid conversation repo host")
+    }
+    url.queryItems = conversation.query
+    guard let target = url.url else {
+      throw LabyrinthTransportError.invalidRequest("invalid conversation record URL")
+    }
+    return target
   }
 
   /// The Space credential manager of signed-in account `did`. Petrel caches
@@ -284,9 +292,10 @@ extension MLSAPIClient {
       // Upstream and Swan: 400 SpaceDeleted, the renewal deletion signal.
       return (400, "SpaceDeleted", message)
     case let .authorizationRefused(_, name, message) where name == "SpaceNotFound":
-      // Petrel's form of the authority's 400 SpaceNotFound: the authority
-      // does not host the Space, or it is not public. Not a refusal of this
-      // reader, so keep the 400; labyrinth maps the name to NotFound.
+      // Petrel's form of the authority's SpaceNotFound (400 upstream, 404 in
+      // Swan): the authority does not host the Space, or it is not public.
+      // Not a refusal of this reader, so answer 400 (Petrel drops the status);
+      // labyrinth maps the name to NotFound.
       return (400, name, message)
     case let .authorizationRefused(_, name, message):
       // This reader was refused (upstream 400, Swan 401, or any 403):
@@ -298,7 +307,9 @@ extension MLSAPIClient {
       return (400, name, message)
     case let .exchangeFailed(status, message):
       // Petrel keeps the status and the message, or the raw body when the
-      // authority sent no message (Swan's 404 SpaceNotFound).
+      // authority sent no message; recover an error name from such a body.
+      // SpaceNotFound never arrives here: Petrel reports it at 400 or 404 as
+      // authorizationRefused (above).
       guard (300...599).contains(status) else { return (502, "UpstreamFailure", message) }
       let body = (try? JSONSerialization.jsonObject(with: Data(message.utf8))) as? [String: Any]
       return (status, body?["error"] as? String, body?["message"] as? String ?? message)
@@ -665,8 +676,9 @@ final class LabyrinthSpaceCredentialStore: @unchecked Sendable {
 /// repo's PDS and its author KEM key; both come from one fetch through here.
 ///
 /// Bounded to `capacity` DIDs and short-lived (`lifetime` seconds). A forced
-/// lookup always refetches and replaces the entry; failed fetches are not
-/// cached. Each caller still applies its own checks to the document.
+/// lookup always refetches and replaces the entry; if that refetch fails, the
+/// entry is dropped. Failed fetches are not cached. Each caller still applies
+/// its own checks to the document.
 final class LabyrinthDIDDocumentCache: @unchecked Sendable {
   typealias Fetch = @Sendable (String) async throws -> DIDDocument
 
@@ -694,17 +706,30 @@ final class LabyrinthDIDDocumentCache: @unchecked Sendable {
 
   func document(for did: String, forceRefresh: Bool = false) async throws -> DIDDocument {
     if !forceRefresh, let cached = cachedDocument(for: did) { return cached }
-    let document = try await fetch(did)
-    // The fetch checks this too; the cache never holds another DID's document.
-    guard document.id == did else { throw MLSPublicPDSReader.ReaderError.invalidResponse }
-    store(document, for: did)
-    return document
+    do {
+      let document = try await fetch(did)
+      // The fetch checks this too; the cache never holds another DID's document.
+      guard document.id == did else { throw MLSPublicPDSReader.ReaderError.invalidResponse }
+      store(document, for: did)
+      return document
+    } catch {
+      // A forced refresh follows a response MAC mismatch, so the cached
+      // document is suspect: never serve it again once its refetch failed.
+      if forceRefresh { remove(did) }
+      throw error
+    }
   }
 
   func clear() {
     lock.lock()
     defer { lock.unlock() }
     entries.removeAll()
+  }
+
+  private func remove(_ did: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    entries.removeValue(forKey: did)
   }
 
   private func cachedDocument(for did: String) -> DIDDocument? {

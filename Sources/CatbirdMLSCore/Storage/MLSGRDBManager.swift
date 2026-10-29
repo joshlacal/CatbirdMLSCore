@@ -1891,7 +1891,9 @@ public actor MLSGRDBManager {
     // ═══════════════════════════════════════════════════════════════════════════
     // Opening a Pool for an inactive user while another user is active causes:
     // 1. Memory spike (2 Pools × 6MB = 12MB+ SQLCipher overhead)
-    // 2. Error 7/21 (OOM) during checkpoint/transaction
+    // 2. Error 7 (SQLITE_NOMEM) during checkpoint/transaction. Error 21 is
+    //    SQLITE_MISUSE (a closed handle, whose message also reads "out of
+    //    memory"), not exhaustion; see isSQLiteError7.
     // 3. Error 11 (Corruption) from partial write
     //
     // This is no longer just a warning - we now BLOCK this dangerous operation.
@@ -1911,7 +1913,7 @@ public actor MLSGRDBManager {
         🛑 [OOM-BLOCKED] getDatabasePool BLOCKED for INACTIVE user!
         Requested: \(userDID.prefix(20), privacy: .private)
         Active: \(activeDID.prefix(20), privacy: .private)
-        This would cause Error 7/21 (OOM) → Error 11 (Corruption).
+        This would risk Error 7 (SQLITE_NOMEM) → Error 11 (Corruption).
         Use read(for:)/write(for:) instead - they auto-route to lightweight access.
         """)
       #if DEBUG

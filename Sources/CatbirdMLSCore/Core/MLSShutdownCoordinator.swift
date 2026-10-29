@@ -9,7 +9,9 @@
 //  ═══════════════════════════════════════════════════════════════════════════
 //
 //  Problem: When switching accounts, the following components must be closed
-//  in a STRICT ORDER to prevent SQLite error 21 (out of memory) and state desync:
+//  in a STRICT ORDER to prevent SQLite error 21 (SQLITE_MISUSE, a closed or
+//  misused handle; for a closed handle SQLite's message reads "out of memory",
+//  but it is not memory exhaustion) and state desync:
 //
 //  1. Swift Concurrency tasks advancing the ratchet
 //  2. Rust FFI context holding SQLite handles

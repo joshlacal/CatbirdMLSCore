@@ -132,7 +132,7 @@
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "095b61af53491d6445ad1f6afcb7efde671b0c1568cb08510f9c69c4bb4d31de"
+    "canonical_sha256": "31117cf64c3c5b909dd637836b7ff7922324fd85bd62d0e0c9d475dcc8e3c3da"
   },
   "interface": {
     "generated_swift": {
@@ -158,7 +158,7 @@
       "Petrel": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/Petrel",
       "PetrelCatbird": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/PetrelCatbird"
     },
-    "manifest_sha256": "b75135ec2332c65d2cd50e7ae54e9269309458e9009f3fa24dc9c259ae43761d",
+    "manifest_sha256": "50224593915ae19499863e693adeb3c3e3461b095beb27469f3a3ecdc0796537",
     "path": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/CatbirdMLSCore"
   },
   "qualification": "reviewed-source",
@@ -3950,15 +3950,15 @@
     "native_source_sha256": "3b490d66dd0df2d786126e4af5f06b31db0752f8ab5ec7d6fc3188b13d4dc8d9",
     "repositories": {
       "Petrel": {
-        "jj_change": "xlwwrpunwvoqrkolvnmutuxrkvvlmzzu",
-        "jj_commit": "c67ccc391b6bd9c2334d793c51558b214cd23964",
-        "parent_jj_commit": "e115236537041a900ec971be05185a70cca73e8a",
+        "jj_change": "ysrowxkkzmrruyzuzxyntuxnqorznxrw",
+        "jj_commit": "2113172d1c33191b7725643688e44f97a8e20469",
+        "parent_jj_commit": "c806bb11330faccfd0fd54f09785599289afea84",
         "path": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/Petrel"
       },
       "PetrelCatbird": {
-        "jj_change": "omuupkmsxovvvypnrxsryrkkopozsvqx",
-        "jj_commit": "3729976929ee3769195e653ef75df5874559a4d9",
-        "parent_jj_commit": "8672c80ffeb3b9cfbdb6bd98f66efa09b13fe0db",
+        "jj_change": "ymswrknypntyloupxusyutwqkxxpvyyx",
+        "jj_commit": "0782f3e41bb88e062b51ef02046720f8167d3211",
+        "parent_jj_commit": "3b14001800009d38efdf9e076d405f796d6bbc93",
         "path": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/PetrelCatbird"
       },
       "catbird-atproto": {
