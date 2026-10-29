@@ -145,15 +145,14 @@ struct MLSPushRegistrationCodecTests {
     }
   }
 
+  /// The public cross-language vector, byte-identical to catbird-atproto's
+  /// tests/fixtures/push-registration.json. It lives in this repository so the
+  /// test does not depend on a parent workspace checkout.
   private func fixture() throws -> [String: Any] {
-    let root = URL(fileURLWithPath: #filePath)
+    let url = URL(fileURLWithPath: #filePath)
       .deletingLastPathComponent()
       .deletingLastPathComponent()
-      .deletingLastPathComponent()
-      .deletingLastPathComponent()
-    let url = root.appendingPathComponent(
-      "docs/generated-artifacts/encrypted-requests/contracts/push-registration-vector.json"
-    )
+      .appendingPathComponent("Fixtures/push-registration-vector.json")
     return try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
   }
 }
