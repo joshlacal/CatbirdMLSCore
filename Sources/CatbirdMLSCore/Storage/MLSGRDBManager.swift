@@ -2026,7 +2026,18 @@ public actor MLSGRDBManager {
         // registration, and admission lease so a later call can validate it.
         if Self.isTransientValidationContention(error) { throw error }
         if case MLSSQLCipherError.storageUnavailable = error { throw error }
-        try existingDatabase.close()
+        do {
+          // Closing an already-closed pool is a no-op. A close that throws left
+          // the pool open (GRDB closes all or nothing), so the cache entry,
+          // registration and admission lease stay for a later call to retry,
+          // as the ephemeral and suspension close paths do.
+          try existingDatabase.close()
+        } catch let closeError {
+          logger.error(
+            "🚨 [DB] Cached pool failed validation (\(error.localizedDescription, privacy: .public)) and could not be closed; keeping it and its lease: \(closeError.localizedDescription, privacy: .public)"
+          )
+          throw closeError
+        }
         if databases[userDID] === existingDatabase {
           databases.removeValue(forKey: userDID)
           poolRegistrationTokens.removeValue(forKey: userDID)
@@ -3609,8 +3620,18 @@ public actor MLSGRDBManager {
   }
 
   /// Check if an error indicates SQLite error 7 / resource exhaustion.
+  ///
+  /// A statement on a closed connection fails with SQLITE_MISUSE (21), and
+  /// SQLite's message for a closed handle reads "out of memory". That is a
+  /// use-after-close, not resource exhaustion: suspending storage for it kept
+  /// a pool closed underneath the manager from being replaced (the cached
+  /// validation probe uses the writer, which reports it this way).
   private nonisolated func isSQLiteError7(_ error: Error) -> Bool {
+    if let databaseError = error as? DatabaseError {
+      return databaseError.resultCode.primaryResultCode == .SQLITE_NOMEM
+    }
     let desc = error.localizedDescription.lowercased()
+    guard !desc.contains("sqlite error 21") else { return false }
     return desc.contains("sqlite error 7") || desc.contains("out of memory")
   }
 

@@ -142,6 +142,30 @@ final class MLSValidationContentionTests: XCTestCase {
     XCTAssertGreaterThan(tableCount ?? 0, 0)
   }
 
+  /// A suspension close racing foreground resume can close the cached pool
+  /// underneath the manager. The writer probe then fails with SQLITE_MISUSE,
+  /// whose SQLite message reads "out of memory". Classified as resource
+  /// exhaustion, it suspended storage for 8 s, so the immediate reopen that
+  /// `rebindDatabaseIfClosed` relies on failed as well.
+  func testClosedCachedPoolIsEvictedAndReopenedWithoutSuspendingStorage() async throws {
+    let closedPool = try await provider.getDatabasePool(for: did)
+    try closedPool.close()
+    do {
+      _ = try await provider.getDatabasePool(for: did)
+      XCTFail("A closed cached pool must not pass validation")
+    } catch let error as DatabaseError {
+      XCTAssertEqual(error.resultCode, .SQLITE_MISUSE, "\(error)")
+    }
+    XCTAssertEqual(MLSGRDBManager.activeEmergencyPoolTokenCount(for: did), 0,
+      "Evicting the closed pool must retire its registration and admission lease")
+    let reopened = try await provider.getDatabasePool(for: did)
+    XCTAssertFalse(reopened === closedPool)
+    let tableCount = try await reopened.read { db in
+      try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master")
+    }
+    XCTAssertGreaterThan(tableCount ?? 0, 0)
+  }
+
   func testSuspensionAbandonsCoalescedOpenAndReleasesActualAdmissionLock() async throws {
     let locked = try exclusiveWriter()
     defer { try? Self.release(locked) }
