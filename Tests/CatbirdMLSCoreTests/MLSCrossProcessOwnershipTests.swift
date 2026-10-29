@@ -109,12 +109,19 @@ final class MLSCrossProcessOwnershipTests: XCTestCase {
       let conversationID = UUID().uuidString
       let marker = await MLSWelcomeGate.shared.markerURL(conversationID: conversationID, userDID: did)
       try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+      // `MLSWelcomeGate.shared` fixes its directory when first used, which in a
+      // full run is under an earlier test's base directory, not this one. The
+      // second process must share that exact gate directory, or both claims
+      // succeed in different directories.
+      let gateDirectory = marker.deletingLastPathComponent().deletingLastPathComponent()
+      XCTAssertEqual(gateDirectory.lastPathComponent, "mls_welcome_gate-\(MLSStoragePaths.cleanSuffix)")
+      let gateBase = gateDirectory.deletingLastPathComponent()
 
       // Both owners claim at one shared instant; the second process is skewed by
       // -2ms...+2ms across rounds so every interleaving around the instant is exercised.
       let start = Date().timeIntervalSince1970 + 0.35
       let skew = Double(round % 9 - 4) * 0.0005
-      let nse = try spawnNativeOwner(["welcome-claim", directory.path, conversationID, did, String(format: "%.6f", start + skew)])
+      let nse = try spawnNativeOwner(["welcome-claim", gateBase.path, conversationID, did, String(format: "%.6f", start + skew)])
       try nse.waitForLine("ready")
       while Date().timeIntervalSince1970 < start {}
       let appWon: Bool
