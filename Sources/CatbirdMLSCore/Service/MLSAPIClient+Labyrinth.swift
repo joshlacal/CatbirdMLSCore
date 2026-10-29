@@ -189,7 +189,11 @@ extension MLSAPIClient {
           throw LabyrinthTransportError.invalidRequest("invalid conversation record URL")
         }
         let credentials = labyrinthSpaceCredentialManager(for: did)
-        return try await credentials.get(url: target, space: conversation.space, audience: conversation.repo)
+        do {
+          return try await credentials.get(url: target, space: conversation.space, audience: conversation.repo)
+        } catch let error as SpaceCredentialError {
+          return try Self.labyrinthSpaceCredentialResponse(for: error, url: target)
+        }
       }
       return try await authenticatedRepoCall(
         method: method, endpoint: nsid, body: body, query: conversation.query)
@@ -229,6 +233,59 @@ extension MLSAPIClient {
   /// Drops the cached Space credentials (logout, account or environment switch).
   public func clearLabyrinthSpaceCredentials() {
     labyrinthSpaceCredentials.clear()
+  }
+
+  /// A credential failure as the raw response the catbird-mls callback
+  /// contract asks for: a non-2xx status and an atproto `{"error","message"}`
+  /// body. Labyrinth maps `SpaceDeleted` and 403 to its terminal `Forbidden`;
+  /// as an untyped bridge error it saw only status 0 and no error name.
+  static func labyrinthSpaceCredentialResponse(
+    for error: SpaceCredentialError, url: URL
+  ) throws -> (data: Data, response: HTTPURLResponse) {
+    let (status, name, message) = labyrinthSpaceCredentialOutcome(error)
+    var body = ["message": message ?? error.errorDescription ?? "Space credential exchange failed"]
+    if let name, !name.isEmpty,
+       name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }) {
+      body["error"] = name
+    }
+    guard let response = HTTPURLResponse(
+      url: url, statusCode: status, httpVersion: "HTTP/1.1",
+      headerFields: ["Content-Type": "application/json"]) else { throw error }
+    return (try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]), response)
+  }
+
+  /// The authority's status, error name and message for each Petrel
+  /// credential failure. Petrel keeps the error name but drops the status of
+  /// refusals, so those use the closest authority answer.
+  static func labyrinthSpaceCredentialOutcome(
+    _ error: SpaceCredentialError
+  ) -> (status: Int, name: String?, message: String?) {
+    switch error {
+    case let .spaceDeleted(_, message):
+      // Upstream and Swan: 400 SpaceDeleted, the renewal deletion signal.
+      return (400, "SpaceDeleted", message)
+    case let .authorizationRefused(_, name, message):
+      // This reader was refused (upstream 400, Swan 401, or any 403):
+      // labyrinth's read refusal, on which history degrades.
+      return (403, name, message)
+    case let .tokenRejected(_, name, message, _):
+      // InvalidDelegationToken or InvalidClientAttestation (400 upstream and
+      // in Swan). Not an access denial: the next read mints a new token.
+      return (400, name, message)
+    case let .exchangeFailed(status, message):
+      // Petrel keeps the status and the message, or the raw body when the
+      // authority sent no message (Swan's 404 SpaceNotFound).
+      guard (300...599).contains(status) else { return (502, "UpstreamFailure", message) }
+      let body = (try? JSONSerialization.jsonObject(with: Data(message.utf8))) as? [String: Any]
+      return (status, body?["error"] as? String, body?["message"] as? String ?? message)
+    case .missingDelegationToken, .invalidToken, .invalidResponse, .insecureURL:
+      // No usable answer from the account's PDS, the authority or the repo host.
+      return (502, "UpstreamFailure", nil)
+    case .invalidKey:
+      return (500, "InternalServerError", nil)
+    case .invalidSpaceRef:
+      return (400, "InvalidRequest", nil)
+    }
   }
 
   struct ConversationSpaceRequest {

@@ -87,6 +87,87 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertFalse(before === api.labyrinthSpaceCredentialManager(for: "did:plc:alice"))
   }
 
+  // MARK: - Credential failures as raw responses (X3)
+
+  /// The synthesized response as catbird-mls's `decode_response` reads it.
+  private func rawResponse(
+    _ error: SpaceCredentialError
+  ) throws -> (status: Int, error: String?, message: String?) {
+    let url = try XCTUnwrap(URL(string: "https://pds.example/xrpc/com.atproto.space.getRecord"))
+    let (data, response) = try Client.labyrinthSpaceCredentialResponse(for: error, url: url)
+    XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "application/json")
+    let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: String])
+    XCTAssertNotNil(body["message"])
+    return (response.statusCode, body["error"], body["message"])
+  }
+
+  /// Labyrinth maps `SpaceDeleted` and 403 to its terminal `Forbidden`. As
+  /// untyped bridge errors these reached it as status 0 with no error name.
+  func testAuthorityRefusalsReachLabyrinthAsTypedResponses() throws {
+    var raw = try rawResponse(.spaceDeleted(host: "authority.example", message: "Space has been deleted"))
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "SpaceDeleted")
+    XCTAssertEqual(raw.message, "Space has been deleted")
+
+    raw = try rawResponse(.spaceDeleted(host: "authority.example", message: nil))
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "SpaceDeleted")
+
+    // Labyrinth matches the error name before the 403 status, so a
+    // SpaceNotFound refusal stays NotFound rather than Forbidden.
+    for name in ["NotAuthorized", "UserNotAuthorized", "AppNotAuthorized", "SpaceNotFound"] {
+      raw = try rawResponse(.authorizationRefused(host: "authority.example", error: name, message: nil))
+      XCTAssertEqual(raw.status, 403, name)
+      XCTAssertEqual(raw.error, name)
+    }
+    // Petrel names a nameless 403 "HTTP 403"; that is not an atproto error name.
+    raw = try rawResponse(.authorizationRefused(host: "authority.example", error: "HTTP 403", message: "denied"))
+    XCTAssertEqual(raw.status, 403)
+    XCTAssertNil(raw.error)
+    XCTAssertEqual(raw.message, "denied")
+
+    raw = try rawResponse(.tokenRejected(
+      host: "authority.example", error: "InvalidDelegationToken", message: "token expired"))
+    XCTAssertEqual(raw.status, 400)
+    XCTAssertEqual(raw.error, "InvalidDelegationToken")
+    XCTAssertEqual(raw.message, "token expired")
+  }
+
+  func testExchangeFailuresKeepTheAuthorityStatusAndErrorName() throws {
+    // Swan answers 404 {"error":"SpaceNotFound"} with no message, so Petrel
+    // keeps the raw body as the message.
+    var raw = try rawResponse(.exchangeFailed(statusCode: 404, message: #"{"error":"SpaceNotFound"}"#))
+    XCTAssertEqual(raw.status, 404)
+    XCTAssertEqual(raw.error, "SpaceNotFound")
+
+    raw = try rawResponse(.exchangeFailed(statusCode: 503, message: "conversation policy unavailable"))
+    XCTAssertEqual(raw.status, 503)
+    XCTAssertNil(raw.error)
+    XCTAssertEqual(raw.message, "conversation policy unavailable")
+
+    // Never synthesize a success.
+    raw = try rawResponse(.exchangeFailed(statusCode: 200, message: "unexpected"))
+    XCTAssertEqual(raw.status, 502)
+    XCTAssertEqual(raw.error, "UpstreamFailure")
+  }
+
+  func testLocalCredentialFailuresStayRetryable() throws {
+    let expected: [(SpaceCredentialError, Int, String)] = [
+      (.missingDelegationToken, 502, "UpstreamFailure"),
+      (.invalidToken("Credential has expired"), 502, "UpstreamFailure"),
+      (.invalidResponse, 502, "UpstreamFailure"),
+      (.insecureURL("http://pds.example"), 502, "UpstreamFailure"),
+      (.invalidKey, 500, "InternalServerError"),
+      (.invalidSpaceRef("did:invalid"), 400, "InvalidRequest"),
+    ]
+    for (error, status, name) in expected {
+      let raw = try rawResponse(error)
+      XCTAssertEqual(raw.status, status, "\(error)")
+      XCTAssertEqual(raw.error, name, "\(error)")
+      XCTAssertEqual(raw.message, error.errorDescription, "\(error)")
+    }
+  }
+
   // MARK: - Service resolution
 
   func testOwnerSpaceCallbackUsesOnlyItsPersonalMailbox() throws {
