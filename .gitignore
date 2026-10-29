@@ -51,3 +51,7 @@ _trash/ffi-rebuild/*/CatbirdMLSFFI.xcframework/
 
 StressTest/.build/
 _trash/ffi-rebuild/*/CatbirdMLS.swift
+
+# Python bytecode (DevelopmentIntegration and Scripts tooling)
+__pycache__/
+*.pyc
