@@ -166,7 +166,10 @@ extension MLSAPIClient {
     guard Self.labyrinthSpaceTransportAvailable else {
       throw LabyrinthTransportError.invalidRequest("this native artifact does not enable Space history")
     }
-    guard let did = await authenticatedUserDID() else { throw MLSAPIError.noAuthentication }
+    guard let did = await authenticatedUserDID() else {
+      clearLabyrinthSpaceCredentials()
+      throw MLSAPIError.noAuthentication
+    }
     if nsid == "com.atproto.space.listSpaces" {
       let query = try Self.validateConversationSpaceInventory(method: method, path: path, body: body)
       return try await authenticatedRepoCall(method: method, endpoint: nsid, body: nil, query: query)
@@ -185,13 +188,7 @@ extension MLSAPIClient {
         guard let target = url.url else {
           throw LabyrinthTransportError.invalidRequest("invalid conversation record URL")
         }
-        let credentials = SpaceCredentialManager(client: client, authorityHostProvider: { authority in
-          let doc = try await SpaceHostResolver.fetchDIDDocument(for: authority)
-          guard doc.id == authority else {
-            throw LabyrinthTransportError.serviceUnresolved("authority DID mismatch")
-          }
-          return try SpaceAuthorityEndpoints.extract(from: doc).spaceHost
-        })
+        let credentials = labyrinthSpaceCredentialManager(for: did)
         return try await credentials.get(url: target, space: conversation.space, audience: conversation.repo)
       }
       return try await authenticatedRepoCall(
@@ -200,6 +197,38 @@ extension MLSAPIClient {
     let query = try Self.validateLabyrinthSpaceRequest(
       did: did, method: method, nsid: nsid, path: path, body: body)
     return try await authenticatedRepoCall(method: method, endpoint: nsid, body: body, query: query)
+  }
+
+  /// The Space credential manager of signed-in account `did`. Petrel caches
+  /// credentials (and their keys) on the manager until they near expiry, so
+  /// one manager is kept per account instead of exchanging a fresh credential
+  /// for every foreign record read. Another account replaces it.
+  func labyrinthSpaceCredentialManager(for did: String) -> SpaceCredentialManager {
+    labyrinthSpaceCredentials.manager(for: did) { [client] in
+      SpaceCredentialManager(
+        client: client,
+        authorityHostProvider: { authority in
+          let doc = try await SpaceHostResolver.fetchDIDDocument(for: authority)
+          guard doc.id == authority else {
+            throw LabyrinthTransportError.serviceUnresolved("authority DID mismatch")
+          }
+          return try SpaceAuthorityEndpoints.extract(from: doc).spaceHost
+        },
+        delegationTokenProvider: { space in
+          // The cache is keyed by account: never cache a credential that the
+          // client minted after switching to another account.
+          guard try await client.getDid() == did else { throw MLSAPIError.noAuthentication }
+          let (_, output) = try await client.com.atproto.space.getDelegationToken(input: .init(space: space))
+          guard let token = output?.token else { throw SpaceCredentialError.missingDelegationToken }
+          guard try await client.getDid() == did else { throw MLSAPIError.noAuthentication }
+          return token
+        })
+    }
+  }
+
+  /// Drops the cached Space credentials (logout, account or environment switch).
+  public func clearLabyrinthSpaceCredentials() {
+    labyrinthSpaceCredentials.clear()
   }
 
   struct ConversationSpaceRequest {
@@ -523,5 +552,29 @@ final class LabyrinthEndpointCache: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     entries[serviceDID] = (endpoint, Date().addingTimeInterval(lifetime))
+  }
+}
+
+/// One Space credential manager, bound to the account DID it was made for.
+/// Asking for another DID drops it, so credentials never cross accounts.
+final class LabyrinthSpaceCredentialStore: @unchecked Sendable {
+  private let lock = NSLock()
+  private var entry: (did: String, manager: SpaceCredentialManager)?
+
+  func manager(
+    for did: String, make: () -> SpaceCredentialManager
+  ) -> SpaceCredentialManager {
+    lock.lock()
+    defer { lock.unlock() }
+    if let entry, entry.did == did { return entry.manager }
+    let manager = make()
+    entry = (did, manager)
+    return manager
+  }
+
+  func clear() {
+    lock.lock()
+    defer { lock.unlock() }
+    entry = nil
   }
 }

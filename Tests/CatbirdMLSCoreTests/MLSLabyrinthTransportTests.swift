@@ -57,6 +57,36 @@ final class MLSLabyrinthTransportTests: XCTestCase {
       path: "/xrpc/blue.catbird.labyrinth.appendBatch"))
   }
 
+  // MARK: - Space credential reuse (MLSDS-01)
+
+  /// Petrel caches credentials on the manager. A new manager per foreign
+  /// read exchanged a fresh credential (delegation token, getSpaceCredential,
+  /// authority policy call) for every record.
+  func testForeignConversationReadsReuseOneCredentialManagerPerAccount() async {
+    let atProto = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let api = await MLSAPIClient(client: atProto)
+    let alice = api.labyrinthSpaceCredentialManager(for: "did:plc:alice")
+    XCTAssertTrue(alice === api.labyrinthSpaceCredentialManager(for: "did:plc:alice"))
+
+    let bob = api.labyrinthSpaceCredentialManager(for: "did:plc:bob")
+    XCTAssertFalse(alice === bob, "another account must not reuse the first account's credentials")
+    XCTAssertTrue(bob === api.labyrinthSpaceCredentialManager(for: "did:plc:bob"))
+    XCTAssertFalse(alice === api.labyrinthSpaceCredentialManager(for: "did:plc:alice"),
+                   "switching back must not resurrect the earlier account's credentials")
+
+    let current = api.labyrinthSpaceCredentialManager(for: "did:plc:alice")
+    api.clearLabyrinthSpaceCredentials()
+    XCTAssertFalse(current === api.labyrinthSpaceCredentialManager(for: "did:plc:alice"))
+  }
+
+  func testEnvironmentSwitchDropsCachedSpaceCredentials() async {
+    let atProto = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let api = await MLSAPIClient(client: atProto)
+    let before = api.labyrinthSpaceCredentialManager(for: "did:plc:alice")
+    await api.switchEnvironment(.custom(serviceDID: "did:web:example.com#atproto_mls"))
+    XCTAssertFalse(before === api.labyrinthSpaceCredentialManager(for: "did:plc:alice"))
+  }
+
   // MARK: - Service resolution
 
   func testOwnerSpaceCallbackUsesOnlyItsPersonalMailbox() throws {

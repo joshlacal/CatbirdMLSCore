@@ -162,6 +162,10 @@ public final class MLSAPIClient {
     private var canonicalSignedRequestPreparer: CanonicalSignedRequestPreparer?
     private let canonicalSignedRequestPreparerLock = NSLock()
 
+    /// The signed-in account's Space credential manager, so a conversation
+    /// Space credential is reused until it expires (MLSAPIClient+Labyrinth).
+    let labyrinthSpaceCredentials = LabyrinthSpaceCredentialStore()
+
     // MARK: - Initialization
 
     /// Initialize MLS API client with ATProtoClient and environment
@@ -237,6 +241,7 @@ public final class MLSAPIClient {
         lastHealthCheck = nil
         clearCompletedInventorySessions()
         await availabilityCache.clear()
+        clearLabyrinthSpaceCredentials()
         // Reconfigure with new service DID
         await configureMLSService()
 
