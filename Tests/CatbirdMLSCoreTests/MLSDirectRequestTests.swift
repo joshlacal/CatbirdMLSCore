@@ -124,7 +124,7 @@ final class MLSDirectRequestTests: XCTestCase {
       snapshotExpiresAt: ATProtocolDate(date: Date(timeIntervalSince1970: 2_000_000_000)),
       inventoryScope: .init(
         supportedProtocolVersions: [.value_1, .value_2],
-        scopeDigest: Bytes(data: Data([0x01]))
+        scopeDigest: Bytes(data: Data(repeating: 0x01, count: 32))
       )
     )
     XCTAssertNoThrow(try MLSAPIClient.validateDirectRequestInventoryScope(scoped))
