@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 import plistlib
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -128,6 +130,77 @@ class AppleArtifactManifestTests(unittest.TestCase):
         self.assertEqual(manifest["build"]["explicit_features"], ["labyrinth"])
         self.assertEqual(manifest["build"]["default_features"], True)
         self.assertEqual(len(manifest["identity"]["canonical_sha256"]), 64)
+
+    def commit_fixture_repositories(self):
+        """Give each recorded source a Git commit, as a fresh checkout has."""
+        for directory in (self.native, self.atproto, self.petrel, self.petrel_catbird):
+            git = ("git", "-C", str(directory), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid")
+            subprocess.run((*git, "init", "--quiet"), check=True)
+            write(directory / ".gitignore", "build/\ntarget/\n")
+            write(directory / "README", "fixture\n")
+            subprocess.run((*git, "add", "--all"), check=True)
+            subprocess.run((*git, "commit", "--quiet", "--message", "fixture"), check=True)
+
+    def relative_manifest(self):
+        self.commit_fixture_repositories()
+        directory = self.core / "DevelopmentIntegration"
+        manifest = self.module.build_manifest(
+            core=self.core,
+            native=self.native,
+            atproto=self.atproto,
+            petrel=self.petrel,
+            petrel_catbird=self.petrel_catbird,
+            selected_inputs=self.selected,
+            qualification="reviewed-source",
+            toolchains={"rustc": "rustc fixture", "swift": "swift fixture"},
+            manifest_dir=directory,
+        )
+        path = directory / "manifest.json"
+        self.module.write_manifest(path, manifest)
+        return manifest, path
+
+    def test_relative_manifest_records_published_commits_and_no_absolute_paths(self):
+        manifest, path = self.relative_manifest()
+
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertNotIn(str(self.root), path.read_text())
+        self.assertNotIn(str(self.root.resolve()), path.read_text())
+        record = manifest["source"]["repositories"]["catbird-mls"]
+        self.assertEqual(record["path"], "../../catbird-mls")
+        head = subprocess.run(
+            ("git", "-C", str(self.native), "rev-parse", "HEAD"),
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        self.assertEqual(record, {"path": "../../catbird-mls", "commit": head})
+        self.assertEqual(manifest["package"]["path"], "..")
+        self.assertEqual(manifest["framework"]["path"], "../Sources/CatbirdMLSFFI.xcframework")
+        self.module.verify_manifest(path)
+
+    def test_relative_manifest_verifies_in_a_relocated_checkout(self):
+        _, path = self.relative_manifest()
+        relocated = Path(self.temporary.name + "-relocated")
+        self.addCleanup(shutil.rmtree, relocated, ignore_errors=True)
+        shutil.copytree(self.root, relocated, symlinks=True)
+
+        self.module.verify_manifest(relocated / path.relative_to(self.root))
+
+    def test_relative_manifest_rejects_uncommitted_or_moved_source(self):
+        _, path = self.relative_manifest()
+        write(self.petrel / "README", "edited\n")
+        with self.assertRaisesRegex(RuntimeError, "modified tracked files"):
+            self.module.verify_manifest(path)
+
+        subprocess.run(
+            ("git", "-C", str(self.petrel), "-c", "user.name=fixture",
+             "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "--all", "--message", "moved"),
+            check=True,
+        )
+        with self.assertRaisesRegex(RuntimeError, "Petrel source commit"):
+            self.module.verify_manifest(path)
+
+    def test_commit_identity_requires_a_checkout(self):
+        with self.assertRaisesRegex(RuntimeError, "neither a JJ nor a Git checkout"):
+            self.module.source_commit_identity(self.petrel)
 
     def test_partial_matrix_cannot_claim_full_release_scope(self):
         framework = self.core / "Sources/CatbirdMLSFFI.xcframework"

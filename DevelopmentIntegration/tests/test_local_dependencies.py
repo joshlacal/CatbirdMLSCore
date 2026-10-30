@@ -167,6 +167,22 @@ class ResolutionGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "wrong local path"):
             self.verifier.validate_dependency_graph(graph, self.expected)
 
+    def test_selected_inputs_name_siblings_relative_to_the_workspace(self):
+        self.assertEqual(
+            self.verifier.selected_path({"repository": "Petrel", "path": "Petrel"}),
+            (WORKSPACE / "Petrel").resolve(),
+        )
+        for location in ("/absolute/Petrel", "../Petrel"):
+            with self.subTest(location=location), self.assertRaisesRegex(RuntimeError, "sibling-relative"):
+                self.verifier.selected_path({"repository": "Petrel", "path": location})
+
+    def test_committed_selected_inputs_record_no_absolute_paths(self):
+        selected = json.loads(self.verifier.SELECTED_INPUTS.read_text())
+        for item in selected["repos"]:
+            self.assertNotIn("workspace", item)
+            if "path" in item:
+                self.assertFalse(Path(item["path"]).is_absolute())
+
     def test_writes_empty_mirror_config_for_jj_only_siblings(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self.verifier.write_swiftpm_config(Path(directory))
