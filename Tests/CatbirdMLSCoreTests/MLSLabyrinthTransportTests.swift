@@ -281,33 +281,34 @@ final class MLSLabyrinthTransportTests: XCTestCase {
   }
 
   /// Petrel reports an authority's SpaceNotFound (400 upstream, 404 in Swan)
-  /// as `authorizationRefused(error: "SpaceNotFound")`. It is not a refusal of
-  /// this reader, so it answers 400: labyrinth maps the name to
-  /// NotFound("space"), and nothing that reads the status first sees the 403
-  /// it turns into Forbidden.
-  func testSpaceNotFoundKeepsTheAuthority400() throws {
+  /// as `authorizationRefused(error: "SpaceNotFound")`. Since the October 29
+  /// release it also answers a user the policy does not authorize, so on the
+  /// credential path it means "not found or not authorized": a 403 without an
+  /// error name, which labyrinth maps to Forbidden (its read refusal) rather
+  /// than NotFound("space"). The name stays in the message.
+  func testSpaceNotFoundIsAReadRefusal() throws {
     var raw = try rawResponse(.authorizationRefused(
       host: "authority.example", error: "SpaceNotFound", message: "Space not found"))
-    XCTAssertEqual(raw.status, 400)
-    XCTAssertEqual(raw.error, "SpaceNotFound")
-    XCTAssertEqual(raw.message, "Space not found")
+    XCTAssertEqual(raw.status, 403)
+    XCTAssertNil(raw.error)
+    XCTAssertEqual(raw.message, "SpaceNotFound: Space not found")
 
     // Swan's 404 has no message, so Petrel passes the raw body as the message.
     let swanBody = #"{"error":"SpaceNotFound"}"#
     raw = try rawResponse(.authorizationRefused(
       host: "authority.example", error: "SpaceNotFound", message: swanBody))
-    XCTAssertEqual(raw.status, 400)
-    XCTAssertEqual(raw.error, "SpaceNotFound")
-    XCTAssertEqual(raw.message, swanBody)
+    XCTAssertEqual(raw.status, 403)
+    XCTAssertNil(raw.error)
+    XCTAssertEqual(raw.message, "SpaceNotFound: \(swanBody)")
 
+    // With no message, Petrel's description fills in (its wording is Petrel's).
     let bare = SpaceCredentialError.authorizationRefused(
       host: "authority.example", error: "SpaceNotFound", message: nil)
     raw = try rawResponse(bare)
-    XCTAssertEqual(raw.status, 400)
-    XCTAssertEqual(raw.error, "SpaceNotFound")
-    XCTAssertEqual(raw.message, bare.errorDescription)
-    // Petrel's description says this is not a deletion.
-    XCTAssertTrue(raw.message?.contains("does not mean it was deleted") == true)
+    XCTAssertEqual(raw.status, 403)
+    XCTAssertNil(raw.error)
+    XCTAssertTrue(raw.message?.hasPrefix("SpaceNotFound: ") == true)
+    XCTAssertGreaterThan(raw.message?.count ?? 0, "SpaceNotFound: ".count)
   }
 
   /// Petrel reports an invalid client attestation (400 or 401) as
