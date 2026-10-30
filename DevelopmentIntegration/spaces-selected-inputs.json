@@ -1,37 +1,44 @@
 {
+  "path_base": "Each path is relative to the directory that contains CatbirdMLSCore and its sibling checkouts.",
   "repos": [
     {
+      "path": "CatbirdMLSCore",
       "repository": "CatbirdMLSCore",
-      "source_git_head": "e5f76c45316d6d390f4e17aa9fae76e7de12b7b3",
-      "source_jj_commit": "e5f76c45316d6d390f4e17aa9fae76e7de12b7b3",
-      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/CatbirdMLSCore"
+      "source_git_head": "f1fa656e1dbfa3c1fa4a7fb60d5113982241abe7",
+      "source_jj_commit": "f1fa656e1dbfa3c1fa4a7fb60d5113982241abe7"
     },
     {
+      "path": "Petrel",
       "repository": "Petrel",
-      "source_git_head": "e115236537041a900ec971be05185a70cca73e8a",
-      "source_jj_commit": "e115236537041a900ec971be05185a70cca73e8a",
-      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/Petrel"
+      "source_git_head": "e5b6039b6981d13ae42e242a36269349788bf5aa",
+      "source_jj_commit": "e5b6039b6981d13ae42e242a36269349788bf5aa"
     },
     {
+      "path": "PetrelCatbird",
       "repository": "PetrelCatbird",
-      "source_git_head": "8672c80ffeb3b9cfbdb6bd98f66efa09b13fe0db",
-      "source_jj_commit": "8672c80ffeb3b9cfbdb6bd98f66efa09b13fe0db",
-      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/PetrelCatbird"
+      "source_git_head": "703ebbfee4ab115e22ff408ddcd83fb76228a3a8",
+      "source_jj_commit": "703ebbfee4ab115e22ff408ddcd83fb76228a3a8"
     },
     {
+      "path": "catbird-atproto",
       "repository": "catbird-atproto",
-      "source_git_head": "e7ff2a3bb17f7d668889cae5f34a2d8d6755647c",
-      "source_jj_commit": "e7ff2a3bb17f7d668889cae5f34a2d8d6755647c",
-      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/catbird-atproto"
+      "source_git_head": "a98aceb5fba88245fe0567092d6037482dcb71bc",
+      "source_jj_commit": "a98aceb5fba88245fe0567092d6037482dcb71bc"
+    },
+    {
+      "path": "catbird-mls",
+      "repository": "catbird-mls",
+      "source_git_head": "9131dbd227a217c28adb69ea8cd377656b4b2951",
+      "source_jj_commit": "9131dbd227a217c28adb69ea8cd377656b4b2951"
     },
     {
       "repository": "labyrinth",
+      "source": "Cargo git dependency of catbird-mls, pinned in its Cargo.toml and Cargo.lock; not a sibling checkout",
       "source_git_head": "385d1ee40ce1c3924c6a02234282e27b29607f2d",
-      "source_jj_commit": "385d1ee40ce1c3924c6a02234282e27b29607f2d",
-      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/labyrinth"
+      "source_jj_commit": "385d1ee40ce1c3924c6a02234282e27b29607f2d"
     }
   ],
-  "schema_version": 1,
-  "scope": "October 23 Spaces local Apple integration",
+  "schema_version": 2,
+  "scope": "October 29 Spaces local Apple integration, built from merged main commits",
   "source_policy": "Selected baselines must remain ancestors; the artifact manifest separately records the final exact source identities and hashes."
 }

@@ -89,6 +89,21 @@ def write_swiftpm_config(directory):
     return directory
 
 
+def selected_path(item):
+    """Resolve a selected input's checkout.
+
+    Schema 2 names each checkout relative to the sibling workspace root (the
+    directory that holds CatbirdMLSCore), so the selection works in any
+    checkout with that layout. Schema 1 recorded an absolute "workspace".
+    """
+    if "path" in item:
+        location = Path(item["path"])
+        if location.is_absolute() or ".." in location.parts:
+            raise RuntimeError(f"Selected {item['repository']} path must be a sibling-relative name")
+        return (WORKSPACE / location).resolve()
+    return canonical(item["workspace"])
+
+
 def selected_records():
     if not SELECTED_INPUTS.is_file():
         raise RuntimeError(f"Selected input manifest is absent: {SELECTED_INPUTS}")
@@ -104,7 +119,7 @@ def selected_records():
         item = by_name.get(name)
         if item is None:
             raise RuntimeError(f"Selected input manifest has no {name} record")
-        if canonical(item["workspace"]) != path.resolve():
+        if selected_path(item) != path.resolve():
             raise RuntimeError(f"Selected {name} workspace does not match exact sibling path")
         if not (path / "Package.swift").is_file() or path.is_symlink():
             raise RuntimeError(f"Approved {name} sibling is missing or symlinked: {path}")
@@ -285,7 +300,7 @@ def collect():
     manifest = local_manifest(environment)
     _, resolved = resolved_sdk_graph(environment)
     identities = {
-        name: jj_identity(name, Path(item["workspace"]), item)
+        name: jj_identity(name, selected_path(item), item)
         for name, item in selected.items()
     }
     for name, resolution in resolved.items():

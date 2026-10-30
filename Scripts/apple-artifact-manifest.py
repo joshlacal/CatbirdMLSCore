@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -118,6 +119,53 @@ def run_output(*arguments, cwd=None):
     return (result.stdout + result.stderr).strip()
 
 
+def stdout_output(*arguments, cwd=None):
+    result = subprocess.run(arguments, cwd=cwd, text=True, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed ({' '.join(arguments)}):\n{result.stdout}{result.stderr}"
+        )
+    return result.stdout.strip()
+
+
+def source_commit_identity(path):
+    """Return the published commit whose tree is exactly this checkout.
+
+    A JJ working-copy commit is local to one workspace and is never pushed, so
+    it cannot identify a source to anyone else. The recorded identity is
+    instead the single parent of an empty working copy, or a clean Git HEAD,
+    which is the same commit in every checkout of that revision.
+    """
+    path = Path(path).resolve()
+    if (path / ".jj").exists():
+        lines = stdout_output(
+            "jj",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            'if(empty, "empty", "changed") ++ "\\n" ++ parents.map(|c| c.commit_id()).join(" ") ++ "\\n"',
+            cwd=path,
+        ).splitlines()
+        if len(lines) != 2:
+            raise RuntimeError(f"Could not read the JJ working copy of {path}")
+        if lines[0] != "empty":
+            raise RuntimeError(f"{path} has uncommitted changes; record only a committed source")
+        parents = lines[1].split()
+        if len(parents) != 1:
+            raise RuntimeError(f"{path} working copy must have exactly one parent commit")
+        return {"commit": parents[0]}
+    if (path / ".git").exists():
+        top = stdout_output("git", "rev-parse", "--show-toplevel", cwd=path)
+        if Path(top).resolve() != path:
+            raise RuntimeError(f"{path} is not the root of its Git checkout")
+        if stdout_output("git", "status", "--porcelain", "--untracked-files=no", cwd=path):
+            raise RuntimeError(f"{path} has modified tracked files; record only a committed source")
+        return {"commit": stdout_output("git", "rev-parse", "HEAD", cwd=path)}
+    raise RuntimeError(f"{path} is neither a JJ nor a Git checkout; its commit cannot be established")
+
+
 def jj_identity(path):
     path = Path(path).resolve()
     output = run_output(
@@ -149,19 +197,39 @@ def jj_identity(path):
     }
 
 
-def repository_record(path, identity):
-    return {"path": str(Path(path).resolve()), **identity}
+def recorded_path(path, base=None):
+    """Render a path relative to the manifest directory when one is given.
+
+    Relative paths let the same manifest verify in any checkout that keeps
+    the sibling layout (CatbirdMLSCore next to catbird-mls, catbird-atproto,
+    Petrel and PetrelCatbird).
+    """
+    path = Path(path).resolve()
+    if base is None:
+        return str(path)
+    return Path(os.path.relpath(path, Path(base).resolve())).as_posix()
 
 
-def schema_record(petrel_catbird):
+def resolve_recorded(value, base):
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path(os.path.normpath(Path(base).resolve() / path))
+
+
+def repository_record(path, identity, base=None):
+    return {"path": recorded_path(path, base), **identity}
+
+
+def schema_record(petrel_catbird, base=None):
     root = Path(petrel_catbird).resolve() / "lexicons"
     if not root.is_dir():
         raise RuntimeError(f"Overlay schema directory is absent: {root}")
     files = file_map(root, root.rglob("*.json"))
-    return {"root": str(root), "sha256": canonical_sha256(files), "files": files}
+    return {"root": recorded_path(root, base), "sha256": canonical_sha256(files), "files": files}
 
 
-def framework_record(framework):
+def framework_record(framework, base=None):
     framework = Path(framework).resolve()
     plist_path = framework / "Info.plist"
     if not plist_path.is_file():
@@ -183,7 +251,7 @@ def framework_record(framework):
     libraries.sort(key=lambda item: item["identifier"])
     files = file_map(framework)
     return {
-        "path": str(framework),
+        "path": recorded_path(framework, base),
         "sha256": canonical_sha256(files),
         "files": files,
         "libraries": libraries,
@@ -208,7 +276,7 @@ def validate_framework_scope(framework, scope):
         raise RuntimeError("Native framework architecture matrix does not match artifact scope")
 
 
-def interface_record(core, framework):
+def interface_record(core, framework, base=None):
     core = Path(core).resolve()
     framework = Path(framework).resolve()
     swift = core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift"
@@ -221,7 +289,7 @@ def interface_record(core, framework):
     }
     record = {
         "generated_swift": {
-            "path": str(swift),
+            "path": recorded_path(swift, base),
             "sha256": sha256_file(swift),
             "size_bytes": swift.stat().st_size,
         },
@@ -253,6 +321,7 @@ def build_manifest(
     framework=None,
     identities=None,
     toolchains=None,
+    manifest_dir=None,
 ):
     core = Path(core).resolve()
     native = Path(native).resolve()
@@ -266,11 +335,12 @@ def build_manifest(
         raise RuntimeError("Native artifact lacks the required Space protocol/feature marker")
     if marker.get("sourceFingerprint") != source_bundle_fingerprint(native, [atproto]):
         raise RuntimeError("Native artifact rebuild marker does not match current source inputs")
-    interface = interface_record(core, framework)
+    base = Path(manifest_dir).resolve() if manifest_dir is not None else None
+    interface = interface_record(core, framework, base)
     if marker.get("generatedSwiftSHA256") != interface["generated_swift"]["sha256"]:
         raise RuntimeError("Native artifact rebuild marker does not match the generated Swift binding")
     artifact_scope = marker.get("artifactScope")
-    framework_identity = framework_record(framework)
+    framework_identity = framework_record(framework, base)
     validate_framework_scope(framework_identity, artifact_scope)
     expected_name = "CatbirdMLSFFISimulator.xcframework" if artifact_scope == "ios-arm64-simulator-only" else "CatbirdMLSFFI.xcframework"
     if framework != core / "Sources" / expected_name:
@@ -283,20 +353,20 @@ def build_manifest(
         "Petrel": petrel,
         "PetrelCatbird": petrel_catbird,
     }
-    identities = identities or {name: jj_identity(path) for name, path in repositories.items()}
+    identities = identities or {name: source_commit_identity(path) for name, path in repositories.items()}
     source = native_source_record(native)
     atproto_source = native_source_record(atproto)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 1 if base is None else 2,
         "scope": "apple-native-uniffi-simulator-only" if artifact_scope == "ios-arm64-simulator-only" else "apple-native-uniffi",
         "qualification": qualification,
         "selected_inputs": {
-            "path": str(selected_inputs),
+            "path": recorded_path(selected_inputs, base),
             "sha256": sha256_file(selected_inputs),
         },
         "source": {
             "repositories": {
-                name: repository_record(path, identities[name])
+                name: repository_record(path, identities[name], base)
                 for name, path in repositories.items()
             },
             "native_source_sha256": source["sha256"],
@@ -305,7 +375,7 @@ def build_manifest(
                 "catbird-atproto": atproto_source,
             },
             "cargo_lock_sha256": sha256_file(native / "Cargo.lock"),
-            "schemas": schema_record(petrel_catbird),
+            "schemas": schema_record(petrel_catbird, base),
         },
         "build": {
             "cargo_profile": "release",
@@ -317,12 +387,12 @@ def build_manifest(
             "toolchains": toolchains or toolchain_record(),
         },
         "package": {
-            "path": str(core),
+            "path": recorded_path(core, base),
             "manifest_sha256": sha256_file(core / "Package.swift"),
             "local_dependencies": {
-                "Petrel": str(petrel),
-                "PetrelCatbird": str(petrel_catbird),
-                "CatbirdMLSFFI": str(framework),
+                "Petrel": recorded_path(petrel, base),
+                "PetrelCatbird": recorded_path(petrel_catbird, base),
+                "CatbirdMLSFFI": recorded_path(framework, base),
             },
         },
         "interface": interface,
@@ -361,16 +431,24 @@ def verify_manifest(path):
     )
     require_equal(identity.get("algorithm"), "sha256", "identity algorithm")
 
-    selected = Path(manifest["selected_inputs"]["path"])
+    # Schema 2 records every path relative to the manifest's own directory.
+    # Absolute paths (schema 1) still resolve to themselves.
+    base = path.parent
+    relative = manifest.get("schema_version") == 2
+
+    def located(value):
+        return resolve_recorded(value, base)
+
+    selected = located(manifest["selected_inputs"]["path"])
     require_equal(sha256_file(selected), manifest["selected_inputs"]["sha256"], "selected inputs")
-    native = Path(manifest["source"]["repositories"]["catbird-mls"]["path"])
+    native = located(manifest["source"]["repositories"]["catbird-mls"]["path"])
     require_equal(
         native_source_fingerprint(native),
         manifest["source"]["native_source_sha256"],
         "native source fingerprint",
     )
     atproto_record = manifest["source"]["local_path_dependencies"]["catbird-atproto"]
-    atproto = Path(manifest["source"]["repositories"]["catbird-atproto"]["path"])
+    atproto = located(manifest["source"]["repositories"]["catbird-atproto"]["path"])
     require_equal(
         native_source_fingerprint(atproto),
         atproto_record["sha256"],
@@ -387,30 +465,34 @@ def verify_manifest(path):
         "Cargo.lock",
     )
     schema = manifest["source"]["schemas"]
-    current_schema = file_map(Path(schema["root"]), Path(schema["root"]).rglob("*.json"))
+    schema_root = located(schema["root"])
+    current_schema = file_map(schema_root, schema_root.rglob("*.json"))
     require_equal(current_schema, schema["files"], "schema file map")
 
     package = manifest["package"]
-    core = Path(package["path"])
+    core = located(package["path"])
     require_equal(sha256_file(core / "Package.swift"), package["manifest_sha256"], "Package.swift")
     for name, dependency in package["local_dependencies"].items():
-        if not Path(dependency).exists():
+        if not located(dependency).exists():
             raise RuntimeError(f"Apple artifact manifest mismatch: missing local dependency {name}")
 
     framework = manifest["framework"]
-    current_framework = framework_record(framework["path"])
+    framework_path = located(framework["path"])
+    current_framework = framework_record(framework_path)
     validate_framework_scope(current_framework, manifest["build"]["apple_artifact_scope"])
     require_equal(manifest["build"]["apple_targets"], APPLE_TARGETS[manifest["build"]["apple_artifact_scope"]], "artifact target scope")
     require_equal(current_framework["files"], framework["files"], "framework file map")
     require_equal(current_framework["libraries"], framework["libraries"], "framework architecture matrix")
-    current_interface = interface_record(core, framework["path"])
+    current_interface = interface_record(core, framework_path, base if relative else None)
     require_equal(current_interface, manifest["interface"], "generated interface")
-    marker = json.loads((Path(framework["path"]) / "labyrinth-space-protocol.json").read_text())
+    marker = json.loads((framework_path / "labyrinth-space-protocol.json").read_text())
     require_equal(marker.get("generatedSwiftSHA256"), current_interface["generated_swift"]["sha256"], "rebuild marker generated interface")
 
     for name, record in manifest["source"]["repositories"].items():
-        repository = Path(record["path"])
-        if (repository / ".jj").exists():
+        repository = located(record["path"])
+        if "commit" in record:
+            require_equal(source_commit_identity(repository), {"commit": record["commit"]}, f"{name} source commit")
+        elif (repository / ".jj").exists():
             current = jj_identity(repository)
             expected_identity = {
                 key: record[key]
@@ -457,6 +539,7 @@ def main():
             selected_inputs=args.selected_inputs,
             qualification=args.qualification,
             framework=args.framework,
+            manifest_dir=args.output.resolve().parent,
         )
         write_manifest(args.output, manifest)
         print(manifest["identity"]["canonical_sha256"])

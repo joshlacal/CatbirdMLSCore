@@ -215,20 +215,21 @@ final class MLSInventoryRequestBackoffTests: XCTestCase {
     XCTAssertThrowsError(try MLSAPIClient.decodeInitialConversationInventory(data: Data("{}".utf8), response: wrongType)) { error in
       guard case NetworkError.invalidContentType = error else { return XCTFail("Success still requires JSON content type") }
     }
-    // `scopeDigest` is a lexicon `bytes` field, so its JSON form is
-    // {"$bytes": base64}; mls-ds presents the retained bare base64 that way.
+    // `scopeDigest` is a lexicon `bytes` field of exactly 32 bytes, so its
+    // JSON form is {"$bytes": base64}; mls-ds presents the retained bare
+    // base64 that way.
     let valid = Data("""
-      {"items":[],"inventorySessionId":"retained-session","snapshotEventCursor":"opaque-cursor","hasMore":false,"snapshotExpiresAt":"2026-09-05T20:00:00.000Z","inventoryScope":{"supportedProtocolVersions":["1","2"],"scopeDigest":{"$bytes":"AQ=="}}}
+      {"items":[],"inventorySessionId":"retained-session","snapshotEventCursor":"opaque-cursor","hasMore":false,"snapshotExpiresAt":"2026-09-05T20:00:00.000Z","inventoryScope":{"supportedProtocolVersions":["1","2"],"scopeDigest":{"$bytes":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}}}
       """.utf8)
     let http = HTTPURLResponse(url: wrongType.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
     let decoded = try MLSAPIClient.decodeInitialConversationInventory(data: valid, response: http)
     XCTAssertEqual(decoded.inventorySessionId, "retained-session")
     XCTAssertEqual(decoded.snapshotEventCursor, "opaque-cursor")
-    XCTAssertEqual(decoded.inventoryScope?.scopeDigest.data, Data([0x01]))
+    XCTAssertEqual(decoded.inventoryScope?.scopeDigest.data, Data(repeating: 0x01, count: 32))
 
     // A version-two inventory without its retained request scope, or with a
     // bare-string digest that does not decode as bytes, fails closed.
-    for scope in ["", #","inventoryScope":{"supportedProtocolVersions":["1","2"],"scopeDigest":"AQ=="}"#] {
+    for scope in ["", #","inventoryScope":{"supportedProtocolVersions":["1","2"],"scopeDigest":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}"#] {
       let unscoped = Data("""
         {"items":[],"inventorySessionId":"retained-session","snapshotEventCursor":"opaque-cursor","hasMore":false,"snapshotExpiresAt":"2026-09-05T20:00:00.000Z"\(scope)}
         """.utf8)
