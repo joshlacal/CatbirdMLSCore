@@ -17,6 +17,15 @@ import PetrelCatbird
 /// from a `listRecords` `value` object with a vanilla `JSONDecoder`, so no decoder registry is
 /// needed.
 enum MLSPublicPDSReader {
+  static let publicReadSession: URLSession = {
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current {
+      do { return try fixture.makeSession() }
+      catch { preconditionFailure("Invalid debug fixture public session") }
+    }
+    #endif
+    return URLSession.shared
+  }()
   static let deviceCollection = "blue.catbird.chat.device"
   static let declarationCollection = "blue.catbird.chat.declaration"
 
@@ -63,7 +72,7 @@ enum MLSPublicPDSReader {
   static func fetchDeviceSignatureKeys(
     did: String,
     resolvePDS: @Sendable (String) async throws -> URL,
-    session: URLSession = .shared
+    session: URLSession = publicReadSession
   ) async throws -> [Data] {
     let pds = try await resolvePDS(did)
     guard let url = deviceRecordsListURL(pds: pds, did: did) else {
@@ -116,27 +125,33 @@ enum MLSPublicPDSReader {
   static func fetchDeclaration(
     did: String,
     resolvePDS: @Sendable (String) async throws -> URL,
-    session: URLSession = .shared
+    session: URLSession = publicReadSession
   ) async throws -> BlueCatbirdChatDeclaration? {
     let pds = try await resolvePDS(did)
     guard let url = declarationGetRecordURL(pds: pds, did: did) else {
       throw ReaderError.invalidEndpoint
     }
 
-    var request = URLRequest(url: url)
-    request.httpMethod = "GET"
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.timeoutInterval = 10.0
-    let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw ReaderError.invalidResponse
+    let limits = NetworkResponseLimits(maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
+    let (data, http) = try await SpaceHostResolver.fetchBoundedPublicJSON(
+      from: url, limits: limits, fixtureSession: session)
+    if (200...299).contains(http.statusCode) {
+      guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            envelope["uri"] as? String == "at://\(did)/\(declarationCollection)/self",
+            let value = envelope["value"] as? [String: Any],
+            value["$type"] as? String == declarationCollection
+      else { throw ReaderError.invalidResponse }
     }
     return try declaration(from: data, statusCode: http.statusCode)
   }
 
   static func declaration(from data: Data, statusCode: Int) throws -> BlueCatbirdChatDeclaration? {
     if (200...299).contains(statusCode) {
-      return try decodeDeclaration(fromGetRecordJSON: data)
+      let declaration = try decodeDeclaration(fromGetRecordJSON: data)
+      guard declaration.protocolVersion == "1",
+            declaration.deliveryService.didString().hasPrefix("did:web:")
+      else { throw ReaderError.invalidResponse }
+      return declaration
     }
     struct ErrorEnvelope: Decodable {
       let error: String

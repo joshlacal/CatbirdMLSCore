@@ -9,7 +9,7 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
       "cancelLeafRecovery", "cancelLeave", "closeConversation",
       "createConversation", "deleteBlob", "enrollDevice",
       "getBlob", "getBlobUsage", "getConversationState",
-      "getConversations", "getDevices", "getEntries",
+      "getConversations", "getDeviceKey", "getDevices", "getEntries",
       "getLeafRecoveryInbox", "getOwnDevices", "getPendingWelcomes",
       "getSubscriptionTicket", "prepareBlobUpload", "publishTyping",
       "rejectWelcome", "replenishKeyPackages",
@@ -71,7 +71,7 @@ final class MLSChatEndpointCatalogTests: XCTestCase {
   func testReadAndTicketRoutesDoNotRequireSignedRequest() {
     let readEndpoints = [
       "getConversations", "getConversationState", "getEntries",
-      "getPendingWelcomes", "getLeafRecoveryInbox", "getDevices",
+      "getPendingWelcomes", "getLeafRecoveryInbox", "getDeviceKey", "getDevices",
       "getOwnDevices", "getBlobUsage", "getBlob",
       "prepareBlobUpload", "uploadBlob", "publishTyping",
       "getSubscriptionTicket", "subscribeEvents"

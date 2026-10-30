@@ -3,7 +3,19 @@ import Petrel
 import PetrelCatbird
 
 extension MLSPublicPDSReader {
-  static let authorizationSession: URLSession = {
+  static let directRequestReceiptAuthorityDID = "did:web:chat.catbird.blue"
+
+  static var authorizationSession: URLSession {
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current {
+      do { return try fixture.makeSession() }
+      catch { preconditionFailure("Invalid debug fixture authorization session") }
+    }
+    #endif
+    return defaultAuthorizationSession
+  }
+
+  private static let defaultAuthorizationSession: URLSession = {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
@@ -20,17 +32,66 @@ extension MLSPublicPDSReader {
     }
   }
 
+  /// Strict canonical URL normalization for production trust-path endpoint matching.
+  /// Builds URLComponents for both URLs, normalizes default HTTPS port 443 to nil,
+  /// and requires the full normalized URLs to be strictly equal (preserving scheme, host,
+  /// path, query, user, password, and fragment).
+  static func normalizeForTrustEvaluation(_ url: URL?) -> URL? {
+    guard let url, var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
+      return nil
+    }
+    if components.scheme?.lowercased() == "https", components.port == 443 {
+      components.port = nil
+    }
+    return components.url
+  }
+
+  static func isMatchingEndpoint(_ actual: URL?, expected: URL) -> Bool {
+    guard let normActual = normalizeForTrustEvaluation(actual),
+          let normExpected = normalizeForTrustEvaluation(expected) else {
+      return false
+    }
+    return normActual == normExpected
+  }
+
   /// Bypass Petrel's non-expiring DID-to-PDS cache for authorization. The
   /// native key-set cache is the only cache on this trust path.
   static func resolveCurrentPDS(did: String, session: URLSession = authorizationSession) async throws -> URL {
+    try currentPDS(in: try await fetchValidatedDIDDocument(did: did, session: session), did: did)
+  }
+
+  /// A fresh fetch of `did`'s DID document, checked to be that DID's own
+  /// document. Never cached here.
+  static func fetchValidatedDIDDocument(
+    did: String, session: URLSession = authorizationSession
+  ) async throws -> DIDDocument {
     guard !did.contains("#"), (try? DID(didString: did)) != nil else { throw ReaderError.invalidResponse }
     let url = try SpaceHostResolver.didDocumentURL(for: did)
-    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-          http.url == url, data.count <= 1_048_576 else { throw ReaderError.invalidResponse }
-    let document = try JSONDecoder().decode(DIDDocument.self, from: data)
+    let limits = NetworkResponseLimits(
+      maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
+    let document: DIDDocument
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current, fixture.permits(url) {
+      var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      let (data, response) = try await session.data(for: request)
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+            isMatchingEndpoint(http.url, expected: url), data.count <= 1_048_576 else {
+        throw ReaderError.invalidResponse
+      }
+      document = try JSONDecoder().decode(DIDDocument.self, from: data)
+    } else {
+      document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+    }
+    #else
+    document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+    #endif
+    guard document.id == did else { throw ReaderError.invalidResponse }
+    return document
+  }
+
+  /// The single HTTPS `#atproto_pds` endpoint of `did`'s own DID document.
+  static func currentPDS(in document: DIDDocument, did: String) throws -> URL {
     guard document.id == did else { throw ReaderError.invalidResponse }
     let services = document.service.filter {
       ($0.id == "#atproto_pds" || $0.id == "\(did)#atproto_pds") && $0.type == "AtprotoPersonalDataServer"
@@ -40,6 +101,70 @@ extension MLSPublicPDSReader {
           endpoint.host != nil, endpoint.user == nil, endpoint.password == nil,
           endpoint.fragment == nil else { throw ReaderError.invalidEndpoint }
     return endpoint
+  }
+
+  /// Fetch only the coordinator DID selected by Rust, never a receipt-supplied URL.
+  /// The fixed local authority retains its existing fixture route; other authorities
+  /// use Petrel's public-address-validated and redirect-free DID resolver.
+  static func fetchDirectRequestReceiptAuthorityDocument(
+    authorityDid did: String,
+    session: URLSession = authorizationSession
+  ) async throws -> Data {
+    guard did.hasPrefix("did:web:") else { throw ReaderError.invalidResponse }
+    if did != directRequestReceiptAuthorityDID {
+      let url = try SpaceHostResolver.didDocumentURL(for: did)
+      guard let host = url.host?.lowercased(),
+            host != "localhost", host != "127.0.0.1", host != "::1"
+      else { throw ReaderError.invalidEndpoint }
+      let limits = NetworkResponseLimits(
+        maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
+      let document: DIDDocument
+      #if DEBUG && canImport(Network) && canImport(Security)
+      if let fixture = Petrel.DebugFixtureTransport.current {
+        guard fixture.permits(url) else { throw ReaderError.invalidEndpoint }
+        document = try await SpaceHostResolver.fetchDIDDocument(
+          for: did, urlSession: session, limits: limits)
+      } else {
+        document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+      }
+      #else
+      document = try await SpaceHostResolver.fetchDIDDocument(for: did, limits: limits)
+      #endif
+      guard document.id == did else { throw ReaderError.invalidResponse }
+      let data = try JSONEncoder().encode(document)
+      guard data.count <= 1_048_576 else { throw ReaderError.invalidResponse }
+      return data
+    }
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = Petrel.DebugFixtureTransport.current {
+      let fixtureURL = fixture.origin.appendingPathComponent(".well-known/did.json")
+      var request = URLRequest(url: fixtureURL, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      request.setValue("chat.catbird.blue", forHTTPHeaderField: "Host")
+      request.timeoutInterval = 10.0
+      let (data, response) = try await session.data(for: request)
+      guard let http = response as? HTTPURLResponse,
+            http.statusCode == 200,
+            data.count <= 1_048_576
+      else { throw ReaderError.invalidResponse }
+      let document = try JSONDecoder().decode(DIDDocument.self, from: data)
+      guard document.id == did else { throw ReaderError.invalidResponse }
+      return data
+    }
+    #endif
+    let url = try SpaceHostResolver.didDocumentURL(for: did)
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.timeoutInterval = 10.0
+    let (data, response) = try await session.data(for: request)
+    guard let http = response as? HTTPURLResponse,
+          http.statusCode == 200,
+          isMatchingEndpoint(http.url, expected: url),
+          data.count <= 1_048_576
+    else { throw ReaderError.invalidResponse }
+    let document = try JSONDecoder().decode(DIDDocument.self, from: data)
+    guard document.id == did else { throw ReaderError.invalidResponse }
+    return data
   }
 
   struct AuthorizedDeviceRecord: Equatable {

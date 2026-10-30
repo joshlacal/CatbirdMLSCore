@@ -85,9 +85,13 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   public typealias SigningPublicKeyResolver = @Sendable (String) -> Data?
   public typealias SigningBindingResolver = @Sendable (String) -> SigningBindingSnapshot?
   public typealias SigningAuthorityResolver = @Sendable (String) -> SigningAuthoritySnapshot?
+  public typealias ReceiptAuthorityDocumentResolver = @Sendable (String) throws -> Data?
+  public typealias ChatDeclarationAuthorityResolver = @Sendable (String) throws -> String?
 
   private let keychainManager: MLSKeychainManager
   private let authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)?
+  private let receiptAuthorityDocumentResolver: ReceiptAuthorityDocumentResolver?
+  private let chatDeclarationAuthorityResolver: ChatDeclarationAuthorityResolver?
   private let signingAuthorityResolver: SigningAuthorityResolver?
   private let transcriptSigner: TranscriptSigner?
   private let signingPublicKeyResolver: SigningPublicKeyResolver?
@@ -109,6 +113,8 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   public init(
     keychainManager: MLSKeychainManager = .shared,
     authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)? = nil,
+    receiptAuthorityDocumentResolver: ReceiptAuthorityDocumentResolver? = nil,
+    chatDeclarationAuthorityResolver: ChatDeclarationAuthorityResolver? = nil,
     signingAuthorityResolver: SigningAuthorityResolver? = nil,
     transcriptSigner: TranscriptSigner? = nil,
     signingPublicKeyResolver: SigningPublicKeyResolver? = nil,
@@ -118,6 +124,8 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   ) {
     self.keychainManager = keychainManager
     self.authorizedDeviceKeyResolver = authorizedDeviceKeyResolver
+    self.receiptAuthorityDocumentResolver = receiptAuthorityDocumentResolver
+    self.chatDeclarationAuthorityResolver = chatDeclarationAuthorityResolver
     self.signingAuthorityResolver = signingAuthorityResolver
     self.transcriptSigner = transcriptSigner
     self.signingPublicKeyResolver = signingPublicKeyResolver
@@ -379,6 +387,26 @@ public final class MLSOrchestratorCredentialAdapter: OrchestratorCredentialCallb
   }
 
   // MARK: - Authorized Device Keys
+
+  public func directRequestReceiptAuthorityDocument(expectedAuthorityDid: String) throws -> Data? {
+    guard let document = try receiptAuthorityDocumentResolver?(expectedAuthorityDid) else { return nil }
+    guard document.count <= 1_048_576,
+          let object = try JSONSerialization.jsonObject(with: document) as? [String: Any],
+          object["id"] as? String == expectedAuthorityDid
+    else {
+      throw OrchestratorBridgeError.Credential(
+        message: "The direct-request receipt authority document is invalid"
+      )
+    }
+    return document
+  }
+
+  public func getChatDeclarationAuthority(userDid: String) throws -> String? {
+    guard let chatDeclarationAuthorityResolver else {
+      throw OrchestratorBridgeError.Credential(message: "Chat declaration resolver unavailable")
+    }
+    return try chatDeclarationAuthorityResolver(userDid)
+  }
 
   public func getAuthorizedDeviceKeys(userDid: String) throws -> [Data]? {
     logger.debug("Resolving authorized device keys for user: \(userDid.prefix(20))...")

@@ -84,4 +84,37 @@ struct MLSPublicPDSReaderTests {
     let garbage = "not json".data(using: .utf8)!
     #expect(MLSPublicPDSReader.decodeDeviceSignatureKeys(fromListRecordsJSON: garbage).isEmpty)
   }
+
+  // MARK: - isMatchingEndpoint normalization
+
+  @Test func endpointMatchingNormalizesDefaultHttpsPort() throws {
+    let base = URL(string: "https://chat.catbird.blue/.well-known/did.json")!
+    let port443 = URL(string: "https://chat.catbird.blue:443/.well-known/did.json")!
+
+    // :443 vs implicit equals
+    #expect(MLSPublicPDSReader.isMatchingEndpoint(port443, expected: base))
+    #expect(MLSPublicPDSReader.isMatchingEndpoint(base, expected: port443))
+
+    // A different query fails
+    let withQuery1 = URL(string: "https://chat.catbird.blue/.well-known/did.json?version=1")!
+    let withQuery2 = URL(string: "https://chat.catbird.blue/.well-known/did.json?version=2")!
+    #expect(!MLSPublicPDSReader.isMatchingEndpoint(withQuery1, expected: base))
+    #expect(!MLSPublicPDSReader.isMatchingEndpoint(withQuery1, expected: withQuery2))
+    let withQuery1Port443 = URL(string: "https://chat.catbird.blue:443/.well-known/did.json?version=1")!
+    #expect(MLSPublicPDSReader.isMatchingEndpoint(withQuery1Port443, expected: withQuery1))
+
+    // A different host fails
+    let diffHost = URL(string: "https://other.catbird.blue/.well-known/did.json")!
+    #expect(!MLSPublicPDSReader.isMatchingEndpoint(diffHost, expected: base))
+
+    // http vs https fails
+    let http = URL(string: "http://chat.catbird.blue/.well-known/did.json")!
+    #expect(!MLSPublicPDSReader.isMatchingEndpoint(http, expected: base))
+    let httpPort443 = URL(string: "http://chat.catbird.blue:443/.well-known/did.json")!
+    #expect(!MLSPublicPDSReader.isMatchingEndpoint(httpPort443, expected: base))
+
+    // :8443 fails
+    let port8443 = URL(string: "https://chat.catbird.blue:8443/.well-known/did.json")!
+    #expect(!MLSPublicPDSReader.isMatchingEndpoint(port8443, expected: base))
+  }
 }

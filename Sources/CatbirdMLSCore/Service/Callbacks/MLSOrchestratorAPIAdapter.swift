@@ -40,6 +40,34 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  internal func directRequestReceiptAuthorityDocument(expectedAuthorityDid: String) throws -> Data {
+    do {
+      return try blocking {
+        try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+          authorityDid: expectedAuthorityDid)
+      }
+    } catch {
+      throw OrchestratorBridgeError.Credential(
+        message: "receipt_authority_unavailable: The direct-request receipt authority could not be verified. \(error.localizedDescription)"
+      )
+    }
+  }
+
+  internal func chatDeclarationAuthority(userDid: String) throws -> String? {
+    do {
+      return try blocking {
+        try await MLSPublicPDSReader.fetchDeclaration(
+          did: userDid,
+          resolvePDS: { did in try await MLSPublicPDSReader.resolveCurrentPDS(did: did) }
+        )?.deliveryService.didString()
+      }
+    } catch {
+      throw OrchestratorBridgeError.Credential(
+        message: "chat_declaration_unavailable: The account home could not be verified. \(error.localizedDescription)"
+      )
+    }
+  }
+
   public func isAuthenticatedAs(did: String) -> Bool {
     (try? blocking { await self.apiClient.isAuthenticatedAs(did) }) ?? false
   }
@@ -93,22 +121,22 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     toEpoch: UInt32?
   ) throws -> FfiMessagesPage {
     let result = try blocking {
-      let output = try await self.apiClient.getCanonicalEntries(
+      let page = try await self.apiClient.getCanonicalEntriesRetainingJSON(
         conversationId: convoId,
         afterSeq: cursor.flatMap(Int.init) ?? 0,
         limit: Int(limit)
       )
       return (
-        entries: output.entries,
+        entries: zip(page.output.entries, page.entriesJSON).map { $0 },
         lastSeq: MLSAPIClient.canonicalContinuationAfterSeq(
-          hasMore: output.hasMore,
-          nextAfterSeq: output.nextAfterSeq
+          hasMore: page.output.hasMore,
+          nextAfterSeq: page.output.nextAfterSeq
         )
       )
     }
     return FfiMessagesPage(
       envelopes: try result.entries.compactMap {
-        try Self.incomingEnvelope($0, messageType: messageType)
+        try Self.incomingEnvelope($0.0, servedJSON: $0.1, messageType: messageType)
       },
       cursor: result.lastSeq.map(String.init)
     )
@@ -207,7 +235,82 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     }
   }
 
+  // MARK: - Labyrinth history backup (catbird-mls feature `labyrinth`)
+  //
+  // UniFFI callback methods cannot be cfg-gated, so they are in every build.
+  // Labyrinth XRPCs go straight to the delivery service with a service-auth
+  // token (MLSAPIClient+Labyrinth.swift): a PDS proxy would drop the signed
+  // write headers. mailboxKeys records live in the account's own repo.
+
+  public func submitLabyrinthRequest(
+    method: String,
+    nsid: String,
+    path: String,
+    body: Data?,
+    headers: [FfiLabyrinthHeader]
+  ) throws -> FfiGatewayResponse {
+    let pairs = headers.map { (name: $0.name, value: $0.value) }
+    return try blocking {
+      let (data, response) = try await self.apiClient.submitLabyrinthRequest(
+        method: method, nsid: nsid, path: path, body: body, headers: pairs)
+      return FfiGatewayResponse(
+        status: UInt16(clamping: response.statusCode),
+        contentType: response.value(forHTTPHeaderField: "Content-Type"),
+        body: data
+      )
+    }
+  }
+
+  public func labyrinthPdsEnabled() -> Bool {
+    true
+  }
+
+  public func putLabyrinthMailboxKeys(rkey: String, record: Data) throws {
+    try blocking {
+      try await self.apiClient.putLabyrinthMailboxKeys(rkey: rkey, record: record)
+    }
+  }
+
+  public func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data? {
+    try blocking {
+      try await self.apiClient.getLabyrinthMailboxKeys(did: did, rkey: rkey)
+    }
+  }
+
+  public func deleteLabyrinthMailboxKeys() throws {
+    try blocking {
+      try await self.apiClient.deleteLabyrinthMailboxKeys()
+    }
+  }
+
+  public func labyrinthSpaceEnabled() -> Bool {
+    // This advertises the adapter capability. Rust probes the host and
+    // persists placement; an outage never creates a second mailbox.
+    MLSAPIClient.labyrinthSpaceTransportAvailable
+  }
+
+  public func submitLabyrinthSpaceRequest(
+    method: String,
+    nsid: String,
+    path: String,
+    body: Data?
+  ) throws -> FfiGatewayResponse {
+    try blocking {
+      let (data, response) = try await self.apiClient.submitLabyrinthSpaceRequest(
+        method: method, nsid: nsid, path: path, body: body)
+      return FfiGatewayResponse(
+        status: UInt16(clamping: response.statusCode),
+        contentType: response.value(forHTTPHeaderField: "Content-Type"),
+        body: data
+      )
+    }
+  }
+
   private func blocking<T>(_ operation: @escaping () async throws -> T) throws -> T {
+    // ponytail: sync FFI callback bridging async networking needs a free cooperative thread.
+    // Ceiling: Bound by RustAuthorityAdmissionGate (<= 4 concurrent calls) and preview coalescing,
+    // ensuring the Swift cooperative thread pool cannot starve.
+    // Upgrade path: UniFFI async foreign callbacks once core FFI re-freezes.
     let semaphore = DispatchSemaphore(value: 0)
     let lock = NSLock()
     var result: Result<T, Error>?
@@ -297,8 +400,11 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
   /// entries, `"commit"` keeps every commit-bearing entry, and `nil` keeps
   /// both. Other entry kinds project to nil; malformed supported entries throw so
   /// the caller cannot advance its cursor past an unprocessed message.
+  /// `servedJSON` is the entry exactly as the service returned it; request
+  /// control rows are forwarded from it, never from a DTO re-encode.
   static func incomingEnvelope(
     _ entry: BlueCatbirdChatDefs.ConversationEntry,
+    servedJSON: Data,
     messageType: String? = nil
   ) throws -> FfiIncomingEnvelope? {
     let wantsApplication = messageType == nil || messageType == "app"
@@ -356,6 +462,60 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
         epoch: body.next.epoch
       )
 
+    case let .blueCatbirdChatDefsDirectRequestEntry(message):
+      guard case let .blueCatbirdChatDefsDirectRequestPublicationBody(body) =
+        message.signedRequest.body,
+        body.conversationId == message.conversationId,
+        body.next.conversationId == message.conversationId
+      else {
+        throw malformedCanonicalEnvelope()
+      }
+      return try canonicalControlEnvelope(
+        servedJSON: servedJSON,
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
+      )
+
+    case let .blueCatbirdChatDefsDirectRequestAcceptanceEntry(message):
+      guard case let .blueCatbirdChatDefsDirectRequestAcceptanceBody(body) =
+        message.signedRequest.body,
+        body.prior.conversationId == message.conversationId,
+        body.next.conversationId == message.conversationId
+      else {
+        throw malformedCanonicalEnvelope()
+      }
+      return try canonicalControlEnvelope(
+        servedJSON: servedJSON,
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.next.epoch
+      )
+
+    case let .blueCatbirdChatDefsConversationCloseEntry(message):
+      guard case let .blueCatbirdChatDefsConversationCloseBody(body) =
+        message.signedRequest.body,
+        body.prior.conversationId == message.conversationId,
+        body.retired.conversationId == message.conversationId
+      else {
+        throw malformedCanonicalEnvelope()
+      }
+      return try canonicalControlEnvelope(
+        servedJSON: servedJSON,
+        conversationId: message.conversationId,
+        senderDid: body.actorDid,
+        receivedAt: message.receivedAt,
+        entryId: message.entryId,
+        sequence: message.seq,
+        epoch: body.prior.epoch
+      )
+
     default:
       return nil
     }
@@ -370,7 +530,8 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
     receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
     entryId: BlueCatbirdChatDefs.OperationId,
     sequence: Int,
-    epoch: Int
+    epoch: Int,
+    canonicalEntryJson: String? = nil
   ) throws -> FfiIncomingEnvelope {
     let timestamp = receivedAt.iso8601String
     guard MLSSystemMessagePresentation.canonicalUUID(conversationId),
@@ -381,6 +542,7 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       throw malformedCanonicalEnvelope()
     }
     return FfiIncomingEnvelope(
+      canonicalEntryJson: canonicalEntryJson,
       conversationId: conversationId,
       senderDid: senderDid.description,
       ciphertext: ciphertext,
@@ -388,6 +550,33 @@ public final class MLSOrchestratorAPIAdapter: OrchestratorApiCallback, @unchecke
       serverMessageId: entryId,
       serverSequence: UInt64(sequence),
       serverEpoch: UInt64(epoch)
+    )
+  }
+
+  /// Retains the complete signed control row for Rust verification and
+  /// dispatch. Returning nil here would let the page cursor advance past an
+  /// unprocessed request transition.
+  private static func canonicalControlEnvelope(
+    servedJSON: Data,
+    conversationId: BlueCatbirdChatDefs.OperationId,
+    senderDid: BlueCatbirdChatDefs.BareDid,
+    receivedAt: BlueCatbirdChatDefs.CanonicalDatetime,
+    entryId: BlueCatbirdChatDefs.OperationId,
+    sequence: Int,
+    epoch: Int
+  ) throws -> FfiIncomingEnvelope {
+    guard let json = String(data: servedJSON, encoding: .utf8) else {
+      throw malformedCanonicalEnvelope()
+    }
+    return try canonicalEnvelope(
+      conversationId: conversationId,
+      senderDid: senderDid,
+      ciphertext: Data(),
+      receivedAt: receivedAt,
+      entryId: entryId,
+      sequence: sequence,
+      epoch: epoch,
+      canonicalEntryJson: json
     )
   }
 

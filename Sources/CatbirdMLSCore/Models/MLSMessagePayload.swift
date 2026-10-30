@@ -1,5 +1,10 @@
 import Foundation
 
+public enum MLSMessagePayloadValidationError: Error, Equatable, Sendable {
+  case invalidGroupInvitation
+  case invalidGroupInvitationText
+}
+
 // MARK: - Message Type Enum
 
 /// Discriminator for MLS message payload types
@@ -50,6 +55,7 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
   case post(MLSPostEmbed)
   case image(MLSImageEmbed)
   case audio(MLSAudioEmbed)
+  case groupInvitation(MLSGroupInvitationReference)
   case unknown(type: String)
 
   enum CodingKeys: String, CodingKey {
@@ -63,6 +69,7 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case post
     case image
     case audio
+    case groupInvitation
   }
 
   public init(from decoder: Decoder) throws {
@@ -90,6 +97,10 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case .audio:
       let data = try container.decode(MLSAudioEmbed.self, forKey: .data)
       self = .audio(data)
+    case .groupInvitation:
+      let data = try container.decode(MLSGroupInvitationReference.self, forKey: .data)
+      try data.validate()
+      self = .groupInvitation(data)
     }
   }
 
@@ -112,6 +123,10 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     case .audio(let data):
       try container.encode(EmbedType.audio, forKey: .type)
       try container.encode(data, forKey: .data)
+    case .groupInvitation(let data):
+      try data.validate()
+      try container.encode(EmbedType.groupInvitation, forKey: .type)
+      try container.encode(data, forKey: .data)
     case .unknown(let type):
       try container.encode(type, forKey: .type)
       // Encode empty object for data to maintain structure
@@ -123,7 +138,7 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     switch self {
     case .post(let post):
       return post.cid
-    case .link, .gif, .image, .audio, .unknown:
+    case .link, .gif, .image, .audio, .groupInvitation, .unknown:
       return nil
     }
   }
@@ -140,6 +155,54 @@ public enum MLSEmbedData: Codable, Sendable, Hashable {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
     return try encoder.encode(self)
+  }
+}
+
+/// Navigation-only reference to an independently signed live group invitation.
+/// Rendering or receiving this value never accepts the invitation.
+public struct MLSGroupInvitationReference: Codable, Sendable, Hashable {
+  public let authorityDid: String
+  public let conversationId: String
+  public let invitationTransitionId: String
+  public let invitedByDid: String
+  public let invitedByDeviceId: String
+  public let recipientDid: String
+
+  public init(
+    authorityDid: String,
+    conversationId: String,
+    invitationTransitionId: String,
+    invitedByDid: String,
+    invitedByDeviceId: String,
+    recipientDid: String
+  ) throws {
+    self.authorityDid = authorityDid
+    self.conversationId = conversationId
+    self.invitationTransitionId = invitationTransitionId
+    self.invitedByDid = invitedByDid
+    self.invitedByDeviceId = invitedByDeviceId
+    self.recipientDid = recipientDid
+    try validate()
+  }
+
+  func validate() throws {
+    guard authorityDid == "did:web:chat.catbird.blue",
+          isCanonicalUUID(conversationId),
+          isCanonicalUUID(invitationTransitionId),
+          isCanonicalUUID(invitedByDeviceId),
+          isBareDID(invitedByDid),
+          isBareDID(recipientDid),
+          invitedByDid != recipientDid
+    else { throw MLSMessagePayloadValidationError.invalidGroupInvitation }
+  }
+
+  private func isCanonicalUUID(_ value: String) -> Bool {
+    value == value.lowercased() && UUID(uuidString: value)?.uuidString.lowercased() == value
+  }
+
+  private func isBareDID(_ value: String) -> Bool {
+    (12 ... 261).contains(value.utf8.count) && value.hasPrefix("did:")
+      && !value.contains("#") && !value.contains("?")
   }
 }
 
@@ -610,6 +673,24 @@ public struct MLSMessagePayload: Codable, Sendable {
       messageType: .text,
       text: text,
       embed: embed
+    )
+  }
+
+  /// Creates a text-only navigation note for a separately signed invitation.
+  /// The Rust send path revalidates the reference against the exact accepted
+  /// direct recipient before encrypting it.
+  public static func groupInvitationNote(
+    text: String,
+    reference: MLSGroupInvitationReference
+  ) throws -> MLSMessagePayload {
+    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          text.utf8.count <= 16_384
+    else { throw MLSMessagePayloadValidationError.invalidGroupInvitationText }
+    try reference.validate()
+    return MLSMessagePayload(
+      messageType: .text,
+      text: text,
+      embed: .groupInvitation(reference)
     )
   }
 

@@ -1,0 +1,37 @@
+{
+  "repos": [
+    {
+      "repository": "CatbirdMLSCore",
+      "source_git_head": "e5f76c45316d6d390f4e17aa9fae76e7de12b7b3",
+      "source_jj_commit": "e5f76c45316d6d390f4e17aa9fae76e7de12b7b3",
+      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/CatbirdMLSCore"
+    },
+    {
+      "repository": "Petrel",
+      "source_git_head": "e115236537041a900ec971be05185a70cca73e8a",
+      "source_jj_commit": "e115236537041a900ec971be05185a70cca73e8a",
+      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/Petrel"
+    },
+    {
+      "repository": "PetrelCatbird",
+      "source_git_head": "8672c80ffeb3b9cfbdb6bd98f66efa09b13fe0db",
+      "source_jj_commit": "8672c80ffeb3b9cfbdb6bd98f66efa09b13fe0db",
+      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/PetrelCatbird"
+    },
+    {
+      "repository": "catbird-atproto",
+      "source_git_head": "e7ff2a3bb17f7d668889cae5f34a2d8d6755647c",
+      "source_jj_commit": "e7ff2a3bb17f7d668889cae5f34a2d8d6755647c",
+      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/catbird-atproto"
+    },
+    {
+      "repository": "labyrinth",
+      "source_git_head": "385d1ee40ce1c3924c6a02234282e27b29607f2d",
+      "source_jj_commit": "385d1ee40ce1c3924c6a02234282e27b29607f2d",
+      "workspace": "/Users/joshlacalamito/Developer/.workspaces/spaces-release-20261023/labyrinth"
+    }
+  ],
+  "schema_version": 1,
+  "scope": "October 23 Spaces local Apple integration",
+  "source_policy": "Selected baselines must remain ancestors; the artifact manifest separately records the final exact source identities and hashes."
+}

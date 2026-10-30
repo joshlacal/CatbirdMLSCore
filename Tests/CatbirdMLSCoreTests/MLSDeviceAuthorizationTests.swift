@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import CatbirdMLS
 import Synchronization
+@testable import Petrel
 @testable import CatbirdMLSCore
 
 final class MLSDeviceAuthorizationTests: XCTestCase {
@@ -89,10 +90,13 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
   }
 
   func testFreshDIDAuthorityResolutionObservesPDSMigration() async throws {
-    let config = URLSessionConfiguration.ephemeral
-    config.protocolClasses = [AuthorizationURLProtocol.self]
-    let session = URLSession(configuration: config)
-    defer { session.invalidateAndCancel(); AuthorizationURLProtocol.handler = nil }
+    NetworkService.setNetworkTestProtocolClasses([AuthorizationURLProtocol.self])
+    NetworkService.dnsResolverOverride = { _ in ["93.184.216.34"] }
+    defer {
+      NetworkService.setNetworkTestProtocolClasses(nil)
+      NetworkService.dnsResolverOverride = nil
+      AuthorizationURLProtocol.handler = nil
+    }
     func document(_ host: String) throws -> Data {
       try JSONSerialization.data(withJSONObject: ["id": did, "service": [[
         "id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": "https://\(host)"
@@ -103,10 +107,77 @@ final class MLSDeviceAuthorizationTests: XCTestCase {
       XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
       return (200, responses.withLock { $0.removeFirst() })
     }
-    let old = try await MLSPublicPDSReader.resolveCurrentPDS(did: did, session: session)
-    let new = try await MLSPublicPDSReader.resolveCurrentPDS(did: did, session: session)
+    let old = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
+    let new = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
     XCTAssertEqual(old.host, "old.example")
     XCTAssertEqual(new.host, "new.example", "A forced native refresh must not remain pinned to the previous PDS")
+  }
+
+  func testDirectRequestReceiptAuthorityFetchesFixedDocumentAndPreservesBytes() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [AuthorizationURLProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel(); AuthorizationURLProtocol.handler = nil }
+    let document = Data(#"{"id":"did:web:chat.catbird.blue","verificationMethod":[]}"#.utf8)
+    AuthorizationURLProtocol.handler = { request in
+      XCTAssertEqual(request.url?.absoluteString, "https://chat.catbird.blue/.well-known/did.json")
+      XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
+      XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+      return (200, document)
+    }
+
+    let fetched = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+      authorityDid: MLSPublicPDSReader.directRequestReceiptAuthorityDID,
+      session: session
+    )
+    XCTAssertEqual(fetched, document)
+  }
+
+  func testDirectRequestReceiptAuthorityRejectsWrongDID() async throws {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [AuthorizationURLProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel(); AuthorizationURLProtocol.handler = nil }
+    AuthorizationURLProtocol.handler = { _ in
+      (200, Data(#"{"id":"did:web:attacker.example","verificationMethod":[]}"#.utf8))
+    }
+
+    do {
+      _ = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+        authorityDid: MLSPublicPDSReader.directRequestReceiptAuthorityDID, session: session)
+      XCTFail("A different DID document cannot become the receipt authority")
+    } catch {}
+  }
+
+  func testDirectRequestReceiptAuthorityRejectsLoopbackPeerBeforeNetwork() async throws {
+    do {
+      _ = try await MLSPublicPDSReader.fetchDirectRequestReceiptAuthorityDocument(
+        authorityDid: "did:web:127.0.0.1")
+      XCTFail("A receipt authority cannot target a local endpoint")
+    } catch MLSPublicPDSReader.ReaderError.invalidEndpoint {}
+  }
+
+  func testCredentialCallbackBindsExpectedReceiptAuthorityAndRejectsOversize() throws {
+    let localDid = MLSPublicPDSReader.directRequestReceiptAuthorityDID
+    let valid = Data(#"{"id":"did:web:chat.catbird.blue"}"#.utf8)
+    let adapter = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { expected in expected == localDid ? valid : nil }
+    )
+    XCTAssertEqual(try adapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: localDid), valid)
+    XCTAssertNil(try adapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: "did:web:peer.example"))
+
+    let foreignDid = "did:web:peer.example"
+    let foreign = Data(#"{"id":"did:web:peer.example"}"#.utf8)
+    let foreignAdapter = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { _ in foreign }
+    )
+    XCTAssertEqual(try foreignAdapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: foreignDid), foreign)
+    XCTAssertThrowsError(try foreignAdapter.directRequestReceiptAuthorityDocument(expectedAuthorityDid: localDid))
+
+    let oversized = MLSOrchestratorCredentialAdapter(
+      receiptAuthorityDocumentResolver: { _ in Data(repeating: 0x20, count: 1_048_577) }
+    )
+    XCTAssertThrowsError(try oversized.directRequestReceiptAuthorityDocument(expectedAuthorityDid: localDid))
   }
 
   func testFailedPublicationDeniesSyncAndSendThenRetriesForSameSession() async throws {

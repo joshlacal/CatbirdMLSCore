@@ -587,6 +587,10 @@ public protocol CatbirdClientBridgeProtocol: AnyObject {
      */
     func addParticipants(conversationId: String, participantDids: [String]) throws
 
+    func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome
+
+    func closeDirectRequest(conversationId: String) throws -> DirectRequestView
+
     /**
      * List all conversations.
      */
@@ -602,30 +606,44 @@ public protocol CatbirdClientBridgeProtocol: AnyObject {
      */
     func fetchNewMessages(conversationId: String, cursor: String?, limit: UInt32) throws -> [ChatMessage]
 
+    func getDirectRequestDeliveryEnabled() throws -> Bool?
+
+    func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference?
+
     /**
      * Leave a conversation.
      */
     func leaveConversation(conversationId: String) throws
+
+    func listDirectRequestViews() throws -> [DirectRequestView]
 
     /**
      * Get message history for a conversation.
      */
     func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64?) throws -> [ChatMessage]
 
+    func refreshRequestPreview(conversationId: String) throws -> DirectRequestView
+
     /**
      * Remove participants from a conversation.
      */
     func removeParticipants(conversationId: String, participantDids: [String]) throws
+
+    func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome
 
     /**
      * Send a text message to a conversation.
      */
     func sendMessage(conversationId: String, text: String) throws -> ChatMessage
 
+    func setDirectRequestDeliveryEnabled(enabled: Bool) throws
+
     /**
      * Shut down the client, releasing all resources.
      */
     func shutdown()
+
+    func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome
 
     /**
      * Sync conversations and messages with the server.
@@ -734,6 +752,20 @@ open class CatbirdClientBridge:
         }
     }
 
+    open func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_cancel_direct_request(self.uniffiClonePointer(),
+                                                                                   FfiConverterString.lower(draftId), $0)
+        })
+    }
+
+    open func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
+        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_close_direct_request(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
     /**
      * List all conversations.
      */
@@ -766,6 +798,20 @@ open class CatbirdClientBridge:
         })
     }
 
+    open func getDirectRequestDeliveryEnabled() throws -> Bool? {
+        return try FfiConverterOptionBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_get_direct_request_delivery_enabled(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference? {
+        return try FfiConverterOptionTypeGroupInvitationReference.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_get_group_invitation_reference(self.uniffiClonePointer(),
+                                                                                            FfiConverterString.lower(conversationId),
+                                                                                            FfiConverterString.lower(recipientDid), $0)
+        })
+    }
+
     /**
      * Leave a conversation.
      */
@@ -774,6 +820,12 @@ open class CatbirdClientBridge:
             uniffi_catbird_mls_fn_method_catbirdclientbridge_leave_conversation(self.uniffiClonePointer(),
                                                                                 FfiConverterString.lower(conversationId), $0)
         }
+    }
+
+    open func listDirectRequestViews() throws -> [DirectRequestView] {
+        return try FfiConverterSequenceTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_list_direct_request_views(self.uniffiClonePointer(), $0)
+        })
     }
 
     /**
@@ -788,6 +840,13 @@ open class CatbirdClientBridge:
         })
     }
 
+    open func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
+        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_refresh_request_preview(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
     /**
      * Remove participants from a conversation.
      */
@@ -797,6 +856,13 @@ open class CatbirdClientBridge:
                                                                                  FfiConverterString.lower(conversationId),
                                                                                  FfiConverterSequenceString.lower(participantDids), $0)
         }
+    }
+
+    open func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_resume_direct_request(self.uniffiClonePointer(),
+                                                                                   FfiConverterString.lower(draftId), $0)
+        })
     }
 
     /**
@@ -810,6 +876,13 @@ open class CatbirdClientBridge:
         })
     }
 
+    open func setDirectRequestDeliveryEnabled(enabled: Bool) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_set_direct_request_delivery_enabled(self.uniffiClonePointer(),
+                                                                                                 FfiConverterBool.lower(enabled), $0)
+        }
+    }
+
     /**
      * Shut down the client, releasing all resources.
      */
@@ -817,6 +890,13 @@ open class CatbirdClientBridge:
         try! rustCall {
             uniffi_catbird_mls_fn_method_catbirdclientbridge_shutdown(self.uniffiClonePointer(), $0)
         }
+    }
+
+    open func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
+        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdclientbridge_start_direct_request(self.uniffiClonePointer(),
+                                                                                  FfiConverterTypeDirectRequestInput.lower(input), $0)
+        })
     }
 
     /**
@@ -3326,6 +3406,10 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func addMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult
 
+    func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome
+
+    func closeDirectRequest(conversationId: String) throws -> DirectRequestView
+
     /**
      * Confirm a previously staged commit: merges it locally, advances the
      * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
@@ -3414,6 +3498,10 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func getConversationRecoveryState(conversationId: String) throws -> FfiConversationRecoveryState
 
+    func getDirectRequestDeliveryEnabled() throws -> Bool?
+
+    func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference?
+
     /**
      * Get key package stats.
      */
@@ -3467,6 +3555,105 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
     func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult
 
     /**
+     * What background archiving and deletion could not do (show it):
+     * quarantined messages, members left out of a conversation's archive
+     * (with pin conflicts to resolve), dropped messages, and a pending
+     * remote deletion.
+     */
+    func labyrinthArchiveStatus() throws -> FfiLabyrinthArchiveStatus
+
+    /**
+     * Forget the recorded exclusions and dropped messages (the user saw them).
+     */
+    func labyrinthClearArchiveReports() throws
+
+    /**
+     * Create a recovery code. Show it to the user once; it is not stored.
+     */
+    func labyrinthCreateRecoveryCode() throws -> String
+
+    /**
+     * Delete the account's history backup everywhere: the server mailbox
+     * and every message the account archived (shown to others as removed),
+     * the PDS `mailboxKeys` records, and this device's state. This
+     * device's state is erased even if the server cannot be reached; the
+     * remote half is then retried (`remote_pending`).
+     */
+    func labyrinthDeleteAccount() throws -> FfiLabyrinthDeletion
+
+    /**
+     * Turn on encrypted history backup for the signed-in account on this
+     * device. Returns this device's Labyrinth device key (hex).
+     */
+    func labyrinthEnableBackup() throws -> String
+
+    /**
+     * Archive every queued sent message now. Call it when the app is about
+     * to suspend and at launch (a killed process leaves its queue saved).
+     * Returns how many messages were archived.
+     */
+    func labyrinthFlushArchive() throws -> UInt64
+
+    /**
+     * Store a conversation's archived history locally (new device).
+     */
+    func labyrinthImportHistory(conversationId: String) throws -> FfiLabyrinthImport
+
+    /**
+     * The conversations this account has backed-up history in. A
+     * non-empty `incomplete_sequencers` means the list is partial.
+     */
+    func labyrinthListThreads() throws -> FfiLabyrinthThreads
+
+    /**
+     * Decrypted history of a conversation in `[from_ms, until_ms)`.
+     */
+    func labyrinthLoadHistoryPage(conversationId: String, fromMs: UInt64?, untilMs: UInt64?) throws -> FfiLabyrinthHistory
+
+    /**
+     * A contact's history keys changed (they reset their backup): the
+     * safety-number change to show, like Signal. Fails if the new keys are
+     * not vouched for by one of the contact's current chat devices.
+     */
+    func labyrinthProposeRepin(did: String) throws -> FfiLabyrinthRepinProposal
+
+    /**
+     * The user accepted the new safety number: trust the contact's new
+     * history keys (`new_head_hex` from the proposal).
+     */
+    func labyrinthRepinPeer(did: String, newHeadHex: String) throws
+
+    /**
+     * Enroll this device into the account's backup with a recovery code.
+     * Returns this device's Labyrinth device key (hex).
+     */
+    func labyrinthRestoreWithRecoveryCode(code: String) throws -> String
+
+    /**
+     * Retry every quarantined message now. Returns how many there were.
+     */
+    func labyrinthRetryQuarantined() throws -> UInt64
+
+    /**
+     * Retry a pending remote account deletion now. Returns true when
+     * nothing is pending any more.
+     */
+    func labyrinthRetryRemoteDeletion() throws -> Bool
+
+    /**
+     * Revoke another device of this account from the backup.
+     */
+    func labyrinthRevokeDevice(deviceKeyHex: String) throws -> UInt64
+
+    /**
+     * Sign-out or account removal on this device: erase this device's
+     * backup state and queue. The account's backup on the server stays, so
+     * a later sign-in restores with a recovery code. Returns whether any
+     * state was saved.
+     */
+    func labyrinthSignOut() throws -> Bool
+
+    /**
      * Leave a conversation through the Rust-owned engine and return the
      * identifiers Swift needs to clean up local state immediately.
      */
@@ -3487,6 +3674,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * List registered devices.
      */
     func listDevices() throws -> [FfiDeviceInfo]
+
+    func listDirectRequestViews() throws -> [DirectRequestView]
 
     /**
      * Perform full silent recovery.
@@ -3607,6 +3796,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func recordResetRequestedOutcome(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws -> FfiResetRecordOutcome
 
+    func refreshRequestPreview(conversationId: String) throws -> DirectRequestView
+
     /**
      * Remove a device.
      */
@@ -3648,6 +3839,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      */
     func respondToWelcomeReissue(convoId: String, recipientDeviceDid: String, requestId: String) throws
 
+    func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome
+
     func resumeFromSuspend(reason: String) throws
 
     func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport
@@ -3678,6 +3871,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * then call this with the blob_id from the upload.
      */
     func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv: Data, sha256: String, size: UInt64, durationMs: UInt64, waveform: [Float], transcript: String?) throws -> FfiMessage
+
+    func setDirectRequestDeliveryEnabled(enabled: Bool) throws
 
     /**
      * Install (or replace) the Layer 3 event callback. Pass None to detach.
@@ -3716,6 +3911,8 @@ public protocol OrchestratorBridgeProtocol: AnyObject {
      * [`discard_pending`](Self::discard_pending) on failure.
      */
     func stageCommit(conversationId: String, kind: FfiCommitKind) throws -> FfiCommitPlan
+
+    func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome
 
     func startupReconcile() throws -> FfiStartupReconcileReport
 
@@ -3861,6 +4058,20 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_add_members_result(self.uniffiClonePointer(),
                                                                                FfiConverterString.lower(conversationId),
                                                                                FfiConverterSequenceString.lower(memberDids), $0)
+        })
+    }
+
+    open func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_cancel_direct_request(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(draftId), $0)
+        })
+    }
+
+    open func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
+        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_close_direct_request(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(conversationId), $0)
         })
     }
 
@@ -4028,6 +4239,20 @@ open class OrchestratorBridge:
         })
     }
 
+    open func getDirectRequestDeliveryEnabled() throws -> Bool? {
+        return try FfiConverterOptionBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_get_direct_request_delivery_enabled(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference? {
+        return try FfiConverterOptionTypeGroupInvitationReference.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_get_group_invitation_reference(self.uniffiClonePointer(),
+                                                                                           FfiConverterString.lower(conversationId),
+                                                                                           FfiConverterString.lower(recipientDid), $0)
+        })
+    }
+
     /**
      * Get key package stats.
      */
@@ -4117,6 +4342,178 @@ open class OrchestratorBridge:
     }
 
     /**
+     * What background archiving and deletion could not do (show it):
+     * quarantined messages, members left out of a conversation's archive
+     * (with pin conflicts to resolve), dropped messages, and a pending
+     * remote deletion.
+     */
+    open func labyrinthArchiveStatus() throws -> FfiLabyrinthArchiveStatus {
+        return try FfiConverterTypeFfiLabyrinthArchiveStatus.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_archive_status(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Forget the recorded exclusions and dropped messages (the user saw them).
+     */
+    open func labyrinthClearArchiveReports() throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_clear_archive_reports(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    /**
+     * Create a recovery code. Show it to the user once; it is not stored.
+     */
+    open func labyrinthCreateRecoveryCode() throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_create_recovery_code(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Delete the account's history backup everywhere: the server mailbox
+     * and every message the account archived (shown to others as removed),
+     * the PDS `mailboxKeys` records, and this device's state. This
+     * device's state is erased even if the server cannot be reached; the
+     * remote half is then retried (`remote_pending`).
+     */
+    open func labyrinthDeleteAccount() throws -> FfiLabyrinthDeletion {
+        return try FfiConverterTypeFfiLabyrinthDeletion.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_delete_account(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Turn on encrypted history backup for the signed-in account on this
+     * device. Returns this device's Labyrinth device key (hex).
+     */
+    open func labyrinthEnableBackup() throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_enable_backup(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Archive every queued sent message now. Call it when the app is about
+     * to suspend and at launch (a killed process leaves its queue saved).
+     * Returns how many messages were archived.
+     */
+    open func labyrinthFlushArchive() throws -> UInt64 {
+        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_flush_archive(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Store a conversation's archived history locally (new device).
+     */
+    open func labyrinthImportHistory(conversationId: String) throws -> FfiLabyrinthImport {
+        return try FfiConverterTypeFfiLabyrinthImport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_import_history(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
+    /**
+     * The conversations this account has backed-up history in. A
+     * non-empty `incomplete_sequencers` means the list is partial.
+     */
+    open func labyrinthListThreads() throws -> FfiLabyrinthThreads {
+        return try FfiConverterTypeFfiLabyrinthThreads.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_list_threads(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Decrypted history of a conversation in `[from_ms, until_ms)`.
+     */
+    open func labyrinthLoadHistoryPage(conversationId: String, fromMs: UInt64?, untilMs: UInt64?) throws -> FfiLabyrinthHistory {
+        return try FfiConverterTypeFfiLabyrinthHistory.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_load_history_page(self.uniffiClonePointer(),
+                                                                                        FfiConverterString.lower(conversationId),
+                                                                                        FfiConverterOptionUInt64.lower(fromMs),
+                                                                                        FfiConverterOptionUInt64.lower(untilMs), $0)
+        })
+    }
+
+    /**
+     * A contact's history keys changed (they reset their backup): the
+     * safety-number change to show, like Signal. Fails if the new keys are
+     * not vouched for by one of the contact's current chat devices.
+     */
+    open func labyrinthProposeRepin(did: String) throws -> FfiLabyrinthRepinProposal {
+        return try FfiConverterTypeFfiLabyrinthRepinProposal.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_propose_repin(self.uniffiClonePointer(),
+                                                                                    FfiConverterString.lower(did), $0)
+        })
+    }
+
+    /**
+     * The user accepted the new safety number: trust the contact's new
+     * history keys (`new_head_hex` from the proposal).
+     */
+    open func labyrinthRepinPeer(did: String, newHeadHex: String) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_repin_peer(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(did),
+                                                                                 FfiConverterString.lower(newHeadHex), $0)
+        }
+    }
+
+    /**
+     * Enroll this device into the account's backup with a recovery code.
+     * Returns this device's Labyrinth device key (hex).
+     */
+    open func labyrinthRestoreWithRecoveryCode(code: String) throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_restore_with_recovery_code(self.uniffiClonePointer(),
+                                                                                                 FfiConverterString.lower(code), $0)
+        })
+    }
+
+    /**
+     * Retry every quarantined message now. Returns how many there were.
+     */
+    open func labyrinthRetryQuarantined() throws -> UInt64 {
+        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_retry_quarantined(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Retry a pending remote account deletion now. Returns true when
+     * nothing is pending any more.
+     */
+    open func labyrinthRetryRemoteDeletion() throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_retry_remote_deletion(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
+     * Revoke another device of this account from the backup.
+     */
+    open func labyrinthRevokeDevice(deviceKeyHex: String) throws -> UInt64 {
+        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_revoke_device(self.uniffiClonePointer(),
+                                                                                    FfiConverterString.lower(deviceKeyHex), $0)
+        })
+    }
+
+    /**
+     * Sign-out or account removal on this device: erase this device's
+     * backup state and queue. The account's backup on the server stays, so
+     * a later sign-in restores with a recovery code. Returns whether any
+     * state was saved.
+     */
+    open func labyrinthSignOut() throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_sign_out(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    /**
      * Leave a conversation through the Rust-owned engine and return the
      * identifiers Swift needs to clean up local state immediately.
      */
@@ -4154,6 +4551,12 @@ open class OrchestratorBridge:
     open func listDevices() throws -> [FfiDeviceInfo] {
         return try FfiConverterSequenceTypeFFIDeviceInfo.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
             uniffi_catbird_mls_fn_method_orchestratorbridge_list_devices(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func listDirectRequestViews() throws -> [DirectRequestView] {
+        return try FfiConverterSequenceTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_list_direct_request_views(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -4360,6 +4763,13 @@ open class OrchestratorBridge:
         })
     }
 
+    open func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
+        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_refresh_request_preview(self.uniffiClonePointer(),
+                                                                                    FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
     /**
      * Remove a device.
      */
@@ -4433,6 +4843,13 @@ open class OrchestratorBridge:
                                                                                        FfiConverterString.lower(recipientDeviceDid),
                                                                                        FfiConverterString.lower(requestId), $0)
         }
+    }
+
+    open func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_resume_direct_request(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(draftId), $0)
+        })
     }
 
     open func resumeFromSuspend(reason: String) throws {
@@ -4515,6 +4932,13 @@ open class OrchestratorBridge:
         })
     }
 
+    open func setDirectRequestDeliveryEnabled(enabled: Bool) throws {
+        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_set_direct_request_delivery_enabled(self.uniffiClonePointer(),
+                                                                                                FfiConverterBool.lower(enabled), $0)
+        }
+    }
+
     /**
      * Install (or replace) the Layer 3 event callback. Pass None to detach.
      */
@@ -4575,6 +4999,13 @@ open class OrchestratorBridge:
             uniffi_catbird_mls_fn_method_orchestratorbridge_stage_commit(self.uniffiClonePointer(),
                                                                          FfiConverterString.lower(conversationId),
                                                                          FfiConverterTypeFFICommitKind.lower(kind), $0)
+        })
+    }
+
+    open func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
+        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
+            uniffi_catbird_mls_fn_method_orchestratorbridge_start_direct_request(self.uniffiClonePointer(),
+                                                                                 FfiConverterTypeDirectRequestInput.lower(input), $0)
         })
     }
 
@@ -6344,6 +6775,207 @@ public func FfiConverterTypeDecryptResult_lower(_ value: DecryptResult) -> RustB
     return FfiConverterTypeDecryptResult.lower(value)
 }
 
+public struct DirectRequestInput {
+    public var draftId: String
+    public var recipientDid: String
+    public var text: String
+    public var invitation: GroupInvitationReference?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(draftId: String, recipientDid: String, text: String, invitation: GroupInvitationReference?) {
+        self.draftId = draftId
+        self.recipientDid = recipientDid
+        self.text = text
+        self.invitation = invitation
+    }
+}
+
+extension DirectRequestInput: Equatable, Hashable {
+    public static func == (lhs: DirectRequestInput, rhs: DirectRequestInput) -> Bool {
+        if lhs.draftId != rhs.draftId {
+            return false
+        }
+        if lhs.recipientDid != rhs.recipientDid {
+            return false
+        }
+        if lhs.text != rhs.text {
+            return false
+        }
+        if lhs.invitation != rhs.invitation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(draftId)
+        hasher.combine(recipientDid)
+        hasher.combine(text)
+        hasher.combine(invitation)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectRequestInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectRequestInput {
+        return
+            try DirectRequestInput(
+                draftId: FfiConverterString.read(from: &buf),
+                recipientDid: FfiConverterString.read(from: &buf),
+                text: FfiConverterString.read(from: &buf),
+                invitation: FfiConverterOptionTypeGroupInvitationReference.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: DirectRequestInput, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.draftId, into: &buf)
+        FfiConverterString.write(value.recipientDid, into: &buf)
+        FfiConverterString.write(value.text, into: &buf)
+        FfiConverterOptionTypeGroupInvitationReference.write(value.invitation, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectRequestInput_lift(_ buf: RustBuffer) throws -> DirectRequestInput {
+    return try FfiConverterTypeDirectRequestInput.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectRequestInput_lower(_ value: DirectRequestInput) -> RustBuffer {
+    return FfiConverterTypeDirectRequestInput.lower(value)
+}
+
+public struct DirectRequestView {
+    /**
+     * Authenticated publication metadata, available independently of consent.
+     */
+    public var introduction: RequestIntroductionMetadata?
+    public var conversationId: String
+    public var firstMessageId: String?
+    public var consent: RequestConsent
+    public var crypto: RequestCrypto
+    public var preview: RequestPreview?
+    public var capabilities: RequestCapabilities
+    public var stateVersion: UInt64
+    public var generation: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * Authenticated publication metadata, available independently of consent.
+         */ introduction: RequestIntroductionMetadata?, conversationId: String, firstMessageId: String?, consent: RequestConsent, crypto: RequestCrypto, preview: RequestPreview?, capabilities: RequestCapabilities, stateVersion: UInt64, generation: UInt64
+    ) {
+        self.introduction = introduction
+        self.conversationId = conversationId
+        self.firstMessageId = firstMessageId
+        self.consent = consent
+        self.crypto = crypto
+        self.preview = preview
+        self.capabilities = capabilities
+        self.stateVersion = stateVersion
+        self.generation = generation
+    }
+}
+
+extension DirectRequestView: Equatable, Hashable {
+    public static func == (lhs: DirectRequestView, rhs: DirectRequestView) -> Bool {
+        if lhs.introduction != rhs.introduction {
+            return false
+        }
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.firstMessageId != rhs.firstMessageId {
+            return false
+        }
+        if lhs.consent != rhs.consent {
+            return false
+        }
+        if lhs.crypto != rhs.crypto {
+            return false
+        }
+        if lhs.preview != rhs.preview {
+            return false
+        }
+        if lhs.capabilities != rhs.capabilities {
+            return false
+        }
+        if lhs.stateVersion != rhs.stateVersion {
+            return false
+        }
+        if lhs.generation != rhs.generation {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(introduction)
+        hasher.combine(conversationId)
+        hasher.combine(firstMessageId)
+        hasher.combine(consent)
+        hasher.combine(crypto)
+        hasher.combine(preview)
+        hasher.combine(capabilities)
+        hasher.combine(stateVersion)
+        hasher.combine(generation)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectRequestView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectRequestView {
+        return
+            try DirectRequestView(
+                introduction: FfiConverterOptionTypeRequestIntroductionMetadata.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                firstMessageId: FfiConverterOptionString.read(from: &buf),
+                consent: FfiConverterTypeRequestConsent.read(from: &buf),
+                crypto: FfiConverterTypeRequestCrypto.read(from: &buf),
+                preview: FfiConverterOptionTypeRequestPreview.read(from: &buf),
+                capabilities: FfiConverterTypeRequestCapabilities.read(from: &buf),
+                stateVersion: FfiConverterUInt64.read(from: &buf),
+                generation: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: DirectRequestView, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeRequestIntroductionMetadata.write(value.introduction, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterOptionString.write(value.firstMessageId, into: &buf)
+        FfiConverterTypeRequestConsent.write(value.consent, into: &buf)
+        FfiConverterTypeRequestCrypto.write(value.crypto, into: &buf)
+        FfiConverterOptionTypeRequestPreview.write(value.preview, into: &buf)
+        FfiConverterTypeRequestCapabilities.write(value.capabilities, into: &buf)
+        FfiConverterUInt64.write(value.stateVersion, into: &buf)
+        FfiConverterUInt64.write(value.generation, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectRequestView_lift(_ buf: RustBuffer) throws -> DirectRequestView {
+    return try FfiConverterTypeDirectRequestView.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectRequestView_lower(_ value: DirectRequestView) -> RustBuffer {
+    return FfiConverterTypeDirectRequestView.lower(value)
+}
+
 public struct EncryptResult {
     public var ciphertext: Data
     public var paddedSize: UInt32
@@ -7881,6 +8513,7 @@ public func FfiConverterTypeFFIGroupState_lower(_ value: FfiGroupState) -> RustB
 }
 
 public struct FfiIncomingEnvelope {
+    public var canonicalEntryJson: String?
     public var conversationId: String
     public var senderDid: String
     public var ciphertext: Data
@@ -7891,7 +8524,8 @@ public struct FfiIncomingEnvelope {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(conversationId: String, senderDid: String, ciphertext: Data, timestamp: String, serverMessageId: String?, serverSequence: UInt64?, serverEpoch: UInt64?) {
+    public init(canonicalEntryJson: String?, conversationId: String, senderDid: String, ciphertext: Data, timestamp: String, serverMessageId: String?, serverSequence: UInt64?, serverEpoch: UInt64?) {
+        self.canonicalEntryJson = canonicalEntryJson
         self.conversationId = conversationId
         self.senderDid = senderDid
         self.ciphertext = ciphertext
@@ -7904,6 +8538,9 @@ public struct FfiIncomingEnvelope {
 
 extension FfiIncomingEnvelope: Equatable, Hashable {
     public static func == (lhs: FfiIncomingEnvelope, rhs: FfiIncomingEnvelope) -> Bool {
+        if lhs.canonicalEntryJson != rhs.canonicalEntryJson {
+            return false
+        }
         if lhs.conversationId != rhs.conversationId {
             return false
         }
@@ -7929,6 +8566,7 @@ extension FfiIncomingEnvelope: Equatable, Hashable {
     }
 
     public func hash(into hasher: inout Hasher) {
+        hasher.combine(canonicalEntryJson)
         hasher.combine(conversationId)
         hasher.combine(senderDid)
         hasher.combine(ciphertext)
@@ -7946,6 +8584,7 @@ public struct FfiConverterTypeFFIIncomingEnvelope: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiIncomingEnvelope {
         return
             try FfiIncomingEnvelope(
+                canonicalEntryJson: FfiConverterOptionString.read(from: &buf),
                 conversationId: FfiConverterString.read(from: &buf),
                 senderDid: FfiConverterString.read(from: &buf),
                 ciphertext: FfiConverterData.read(from: &buf),
@@ -7957,6 +8596,7 @@ public struct FfiConverterTypeFFIIncomingEnvelope: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiIncomingEnvelope, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.canonicalEntryJson, into: &buf)
         FfiConverterString.write(value.conversationId, into: &buf)
         FfiConverterString.write(value.senderDid, into: &buf)
         FfiConverterData.write(value.ciphertext, into: &buf)
@@ -8239,6 +8879,71 @@ public func FfiConverterTypeFFIKeyPackageSyncResult_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeFFIKeyPackageSyncResult_lower(_ value: FfiKeyPackageSyncResult) -> RustBuffer {
     return FfiConverterTypeFFIKeyPackageSyncResult.lower(value)
+}
+
+/**
+ * One extra HTTP header of a Labyrinth request
+ * ([`OrchestratorAPICallback::submit_labyrinth_request`]).
+ */
+public struct FfiLabyrinthHeader {
+    public var name: String
+    public var value: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+}
+
+extension FfiLabyrinthHeader: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthHeader, rhs: FfiLabyrinthHeader) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(value)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFFILabyrinthHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthHeader {
+        return
+            try FfiLabyrinthHeader(
+                name: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthHeader, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFILabyrinthHeader_lift(_ buf: RustBuffer) throws -> FfiLabyrinthHeader {
+    return try FfiConverterTypeFFILabyrinthHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFFILabyrinthHeader_lower(_ value: FfiLabyrinthHeader) -> RustBuffer {
+    return FfiConverterTypeFFILabyrinthHeader.lower(value)
 }
 
 public struct FfiLeaveResult {
@@ -9840,6 +10545,973 @@ public func FfiConverterTypeFfiKeyPackageBindingClassification_lower(_ value: Ff
     return FfiConverterTypeFfiKeyPackageBindingClassification.lower(value)
 }
 
+/**
+ * What background Labyrinth work could not do.
+ */
+public struct FfiLabyrinthArchiveStatus {
+    public var pending: UInt64
+    public var quarantined: [FfiLabyrinthQuarantined]
+    public var excludedMembers: [FfiLabyrinthExcludedMember]
+    public var dropped: [FfiLabyrinthDropped]
+    /**
+     * The last error of an account deletion whose remote half is pending.
+     */
+    public var remoteDeletionPending: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(pending: UInt64, quarantined: [FfiLabyrinthQuarantined], excludedMembers: [FfiLabyrinthExcludedMember], dropped: [FfiLabyrinthDropped],
+                /* 
+                    * The last error of an account deletion whose remote half is pending.
+                    */ remoteDeletionPending: String?)
+    {
+        self.pending = pending
+        self.quarantined = quarantined
+        self.excludedMembers = excludedMembers
+        self.dropped = dropped
+        self.remoteDeletionPending = remoteDeletionPending
+    }
+}
+
+extension FfiLabyrinthArchiveStatus: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthArchiveStatus, rhs: FfiLabyrinthArchiveStatus) -> Bool {
+        if lhs.pending != rhs.pending {
+            return false
+        }
+        if lhs.quarantined != rhs.quarantined {
+            return false
+        }
+        if lhs.excludedMembers != rhs.excludedMembers {
+            return false
+        }
+        if lhs.dropped != rhs.dropped {
+            return false
+        }
+        if lhs.remoteDeletionPending != rhs.remoteDeletionPending {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(pending)
+        hasher.combine(quarantined)
+        hasher.combine(excludedMembers)
+        hasher.combine(dropped)
+        hasher.combine(remoteDeletionPending)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthArchiveStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthArchiveStatus {
+        return
+            try FfiLabyrinthArchiveStatus(
+                pending: FfiConverterUInt64.read(from: &buf),
+                quarantined: FfiConverterSequenceTypeFfiLabyrinthQuarantined.read(from: &buf),
+                excludedMembers: FfiConverterSequenceTypeFfiLabyrinthExcludedMember.read(from: &buf),
+                dropped: FfiConverterSequenceTypeFfiLabyrinthDropped.read(from: &buf),
+                remoteDeletionPending: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthArchiveStatus, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.pending, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthQuarantined.write(value.quarantined, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthExcludedMember.write(value.excludedMembers, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthDropped.write(value.dropped, into: &buf)
+        FfiConverterOptionString.write(value.remoteDeletionPending, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthArchiveStatus_lift(_ buf: RustBuffer) throws -> FfiLabyrinthArchiveStatus {
+    return try FfiConverterTypeFfiLabyrinthArchiveStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthArchiveStatus_lower(_ value: FfiLabyrinthArchiveStatus) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthArchiveStatus.lower(value)
+}
+
+/**
+ * What account deletion did.
+ */
+public struct FfiLabyrinthDeletion {
+    /**
+     * Publishers that could not retract their records.
+     */
+    public var publishersNotRetracted: UInt64
+    /**
+     * The remote half failed with this error and is retried in the
+     * background; this device's state is erased regardless.
+     */
+    public var remotePending: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * Publishers that could not retract their records.
+         */ publishersNotRetracted: UInt64,
+        /* 
+            * The remote half failed with this error and is retried in the
+            * background; this device's state is erased regardless.
+            */ remotePending: String?
+    ) {
+        self.publishersNotRetracted = publishersNotRetracted
+        self.remotePending = remotePending
+    }
+}
+
+extension FfiLabyrinthDeletion: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthDeletion, rhs: FfiLabyrinthDeletion) -> Bool {
+        if lhs.publishersNotRetracted != rhs.publishersNotRetracted {
+            return false
+        }
+        if lhs.remotePending != rhs.remotePending {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(publishersNotRetracted)
+        hasher.combine(remotePending)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthDeletion: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthDeletion {
+        return
+            try FfiLabyrinthDeletion(
+                publishersNotRetracted: FfiConverterUInt64.read(from: &buf),
+                remotePending: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthDeletion, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.publishersNotRetracted, into: &buf)
+        FfiConverterOptionString.write(value.remotePending, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDeletion_lift(_ buf: RustBuffer) throws -> FfiLabyrinthDeletion {
+    return try FfiConverterTypeFfiLabyrinthDeletion.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDeletion_lower(_ value: FfiLabyrinthDeletion) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthDeletion.lower(value)
+}
+
+/**
+ * A queued message dropped unarchived.
+ */
+public struct FfiLabyrinthDropped {
+    public var conversationId: String
+    public var messageId: String
+    public var reason: String
+    public var atMs: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, messageId: String, reason: String, atMs: UInt64) {
+        self.conversationId = conversationId
+        self.messageId = messageId
+        self.reason = reason
+        self.atMs = atMs
+    }
+}
+
+extension FfiLabyrinthDropped: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthDropped, rhs: FfiLabyrinthDropped) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.atMs != rhs.atMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(messageId)
+        hasher.combine(reason)
+        hasher.combine(atMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthDropped: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthDropped {
+        return
+            try FfiLabyrinthDropped(
+                conversationId: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf),
+                atMs: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthDropped, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterUInt64.write(value.atMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDropped_lift(_ buf: RustBuffer) throws -> FfiLabyrinthDropped {
+    return try FfiConverterTypeFfiLabyrinthDropped.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthDropped_lower(_ value: FfiLabyrinthDropped) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthDropped.lower(value)
+}
+
+/**
+ * A member left out of a conversation's archive (it cannot read the
+ * messages archived meanwhile).
+ */
+public struct FfiLabyrinthExcludedMember {
+    public var conversationId: String
+    public var did: String
+    public var reason: String
+    /**
+     * A pin conflict: offer `labyrinth_propose_repin(did)`.
+     */
+    public var needsRepin: Bool
+    public var atMs: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, did: String, reason: String,
+                /* 
+                    * A pin conflict: offer `labyrinth_propose_repin(did)`.
+                    */ needsRepin: Bool, atMs: UInt64)
+    {
+        self.conversationId = conversationId
+        self.did = did
+        self.reason = reason
+        self.needsRepin = needsRepin
+        self.atMs = atMs
+    }
+}
+
+extension FfiLabyrinthExcludedMember: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthExcludedMember, rhs: FfiLabyrinthExcludedMember) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.did != rhs.did {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.needsRepin != rhs.needsRepin {
+            return false
+        }
+        if lhs.atMs != rhs.atMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(did)
+        hasher.combine(reason)
+        hasher.combine(needsRepin)
+        hasher.combine(atMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthExcludedMember: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthExcludedMember {
+        return
+            try FfiLabyrinthExcludedMember(
+                conversationId: FfiConverterString.read(from: &buf),
+                did: FfiConverterString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf),
+                needsRepin: FfiConverterBool.read(from: &buf),
+                atMs: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthExcludedMember, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.did, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterBool.write(value.needsRepin, into: &buf)
+        FfiConverterUInt64.write(value.atMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthExcludedMember_lift(_ buf: RustBuffer) throws -> FfiLabyrinthExcludedMember {
+    return try FfiConverterTypeFfiLabyrinthExcludedMember.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthExcludedMember_lower(_ value: FfiLabyrinthExcludedMember) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthExcludedMember.lower(value)
+}
+
+/**
+ * One page of decrypted history.
+ */
+public struct FfiLabyrinthHistory {
+    public var messages: [FfiLabyrinthMessage]
+    public var undecryptableCount: UInt64
+    public var spaceReadable: Bool
+    public var redacted: [FfiLabyrinthRedacted]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messages: [FfiLabyrinthMessage], undecryptableCount: UInt64, spaceReadable: Bool, redacted: [FfiLabyrinthRedacted]) {
+        self.messages = messages
+        self.undecryptableCount = undecryptableCount
+        self.spaceReadable = spaceReadable
+        self.redacted = redacted
+    }
+}
+
+extension FfiLabyrinthHistory: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthHistory, rhs: FfiLabyrinthHistory) -> Bool {
+        if lhs.messages != rhs.messages {
+            return false
+        }
+        if lhs.undecryptableCount != rhs.undecryptableCount {
+            return false
+        }
+        if lhs.spaceReadable != rhs.spaceReadable {
+            return false
+        }
+        if lhs.redacted != rhs.redacted {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messages)
+        hasher.combine(undecryptableCount)
+        hasher.combine(spaceReadable)
+        hasher.combine(redacted)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthHistory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthHistory {
+        return
+            try FfiLabyrinthHistory(
+                messages: FfiConverterSequenceTypeFfiLabyrinthMessage.read(from: &buf),
+                undecryptableCount: FfiConverterUInt64.read(from: &buf),
+                spaceReadable: FfiConverterBool.read(from: &buf),
+                redacted: FfiConverterSequenceTypeFfiLabyrinthRedacted.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthHistory, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFfiLabyrinthMessage.write(value.messages, into: &buf)
+        FfiConverterUInt64.write(value.undecryptableCount, into: &buf)
+        FfiConverterBool.write(value.spaceReadable, into: &buf)
+        FfiConverterSequenceTypeFfiLabyrinthRedacted.write(value.redacted, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthHistory_lift(_ buf: RustBuffer) throws -> FfiLabyrinthHistory {
+    return try FfiConverterTypeFfiLabyrinthHistory.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthHistory_lower(_ value: FfiLabyrinthHistory) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthHistory.lower(value)
+}
+
+/**
+ * What importing a conversation's history stored.
+ */
+public struct FfiLabyrinthImport {
+    public var imported: UInt64
+    public var alreadyPresent: UInt64
+    public var skipped: UInt64
+    public var undecryptable: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(imported: UInt64, alreadyPresent: UInt64, skipped: UInt64, undecryptable: UInt64) {
+        self.imported = imported
+        self.alreadyPresent = alreadyPresent
+        self.skipped = skipped
+        self.undecryptable = undecryptable
+    }
+}
+
+extension FfiLabyrinthImport: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthImport, rhs: FfiLabyrinthImport) -> Bool {
+        if lhs.imported != rhs.imported {
+            return false
+        }
+        if lhs.alreadyPresent != rhs.alreadyPresent {
+            return false
+        }
+        if lhs.skipped != rhs.skipped {
+            return false
+        }
+        if lhs.undecryptable != rhs.undecryptable {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(imported)
+        hasher.combine(alreadyPresent)
+        hasher.combine(skipped)
+        hasher.combine(undecryptable)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthImport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthImport {
+        return
+            try FfiLabyrinthImport(
+                imported: FfiConverterUInt64.read(from: &buf),
+                alreadyPresent: FfiConverterUInt64.read(from: &buf),
+                skipped: FfiConverterUInt64.read(from: &buf),
+                undecryptable: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthImport, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.imported, into: &buf)
+        FfiConverterUInt64.write(value.alreadyPresent, into: &buf)
+        FfiConverterUInt64.write(value.skipped, into: &buf)
+        FfiConverterUInt64.write(value.undecryptable, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthImport_lift(_ buf: RustBuffer) throws -> FfiLabyrinthImport {
+    return try FfiConverterTypeFfiLabyrinthImport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthImport_lower(_ value: FfiLabyrinthImport) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthImport.lower(value)
+}
+
+/**
+ * One decrypted history message.
+ */
+public struct FfiLabyrinthMessage {
+    public var messageId: String
+    /**
+     * Absent for owner-archive copies, which carry no sender.
+     */
+    public var senderDid: String?
+    public var timestampMs: UInt64
+    /**
+     * The archived frame: the sent `MLSMessagePayload` JSON.
+     */
+    public var frame: Data
+    /**
+     * True for a copy from this account's own re-archive.
+     */
+    public var fromOwnerArchive: Bool
+    /**
+     * Another copy shares this message id ([CB-31]); show both.
+     */
+    public var conflict: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String,
+                /* 
+                    * Absent for owner-archive copies, which carry no sender.
+                    */ senderDid: String?, timestampMs: UInt64,
+                /* 
+                    * The archived frame: the sent `MLSMessagePayload` JSON.
+                    */ frame: Data,
+                /* 
+                    * True for a copy from this account's own re-archive.
+                    */ fromOwnerArchive: Bool,
+                /* 
+                    * Another copy shares this message id ([CB-31]); show both.
+                    */ conflict: Bool)
+    {
+        self.messageId = messageId
+        self.senderDid = senderDid
+        self.timestampMs = timestampMs
+        self.frame = frame
+        self.fromOwnerArchive = fromOwnerArchive
+        self.conflict = conflict
+    }
+}
+
+extension FfiLabyrinthMessage: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthMessage, rhs: FfiLabyrinthMessage) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.timestampMs != rhs.timestampMs {
+            return false
+        }
+        if lhs.frame != rhs.frame {
+            return false
+        }
+        if lhs.fromOwnerArchive != rhs.fromOwnerArchive {
+            return false
+        }
+        if lhs.conflict != rhs.conflict {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(senderDid)
+        hasher.combine(timestampMs)
+        hasher.combine(frame)
+        hasher.combine(fromOwnerArchive)
+        hasher.combine(conflict)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthMessage {
+        return
+            try FfiLabyrinthMessage(
+                messageId: FfiConverterString.read(from: &buf),
+                senderDid: FfiConverterOptionString.read(from: &buf),
+                timestampMs: FfiConverterUInt64.read(from: &buf),
+                frame: FfiConverterData.read(from: &buf),
+                fromOwnerArchive: FfiConverterBool.read(from: &buf),
+                conflict: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterOptionString.write(value.senderDid, into: &buf)
+        FfiConverterUInt64.write(value.timestampMs, into: &buf)
+        FfiConverterData.write(value.frame, into: &buf)
+        FfiConverterBool.write(value.fromOwnerArchive, into: &buf)
+        FfiConverterBool.write(value.conflict, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthMessage_lift(_ buf: RustBuffer) throws -> FfiLabyrinthMessage {
+    return try FfiConverterTypeFfiLabyrinthMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthMessage_lower(_ value: FfiLabyrinthMessage) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthMessage.lower(value)
+}
+
+/**
+ * A queued message the archive skips until retried.
+ */
+public struct FfiLabyrinthQuarantined {
+    public var conversationId: String
+    public var messageId: String
+    public var failures: UInt32
+    public var lastError: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, messageId: String, failures: UInt32, lastError: String?) {
+        self.conversationId = conversationId
+        self.messageId = messageId
+        self.failures = failures
+        self.lastError = lastError
+    }
+}
+
+extension FfiLabyrinthQuarantined: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthQuarantined, rhs: FfiLabyrinthQuarantined) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.failures != rhs.failures {
+            return false
+        }
+        if lhs.lastError != rhs.lastError {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(messageId)
+        hasher.combine(failures)
+        hasher.combine(lastError)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthQuarantined: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthQuarantined {
+        return
+            try FfiLabyrinthQuarantined(
+                conversationId: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterString.read(from: &buf),
+                failures: FfiConverterUInt32.read(from: &buf),
+                lastError: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthQuarantined, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterUInt32.write(value.failures, into: &buf)
+        FfiConverterOptionString.write(value.lastError, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthQuarantined_lift(_ buf: RustBuffer) throws -> FfiLabyrinthQuarantined {
+    return try FfiConverterTypeFfiLabyrinthQuarantined.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthQuarantined_lower(_ value: FfiLabyrinthQuarantined) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthQuarantined.lower(value)
+}
+
+/**
+ * One redacted history message.
+ */
+public struct FfiLabyrinthRedacted {
+    public var messageId: String
+    public var senderDid: String
+    public var timestampMs: UInt64
+    public var label: FfiLabyrinthRedactionLabel
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String, senderDid: String, timestampMs: UInt64, label: FfiLabyrinthRedactionLabel) {
+        self.messageId = messageId
+        self.senderDid = senderDid
+        self.timestampMs = timestampMs
+        self.label = label
+    }
+}
+
+extension FfiLabyrinthRedacted: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthRedacted, rhs: FfiLabyrinthRedacted) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.timestampMs != rhs.timestampMs {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(senderDid)
+        hasher.combine(timestampMs)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthRedacted: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRedacted {
+        return
+            try FfiLabyrinthRedacted(
+                messageId: FfiConverterString.read(from: &buf),
+                senderDid: FfiConverterString.read(from: &buf),
+                timestampMs: FfiConverterUInt64.read(from: &buf),
+                label: FfiConverterTypeFfiLabyrinthRedactionLabel.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthRedacted, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.senderDid, into: &buf)
+        FfiConverterUInt64.write(value.timestampMs, into: &buf)
+        FfiConverterTypeFfiLabyrinthRedactionLabel.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedacted_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRedacted {
+    return try FfiConverterTypeFfiLabyrinthRedacted.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedacted_lower(_ value: FfiLabyrinthRedacted) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthRedacted.lower(value)
+}
+
+/**
+ * A safety-number change to confirm before re-pinning a peer.
+ */
+public struct FfiLabyrinthRepinProposal {
+    public var did: String
+    public var pinnedEpoch: UInt64?
+    public var oldSafetyNumber: String?
+    public var newEpoch: UInt64
+    /**
+     * Pass back to `labyrinth_repin_peer` once the user accepts.
+     */
+    public var newHeadHex: String
+    public var newSafetyNumber: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(did: String, pinnedEpoch: UInt64?, oldSafetyNumber: String?, newEpoch: UInt64,
+                /* 
+                    * Pass back to `labyrinth_repin_peer` once the user accepts.
+                    */ newHeadHex: String, newSafetyNumber: String)
+    {
+        self.did = did
+        self.pinnedEpoch = pinnedEpoch
+        self.oldSafetyNumber = oldSafetyNumber
+        self.newEpoch = newEpoch
+        self.newHeadHex = newHeadHex
+        self.newSafetyNumber = newSafetyNumber
+    }
+}
+
+extension FfiLabyrinthRepinProposal: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthRepinProposal, rhs: FfiLabyrinthRepinProposal) -> Bool {
+        if lhs.did != rhs.did {
+            return false
+        }
+        if lhs.pinnedEpoch != rhs.pinnedEpoch {
+            return false
+        }
+        if lhs.oldSafetyNumber != rhs.oldSafetyNumber {
+            return false
+        }
+        if lhs.newEpoch != rhs.newEpoch {
+            return false
+        }
+        if lhs.newHeadHex != rhs.newHeadHex {
+            return false
+        }
+        if lhs.newSafetyNumber != rhs.newSafetyNumber {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(did)
+        hasher.combine(pinnedEpoch)
+        hasher.combine(oldSafetyNumber)
+        hasher.combine(newEpoch)
+        hasher.combine(newHeadHex)
+        hasher.combine(newSafetyNumber)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthRepinProposal: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRepinProposal {
+        return
+            try FfiLabyrinthRepinProposal(
+                did: FfiConverterString.read(from: &buf),
+                pinnedEpoch: FfiConverterOptionUInt64.read(from: &buf),
+                oldSafetyNumber: FfiConverterOptionString.read(from: &buf),
+                newEpoch: FfiConverterUInt64.read(from: &buf),
+                newHeadHex: FfiConverterString.read(from: &buf),
+                newSafetyNumber: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthRepinProposal, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.did, into: &buf)
+        FfiConverterOptionUInt64.write(value.pinnedEpoch, into: &buf)
+        FfiConverterOptionString.write(value.oldSafetyNumber, into: &buf)
+        FfiConverterUInt64.write(value.newEpoch, into: &buf)
+        FfiConverterString.write(value.newHeadHex, into: &buf)
+        FfiConverterString.write(value.newSafetyNumber, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRepinProposal_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRepinProposal {
+    return try FfiConverterTypeFfiLabyrinthRepinProposal.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRepinProposal_lower(_ value: FfiLabyrinthRepinProposal) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthRepinProposal.lower(value)
+}
+
+/**
+ * The conversations this account has history in.
+ */
+public struct FfiLabyrinthThreads {
+    public var conversationIds: [String]
+    /**
+     * Sequencer DSes mls-ds could not reach: the list may miss their
+     * conversations.
+     */
+    public var incompleteSequencers: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationIds: [String],
+                /* 
+                    * Sequencer DSes mls-ds could not reach: the list may miss their
+                    * conversations.
+                    */ incompleteSequencers: [String])
+    {
+        self.conversationIds = conversationIds
+        self.incompleteSequencers = incompleteSequencers
+    }
+}
+
+extension FfiLabyrinthThreads: Equatable, Hashable {
+    public static func == (lhs: FfiLabyrinthThreads, rhs: FfiLabyrinthThreads) -> Bool {
+        if lhs.conversationIds != rhs.conversationIds {
+            return false
+        }
+        if lhs.incompleteSequencers != rhs.incompleteSequencers {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationIds)
+        hasher.combine(incompleteSequencers)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthThreads: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthThreads {
+        return
+            try FfiLabyrinthThreads(
+                conversationIds: FfiConverterSequenceString.read(from: &buf),
+                incompleteSequencers: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: FfiLabyrinthThreads, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.conversationIds, into: &buf)
+        FfiConverterSequenceString.write(value.incompleteSequencers, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthThreads_lift(_ buf: RustBuffer) throws -> FfiLabyrinthThreads {
+    return try FfiConverterTypeFfiLabyrinthThreads.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthThreads_lower(_ value: FfiLabyrinthThreads) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthThreads.lower(value)
+}
+
 public struct FfiPeerBadErrorClassification {
     public var peerBad: Bool
     public var quarantineTriggerEligible: Bool
@@ -10210,6 +11882,99 @@ public func FfiConverterTypeGroupDebugInfo_lift(_ buf: RustBuffer) throws -> Gro
 #endif
 public func FfiConverterTypeGroupDebugInfo_lower(_ value: GroupDebugInfo) -> RustBuffer {
     return FfiConverterTypeGroupDebugInfo.lower(value)
+}
+
+public struct GroupInvitationReference {
+    public var authorityDid: String
+    public var conversationId: String
+    public var invitationTransitionId: String
+    public var invitedByDid: String
+    public var invitedByDeviceId: String
+    public var recipientDid: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(authorityDid: String, conversationId: String, invitationTransitionId: String, invitedByDid: String, invitedByDeviceId: String, recipientDid: String) {
+        self.authorityDid = authorityDid
+        self.conversationId = conversationId
+        self.invitationTransitionId = invitationTransitionId
+        self.invitedByDid = invitedByDid
+        self.invitedByDeviceId = invitedByDeviceId
+        self.recipientDid = recipientDid
+    }
+}
+
+extension GroupInvitationReference: Equatable, Hashable {
+    public static func == (lhs: GroupInvitationReference, rhs: GroupInvitationReference) -> Bool {
+        if lhs.authorityDid != rhs.authorityDid {
+            return false
+        }
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.invitationTransitionId != rhs.invitationTransitionId {
+            return false
+        }
+        if lhs.invitedByDid != rhs.invitedByDid {
+            return false
+        }
+        if lhs.invitedByDeviceId != rhs.invitedByDeviceId {
+            return false
+        }
+        if lhs.recipientDid != rhs.recipientDid {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(authorityDid)
+        hasher.combine(conversationId)
+        hasher.combine(invitationTransitionId)
+        hasher.combine(invitedByDid)
+        hasher.combine(invitedByDeviceId)
+        hasher.combine(recipientDid)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGroupInvitationReference: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupInvitationReference {
+        return
+            try GroupInvitationReference(
+                authorityDid: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                invitationTransitionId: FfiConverterString.read(from: &buf),
+                invitedByDid: FfiConverterString.read(from: &buf),
+                invitedByDeviceId: FfiConverterString.read(from: &buf),
+                recipientDid: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: GroupInvitationReference, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.authorityDid, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.invitationTransitionId, into: &buf)
+        FfiConverterString.write(value.invitedByDid, into: &buf)
+        FfiConverterString.write(value.invitedByDeviceId, into: &buf)
+        FfiConverterString.write(value.recipientDid, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGroupInvitationReference_lift(_ buf: RustBuffer) throws -> GroupInvitationReference {
+    return try FfiConverterTypeGroupInvitationReference.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGroupInvitationReference_lower(_ value: GroupInvitationReference) -> RustBuffer {
+    return FfiConverterTypeGroupInvitationReference.lower(value)
 }
 
 public struct GroupMemberDebugInfo {
@@ -11115,6 +12880,188 @@ public func FfiConverterTypeRemoveProposalInfo_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeRemoveProposalInfo_lower(_ value: RemoveProposalInfo) -> RustBuffer {
     return FfiConverterTypeRemoveProposalInfo.lower(value)
+}
+
+public struct RequestCapabilities {
+    public var canPreview: Bool
+    public var canAccept: Bool
+    public var canClose: Bool
+    public var canSend: Bool
+    public var canEmitReceipts: Bool
+    public var canAdminister: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(canPreview: Bool, canAccept: Bool, canClose: Bool, canSend: Bool, canEmitReceipts: Bool, canAdminister: Bool) {
+        self.canPreview = canPreview
+        self.canAccept = canAccept
+        self.canClose = canClose
+        self.canSend = canSend
+        self.canEmitReceipts = canEmitReceipts
+        self.canAdminister = canAdminister
+    }
+}
+
+extension RequestCapabilities: Equatable, Hashable {
+    public static func == (lhs: RequestCapabilities, rhs: RequestCapabilities) -> Bool {
+        if lhs.canPreview != rhs.canPreview {
+            return false
+        }
+        if lhs.canAccept != rhs.canAccept {
+            return false
+        }
+        if lhs.canClose != rhs.canClose {
+            return false
+        }
+        if lhs.canSend != rhs.canSend {
+            return false
+        }
+        if lhs.canEmitReceipts != rhs.canEmitReceipts {
+            return false
+        }
+        if lhs.canAdminister != rhs.canAdminister {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(canPreview)
+        hasher.combine(canAccept)
+        hasher.combine(canClose)
+        hasher.combine(canSend)
+        hasher.combine(canEmitReceipts)
+        hasher.combine(canAdminister)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRequestCapabilities: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestCapabilities {
+        return
+            try RequestCapabilities(
+                canPreview: FfiConverterBool.read(from: &buf),
+                canAccept: FfiConverterBool.read(from: &buf),
+                canClose: FfiConverterBool.read(from: &buf),
+                canSend: FfiConverterBool.read(from: &buf),
+                canEmitReceipts: FfiConverterBool.read(from: &buf),
+                canAdminister: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: RequestCapabilities, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.canPreview, into: &buf)
+        FfiConverterBool.write(value.canAccept, into: &buf)
+        FfiConverterBool.write(value.canClose, into: &buf)
+        FfiConverterBool.write(value.canSend, into: &buf)
+        FfiConverterBool.write(value.canEmitReceipts, into: &buf)
+        FfiConverterBool.write(value.canAdminister, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestCapabilities_lift(_ buf: RustBuffer) throws -> RequestCapabilities {
+    return try FfiConverterTypeRequestCapabilities.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestCapabilities_lower(_ value: RequestCapabilities) -> RustBuffer {
+    return FfiConverterTypeRequestCapabilities.lower(value)
+}
+
+/**
+ * Immutable first-message attribution from the signed publication and its
+ * authority receipt. It does not grant ordinary message effects.
+ */
+public struct RequestIntroductionMetadata {
+    public var senderDid: String
+    public var senderDeviceId: String
+    public var receivedAt: String
+    public var epoch: UInt64
+    public var sequenceNumber: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(senderDid: String, senderDeviceId: String, receivedAt: String, epoch: UInt64, sequenceNumber: UInt64) {
+        self.senderDid = senderDid
+        self.senderDeviceId = senderDeviceId
+        self.receivedAt = receivedAt
+        self.epoch = epoch
+        self.sequenceNumber = sequenceNumber
+    }
+}
+
+extension RequestIntroductionMetadata: Equatable, Hashable {
+    public static func == (lhs: RequestIntroductionMetadata, rhs: RequestIntroductionMetadata) -> Bool {
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.senderDeviceId != rhs.senderDeviceId {
+            return false
+        }
+        if lhs.receivedAt != rhs.receivedAt {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.sequenceNumber != rhs.sequenceNumber {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(senderDid)
+        hasher.combine(senderDeviceId)
+        hasher.combine(receivedAt)
+        hasher.combine(epoch)
+        hasher.combine(sequenceNumber)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRequestIntroductionMetadata: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestIntroductionMetadata {
+        return
+            try RequestIntroductionMetadata(
+                senderDid: FfiConverterString.read(from: &buf),
+                senderDeviceId: FfiConverterString.read(from: &buf),
+                receivedAt: FfiConverterString.read(from: &buf),
+                epoch: FfiConverterUInt64.read(from: &buf),
+                sequenceNumber: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: RequestIntroductionMetadata, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.senderDid, into: &buf)
+        FfiConverterString.write(value.senderDeviceId, into: &buf)
+        FfiConverterString.write(value.receivedAt, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterUInt64.write(value.sequenceNumber, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestIntroductionMetadata_lift(_ buf: RustBuffer) throws -> RequestIntroductionMetadata {
+    return try FfiConverterTypeRequestIntroductionMetadata.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestIntroductionMetadata_lower(_ value: RequestIntroductionMetadata) -> RustBuffer {
+    return FfiConverterTypeRequestIntroductionMetadata.lower(value)
 }
 
 /**
@@ -12316,6 +14263,11 @@ extension ChatV2ValidationError: Foundation.LocalizedError {
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum CleanChatOperationFfi {
+    case prepareDirectRequest
+    case publishDirectRequest
+    case cancelDirectRequestPreparation
+    case getDirectRequestOutcome
+    case publishDirectRequestKeys
     case acceptConversation
     case acknowledgeWelcome
     case activateReset
@@ -12330,6 +14282,7 @@ public enum CleanChatOperationFfi {
     case getBlobUsage
     case getConversationState
     case getDevices
+    case getDeviceKey
     case getEntries
     case getLeafRecoveryInbox
     case getOwnDevices
@@ -12358,67 +14311,79 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanChatOperationFfi {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return .acceptConversation
+        case 1: return .prepareDirectRequest
 
-        case 2: return .acknowledgeWelcome
+        case 2: return .publishDirectRequest
 
-        case 3: return .activateReset
+        case 3: return .cancelDirectRequestPreparation
 
-        case 4: return .cancelLeafRecovery
+        case 4: return .getDirectRequestOutcome
 
-        case 5: return .cancelLeave
+        case 5: return .publishDirectRequestKeys
 
-        case 6: return .closeConversation
+        case 6: return .acceptConversation
 
-        case 7: return .getConversations
+        case 7: return .acknowledgeWelcome
 
-        case 8: return .createConversation
+        case 8: return .activateReset
 
-        case 9: return .deleteBlob
+        case 9: return .cancelLeafRecovery
 
-        case 10: return .sendMessage
+        case 10: return .cancelLeave
 
-        case 11: return .getBlob
+        case 11: return .closeConversation
 
-        case 12: return .getBlobUsage
+        case 12: return .getConversations
 
-        case 13: return .getConversationState
+        case 13: return .createConversation
 
-        case 14: return .getDevices
+        case 14: return .deleteBlob
 
-        case 15: return .getEntries
+        case 15: return .sendMessage
 
-        case 16: return .getLeafRecoveryInbox
+        case 16: return .getBlob
 
-        case 17: return .getOwnDevices
+        case 17: return .getBlobUsage
 
-        case 18: return .getPendingWelcomes
+        case 18: return .getConversationState
 
-        case 19: return .getSubscriptionTicket
+        case 19: return .getDevices
 
-        case 20: return .prepareBlobUpload
+        case 20: return .getDeviceKey
 
-        case 21: return .publishTyping
+        case 21: return .getEntries
 
-        case 22: return .rejectWelcome
+        case 22: return .getLeafRecoveryInbox
 
-        case 23: return .replenishKeyPackages
+        case 23: return .getOwnDevices
 
-        case 24: return .requestLeafRecovery
+        case 24: return .getPendingWelcomes
 
-        case 25: return .enrollDevice
+        case 25: return .getSubscriptionTicket
 
-        case 26: return .requestLeave
+        case 26: return .prepareBlobUpload
 
-        case 27: return .requestReset
+        case 27: return .publishTyping
 
-        case 28: return .revokeDevice
+        case 28: return .rejectWelcome
 
-        case 29: return .submitTransition
+        case 29: return .replenishKeyPackages
 
-        case 30: return .subscribeEvents
+        case 30: return .requestLeafRecovery
 
-        case 31: return .uploadBlob
+        case 31: return .enrollDevice
+
+        case 32: return .requestLeave
+
+        case 33: return .requestReset
+
+        case 34: return .revokeDevice
+
+        case 35: return .submitTransition
+
+        case 36: return .subscribeEvents
+
+        case 37: return .uploadBlob
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -12426,98 +14391,116 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
 
     public static func write(_ value: CleanChatOperationFfi, into buf: inout [UInt8]) {
         switch value {
-        case .acceptConversation:
+        case .prepareDirectRequest:
             writeInt(&buf, Int32(1))
 
-        case .acknowledgeWelcome:
+        case .publishDirectRequest:
             writeInt(&buf, Int32(2))
 
-        case .activateReset:
+        case .cancelDirectRequestPreparation:
             writeInt(&buf, Int32(3))
 
-        case .cancelLeafRecovery:
+        case .getDirectRequestOutcome:
             writeInt(&buf, Int32(4))
 
-        case .cancelLeave:
+        case .publishDirectRequestKeys:
             writeInt(&buf, Int32(5))
 
-        case .closeConversation:
+        case .acceptConversation:
             writeInt(&buf, Int32(6))
 
-        case .getConversations:
+        case .acknowledgeWelcome:
             writeInt(&buf, Int32(7))
 
-        case .createConversation:
+        case .activateReset:
             writeInt(&buf, Int32(8))
 
-        case .deleteBlob:
+        case .cancelLeafRecovery:
             writeInt(&buf, Int32(9))
 
-        case .sendMessage:
+        case .cancelLeave:
             writeInt(&buf, Int32(10))
 
-        case .getBlob:
+        case .closeConversation:
             writeInt(&buf, Int32(11))
 
-        case .getBlobUsage:
+        case .getConversations:
             writeInt(&buf, Int32(12))
 
-        case .getConversationState:
+        case .createConversation:
             writeInt(&buf, Int32(13))
 
-        case .getDevices:
+        case .deleteBlob:
             writeInt(&buf, Int32(14))
 
-        case .getEntries:
+        case .sendMessage:
             writeInt(&buf, Int32(15))
 
-        case .getLeafRecoveryInbox:
+        case .getBlob:
             writeInt(&buf, Int32(16))
 
-        case .getOwnDevices:
+        case .getBlobUsage:
             writeInt(&buf, Int32(17))
 
-        case .getPendingWelcomes:
+        case .getConversationState:
             writeInt(&buf, Int32(18))
 
-        case .getSubscriptionTicket:
+        case .getDevices:
             writeInt(&buf, Int32(19))
 
-        case .prepareBlobUpload:
+        case .getDeviceKey:
             writeInt(&buf, Int32(20))
 
-        case .publishTyping:
+        case .getEntries:
             writeInt(&buf, Int32(21))
 
-        case .rejectWelcome:
+        case .getLeafRecoveryInbox:
             writeInt(&buf, Int32(22))
 
-        case .replenishKeyPackages:
+        case .getOwnDevices:
             writeInt(&buf, Int32(23))
 
-        case .requestLeafRecovery:
+        case .getPendingWelcomes:
             writeInt(&buf, Int32(24))
 
-        case .enrollDevice:
+        case .getSubscriptionTicket:
             writeInt(&buf, Int32(25))
 
-        case .requestLeave:
+        case .prepareBlobUpload:
             writeInt(&buf, Int32(26))
 
-        case .requestReset:
+        case .publishTyping:
             writeInt(&buf, Int32(27))
 
-        case .revokeDevice:
+        case .rejectWelcome:
             writeInt(&buf, Int32(28))
 
-        case .submitTransition:
+        case .replenishKeyPackages:
             writeInt(&buf, Int32(29))
 
-        case .subscribeEvents:
+        case .requestLeafRecovery:
             writeInt(&buf, Int32(30))
 
-        case .uploadBlob:
+        case .enrollDevice:
             writeInt(&buf, Int32(31))
+
+        case .requestLeave:
+            writeInt(&buf, Int32(32))
+
+        case .requestReset:
+            writeInt(&buf, Int32(33))
+
+        case .revokeDevice:
+            writeInt(&buf, Int32(34))
+
+        case .submitTransition:
+            writeInt(&buf, Int32(35))
+
+        case .subscribeEvents:
+            writeInt(&buf, Int32(36))
+
+        case .uploadBlob:
+            writeInt(&buf, Int32(37))
         }
     }
 }
@@ -12639,6 +14622,85 @@ public func FfiConverterTypeDecryptContentType_lower(_ value: DecryptContentType
 }
 
 extension DecryptContentType: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum DirectRequestOutcome {
+    case requestSent(conversationId: String, messageId: String, requestId: String)
+    case outcomeUnknown(requestId: String)
+    case existingDirect(conversationId: String, requiresAcceptance: Bool)
+    case retryable(code: String)
+    case terminalNotPublished(requestId: String, code: String)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDirectRequestOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = DirectRequestOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DirectRequestOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return try .requestSent(conversationId: FfiConverterString.read(from: &buf), messageId: FfiConverterString.read(from: &buf), requestId: FfiConverterString.read(from: &buf))
+
+        case 2: return try .outcomeUnknown(requestId: FfiConverterString.read(from: &buf))
+
+        case 3: return try .existingDirect(conversationId: FfiConverterString.read(from: &buf), requiresAcceptance: FfiConverterBool.read(from: &buf))
+
+        case 4: return try .retryable(code: FfiConverterString.read(from: &buf))
+
+        case 5: return try .terminalNotPublished(requestId: FfiConverterString.read(from: &buf), code: FfiConverterString.read(from: &buf))
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DirectRequestOutcome, into buf: inout [UInt8]) {
+        switch value {
+        case let .requestSent(conversationId, messageId, requestId):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(conversationId, into: &buf)
+            FfiConverterString.write(messageId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+
+        case let .outcomeUnknown(requestId):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(requestId, into: &buf)
+
+        case let .existingDirect(conversationId, requiresAcceptance):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(conversationId, into: &buf)
+            FfiConverterBool.write(requiresAcceptance, into: &buf)
+
+        case let .retryable(code):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(code, into: &buf)
+
+        case let .terminalNotPublished(requestId, code):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(code, into: &buf)
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectRequestOutcome_lift(_ buf: RustBuffer) throws -> DirectRequestOutcome {
+    return try FfiConverterTypeDirectRequestOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDirectRequestOutcome_lower(_ value: DirectRequestOutcome) -> RustBuffer {
+    return FfiConverterTypeDirectRequestOutcome.lower(value)
+}
+
+extension DirectRequestOutcome: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -12882,6 +14944,7 @@ extension FfiDeliveryStatus: Equatable, Hashable {}
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum FfiEngineEventKind {
+    case requestReceived
     case conversationUpdated
     case messageInserted
     case recoveryStateChanged
@@ -12897,13 +14960,15 @@ public struct FfiConverterTypeFFIEngineEventKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEngineEventKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return .conversationUpdated
+        case 1: return .requestReceived
 
-        case 2: return .messageInserted
+        case 2: return .conversationUpdated
 
-        case 3: return .recoveryStateChanged
+        case 3: return .messageInserted
 
-        case 4: return .needsUiRefresh
+        case 4: return .recoveryStateChanged
+
+        case 5: return .needsUiRefresh
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -12911,17 +14976,20 @@ public struct FfiConverterTypeFFIEngineEventKind: FfiConverterRustBuffer {
 
     public static func write(_ value: FfiEngineEventKind, into buf: inout [UInt8]) {
         switch value {
-        case .conversationUpdated:
+        case .requestReceived:
             writeInt(&buf, Int32(1))
 
-        case .messageInserted:
+        case .conversationUpdated:
             writeInt(&buf, Int32(2))
 
-        case .recoveryStateChanged:
+        case .messageInserted:
             writeInt(&buf, Int32(3))
 
-        case .needsUiRefresh:
+        case .recoveryStateChanged:
             writeInt(&buf, Int32(4))
+
+        case .needsUiRefresh:
+            writeInt(&buf, Int32(5))
         }
     }
 }
@@ -13188,6 +15256,77 @@ extension FfiKeyPackageBindingStatus: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * How a redacted history message must be labelled.
+ */
+
+public enum FfiLabyrinthRedactionLabel {
+    /**
+     * Signed by one of the author's chat devices: "unsent".
+     */
+    case unsent
+    /**
+     * Signed by the conversation's sequencer DS: "deleted (account
+     * removed)".
+     */
+    case accountDeleted
+    /**
+     * Nothing proves why: "removed by server".
+     */
+    case removedByServer
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLabyrinthRedactionLabel: FfiConverterRustBuffer {
+    typealias SwiftType = FfiLabyrinthRedactionLabel
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRedactionLabel {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .unsent
+
+        case 2: return .accountDeleted
+
+        case 3: return .removedByServer
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiLabyrinthRedactionLabel, into buf: inout [UInt8]) {
+        switch value {
+        case .unsent:
+            writeInt(&buf, Int32(1))
+
+        case .accountDeleted:
+            writeInt(&buf, Int32(2))
+
+        case .removedByServer:
+            writeInt(&buf, Int32(3))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedactionLabel_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRedactionLabel {
+    return try FfiConverterTypeFfiLabyrinthRedactionLabel.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLabyrinthRedactionLabel_lower(_ value: FfiLabyrinthRedactionLabel) -> RustBuffer {
+    return FfiConverterTypeFfiLabyrinthRedactionLabel.lower(value)
+}
+
+extension FfiLabyrinthRedactionLabel: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum FfiMlsErrorKind {
     case invalidCommit
@@ -13362,6 +15501,8 @@ public enum MlsError {
 
     case GroupNotFound(message: String)
 
+    case RequestImportExpired(message: String)
+
     case InvalidKeyPackage(message: String)
 
     case AddMembersFailed(message: String)
@@ -13507,159 +15648,163 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 3: return try .InvalidKeyPackage(
+        case 3: return try .RequestImportExpired(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 4: return try .AddMembersFailed(
+        case 4: return try .InvalidKeyPackage(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 5: return try .EncryptionFailed(
+        case 5: return try .AddMembersFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 6: return try .DecryptionFailed(
+        case 6: return try .EncryptionFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 7: return try .SerializationError(
+        case 7: return try .DecryptionFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 8: return try .OpenMlsError(
+        case 8: return try .SerializationError(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 9: return try .InvalidGroupId(
+        case 9: return try .OpenMlsError(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 10: return try .SecretExportFailed(
+        case 10: return try .InvalidGroupId(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 11: return try .CommitProcessingFailed(
+        case 11: return try .SecretExportFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 12: return try .InvalidCommit(
+        case 12: return try .CommitProcessingFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 13: return try .InvalidData(
+        case 13: return try .InvalidCommit(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 14: return try .ContextNotInitialized(
+        case 14: return try .InvalidData(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 15: return try .ContextClosed(
+        case 15: return try .ContextNotInitialized(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 16: return try .WireFormatPolicyViolation(
+        case 16: return try .ContextClosed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 17: return try .MergeFailed(
+        case 17: return try .WireFormatPolicyViolation(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 18: return try .NoMatchingKeyPackage(
+        case 18: return try .MergeFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 19: return try .KeyPackageDesyncDetected(
+        case 19: return try .NoMatchingKeyPackage(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 20: return try .WelcomeConsumed(
+        case 20: return try .KeyPackageDesyncDetected(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 21: return try .StorageError(
+        case 21: return try .WelcomeConsumed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 22: return try .StorageFailed(
+        case 22: return try .StorageError(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 23: return try .MemberNotFound(
+        case 23: return try .StorageFailed(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 24: return try .CannotRemoveLastAdmin(
+        case 24: return try .MemberNotFound(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 25: return try .InsufficientPermissions(
+        case 25: return try .CannotRemoveLastAdmin(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 26: return try .InvalidProposalRef(
+        case 26: return try .InsufficientPermissions(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 27: return try .LockPoisoned(
+        case 27: return try .InvalidProposalRef(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 28: return try .NullPointer(
+        case 28: return try .LockPoisoned(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 29: return try .InvalidContext(
+        case 29: return try .NullPointer(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 30: return try .TlsCodec(
+        case 30: return try .InvalidContext(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 31: return try .OpenMls(
+        case 31: return try .TlsCodec(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 32: return try .Internal(
+        case 32: return try .OpenMls(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 33: return try .InvalidUtf8(
+        case 33: return try .Internal(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 34: return try .Serialization(
+        case 34: return try .InvalidUtf8(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 35: return try .ThreadSafety(
+        case 35: return try .Serialization(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 36: return try .Panic(
+        case 36: return try .ThreadSafety(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 37: return try .OperationNotSupported(
+        case 37: return try .Panic(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 38: return try .InvalidArgument(
+        case 38: return try .OperationNotSupported(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 39: return try .InvalidState(
+        case 39: return try .InvalidArgument(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 40: return try .Cryptography(
+        case 40: return try .InvalidState(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 41: return try .EpochMismatch(
+        case 41: return try .Cryptography(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 42: return try .EpochMismatch(
                 message: FfiConverterString.read(from: &buf)
             )
 
@@ -13673,84 +15818,86 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         case .GroupNotFound(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(2))
-        case .InvalidKeyPackage(_ /* message is ignored*/ ):
+        case .RequestImportExpired(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(3))
-        case .AddMembersFailed(_ /* message is ignored*/ ):
+        case .InvalidKeyPackage(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(4))
-        case .EncryptionFailed(_ /* message is ignored*/ ):
+        case .AddMembersFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(5))
-        case .DecryptionFailed(_ /* message is ignored*/ ):
+        case .EncryptionFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(6))
-        case .SerializationError(_ /* message is ignored*/ ):
+        case .DecryptionFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(7))
-        case .OpenMlsError(_ /* message is ignored*/ ):
+        case .SerializationError(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(8))
-        case .InvalidGroupId(_ /* message is ignored*/ ):
+        case .OpenMlsError(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(9))
-        case .SecretExportFailed(_ /* message is ignored*/ ):
+        case .InvalidGroupId(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(10))
-        case .CommitProcessingFailed(_ /* message is ignored*/ ):
+        case .SecretExportFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(11))
-        case .InvalidCommit(_ /* message is ignored*/ ):
+        case .CommitProcessingFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(12))
-        case .InvalidData(_ /* message is ignored*/ ):
+        case .InvalidCommit(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(13))
-        case .ContextNotInitialized(_ /* message is ignored*/ ):
+        case .InvalidData(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(14))
-        case .ContextClosed(_ /* message is ignored*/ ):
+        case .ContextNotInitialized(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(15))
-        case .WireFormatPolicyViolation(_ /* message is ignored*/ ):
+        case .ContextClosed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(16))
-        case .MergeFailed(_ /* message is ignored*/ ):
+        case .WireFormatPolicyViolation(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(17))
-        case .NoMatchingKeyPackage(_ /* message is ignored*/ ):
+        case .MergeFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(18))
-        case .KeyPackageDesyncDetected(_ /* message is ignored*/ ):
+        case .NoMatchingKeyPackage(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(19))
-        case .WelcomeConsumed(_ /* message is ignored*/ ):
+        case .KeyPackageDesyncDetected(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(20))
-        case .StorageError(_ /* message is ignored*/ ):
+        case .WelcomeConsumed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(21))
-        case .StorageFailed(_ /* message is ignored*/ ):
+        case .StorageError(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(22))
-        case .MemberNotFound(_ /* message is ignored*/ ):
+        case .StorageFailed(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(23))
-        case .CannotRemoveLastAdmin(_ /* message is ignored*/ ):
+        case .MemberNotFound(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(24))
-        case .InsufficientPermissions(_ /* message is ignored*/ ):
+        case .CannotRemoveLastAdmin(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(25))
-        case .InvalidProposalRef(_ /* message is ignored*/ ):
+        case .InsufficientPermissions(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(26))
-        case .LockPoisoned(_ /* message is ignored*/ ):
+        case .InvalidProposalRef(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(27))
-        case .NullPointer(_ /* message is ignored*/ ):
+        case .LockPoisoned(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(28))
-        case .InvalidContext(_ /* message is ignored*/ ):
+        case .NullPointer(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(29))
-        case .TlsCodec(_ /* message is ignored*/ ):
+        case .InvalidContext(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(30))
-        case .OpenMls(_ /* message is ignored*/ ):
+        case .TlsCodec(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(31))
-        case .Internal(_ /* message is ignored*/ ):
+        case .OpenMls(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(32))
-        case .InvalidUtf8(_ /* message is ignored*/ ):
+        case .Internal(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(33))
-        case .Serialization(_ /* message is ignored*/ ):
+        case .InvalidUtf8(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(34))
-        case .ThreadSafety(_ /* message is ignored*/ ):
+        case .Serialization(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(35))
-        case .Panic(_ /* message is ignored*/ ):
+        case .ThreadSafety(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(36))
-        case .OperationNotSupported(_ /* message is ignored*/ ):
+        case .Panic(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(37))
-        case .InvalidArgument(_ /* message is ignored*/ ):
+        case .OperationNotSupported(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(38))
-        case .InvalidState(_ /* message is ignored*/ ):
+        case .InvalidArgument(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(39))
-        case .Cryptography(_ /* message is ignored*/ ):
+        case .InvalidState(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(40))
-        case .EpochMismatch(_ /* message is ignored*/ ):
+        case .Cryptography(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(41))
+        case .EpochMismatch(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(42))
         }
     }
 }
@@ -14126,6 +16273,189 @@ public func FfiConverterTypeProposalInfo_lower(_ value: ProposalInfo) -> RustBuf
 }
 
 extension ProposalInfo: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RequestConsent {
+    case incomingPending
+    case outgoingPending
+    case accepted
+    case closed
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRequestConsent: FfiConverterRustBuffer {
+    typealias SwiftType = RequestConsent
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestConsent {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .incomingPending
+
+        case 2: return .outgoingPending
+
+        case 3: return .accepted
+
+        case 4: return .closed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RequestConsent, into buf: inout [UInt8]) {
+        switch value {
+        case .incomingPending:
+            writeInt(&buf, Int32(1))
+
+        case .outgoingPending:
+            writeInt(&buf, Int32(2))
+
+        case .accepted:
+            writeInt(&buf, Int32(3))
+
+        case .closed:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestConsent_lift(_ buf: RustBuffer) throws -> RequestConsent {
+    return try FfiConverterTypeRequestConsent.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestConsent_lower(_ value: RequestConsent) -> RustBuffer {
+    return FfiConverterTypeRequestConsent.lower(value)
+}
+
+extension RequestConsent: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RequestCrypto {
+    case welcomeAvailable
+    case importing
+    case ready
+    case unavailable
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRequestCrypto: FfiConverterRustBuffer {
+    typealias SwiftType = RequestCrypto
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestCrypto {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .welcomeAvailable
+
+        case 2: return .importing
+
+        case 3: return .ready
+
+        case 4: return .unavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RequestCrypto, into buf: inout [UInt8]) {
+        switch value {
+        case .welcomeAvailable:
+            writeInt(&buf, Int32(1))
+
+        case .importing:
+            writeInt(&buf, Int32(2))
+
+        case .ready:
+            writeInt(&buf, Int32(3))
+
+        case .unavailable:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestCrypto_lift(_ buf: RustBuffer) throws -> RequestCrypto {
+    return try FfiConverterTypeRequestCrypto.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestCrypto_lower(_ value: RequestCrypto) -> RustBuffer {
+    return FfiConverterTypeRequestCrypto.lower(value)
+}
+
+extension RequestCrypto: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RequestPreview {
+    case ready(text: String, invitation: GroupInvitationReference?)
+    case unavailable(code: String)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRequestPreview: FfiConverterRustBuffer {
+    typealias SwiftType = RequestPreview
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestPreview {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return try .ready(text: FfiConverterString.read(from: &buf), invitation: FfiConverterOptionTypeGroupInvitationReference.read(from: &buf))
+
+        case 2: return try .unavailable(code: FfiConverterString.read(from: &buf))
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RequestPreview, into buf: inout [UInt8]) {
+        switch value {
+        case let .ready(text, invitation):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(text, into: &buf)
+            FfiConverterOptionTypeGroupInvitationReference.write(invitation, into: &buf)
+
+        case let .unavailable(code):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(code, into: &buf)
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestPreview_lift(_ buf: RustBuffer) throws -> RequestPreview {
+    return try FfiConverterTypeRequestPreview.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRequestPreview_lower(_ value: RequestPreview) -> RustBuffer {
+    return FfiConverterTypeRequestPreview.lower(value)
+}
+
+extension RequestPreview: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -15041,6 +17371,71 @@ public protocol OrchestratorApiCallback: AnyObject {
     func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair]
 
     func getGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String) throws -> Data
+
+    /**
+     * Send one `blue.catbird.labyrinth.*` XRPC to the account's mls-ds.
+     *
+     * Attach an atproto service-auth JWT whose `lxm` is `nsid` and whose
+     * `aud` is the delivery service, exactly as for
+     * `submit_prepared_request`. `path` is `/xrpc/{nsid}` plus the
+     * already-encoded query string (it carries `actorDeviceId`); send it
+     * verbatim. Send every `headers` entry unchanged: on procedures they
+     * are `catbird-labyrinth-write` and `catbird-labyrinth-write-signature`,
+     * the device-signed write body mls-ds verifies. `body` is the JSON
+     * body of a procedure (`method` = `POST`), absent on queries (`GET`).
+     * Return the raw response, including non-2xx statuses with their
+     * atproto error body: Rust maps the error names.
+     */
+    func submitLabyrinthRequest(method: String, nsid: String, path: String, body: Data?, headers: [FfiLabyrinthHeader]) throws -> FfiGatewayResponse
+
+    /**
+     * True once the platform implements the three `*_labyrinth_mailbox_keys`
+     * methods below. Rust then publishes every epoch to the PDS as well and
+     * cross-checks peers' PDS records against mls-ds ([CB-28], [CB-29]).
+     */
+    func labyrinthPdsEnabled() -> Bool
+
+    /**
+     * `com.atproto.repo.putRecord` of `record` (JSON, `$type` included) into
+     * the signed-in account's repo, collection
+     * `blue.catbird.labyrinth.mailboxKeys`, rkey `rkey` (`self` or a
+     * 12-digit epoch number). Create or replace.
+     */
+    func putLabyrinthMailboxKeys(rkey: String, record: Data) throws
+
+    /**
+     * `com.atproto.repo.getRecord` of `blue.catbird.labyrinth.mailboxKeys`
+     * / `rkey` from `did`'s repo (resolve its PDS). Return the record value
+     * JSON, or `None` when the record (or the repo) does not exist.
+     */
+    func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data?
+
+    /**
+     * Delete every `blue.catbird.labyrinth.mailboxKeys` record in the
+     * signed-in account's repo (account deletion).
+     */
+    func deleteLabyrinthMailboxKeys() throws
+
+    /**
+     * True once the platform implements `submit_labyrinth_space_request`
+     * against a PDS that serves `com.atproto.space.*`. Together with
+     * `labyrinth_pds_enabled`, a new history mailbox then goes into the
+     * account's own Space instead of mls-ds. Report false for a PDS
+     * without Spaces (bsky.social today).
+     */
+    func labyrinthSpaceEnabled() -> Bool
+
+    /**
+     * Send one `com.atproto.space.*` XRPC to the signed-in account's own
+     * PDS with its OAuth (DPoP) session, the way `com.atproto.repo.*` calls
+     * go: no service auth and no extra headers. `nsid` always starts with
+     * `com.atproto.space.`; `path` is `/xrpc/{nsid}` plus the
+     * already-encoded query string, sent verbatim; `body` is the JSON body
+     * of a procedure (`method` = `POST`), absent on queries (`GET`).
+     * Return the raw response, including non-2xx statuses with their
+     * atproto error body.
+     */
+    func submitLabyrinthSpaceRequest(method: String, nsid: String, path: String, body: Data?) throws -> FfiGatewayResponse
 }
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
@@ -15382,6 +17777,184 @@ private enum UniffiCallbackInterfaceOrchestratorAPICallback {
                 lowerError: FfiConverterTypeOrchestratorBridgeError.lower
             )
         },
+        submitLabyrinthRequest: { (
+            uniffiHandle: UInt64,
+            method: RustBuffer,
+            nsid: RustBuffer,
+            path: RustBuffer,
+            body: RustBuffer,
+            headers: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiGatewayResponse in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.submitLabyrinthRequest(
+                    method: FfiConverterString.lift(method),
+                    nsid: FfiConverterString.lift(nsid),
+                    path: FfiConverterString.lift(path),
+                    body: FfiConverterOptionData.lift(body),
+                    headers: FfiConverterSequenceTypeFFILabyrinthHeader.lift(headers)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        labyrinthPdsEnabled: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.labyrinthPdsEnabled(
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        putLabyrinthMailboxKeys: { (
+            uniffiHandle: UInt64,
+            rkey: RustBuffer,
+            record: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.putLabyrinthMailboxKeys(
+                    rkey: FfiConverterString.lift(rkey),
+                    record: FfiConverterData.lift(record)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getLabyrinthMailboxKeys: { (
+            uniffiHandle: UInt64,
+            did: RustBuffer,
+            rkey: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getLabyrinthMailboxKeys(
+                    did: FfiConverterString.lift(did),
+                    rkey: FfiConverterString.lift(rkey)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        deleteLabyrinthMailboxKeys: { (
+            uniffiHandle: UInt64,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.deleteLabyrinthMailboxKeys(
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        labyrinthSpaceEnabled: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<Int8>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Bool in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.labyrinthSpaceEnabled(
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        submitLabyrinthSpaceRequest: { (
+            uniffiHandle: UInt64,
+            method: RustBuffer,
+            nsid: RustBuffer,
+            path: RustBuffer,
+            body: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiGatewayResponse in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.submitLabyrinthSpaceRequest(
+                    method: FfiConverterString.lift(method),
+                    nsid: FfiConverterString.lift(nsid),
+                    path: FfiConverterString.lift(path),
+                    body: FfiConverterOptionData.lift(body)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         uniffiFree: { (uniffiHandle: UInt64) in
             let result = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.remove(handle: uniffiHandle)
             if result == nil {
@@ -15444,6 +18017,21 @@ extension FfiConverterCallbackInterfaceOrchestratorApiCallback: FfiConverter {
  * Credential store callback interface for Swift/Kotlin.
  */
 public protocol OrchestratorCredentialCallback: AnyObject {
+    /**
+     * Authenticated resolution of the expected authority DID document.
+     * Rust checks the receipt method and persists the trusted historical method.
+     */
+    func directRequestReceiptAuthorityDocument(expectedAuthorityDid: String) throws -> Data?
+
+    /**
+     * Resolve verified account-home chat declaration for an actor DID from authenticated PDS.
+     * Returns:
+     * - Ok(Some(did)) if verified blue.catbird.chat.declaration/self declares deliveryService: did
+     * - Ok(None) ONLY when verified getRecord returns 404 RecordNotFound
+     * - Err(Credential) if declaration resolution is unavailable or failed (FAIL-CLOSED)
+     */
+    func getChatDeclarationAuthority(userDid: String) throws -> String?
+
     func storeSigningKey(userDid: String, keyData: Data) throws
 
     func getSigningKey(userDid: String) throws -> Data?
@@ -15479,6 +18067,54 @@ private enum UniffiCallbackInterfaceOrchestratorCredentialCallback {
     /// Create the VTable using a series of closures.
     /// Swift automatically converts these into C callback functions.
     static var vtable: UniffiVTableCallbackInterfaceOrchestratorCredentialCallback = .init(
+        directRequestReceiptAuthorityDocument: { (
+            uniffiHandle: UInt64,
+            expectedAuthorityDid: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.directRequestReceiptAuthorityDocument(
+                    expectedAuthorityDid: FfiConverterString.lift(expectedAuthorityDid)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
+        getChatDeclarationAuthority: { (
+            uniffiHandle: UInt64,
+            userDid: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getChatDeclarationAuthority(
+                    userDid: FfiConverterString.lift(userDid)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         storeSigningKey: { (
             uniffiHandle: UInt64,
             userDid: RustBuffer,
@@ -16062,6 +18698,13 @@ extension FfiConverterCallbackInterfaceOrchestratorEventCallback: FfiConverter {
  * can use actors/dispatch internally.
  */
 public protocol OrchestratorStorageCallback: AnyObject {
+    /**
+     * Commit an account-scoped canonical projection and exact alias retirement
+     * in one durable host transaction. See ConversationProjectionCommitRequest
+     * and ConversationProjectionCommitOutcome for the strict JSON contract.
+     */
+    func commitConversationProjectionJson(requestJson: String) throws -> String
+
     func ensureConversationExists(userDid: String, conversationId: String, groupId: String) throws
 
     func updateJoinInfo(conversationId: String, userDid: String, joinMethod: String, joinEpoch: UInt64) throws
@@ -16209,6 +18852,30 @@ private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
     /// Create the VTable using a series of closures.
     /// Swift automatically converts these into C callback functions.
     static var vtable: UniffiVTableCallbackInterfaceOrchestratorStorageCallback = .init(
+        commitConversationProjectionJson: { (
+            uniffiHandle: UInt64,
+            requestJson: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.commitConversationProjectionJson(
+                    requestJson: FfiConverterString.lift(requestJson)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
+            )
+        },
         ensureConversationExists: { (
             uniffiHandle: UInt64,
             userDid: RustBuffer,
@@ -17646,6 +20313,54 @@ private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeGroupInvitationReference: FfiConverterRustBuffer {
+    typealias SwiftType = GroupInvitationReference?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeGroupInvitationReference.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeGroupInvitationReference.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeRequestIntroductionMetadata: FfiConverterRustBuffer {
+    typealias SwiftType = RequestIntroductionMetadata?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRequestIntroductionMetadata.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRequestIntroductionMetadata.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeChatV2RecoveryRung: FfiConverterRustBuffer {
     typealias SwiftType = ChatV2RecoveryRung?
 
@@ -17710,6 +20425,30 @@ private struct FfiConverterOptionTypeFFIDeliveryStatus: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFFIDeliveryStatus.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeRequestPreview: FfiConverterRustBuffer {
+    typealias SwiftType = RequestPreview?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRequestPreview.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRequestPreview.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17965,6 +20704,31 @@ private struct FfiConverterSequenceTypeConversation: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeDirectRequestView: FfiConverterRustBuffer {
+    typealias SwiftType = [DirectRequestView]
+
+    static func write(_ value: [DirectRequestView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDirectRequestView.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DirectRequestView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DirectRequestView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeDirectRequestView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeFFIConversationView: FfiConverterRustBuffer {
     typealias SwiftType = [FfiConversationView]
 
@@ -18115,6 +20879,31 @@ private struct FfiConverterSequenceTypeFFIKeyPackageRef: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeFFILabyrinthHeader: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthHeader]
+
+    static func write(_ value: [FfiLabyrinthHeader], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFFILabyrinthHeader.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthHeader] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthHeader]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFFILabyrinthHeader.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeFFIMemberView: FfiConverterRustBuffer {
     typealias SwiftType = [FfiMemberView]
 
@@ -18232,6 +21021,131 @@ private struct FfiConverterSequenceTypeFFISequencerReceipt: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeFFISequencerReceipt.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthDropped: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthDropped]
+
+    static func write(_ value: [FfiLabyrinthDropped], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthDropped.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthDropped] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthDropped]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthDropped.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthExcludedMember: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthExcludedMember]
+
+    static func write(_ value: [FfiLabyrinthExcludedMember], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthExcludedMember.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthExcludedMember] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthExcludedMember]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthExcludedMember.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthMessage: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthMessage]
+
+    static func write(_ value: [FfiLabyrinthMessage], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthMessage.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthMessage] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthMessage]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthMessage.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthQuarantined: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthQuarantined]
+
+    static func write(_ value: [FfiLabyrinthQuarantined], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthQuarantined.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthQuarantined] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthQuarantined]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthQuarantined.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeFfiLabyrinthRedacted: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiLabyrinthRedacted]
+
+    static func write(_ value: [FfiLabyrinthRedacted], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiLabyrinthRedacted.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthRedacted] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiLabyrinthRedacted]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeFfiLabyrinthRedacted.read(from: &buf))
         }
         return seq
     }
@@ -19103,6 +22017,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_add_participants() != 9190 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_cancel_direct_request() != 17369 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_close_direct_request() != 36774 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_conversations() != 35993 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19112,19 +22032,40 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_fetch_new_messages() != 30751 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_get_direct_request_delivery_enabled() != 19105 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_get_group_invitation_reference() != 60283 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_leave_conversation() != 6136 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_list_direct_request_views() != 8634 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_messages() != 46800 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_refresh_request_preview() != 16960 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_remove_participants() != 39550 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_resume_direct_request() != 1547 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_send_message() != 32396 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_set_direct_request_delivery_enabled() != 4333 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_shutdown() != 22360 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_start_direct_request() != 51078 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdclientbridge_sync() != 61177 {
@@ -19436,6 +22377,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members_result() != 22800 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_cancel_direct_request() != 39578 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_close_direct_request() != 62385 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_confirm_commit() != 2386 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19478,6 +22425,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_recovery_state() != 48248 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_direct_request_delivery_enabled() != 21233 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_group_invitation_reference() != 1128 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19499,6 +22452,54 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_or_rejoin() != 36176 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_archive_status() != 48156 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_clear_archive_reports() != 53397 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_create_recovery_code() != 55022 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_delete_account() != 53128 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_enable_backup() != 48619 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_flush_archive() != 35191 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_import_history() != 50211 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_list_threads() != 27839 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_load_history_page() != 29804 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_propose_repin() != 328 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_repin_peer() != 16050 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_restore_with_recovery_code() != 46432 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_retry_quarantined() != 35706 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_retry_remote_deletion() != 46636 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_revoke_device() != 15568 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_sign_out() != 46632 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_conversation() != 20896 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19509,6 +22510,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_devices() != 16449 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_direct_request_views() != 60350 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_perform_silent_recovery() != 48593 {
@@ -19550,6 +22554,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_reset_requested_outcome() != 25351 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_refresh_request_preview() != 5134 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_device() != 60366 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19566,6 +22573,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_respond_to_welcome_reissue() != 40031 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_resume_direct_request() != 27421 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_resume_from_suspend() != 171 {
@@ -19589,6 +22599,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_voice_message() != 34733 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_direct_request_delivery_enabled() != 3122 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_event_callback() != 27441 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19602,6 +22615,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_stage_commit() != 32523 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorbridge_start_direct_request() != 60850 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratorbridge_startup_reconcile() != 62080 {
@@ -19700,37 +22716,64 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 51954 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 2272 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_labyrinth_request() != 28172 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_signing_key() != 54007 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_labyrinth_pds_enabled() != 55486 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_sign_clean_chat_transcript() != 53865 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_labyrinth_mailbox_keys() != 29703 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 60734 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_labyrinth_mailbox_keys() != 20714 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 38979 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_delete_labyrinth_mailbox_keys() != 7392 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 53768 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_labyrinth_space_enabled() != 4102 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 58159 {
+    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_labyrinth_space_request() != 39964 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 56049 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_direct_request_receipt_authority_document() != 45119 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 24059 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_chat_declaration_authority() != 5598 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 60789 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 56185 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 2125 {
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_signing_key() != 46305 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_sign_clean_chat_transcript() != 47109 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 37606 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 16244 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 44480 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 50333 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 38649 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 46254 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 21594 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 10106 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantined() != 58743 {
@@ -19748,115 +22791,118 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_sequencer_equivocation() != 33784 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 57265 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_commit_conversation_projection_json() != 17244 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_update_join_info() != 28185 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 24774 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation() != 4483 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_update_join_info() != 42059 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_conversations() != 25284 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation() != 53428 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_conversations() != 26753 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_conversations() != 58388 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 59265 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_conversations() != 5927 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_account_exit() != 48006 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 41822 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 3588 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_account_exit() != 43369 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 43017 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 10063 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 41915 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 29082 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 8939 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 22899 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 56843 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 24442 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 54946 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 59341 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 18893 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 11463 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 61853 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 5422 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 51219 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 38193 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 49648 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 49281 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 47648 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 33710 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 27190 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 41796 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 29037 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 4276 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 31022 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 4993 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 10381 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 23879 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 52807 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 50265 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 16379 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 18570 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 61257 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 64969 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 11542 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 38235 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 51909 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 9654 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 58386 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 31307 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 37167 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 53691 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 59214 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 42244 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 17620 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 19689 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 41919 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 25003 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 55384 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 17248 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 64867 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 42352 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 36579 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 36495 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 31409 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 59622 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 992 {
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 58750 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 40264 {
         return InitializationResult.apiChecksumMismatch
     }
 

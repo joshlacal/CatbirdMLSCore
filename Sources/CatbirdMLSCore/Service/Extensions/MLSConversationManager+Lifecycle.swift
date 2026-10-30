@@ -54,6 +54,7 @@ extension MLSConversationManager {
       reason: "MLSConversationManager.suspendMLSOperations"
     )
     activeSuspensionID = suspensionID
+    suspensionTransitionID = suspensionID
     let rustPrepareSucceeded: Bool
     if protocolAuthorityMode == .rustFull, let runtime = orchestratorRuntime {
       do {
@@ -146,13 +147,15 @@ extension MLSConversationManager {
   /// Resume MLS operations when app returns to foreground
   /// This restarts background tasks that were cancelled during suspension
   @MainActor
-  public func resumeMLSOperations() async {
+  @discardableResult
+  public func resumeMLSOperations() async -> Bool {
     guard isSuspending else {
       logger.debug("🔄 [RESUME] MLS not suspended - nothing to resume")
-      return
+      return protocolAuthorityMode != .rustFull || rustStartupReconcileCompleted
     }
 
     let observedSuspensionID = activeSuspensionID
+    let observedTransition = suspensionTransitionID
     logger.info("▶️ [RESUME] Resuming MLS operations after app foreground")
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
@@ -171,7 +174,7 @@ extension MLSConversationManager {
         logger.warning(
           "⚠️ [RESUME] Stale or unowned manager resume did not clear active suspension gates"
         )
-        return
+        return false
       }
       if activeSuspensionID == observedSuspensionID {
         activeSuspensionID = nil
@@ -183,15 +186,17 @@ extension MLSConversationManager {
         logger.warning(
           "⚠️ [RESUME] Manager without an owned suspension cannot clear active lifecycle gates"
         )
-        return
+        return false
       }
     }
 
     let reassertSuspensionAfterRestoreFailure: (String) -> Void = { [self] reason in
-      activeSuspensionID =
-        MLSContextFreeLifecycleSuspensionOwner.recordManagerSuspensionIfUnowned(
+      guard suspensionTransitionID == observedTransition else { return }
+      if let restoredID = MLSContextFreeLifecycleSuspensionOwner.recordManagerSuspensionIfUnowned(
           reason: reason
-        )
+        ) {
+        activeSuspensionID = restoredID
+      }
       isSuspending = true
       isSyncPaused = true
     }
@@ -209,8 +214,9 @@ extension MLSConversationManager {
           reassertSuspensionAfterRestoreFailure(
             "MLSConversationManager runtime restore failed"
           )
-          return
+          return false
         }
+        guard suspensionTransitionID == observedTransition else { return false }
         rustRuntimeRequiresForegroundRestore = false
       } else if let runtime = orchestratorRuntime {
         do {
@@ -228,8 +234,9 @@ extension MLSConversationManager {
             reassertSuspensionAfterRestoreFailure(
               "MLSConversationManager runtime recovery failed"
             )
-            return
+            return false
           }
+          guard suspensionTransitionID == observedTransition else { return false }
           rustRuntimeRequiresForegroundRestore = false
         }
       }
@@ -237,25 +244,34 @@ extension MLSConversationManager {
 
     // A newer inactive/background transition may have acquired the gates while
     // the async runtime restore was in flight. Never resume work through it.
-    guard !MLSClient.isSuspensionInProgress,
+    guard suspensionTransitionID == observedTransition,
+          !MLSClient.isSuspensionInProgress,
           !MLSCoreContext.isSuspensionInProgress
     else {
       logger.warning(
         "⚠️ [RESUME] A newer lifecycle transition asserted suspension during runtime restore"
       )
-      return
+      return false
     }
 
     isSuspending = false
     isSyncPaused = false
 
-    await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
+    let reconciliationSucceeded: Bool
+    if protocolAuthorityMode == .rustFull {
+      reconciliationSucceeded = await runRustStartupReconcileIfNeeded(operation: "resumeStartupReconcile")
+    } else {
+      reconciliationSucceeded = true
+    }
+    guard suspensionTransitionID == observedTransition,
+          !MLSClient.isSuspensionInProgress, !MLSCoreContext.isSuspensionInProgress,
+          !isSuspending, !isSyncPaused else { return false }
     schedulePostReloadSyncIfNeeded()
 
     // Restart background tasks (only if we're initialized)
     guard isInitialized else {
       logger.debug("   Skipping task restart - not initialized")
-      return
+      return reconciliationSucceeded
     }
 
     // Restart periodic tasks
@@ -289,7 +305,12 @@ extension MLSConversationManager {
     // Note: missingConversationsTask is typically only run during initialization
     // If needed, it will be triggered by syncWithServer or explicit rejoin requests
 
-    logger.info("✅ [RESUME] MLS operations resumed")
+    if reconciliationSucceeded {
+      logger.info("✅ [RESUME] MLS operations resumed and startup reconciliation completed")
+    } else {
+      logger.warning("⚠️ [RESUME] MLS gates reopened but startup reconciliation failed")
+    }
+    return reconciliationSucceeded
   }
 
   @MainActor
@@ -1079,6 +1100,7 @@ extension MLSConversationManager {
   }
 
   @discardableResult
+  @MainActor
   internal func runRustStartupReconcileIfNeeded(operation: String) async -> Bool {
     guard protocolAuthorityMode == .rustFull else { return false }
 
@@ -1090,12 +1112,22 @@ extension MLSConversationManager {
     }
 
     do {
+      let generation = MLSGRDBManager.storageLifecycleGeneration
+      let transition = suspensionTransitionID
+      let observedUserDID = userDid
       // Repository authorization must exist before recovery consumes remote
       // credentials or a sibling device attempts to admit this device.
       try await ensureDeviceRecordPublished()
+      try Task.checkCancellation()
+      try MLSGRDBManager.requireCurrentStorageGeneration(generation)
+      guard suspensionTransitionID == transition else { return false }
       let report = try await withRustAuthoritativeRuntime(operation: operation) { runtime in
         try runtime.startupReconcile()
       }
+      try Task.checkCancellation()
+      try MLSGRDBManager.requireCurrentStorageGeneration(generation)
+      guard userDid == observedUserDID, suspensionTransitionID == transition,
+            !isShuttingDown else { return false }
       rustStartupReconcileCompleted = true
       logger.info(
         "✅ [MLS-FULL-RUST] Startup reconcile completed scanned=\(report.scanned, privacy: .public) healthy=\(report.healthy, privacy: .public) needsRejoin=\(report.needsRejoin, privacy: .public) resetPending=\(report.resetPending, privacy: .public) unrecoverableLocal=\(report.unrecoverableLocal, privacy: .public)"

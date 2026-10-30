@@ -1,0 +1,4096 @@
+{
+  "build": {
+    "apple_targets": [
+      "aarch64-apple-darwin",
+      "aarch64-apple-ios",
+      "aarch64-apple-ios-macabi",
+      "aarch64-apple-ios-sim",
+      "x86_64-apple-darwin",
+      "x86_64-apple-ios",
+      "x86_64-apple-ios-macabi"
+    ],
+    "cargo_profile": "release",
+    "default_features": true,
+    "explicit_features": [],
+    "toolchains": {
+      "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+      "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+      "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx27.0.0\nswift-driver version: 1.168.6",
+      "xcode": "Xcode 27.1\nBuild version 27A9275"
+    }
+  },
+  "framework": {
+    "files": {
+      "Info.plist": {
+        "sha256": "3271f921634f9aca874f1d4d97a026ae26c8c2595585d08df7dc5681bcdb0c3e",
+        "size_bytes": 2251
+      },
+      "ios-arm64/Headers/CatbirdMLSFFI.h": {
+        "sha256": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+        "size_bytes": 232354
+      },
+      "ios-arm64/Headers/module.modulemap": {
+        "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+        "size_bytes": 66
+      },
+      "ios-arm64/libCatbirdMLSFFI.a": {
+        "sha256": "7de146630bccc8024f707340290f422988bd863372c4a1bf686966c3f13a7316",
+        "size_bytes": 888104072
+      },
+      "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": {
+        "sha256": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+        "size_bytes": 232354
+      },
+      "ios-arm64_x86_64-maccatalyst/Headers/module.modulemap": {
+        "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+        "size_bytes": 66
+      },
+      "ios-arm64_x86_64-maccatalyst/libCatbirdMLSFFI.a": {
+        "sha256": "1e62d60a4898b7bce08628566dfcde6ac46bdd5bd9cb4ad97196930900d8ba99",
+        "size_bytes": 1764473568
+      },
+      "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": {
+        "sha256": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+        "size_bytes": 232354
+      },
+      "ios-arm64_x86_64-simulator/Headers/module.modulemap": {
+        "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+        "size_bytes": 66
+      },
+      "ios-arm64_x86_64-simulator/libCatbirdMLSFFI.a": {
+        "sha256": "22fa7c06c366c942729e1af38be3b14d135ad08ad4a903b0eb2dd45a03fd24de",
+        "size_bytes": 1762494584
+      },
+      "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": {
+        "sha256": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+        "size_bytes": 232354
+      },
+      "macos-arm64_x86_64/Headers/module.modulemap": {
+        "sha256": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+        "size_bytes": 66
+      },
+      "macos-arm64_x86_64/libCatbirdMLSFFI.a": {
+        "sha256": "d48f063c205d70dec8f8a024a891b562bc7725bf97d6ca77aed77b6219df77e9",
+        "size_bytes": 1772231616
+      }
+    },
+    "libraries": [
+      {
+        "architectures": [
+          "arm64"
+        ],
+        "headers_path": "Headers",
+        "identifier": "ios-arm64",
+        "library_path": "libCatbirdMLSFFI.a",
+        "platform": "ios",
+        "variant": null
+      },
+      {
+        "architectures": [
+          "arm64",
+          "x86_64"
+        ],
+        "headers_path": "Headers",
+        "identifier": "ios-arm64_x86_64-maccatalyst",
+        "library_path": "libCatbirdMLSFFI.a",
+        "platform": "ios",
+        "variant": "maccatalyst"
+      },
+      {
+        "architectures": [
+          "arm64",
+          "x86_64"
+        ],
+        "headers_path": "Headers",
+        "identifier": "ios-arm64_x86_64-simulator",
+        "library_path": "libCatbirdMLSFFI.a",
+        "platform": "ios",
+        "variant": "simulator"
+      },
+      {
+        "architectures": [
+          "arm64",
+          "x86_64"
+        ],
+        "headers_path": "Headers",
+        "identifier": "macos-arm64_x86_64",
+        "library_path": "libCatbirdMLSFFI.a",
+        "platform": "macos",
+        "variant": null
+      }
+    ],
+    "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework",
+    "sha256": "51d30d7ed5cc71fac50ef16e427943d19434e97aeab1bc6b55581a2d9325eed5"
+  },
+  "identity": {
+    "algorithm": "sha256",
+    "canonical_sha256": "47328659f182ff77b6caf90be4bb2b901e450402a32c4f35a120ef7ad88b66bf"
+  },
+  "interface": {
+    "generated_swift": {
+      "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/CatbirdMLSCore/Sources/CatbirdMLS/CatbirdMLS.swift",
+      "sha256": "e23b97bc165daa9bdcdbf2e340273c5812e494bb9bef115f1a0205f182d11482",
+      "size_bytes": 834635
+    },
+    "native_headers": {
+      "ios-arm64/Headers/CatbirdMLSFFI.h": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+      "ios-arm64/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+      "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+      "ios-arm64_x86_64-maccatalyst/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+      "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+      "ios-arm64_x86_64-simulator/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f",
+      "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": "4a6bdfab589f215595719ce80e7ecbae58bbe7ec2b887ac641fc3efd64d64b33",
+      "macos-arm64_x86_64/Headers/module.modulemap": "339445ee976275ad686f78ed940dd5d78c19e69c2711e47f0bcbb6e1bd86029f"
+    },
+    "sha256": "9cb01b00e7361eb586fa92f1743ea06199dfb56622be4f05c5dcbaadd67f9683"
+  },
+  "package": {
+    "local_dependencies": {
+      "CatbirdMLSFFI": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/CatbirdMLSCore/Sources/CatbirdMLSFFI.xcframework",
+      "Petrel": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/Petrel",
+      "PetrelCatbird": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/PetrelCatbird"
+    },
+    "manifest_sha256": "19a80a8764ad71dc39a41baaa745ee18b0295b03846d378533fb4c8f433b7a82",
+    "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/CatbirdMLSCore"
+  },
+  "qualification": "unreviewed-candidate",
+  "schema_version": 1,
+  "scope": "apple-native-uniffi",
+  "selected_inputs": {
+    "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/dependencies/selected-inputs.json",
+    "sha256": "4520d403b8c49fd2b2807de7fb344f751cdace13bbae51e3c9bb9dd207fd3e95"
+  },
+  "source": {
+    "cargo_lock_sha256": "ed098d1e51324ad762f228ce8046e97da13cee9abdc502d83871bcd4e0d5c177",
+    "local_path_dependencies": {
+      "catbird-atproto": {
+        "files": {
+          "Cargo.lock": {
+            "sha256": "c615548275b18b4744c5fe0375d367b4698c76c8b0c54034952b6a2d4c817337",
+            "size_bytes": 71528
+          },
+          "Cargo.toml": {
+            "sha256": "7b74190518699989efbffad67341f5fd22c1bc42b5c819f0417c391a8ea9d359",
+            "size_bytes": 1050
+          },
+          "src/generated/app_bsky.rs": {
+            "sha256": "ac600a51d0061d60df460b58b8eec1ffb8005fdd403b4a8e8aeb27cb3c3cd655",
+            "size_bytes": 747
+          },
+          "src/generated/app_bsky/actor.rs": {
+            "sha256": "02444a7a914b1b51f20e6e50ab63b3334ac76d24c9655bb02272756005ac086d",
+            "size_bytes": 401091
+          },
+          "src/generated/app_bsky/actor/content_visibility_declaration.rs": {
+            "sha256": "f0a67a295dfd353a09da22864247620be7ec3e0316f72a683dddde338639fa28",
+            "size_bytes": 12234
+          },
+          "src/generated/app_bsky/actor/get_preferences.rs": {
+            "sha256": "c26bad211c9ee08baa1e58151b83f586f9a2e720fd093dbb462f1acc80928807",
+            "size_bytes": 2598
+          },
+          "src/generated/app_bsky/actor/get_profile.rs": {
+            "sha256": "1643c2c8858ddc5230ea3637f41ced72b317e09b6adf2fb1cac710a42988818b",
+            "size_bytes": 6252
+          },
+          "src/generated/app_bsky/actor/get_profiles.rs": {
+            "sha256": "9653fa2264168a5655e41c8872afbbd15c498ea966cee3d9225fe9d79757971d",
+            "size_bytes": 6318
+          },
+          "src/generated/app_bsky/actor/get_suggestions.rs": {
+            "sha256": "837db98e4b21ae5c06b89e8d7ee2b2e99c40fb68795b306990f3296c485a4ee4",
+            "size_bytes": 7007
+          },
+          "src/generated/app_bsky/actor/profile.rs": {
+            "sha256": "89b9814e074287bafd1d80c4667d17f455b8ac5c5a11b5a28810c7c182242f53",
+            "size_bytes": 31340
+          },
+          "src/generated/app_bsky/actor/put_preferences.rs": {
+            "sha256": "fb68a2ad536bf006c8baa094488f4e1771ebd6586f66268023ff041080453a3b",
+            "size_bytes": 6986
+          },
+          "src/generated/app_bsky/actor/search_actors.rs": {
+            "sha256": "ff72f2fc1a90c80ad35d1da630f58fd0c2c112264496831201c1b30d8a97c6f5",
+            "size_bytes": 7798
+          },
+          "src/generated/app_bsky/actor/search_actors_typeahead.rs": {
+            "sha256": "969cd56aa67eade127eed5d2a1889faf58e80108c015c0837fa01625a10e6c28",
+            "size_bytes": 7542
+          },
+          "src/generated/app_bsky/actor/status.rs": {
+            "sha256": "662ec5817bdc9800a8199f2b7decb9ac3cc764ef54ae8bdb74396fe2da43c639",
+            "size_bytes": 19132
+          },
+          "src/generated/app_bsky/ageassurance.rs": {
+            "sha256": "9f515be2c8c8d6e016a894ee3714121096586bc251965fc28e4f39b8a6fa535f",
+            "size_bytes": 160033
+          },
+          "src/generated/app_bsky/ageassurance/begin.rs": {
+            "sha256": "39cf88cb03c439edbb43814d98a9bab411a6b8e321a2bcd3da05408a264405f2",
+            "size_bytes": 6217
+          },
+          "src/generated/app_bsky/ageassurance/get_config.rs": {
+            "sha256": "04c833821d8e146b2dafd8534037ffddee09b005bd9d7c68258631938aface4f",
+            "size_bytes": 2838
+          },
+          "src/generated/app_bsky/ageassurance/get_state.rs": {
+            "sha256": "dfda1f1d9400e234f868f7665ad4753ded7b2ed663607da32524e2406a88ce86",
+            "size_bytes": 6865
+          },
+          "src/generated/app_bsky/auth_create_posts.rs": {
+            "sha256": "3da9a1ad866da65eb02b2a2eb1a53926f9b37a675cc554c933fb362ddc0e6ac5",
+            "size_bytes": 222
+          },
+          "src/generated/app_bsky/auth_delete_content.rs": {
+            "sha256": "64b10a1dd53bbe5ac26ca49dc99ef90d8fa74c7deacf6eb2a2f523919f26377c",
+            "size_bytes": 224
+          },
+          "src/generated/app_bsky/auth_full_app.rs": {
+            "sha256": "b7b09372fa32f2806604b2395944a7b39192f465800079e96eed0e09d7943c03",
+            "size_bytes": 218
+          },
+          "src/generated/app_bsky/auth_manage_feed_declarations.rs": {
+            "sha256": "fe53c91e828d4ac72256cb0e7a74303ddc7b9e3c5b9518a1f0d8e16ec2008652",
+            "size_bytes": 233
+          },
+          "src/generated/app_bsky/auth_manage_labeler_service.rs": {
+            "sha256": "533889438581dcebecc3c10b4c226ebbd70260fd977fffda276574003cac0e74",
+            "size_bytes": 231
+          },
+          "src/generated/app_bsky/auth_manage_moderation.rs": {
+            "sha256": "f3a0970e1a80ce99f52510b1b1b356bf04d36f6ce5f3af2b9bb11fa3b0ea6ab9",
+            "size_bytes": 227
+          },
+          "src/generated/app_bsky/auth_manage_notifications.rs": {
+            "sha256": "82cced91808335aeccbfff8a947c43c58eb7e23c4323d9fddc69515a79b78f64",
+            "size_bytes": 230
+          },
+          "src/generated/app_bsky/auth_manage_profile.rs": {
+            "sha256": "5e007600ed4cab43e2dd7596197884c5533010de763db262e8305a802555bcda",
+            "size_bytes": 224
+          },
+          "src/generated/app_bsky/auth_view_all.rs": {
+            "sha256": "855f6d5c721066e6af4dac82ecb2cb4c46ab18c0544d5b50d026bb3d68d6350f",
+            "size_bytes": 218
+          },
+          "src/generated/app_bsky/bookmark.rs": {
+            "sha256": "ffe81fb6b5e36fcf467fb8cd2c8beac31e3c609f38e3621e4578f8af46f59a70",
+            "size_bytes": 20697
+          },
+          "src/generated/app_bsky/bookmark/create_bookmark.rs": {
+            "sha256": "8d605a994d5a20738b52abee95e27532157583f5abb0a93d9574aa7ef711fcbe",
+            "size_bytes": 9590
+          },
+          "src/generated/app_bsky/bookmark/delete_bookmark.rs": {
+            "sha256": "dd281d8b3589d058fba5ac00676d5d849d133ccbdb99255f1af7210140ffdb3a",
+            "size_bytes": 8265
+          },
+          "src/generated/app_bsky/bookmark/get_bookmarks.rs": {
+            "sha256": "7bd40cee69fb3581d620a71e634a3bc787c921ecaf25f468fa060f944f35bd1c",
+            "size_bytes": 6589
+          },
+          "src/generated/app_bsky/contact.rs": {
+            "sha256": "a0b8604502030cb96428ec91ab40372407ba9a959969190fc0d0248d97060290",
+            "size_bytes": 32478
+          },
+          "src/generated/app_bsky/contact/dismiss_match.rs": {
+            "sha256": "1b6207bff27fb53440cccbf6482256e2ae8508c274a4d2944a2f645e894ca4fc",
+            "size_bytes": 8969
+          },
+          "src/generated/app_bsky/contact/get_matches.rs": {
+            "sha256": "cda59b8a356d7564e53e334d7fb4a0faf02d9238e227c36af5593009826f3f9a",
+            "size_bytes": 9099
+          },
+          "src/generated/app_bsky/contact/get_sync_status.rs": {
+            "sha256": "4a07cf83ad8d2e72b5c969ce85b0d0a3cbe086e9037ba6a5e5283a3eb648bbc7",
+            "size_bytes": 4669
+          },
+          "src/generated/app_bsky/contact/import_contacts.rs": {
+            "sha256": "9c4ccd0d9d70748654e6666bc4244bd28eadba6cd9ec68bddc322f91756e3a50",
+            "size_bytes": 12080
+          },
+          "src/generated/app_bsky/contact/remove_data.rs": {
+            "sha256": "6f6ed35c13a14d32ed5a3c5694b0f28ef39e9bc8efc4180ac5b0e7ed762fd690",
+            "size_bytes": 4854
+          },
+          "src/generated/app_bsky/contact/send_notification.rs": {
+            "sha256": "d53d43de32b8b92e0b8a97e2102e624b05c3bfcbae98a0c04c1b763d69b452cc",
+            "size_bytes": 8747
+          },
+          "src/generated/app_bsky/contact/start_phone_verification.rs": {
+            "sha256": "7b424a0057cd893a54b4828ff1738cda69d0fc45ac4c6ffb8e870d2a2d6aa8aa",
+            "size_bytes": 6088
+          },
+          "src/generated/app_bsky/contact/verify_phone.rs": {
+            "sha256": "f1939bd8f1e60a26e395bf84201d2e4f816878110925103899201c8df7298184",
+            "size_bytes": 6575
+          },
+          "src/generated/app_bsky/draft.rs": {
+            "sha256": "f45f7d2b5d95e1d8492778a54fbf12fe73f070a953c6de574db411b029c30fe9",
+            "size_bytes": 121081
+          },
+          "src/generated/app_bsky/draft/create_draft.rs": {
+            "sha256": "991daadc50811ac5d7392a507edbb94772f638e1598960a13168013656f39d39",
+            "size_bytes": 8541
+          },
+          "src/generated/app_bsky/draft/delete_draft.rs": {
+            "sha256": "8a75333589731e6298a05e0591094bc05c2c82c073eb6b545fee2d81e538ae58",
+            "size_bytes": 6637
+          },
+          "src/generated/app_bsky/draft/get_drafts.rs": {
+            "sha256": "4fa1926826f47b50d793bcec61a030e0c24605634428f9fb118ffdcee4cb906a",
+            "size_bytes": 6424
+          },
+          "src/generated/app_bsky/draft/update_draft.rs": {
+            "sha256": "224549210fcdc7b1e256768d5e96ab3a88722b762b97d56490e97d9eb0e88875",
+            "size_bytes": 6733
+          },
+          "src/generated/app_bsky/embed.rs": {
+            "sha256": "2b7ac972579aa265f3d17b270d003165dd23d7ffadbcadc649badf3196d1a5df",
+            "size_bytes": 10793
+          },
+          "src/generated/app_bsky/embed/external.rs": {
+            "sha256": "a7aeb5bdd3c91d712406548aa5a4cb9ad886c9dae75084e6a6d73e0c03d80f05",
+            "size_bytes": 90215
+          },
+          "src/generated/app_bsky/embed/gallery.rs": {
+            "sha256": "b032f2bcb2a710dc6c2f29b5a143041c217b6c277bd092cc36991b48fd7b6a84",
+            "size_bytes": 43972
+          },
+          "src/generated/app_bsky/embed/get_embed_external_view.rs": {
+            "sha256": "1c6ce542d8317bc22b13a1a3ca23e9e7faed8878a9d0e7c4116da0839a03a26e",
+            "size_bytes": 8974
+          },
+          "src/generated/app_bsky/embed/images.rs": {
+            "sha256": "b2777b633185e19756dd5c676ac8fc88b4d3e4187a1b143ae75de7123ae64a27",
+            "size_bytes": 42685
+          },
+          "src/generated/app_bsky/embed/record.rs": {
+            "sha256": "3787bf9e8668060fd54ddcfcaaaec444656d628325192d6b5b31d8b7b5c12be0",
+            "size_bytes": 73978
+          },
+          "src/generated/app_bsky/embed/record_with_media.rs": {
+            "sha256": "2173676def8c11da8f7476158a9a76e06118656cd8bd3b06a110e805fd82df98",
+            "size_bytes": 22403
+          },
+          "src/generated/app_bsky/embed/video.rs": {
+            "sha256": "0a12e25fee37716448d8ec7c0045ae059b9baed3104d6bbd51d31944497300f6",
+            "size_bytes": 46626
+          },
+          "src/generated/app_bsky/feed.rs": {
+            "sha256": "d6710e0b1eeda31bd73446a89ede1140e16346512317fe3da3032ce701153bc5",
+            "size_bytes": 230646
+          },
+          "src/generated/app_bsky/feed/describe_feed_generator.rs": {
+            "sha256": "c085b6ee2506bab26f3e3ca074df81df9555b13729f0194a53415f03e7a73161",
+            "size_bytes": 14873
+          },
+          "src/generated/app_bsky/feed/generator.rs": {
+            "sha256": "4ab11c284e89558584d0436d66b28a95c56e02fbf7285c37012b4c3d96acdf33",
+            "size_bytes": 30778
+          },
+          "src/generated/app_bsky/feed/get_actor_feeds.rs": {
+            "sha256": "3e320155a660d43ba6e04be19a8e177e5e5c0acbfc228ede0ebc484c985cd3b0",
+            "size_bytes": 7920
+          },
+          "src/generated/app_bsky/feed/get_actor_likes.rs": {
+            "sha256": "e8bdfb8dd6215d2f68d1cc820c87a5de74f574893dcff650dac47b518df90835",
+            "size_bytes": 9682
+          },
+          "src/generated/app_bsky/feed/get_author_feed.rs": {
+            "sha256": "b65e2a98f4567ba812fc82dd56dda43d8f709f389e4c5c7ed3383112291e6c57",
+            "size_bytes": 14822
+          },
+          "src/generated/app_bsky/feed/get_feed.rs": {
+            "sha256": "4ba3482bbf9849702a6948598803acf8a08bad4d7f154956ab92c0a6fad38e13",
+            "size_bytes": 8855
+          },
+          "src/generated/app_bsky/feed/get_feed_generator.rs": {
+            "sha256": "47cc758acfd267118d4ddc8bd80604677522ba9a550e03e989e785995fb324c0",
+            "size_bytes": 6738
+          },
+          "src/generated/app_bsky/feed/get_feed_generators.rs": {
+            "sha256": "e74b85dfd0d61b1df61e27f2e553e4de25a93f2d06ec67234507e1523dd8b917",
+            "size_bytes": 6574
+          },
+          "src/generated/app_bsky/feed/get_feed_skeleton.rs": {
+            "sha256": "34edf1259c1608cde80cb0987e61508e7119a41cce97db6cdb30633ccca64b91",
+            "size_bytes": 9512
+          },
+          "src/generated/app_bsky/feed/get_likes.rs": {
+            "sha256": "30f2a435504299c79df2930a22aed82388ed7cb3b5827237c7c60754b5060286",
+            "size_bytes": 24504
+          },
+          "src/generated/app_bsky/feed/get_list_feed.rs": {
+            "sha256": "80a3c582b7ff139fb73d04da4b0fc29d52a83716e230ed2bf2cbc67716e67981",
+            "size_bytes": 9088
+          },
+          "src/generated/app_bsky/feed/get_post_thread.rs": {
+            "sha256": "8b9bd2a342c7f04c233a6bb93e4fda9d6712e3dc571c9db607af3ca4e5c7aa8f",
+            "size_bytes": 10171
+          },
+          "src/generated/app_bsky/feed/get_posts.rs": {
+            "sha256": "f36f4d1fffbde6dbcf8ac2e033337179a68dd7b96dc6521f7825407f799fc905",
+            "size_bytes": 6100
+          },
+          "src/generated/app_bsky/feed/get_quotes.rs": {
+            "sha256": "eb73474944b5e253c094b3dee89ef4369ce7bc3d0b5e44007ff628546cfaa9c9",
+            "size_bytes": 8588
+          },
+          "src/generated/app_bsky/feed/get_reposted_by.rs": {
+            "sha256": "7aa9a6946bb3e851dcccae12354da7e956ce1b8a6a0b7528efc3ac0c5206b37a",
+            "size_bytes": 8832
+          },
+          "src/generated/app_bsky/feed/get_suggested_feeds.rs": {
+            "sha256": "c343ed64ec7bf99bae4503349660fb76caa70dfa5d6d78ff8c8197fab7ed54fd",
+            "size_bytes": 6805
+          },
+          "src/generated/app_bsky/feed/get_timeline.rs": {
+            "sha256": "26380d57c6d1ea78b730f9ac36b9f4745c1f691848481ac0903646c90891d47b",
+            "size_bytes": 7174
+          },
+          "src/generated/app_bsky/feed/like.rs": {
+            "sha256": "45bf5551fb0b67eddf7aeeb52d107c6f5caf806746044f6f2be57e3f0e7bfafa",
+            "size_bytes": 13992
+          },
+          "src/generated/app_bsky/feed/post.rs": {
+            "sha256": "ee3430fa1ab433ac5b3f90ee57de790c52e82d0235f05183fd54d2c2cc241d46",
+            "size_bytes": 61283
+          },
+          "src/generated/app_bsky/feed/postgate.rs": {
+            "sha256": "54da7751b88d4149487bb0c8f7a115c439753ee8a75e119e1d3db7fde9ebbd59",
+            "size_bytes": 21743
+          },
+          "src/generated/app_bsky/feed/repost.rs": {
+            "sha256": "25a055a31a43b36b2f7b596635b6bb9cf7c52e6debe95477d6d86b9d42f9b9ee",
+            "size_bytes": 14130
+          },
+          "src/generated/app_bsky/feed/search_posts.rs": {
+            "sha256": "1c9c3d8cb92e44936ddcbd42413eded13af8dea1297854b179a04d02f7f2ca55",
+            "size_bytes": 18246
+          },
+          "src/generated/app_bsky/feed/search_posts_v2.rs": {
+            "sha256": "02204ba4357e01051f49d614f2cf01b4abe5f96e5ae31cd90cb1452ffe22759a",
+            "size_bytes": 38295
+          },
+          "src/generated/app_bsky/feed/send_interactions.rs": {
+            "sha256": "65ebb6229eed23a86a88e47559410caeab4c64e9eca99e55811761e190506af9",
+            "size_bytes": 8339
+          },
+          "src/generated/app_bsky/feed/threadgate.rs": {
+            "sha256": "fe9fffc29afa7fd62591200822a69602e7abd9651621a6c3c6c02ae8e1ed3c95",
+            "size_bytes": 35502
+          },
+          "src/generated/app_bsky/graph.rs": {
+            "sha256": "cb0f0f4c8943278ce74de53dce27d1c229501e6ad4033b711637de0100e85010",
+            "size_bytes": 154981
+          },
+          "src/generated/app_bsky/graph/block.rs": {
+            "sha256": "fb6123bd63bf7b3776162e47d280176931d604a389d8537072d71279310db4a3",
+            "size_bytes": 12919
+          },
+          "src/generated/app_bsky/graph/follow.rs": {
+            "sha256": "b7d14d71320789c45eae4e5153cb4e7c0792f070f6dcf51b9f0028e182f66c3b",
+            "size_bytes": 14181
+          },
+          "src/generated/app_bsky/graph/get_actor_starter_packs.rs": {
+            "sha256": "83b0c80963fb381aae8b80f704be8dd771d65ce57ddf8fffecc327e29cf75a69",
+            "size_bytes": 8355
+          },
+          "src/generated/app_bsky/graph/get_blocks.rs": {
+            "sha256": "4be34391a3adf3f5e5bf7ee6002c03b111036a275c211e473a43864cd81c5029",
+            "size_bytes": 6426
+          },
+          "src/generated/app_bsky/graph/get_followers.rs": {
+            "sha256": "70fb63b679828cd56a2d089491376717d953e87ce29e88c2378e393c7ee59346",
+            "size_bytes": 10882
+          },
+          "src/generated/app_bsky/graph/get_follows.rs": {
+            "sha256": "8a9038b56e42dff871f510a69a1ca5294f3bd4067bc201edfb1aa4727380418f",
+            "size_bytes": 10734
+          },
+          "src/generated/app_bsky/graph/get_known_followers.rs": {
+            "sha256": "3ae9fdeaf8e23bfb5d76ab59a16f7f72aa7feb63af16769fec7cdf53abf685ed",
+            "size_bytes": 8219
+          },
+          "src/generated/app_bsky/graph/get_list.rs": {
+            "sha256": "a2b4aec9c623ca8459738bf4cef3d2e91f5ab1ef1bba76f3c3d21026a19d61a6",
+            "size_bytes": 7625
+          },
+          "src/generated/app_bsky/graph/get_list_blocks.rs": {
+            "sha256": "554b6fd1743345edb2392f5b182cd455c5badf7ef4bc0600517e4f68a44c7332",
+            "size_bytes": 6615
+          },
+          "src/generated/app_bsky/graph/get_list_mutes.rs": {
+            "sha256": "035631b49c9b5cfcbb14cd73bc64235252e31889abc88fe51689d19a3b3fafd0",
+            "size_bytes": 6566
+          },
+          "src/generated/app_bsky/graph/get_lists.rs": {
+            "sha256": "4892d19f3ec4d679e9d1e1cddc5a22399611710ab6445e50582911861edd73b8",
+            "size_bytes": 10691
+          },
+          "src/generated/app_bsky/graph/get_lists_with_membership.rs": {
+            "sha256": "e1bdc5df34896317913a2db7fe8e10d4fbdaf248bd64292fe1dc635c4fb6afd4",
+            "size_bytes": 25708
+          },
+          "src/generated/app_bsky/graph/get_mutes.rs": {
+            "sha256": "f62fb0175d1d4803711898d788b6dda3f17e144f1db468a0fec4117aa8bd3db4",
+            "size_bytes": 6380
+          },
+          "src/generated/app_bsky/graph/get_relationships.rs": {
+            "sha256": "45e1ffdb636cfc251285ff005065b9fd669a0d22eb62336b3553bf8fc6bd064f",
+            "size_bytes": 9605
+          },
+          "src/generated/app_bsky/graph/get_starter_pack.rs": {
+            "sha256": "7288ffba0268f8906e11a501a2819c9ef86d67775a1a717fa65ecc326f9ce4c8",
+            "size_bytes": 6531
+          },
+          "src/generated/app_bsky/graph/get_starter_packs.rs": {
+            "sha256": "f81a596167ae5fab52bf826afd0a362ffcea19802c52bd6f68e775de8286ceb2",
+            "size_bytes": 6480
+          },
+          "src/generated/app_bsky/graph/get_starter_packs_with_membership.rs": {
+            "sha256": "82250e9a19ac45e0f643907ff610514627b60cd4fc390b8a2dfefc87b9d580ac",
+            "size_bytes": 22529
+          },
+          "src/generated/app_bsky/graph/get_suggested_follows_by_actor.rs": {
+            "sha256": "3e52d9b63d7a4384baebaf81373b2ea43f5079d350473f2eba923e4bebe6866b",
+            "size_bytes": 7931
+          },
+          "src/generated/app_bsky/graph/list.rs": {
+            "sha256": "34209d99fea1f5a49699db46d1c1166e601673e0b0c265d1d9819352ad4985dd",
+            "size_bytes": 24925
+          },
+          "src/generated/app_bsky/graph/listblock.rs": {
+            "sha256": "f912d74982300743281218a06612c4f2ca9a872b9d12552e24977d55507c8369",
+            "size_bytes": 13135
+          },
+          "src/generated/app_bsky/graph/listitem.rs": {
+            "sha256": "be29afd33be52edbfd349aa656d4a866d41043cf30365751f425e10656fc7029",
+            "size_bytes": 15602
+          },
+          "src/generated/app_bsky/graph/mute_actor.rs": {
+            "sha256": "17cc602cb0854ae80623d49daf36e73b2913ac598a42393667877764a976e638",
+            "size_bytes": 8383
+          },
+          "src/generated/app_bsky/graph/mute_actor_list.rs": {
+            "sha256": "7276ed3521380fb5d04ccfbb9b10bfef10a35ca518bd46f4420f3185fa3497e8",
+            "size_bytes": 6797
+          },
+          "src/generated/app_bsky/graph/mute_thread.rs": {
+            "sha256": "7bb00bb8aaf7970fc9402faeea23e6865c973ae7d31e597f859b9b1cf90afbcf",
+            "size_bytes": 6641
+          },
+          "src/generated/app_bsky/graph/search_starter_packs.rs": {
+            "sha256": "fccd477dfa4ae1b8d0c70405bc720fb64938193362f7ab1edd96a8b0984a3138",
+            "size_bytes": 8013
+          },
+          "src/generated/app_bsky/graph/search_starter_packs_v2.rs": {
+            "sha256": "0f5d4867602c59884c8c08910a58d34d25dfe06e662bbf41dffb8992ab428fc3",
+            "size_bytes": 8340
+          },
+          "src/generated/app_bsky/graph/starterpack.rs": {
+            "sha256": "217442682f58e9ff9caa990c94e01c226f08be818b932fd9bc1992f2a6acc109",
+            "size_bytes": 30994
+          },
+          "src/generated/app_bsky/graph/unmute_actor.rs": {
+            "sha256": "9daf2643a44d5448270add94222f636c9721c6f868bd61de43bc4b11e96668ca",
+            "size_bytes": 6724
+          },
+          "src/generated/app_bsky/graph/unmute_actor_list.rs": {
+            "sha256": "419500e1cc25aa573f9b98791ece855b3b66240d42359f9d3e79270ec2041ff1",
+            "size_bytes": 6892
+          },
+          "src/generated/app_bsky/graph/unmute_thread.rs": {
+            "sha256": "dd70c462ace3ecfaae6014f64f157aa6f0c319723c3279bf9c63ae9738afc03e",
+            "size_bytes": 6735
+          },
+          "src/generated/app_bsky/graph/verification.rs": {
+            "sha256": "f507b6eec4c4e1a796d42c7b91e4f96fa3a4f88d5ac6d48dddf899182ebdb15e",
+            "size_bytes": 19577
+          },
+          "src/generated/app_bsky/labeler.rs": {
+            "sha256": "af8ef1a5c751a37b81bb5907a4ad58ef795e2db604bb249196094d5a2b907521",
+            "size_bytes": 62491
+          },
+          "src/generated/app_bsky/labeler/get_services.rs": {
+            "sha256": "caa12e1c27a748b6f7c75f47cba4f0b3ca99fc7696a93ad8165aef7a8f79031e",
+            "size_bytes": 7699
+          },
+          "src/generated/app_bsky/labeler/service.rs": {
+            "sha256": "4a3e1ee334e801169d79f881e900f92c514dc846a081c88b0b95bd030af41bb4",
+            "size_bytes": 21582
+          },
+          "src/generated/app_bsky/notification.rs": {
+            "sha256": "2866825286b844c646ebc34825c5a550bcb6b53834427af327a0b9b736b2c1d2",
+            "size_bytes": 97607
+          },
+          "src/generated/app_bsky/notification/declaration.rs": {
+            "sha256": "8bb2e419d8a6dac86e45a982312d65c393cddb89825ca0bfe6239c631ab3a4ed",
+            "size_bytes": 14182
+          },
+          "src/generated/app_bsky/notification/get_preferences.rs": {
+            "sha256": "80eddd7b675b91e40475a748a35be8828787213fdef430e508c235d760dad99c",
+            "size_bytes": 2654
+          },
+          "src/generated/app_bsky/notification/get_unread_count.rs": {
+            "sha256": "433be505f2855fd80e584cd3a13b4ef4534f24e6a6e7b9907bb739c8093395e7",
+            "size_bytes": 5741
+          },
+          "src/generated/app_bsky/notification/list_activity_subscriptions.rs": {
+            "sha256": "c266da671325bee25a25ef6297f137cd57b67d10881285f56c38df70377bd556",
+            "size_bytes": 7281
+          },
+          "src/generated/app_bsky/notification/list_notifications.rs": {
+            "sha256": "9a70590776d7322064595c53aae95eefc9f741ccd68f04c86d0c054835a01531",
+            "size_bytes": 43851
+          },
+          "src/generated/app_bsky/notification/put_activity_subscription.rs": {
+            "sha256": "7a4b0ed2be80cb1f71be7f2c84b273cf79829b6bfba96c5f6b233440b82b1980",
+            "size_bytes": 9885
+          },
+          "src/generated/app_bsky/notification/put_preferences.rs": {
+            "sha256": "6dfcfcc7ff135c1de9c68453d8f2180b8b0a60833cbd3790a23b631bee1071c1",
+            "size_bytes": 6846
+          },
+          "src/generated/app_bsky/notification/put_preferences_v2.rs": {
+            "sha256": "f6ec05e7b97975d10958fd03985470d7ec4273e298a1fc68dc087f8fa87e3d03",
+            "size_bytes": 5767
+          },
+          "src/generated/app_bsky/notification/register_push.rs": {
+            "sha256": "d4e366e1731342df91c2e87453e988d92af1596d3c3a9adeeb955d8efd273095",
+            "size_bytes": 14226
+          },
+          "src/generated/app_bsky/notification/unregister_push.rs": {
+            "sha256": "4589d28e9f3ab25e8a0bacf5439656acc275736030d139388025401a66c2286d",
+            "size_bytes": 13623
+          },
+          "src/generated/app_bsky/notification/update_seen.rs": {
+            "sha256": "2cdd8e6091608b71f7203c8ddfae0bf2d51bbe052b0c7312489f600a8cc0f84f",
+            "size_bytes": 6734
+          },
+          "src/generated/app_bsky/richtext.rs": {
+            "sha256": "55b994fefa7c3d1e6d3c8e7235109d7997f12022b718932e8976cfeb166f406f",
+            "size_bytes": 275
+          },
+          "src/generated/app_bsky/richtext/facet.rs": {
+            "sha256": "e42177f60b450eb63752e5808787f40a3dd6c721536d29222dac3a12ecbd8c99",
+            "size_bytes": 41321
+          },
+          "src/generated/app_bsky/unspecced.rs": {
+            "sha256": "b33f7f7d06abc837554abb697da86f85026525e927c1b4076f46c291c5aed4ca",
+            "size_bytes": 142046
+          },
+          "src/generated/app_bsky/unspecced/get_age_assurance_state.rs": {
+            "sha256": "95e53b45abad90468ae9d412a54c7f637ec293909205f96b8c5fe3b16bab89a6",
+            "size_bytes": 3053
+          },
+          "src/generated/app_bsky/unspecced/get_config.rs": {
+            "sha256": "00b37118628fae43249ff094fa8dab7f67ac6c1f539c10cc87689afaee347ce9",
+            "size_bytes": 13430
+          },
+          "src/generated/app_bsky/unspecced/get_onboarding_suggested_starter_packs.rs": {
+            "sha256": "9a7cc2ae79f4cb3ec4fbf3d6545449e55cd0578ff2b73733e519f92870239c06",
+            "size_bytes": 5930
+          },
+          "src/generated/app_bsky/unspecced/get_onboarding_suggested_starter_packs_skeleton.rs": {
+            "sha256": "fa8d1dfd966d98e0a102daa35aae6efca9fe32ee913ae6c2c174c3b33f77c360",
+            "size_bytes": 8229
+          },
+          "src/generated/app_bsky/unspecced/get_onboarding_suggested_users_skeleton.rs": {
+            "sha256": "8ccd4c46d57e00840ec5ba46867662d8ff23b79d65479375654ea4fd6df29d2a",
+            "size_bytes": 8891
+          },
+          "src/generated/app_bsky/unspecced/get_popular_feed_generators.rs": {
+            "sha256": "5bb1c36a53e1966545a815f6863a2b4a423bb70058fdf0c99fe838004b0c8813",
+            "size_bytes": 7892
+          },
+          "src/generated/app_bsky/unspecced/get_post_thread_other_v2.rs": {
+            "sha256": "40f6467c190453638849ae3ac4ccb603bd0e896fe3e65110fa84d4f919e52884",
+            "size_bytes": 20896
+          },
+          "src/generated/app_bsky/unspecced/get_post_thread_v2.rs": {
+            "sha256": "dd8b1a6b4a888edc442db576a8b567c322fbfc4a339b58ad86290947527bbd17",
+            "size_bytes": 30407
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_feeds.rs": {
+            "sha256": "0049279d3e3496d22c015048bdac722a9d9d7b906cd96fe537976bcfa06405b3",
+            "size_bytes": 5201
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_feeds_skeleton.rs": {
+            "sha256": "f10c5ac754b6c256daa7f27aeaad90e51ee049bbdcc31eab63f9e71376c950a6",
+            "size_bytes": 7337
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_onboarding_users.rs": {
+            "sha256": "420826868705b78a902af95b700634a8fabec98118077cbc5191464be4799f32",
+            "size_bytes": 7612
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_starter_packs.rs": {
+            "sha256": "3976134c99e6b548d346599fb750835dba598a7ba97416712330fbcf1ad07779",
+            "size_bytes": 5492
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_starter_packs_skeleton.rs": {
+            "sha256": "8e425c0c5daa2b18908d790208d6dfac2886d80b1432e87c6140876687535ee9",
+            "size_bytes": 7687
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users.rs": {
+            "sha256": "22384110c7e4d792c5cbf6850f49ff6b853609c47ae4453fc0a8e39d603fece5",
+            "size_bytes": 7092
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_for_discover.rs": {
+            "sha256": "76c268ee72b5a72bbb1beacfb4ed440edc0a8a801002d4a20ea56e9252561057",
+            "size_bytes": 5855
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_for_discover_skeleton.rs": {
+            "sha256": "b1785ecfcb8a7897f3bacd32bd883ffffa4497fbf552e8a4a68e6c3c291ec98d",
+            "size_bytes": 8101
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_for_explore.rs": {
+            "sha256": "ca6b39f5280d08db0e350cdccd70b159af112d5c22d77c67dd0592a7958ed448",
+            "size_bytes": 7470
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_for_explore_skeleton.rs": {
+            "sha256": "9cec65a9176e7431ed0d4cfce290392f6f7e088fbb472eee61ca08482a573f40",
+            "size_bytes": 8750
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_for_see_more.rs": {
+            "sha256": "74fa67969feee7c6a6cf0a9bc43e1af2d262f3a7f09c8599434be41a3a98d68c",
+            "size_bytes": 7479
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_for_see_more_skeleton.rs": {
+            "sha256": "a37e438cef046b34f213ef3c4e7db4200c12ff21df69bfc5dae682e7bad73903",
+            "size_bytes": 8760
+          },
+          "src/generated/app_bsky/unspecced/get_suggested_users_skeleton.rs": {
+            "sha256": "fdfaf66c81b959bd1a60593095c9210882a436a813c08ad0bbab1817b4b4a4fe",
+            "size_bytes": 8356
+          },
+          "src/generated/app_bsky/unspecced/get_suggestions_skeleton.rs": {
+            "sha256": "9d1975b16b827330b1cfd90608a1a70483e7d9134b6a19acc8f91aca9e6b6a0c",
+            "size_bytes": 9503
+          },
+          "src/generated/app_bsky/unspecced/get_tagged_suggestions.rs": {
+            "sha256": "67ef24d59634bb0e9c17c705d03a1eddd218346ac73230f77d051d88bb635f47",
+            "size_bytes": 17746
+          },
+          "src/generated/app_bsky/unspecced/get_trending_topics.rs": {
+            "sha256": "46f1100f717b734793dcab0fa0df9e1d6e66b0b16b6fe66ab221b4b4f3e29419",
+            "size_bytes": 7011
+          },
+          "src/generated/app_bsky/unspecced/get_trends.rs": {
+            "sha256": "22f5cdfeaf5738a653cd52c1e3b291d1597a76b9adb1892ac6425d107d9f6cd7",
+            "size_bytes": 5083
+          },
+          "src/generated/app_bsky/unspecced/get_trends_skeleton.rs": {
+            "sha256": "81d9ab1b84cd2fc2b8b63d9660a1636ba2629a1d10d52ac3ccac0534188a2e1d",
+            "size_bytes": 7129
+          },
+          "src/generated/app_bsky/unspecced/init_age_assurance.rs": {
+            "sha256": "f9ad5137ea5413037b5bebd7e4dc34bc794eecd118a0a322db2a3557d89bdff4",
+            "size_bytes": 5793
+          },
+          "src/generated/app_bsky/unspecced/search_actors_skeleton.rs": {
+            "sha256": "5efee1c2f6f666d3988d04cf5bd5c0eaf9109d09dc9568ce274af033682c17cb",
+            "size_bytes": 11231
+          },
+          "src/generated/app_bsky/unspecced/search_posts_skeleton.rs": {
+            "sha256": "d8cdc429ea05858ad36d29e61efb729e89c5889aee34f3ede11db072e94122e8",
+            "size_bytes": 19982
+          },
+          "src/generated/app_bsky/unspecced/search_starter_packs_skeleton.rs": {
+            "sha256": "ddbbe4152231343ae530c09233077626d0784aa61dfbebe682b9533483d340d9",
+            "size_bytes": 10978
+          },
+          "src/generated/app_bsky/video.rs": {
+            "sha256": "91bfefa344a6a7e349f03d66da75a8f9acea1ef08c50624241c4d0bd5a687b1d",
+            "size_bytes": 26500
+          },
+          "src/generated/app_bsky/video/abort_upload.rs": {
+            "sha256": "b8f39d5c0bcb72d50cedaeed7c8e49ad6cfb9bf109facfaa2d67d899359ab17c",
+            "size_bytes": 8216
+          },
+          "src/generated/app_bsky/video/finish_upload.rs": {
+            "sha256": "6d5b3b4b42896d5b6f3633506b0ba4375f672bfef272f1bfe02215464e5d9eff",
+            "size_bytes": 8366
+          },
+          "src/generated/app_bsky/video/get_job_status.rs": {
+            "sha256": "546973af3bb0823606413f833dc7e562053d61afd7ceff4795718bf0f9c6c915",
+            "size_bytes": 6204
+          },
+          "src/generated/app_bsky/video/get_upload_limits.rs": {
+            "sha256": "3ecbea71354ef54f54321d2750bf7ea32333157328d3da3c4176375eeb3b88d5",
+            "size_bytes": 3315
+          },
+          "src/generated/app_bsky/video/get_upload_status.rs": {
+            "sha256": "75c3f5155c509f5af81c5a0cc4f904598337e67b2dd4e8f624438e0970342841",
+            "size_bytes": 11766
+          },
+          "src/generated/app_bsky/video/start_upload.rs": {
+            "sha256": "9ee17bd16ec9abc96eac615c62c4653c6436e1fc3b45f188b800920b8d52b8ba",
+            "size_bytes": 16766
+          },
+          "src/generated/app_bsky/video/upload_part.rs": {
+            "sha256": "ab1bf740259a270738ddffe07e7961387d58a40f9edd360abe7c585d27f6fd5b",
+            "size_bytes": 13885
+          },
+          "src/generated/app_bsky/video/upload_video.rs": {
+            "sha256": "a7528281a84a69ed64a399d757eac877eeff75865f541291a704093fdcee41d6",
+            "size_bytes": 3118
+          },
+          "src/generated/blue_catbird.rs": {
+            "sha256": "a6bd3d81d167daea2ecbb03721fe7f0a429052fc7b2792ce992112c954ce9830",
+            "size_bytes": 336
+          },
+          "src/generated/blue_catbird/bskychat.rs": {
+            "sha256": "eabc466b34fc7d333cbd912c641553d438f9b5cd7e1f1cd2b7b81e1bb2f0bc22",
+            "size_bytes": 316
+          },
+          "src/generated/blue_catbird/bskychat/push_heartbeat.rs": {
+            "sha256": "d6bf75ff5760c962493f6087c2068581b8a29f7ffb879c38491a648c3fb728c9",
+            "size_bytes": 3358
+          },
+          "src/generated/blue_catbird/bskychat/update_mute_status.rs": {
+            "sha256": "d265085b40d06eed31d9c871e8aba2af61f79544581e5be6c60995b4808c4a89",
+            "size_bytes": 8652
+          },
+          "src/generated/blue_catbird/chat.rs": {
+            "sha256": "d2291a52f9b5a3777882d03ada4d3f81983268bb8c9bbec1c3a24e258203f86e",
+            "size_bytes": 4802663
+          },
+          "src/generated/blue_catbird/chat/accept_conversation.rs": {
+            "sha256": "5e729db06605bcd83754504165c5de943d3ab5d0f6f0076809e2334c61181ea5",
+            "size_bytes": 16849
+          },
+          "src/generated/blue_catbird/chat/acknowledge_welcome.rs": {
+            "sha256": "3273c43b786276927eb242f7ca8830780172cdb08adf2c98f1baf4db30085dfb",
+            "size_bytes": 15660
+          },
+          "src/generated/blue_catbird/chat/activate_reset.rs": {
+            "sha256": "7791b20631178beb1ae57bb1172ca1db1e847d1f619aeb61bcaef1774ef4a234",
+            "size_bytes": 19471
+          },
+          "src/generated/blue_catbird/chat/auth_full.rs": {
+            "sha256": "6447b291cb97226896c2cc160aa302033fbafa8f1b262f3699c7ea9397993c2d",
+            "size_bytes": 224
+          },
+          "src/generated/blue_catbird/chat/cancel_direct_request_preparation.rs": {
+            "sha256": "8dd0c3de2938c0d9684254477928a63acb43a7559d61952846e86a959dabb6a6",
+            "size_bytes": 21815
+          },
+          "src/generated/blue_catbird/chat/cancel_leaf_recovery.rs": {
+            "sha256": "2f337e46f4110ed3b9fe541805e5ce98e336294cfe2c6e746d951b4fb79972d5",
+            "size_bytes": 15073
+          },
+          "src/generated/blue_catbird/chat/cancel_leave.rs": {
+            "sha256": "ae86a5cc5c3074b5fdb7ac2f9344e7100c35dcc5accb821c12989d5f279c96a2",
+            "size_bytes": 14717
+          },
+          "src/generated/blue_catbird/chat/close_conversation.rs": {
+            "sha256": "f852b0d4122975a28027189e4b8e7d27bad4e61efcd07899622c14b09bf5cc6b",
+            "size_bytes": 16517
+          },
+          "src/generated/blue_catbird/chat/create_conversation.rs": {
+            "sha256": "35ae1ff9e0bb9db598eb8c47f00dac54f061d240760b0c92187a5c153ef83a64",
+            "size_bytes": 19222
+          },
+          "src/generated/blue_catbird/chat/declaration.rs": {
+            "sha256": "d8a9205e955c4110f7065662af00b966325fc0c32b336a988b37222ee0a136fe",
+            "size_bytes": 24091
+          },
+          "src/generated/blue_catbird/chat/delete_blob.rs": {
+            "sha256": "698cf72404aa92a1a6802c4ff08385b9c2aae6f7da8b686c5e9e1a24e9833ffa",
+            "size_bytes": 14551
+          },
+          "src/generated/blue_catbird/chat/device.rs": {
+            "sha256": "724295711334a9549ef4f35fd166c48efa9a2efa03e81322cb5165163f1276a0",
+            "size_bytes": 15648
+          },
+          "src/generated/blue_catbird/chat/enroll_device.rs": {
+            "sha256": "f043b8084b5eb2099556c359397e0b6ff844d2b12bab141c1ddaa308a7c9e7f8",
+            "size_bytes": 15211
+          },
+          "src/generated/blue_catbird/chat/get_blob.rs": {
+            "sha256": "8d08764953fadccecad230267b4bbf5953c9dc4ff78e442d3364f644ff8c1fe4",
+            "size_bytes": 12808
+          },
+          "src/generated/blue_catbird/chat/get_blob_usage.rs": {
+            "sha256": "fa8dedbdc31f67f315219ae419a599787e20819c07e2e620812f90b183b8c058",
+            "size_bytes": 11322
+          },
+          "src/generated/blue_catbird/chat/get_conversation_state.rs": {
+            "sha256": "0cf3051265e3500cb88841c4266e0b40acf11a9bf37d61243c3336036eda6f79",
+            "size_bytes": 15505
+          },
+          "src/generated/blue_catbird/chat/get_conversations.rs": {
+            "sha256": "2fe7b490d143115e657b40bbd185d5be60e75db974d32d8b38d7cd206cf43ed6",
+            "size_bytes": 18733
+          },
+          "src/generated/blue_catbird/chat/get_device_key.rs": {
+            "sha256": "99c100ff3a04a6f48987284187a41cb06c4e17b3f336a849b53bd51e046f7754",
+            "size_bytes": 16131
+          },
+          "src/generated/blue_catbird/chat/get_devices.rs": {
+            "sha256": "169dded652cb6b463efacb472a888ef46081c27082d87fee18bc54ed2901f852",
+            "size_bytes": 12612
+          },
+          "src/generated/blue_catbird/chat/get_direct_request_outcome.rs": {
+            "sha256": "20509c2f8e7e90410e91de295f02952e9a1d4a1e2214f19f3ba1d33012820ddc",
+            "size_bytes": 21640
+          },
+          "src/generated/blue_catbird/chat/get_entries.rs": {
+            "sha256": "020a5dfe06f9e9cceb5504c10871cd22037175e3d447fb8f1f24ae78c4d1239f",
+            "size_bytes": 16863
+          },
+          "src/generated/blue_catbird/chat/get_leaf_recovery_inbox.rs": {
+            "sha256": "5ca585011e9ff4dbdffbd8e8c14b4f4ed817dc984741051714328bdda8d90b47",
+            "size_bytes": 21217
+          },
+          "src/generated/blue_catbird/chat/get_own_devices.rs": {
+            "sha256": "8eb85359968b25a02ba2e12020d8b18e49e269c34c4a9bcf6b65831f8954bc11",
+            "size_bytes": 13548
+          },
+          "src/generated/blue_catbird/chat/get_pending_welcomes.rs": {
+            "sha256": "9a62f79d402bfd030a05290efe7ecded0afbbc0a1b31faf219ac97efb8f9a51b",
+            "size_bytes": 21624
+          },
+          "src/generated/blue_catbird/chat/get_subscription_ticket.rs": {
+            "sha256": "1772cee16816f44484d335c77d64d4f2eae17eabedc8b8d12e1d7ae973bca196",
+            "size_bytes": 13708
+          },
+          "src/generated/blue_catbird/chat/prepare_blob_upload.rs": {
+            "sha256": "b1d96a321423cf4227d39338ac7c2181a37a0e1fa704574be761d089ca89d4b8",
+            "size_bytes": 16311
+          },
+          "src/generated/blue_catbird/chat/prepare_direct_request.rs": {
+            "sha256": "ed4eac14f0c10584cbae3f058cb0b7618bdcf5bf21e3d4dc49a5eff4ec276e0c",
+            "size_bytes": 21187
+          },
+          "src/generated/blue_catbird/chat/publish_direct_request.rs": {
+            "sha256": "1400488bde837d74cf283569d1fbcc669a8056de06fcb07957101176df294ff5",
+            "size_bytes": 21187
+          },
+          "src/generated/blue_catbird/chat/publish_direct_request_keys.rs": {
+            "sha256": "d76e2790bf221975080f779f666c20d8f4ccbe0cc482886c3a4679590270d6da",
+            "size_bytes": 21441
+          },
+          "src/generated/blue_catbird/chat/publish_typing.rs": {
+            "sha256": "4418526839b4f4ceb4afff4b021c1a4735beb28ec5d244d4ff48dba76386b626",
+            "size_bytes": 16526
+          },
+          "src/generated/blue_catbird/chat/reject_welcome.rs": {
+            "sha256": "5e8c6a9f1481392db30ae00267f6c84397194ad16e48c7a771aaa09c4db188be",
+            "size_bytes": 15334
+          },
+          "src/generated/blue_catbird/chat/replenish_key_packages.rs": {
+            "sha256": "e1b83ff1dc22f8ebc51772ea68487cb93b2398cb029df55c7a3c2ef8dd395d07",
+            "size_bytes": 15240
+          },
+          "src/generated/blue_catbird/chat/request_leaf_recovery.rs": {
+            "sha256": "dd16f58c7d213357a624b41de1fe424994a0ac3dd47571fcebddf9cdce6df58b",
+            "size_bytes": 16944
+          },
+          "src/generated/blue_catbird/chat/request_leave.rs": {
+            "sha256": "73450e45b5769c94c8e92f7560d939692fe87875ba05df19b58035d1febaaf20",
+            "size_bytes": 16967
+          },
+          "src/generated/blue_catbird/chat/request_reset.rs": {
+            "sha256": "8d42358d9cba47e5685ee17e0507e03639b98093a95382eb7df774e7be78e5ac",
+            "size_bytes": 15608
+          },
+          "src/generated/blue_catbird/chat/revoke_device.rs": {
+            "sha256": "169af3f2d815e5289754ee32491c1603b947b587f7b80927d0d4a2fff6846f8e",
+            "size_bytes": 14221
+          },
+          "src/generated/blue_catbird/chat/send_message.rs": {
+            "sha256": "e287a116f3b4e1663e8c8dce14e820ec35a93ad71ecefcde0d36def4574d8ed0",
+            "size_bytes": 18720
+          },
+          "src/generated/blue_catbird/chat/submit_transition.rs": {
+            "sha256": "066c7e2042630fcd1aa322e0e9c6344fb19a115d3e2422ae20f1aeb86dd3c710",
+            "size_bytes": 30821
+          },
+          "src/generated/blue_catbird/chat/subscribe_events.rs": {
+            "sha256": "ca290286ba3def41e01418d34425e3155afbe3efe6a1c7cca5518c7c8f4078af",
+            "size_bytes": 12080
+          },
+          "src/generated/blue_catbird/chat/update_push_token.rs": {
+            "sha256": "671ad21a9cfdd23596f0eef51f784b93d8dd31b05020b2de30ac63ddb5c9d684",
+            "size_bytes": 10213
+          },
+          "src/generated/blue_catbird/chat/upload_blob.rs": {
+            "sha256": "a944f6856e790adbb1534b5a56c094365ef9b3dfba8637779684000161ac9c79",
+            "size_bytes": 14957
+          },
+          "src/generated/blue_catbird/circle.rs": {
+            "sha256": "3da99e2b739bce671eb352a696819b23b761dedc22cb12590fbd4317f940facf",
+            "size_bytes": 49336
+          },
+          "src/generated/blue_catbird/circle/activate_circle.rs": {
+            "sha256": "13daff0ca1dd4af88a9521bb92cf89c73eeeb834dea174d0243c1307152bacd3",
+            "size_bytes": 11684
+          },
+          "src/generated/blue_catbird/circle/get_capabilities.rs": {
+            "sha256": "cdaa4b95df96de4dd57ff9fd111d81d6507087d0d546a8498615ceb325c84941",
+            "size_bytes": 6091
+          },
+          "src/generated/blue_catbird/circle/get_feed.rs": {
+            "sha256": "1f70e9d3e0166040a438141ba8ba6c1f3d77b86965c0621bbcf45dabad349938",
+            "size_bytes": 10349
+          },
+          "src/generated/blue_catbird/circle/get_media.rs": {
+            "sha256": "30ee12d266d2d5996fb4896300d7330b7b9bcdb04169a7b90a11b2c4001bc23d",
+            "size_bytes": 11937
+          },
+          "src/generated/blue_catbird/circle/get_post_thread.rs": {
+            "sha256": "8003a87c747158932844c60ec7a8a5f1ec435e793ff0082ceb22a80c93ee948e",
+            "size_bytes": 12556
+          },
+          "src/generated/blue_catbird/circle/list_circles.rs": {
+            "sha256": "ffd5d87032bb492063d3a5f65ec03a3cf8e525e1fa6d33d87164acf82d4aeeb4",
+            "size_bytes": 9696
+          },
+          "src/generated/blue_catbird/circle/list_notifications.rs": {
+            "sha256": "f92db90fa443be3dcf4860ffbc42c9749010d0de16fce9d0f96343590d198a32",
+            "size_bytes": 10006
+          },
+          "src/generated/blue_catbird/circle/metadata.rs": {
+            "sha256": "f40e12283ed460f56ab3211f11bc1b17bc9ba53ed77e92ad0be0ca9b0f7f779e",
+            "size_bytes": 20345
+          },
+          "src/generated/blue_catbird/circle/report_record.rs": {
+            "sha256": "be57546998b9b1134d9f621669820f957cacbb42a841a78225cc8ec064b3eaa2",
+            "size_bytes": 16264
+          },
+          "src/generated/blue_catbird/circle/update_preferences.rs": {
+            "sha256": "e916b371d4908cadff7b5deca2606db7288a09ba2e04c20013d0b91dcfbcdcbd",
+            "size_bytes": 11856
+          },
+          "src/generated/blue_catbird/labyrinth.rs": {
+            "sha256": "827091893d3a1e417035a067609d4537796ab85ec4caec5691aefeb60dc13ae0",
+            "size_bytes": 117375
+          },
+          "src/generated/blue_catbird/labyrinth/append_batch.rs": {
+            "sha256": "7d2536a9eda3f9adbb7b2033169b70ba511cdf06940b10d295954873853ab179",
+            "size_bytes": 10328
+          },
+          "src/generated/blue_catbird/labyrinth/append_owner_batch.rs": {
+            "sha256": "37515a80b51b0f764eea1da6ec64dc1f3af6071b1fc30a2b4313d12ab41d0647",
+            "size_bytes": 7526
+          },
+          "src/generated/blue_catbird/labyrinth/batch.rs": {
+            "sha256": "14db4eeb726b67c4a8fb384625dc0dc0430b9fdf8320e162bda3a944eacbe48a",
+            "size_bytes": 16624
+          },
+          "src/generated/blue_catbird/labyrinth/create_device.rs": {
+            "sha256": "3771d0692b438fc691b49b0a6fede466636db1db34975233bac5b765baf9c0f1",
+            "size_bytes": 9091
+          },
+          "src/generated/blue_catbird/labyrinth/create_epoch.rs": {
+            "sha256": "271165a6339b951da2180f102fbb69acdad509e03c8480a1d3aeec0ebbf01935",
+            "size_bytes": 12340
+          },
+          "src/generated/blue_catbird/labyrinth/create_epoch_member.rs": {
+            "sha256": "ead217a568aeaa19c701e948e5756ac3779b14fc55754929b83597396a21d376",
+            "size_bytes": 10276
+          },
+          "src/generated/blue_catbird/labyrinth/create_mek.rs": {
+            "sha256": "0c8f88a564178c4e2441a3a45d74971af27fffaa1828f5ca5b93f2fba96a17c3",
+            "size_bytes": 10327
+          },
+          "src/generated/blue_catbird/labyrinth/create_virtual_device.rs": {
+            "sha256": "109064da1425e0c8a9f3f3b6ef226d2069284af6e2b065e09ddddd1096e3e00c",
+            "size_bytes": 26025
+          },
+          "src/generated/blue_catbird/labyrinth/delete_account_data.rs": {
+            "sha256": "3c39ce8c52607db30e98dae8a9d83d6d79bc626754dead623e2af8d1850ac8f8",
+            "size_bytes": 4672
+          },
+          "src/generated/blue_catbird/labyrinth/delete_attachment_ref.rs": {
+            "sha256": "ef8ffcf83b980c29ae6fc03b3b19ce46648f1ba06a96c7d0a69923565d039301",
+            "size_bytes": 11319
+          },
+          "src/generated/blue_catbird/labyrinth/delete_orf_state.rs": {
+            "sha256": "db9610b05e28a28e5dbfb89b66ebafe1f0dcb38c85183a45693717e27779af91",
+            "size_bytes": 8924
+          },
+          "src/generated/blue_catbird/labyrinth/delete_virtual_device.rs": {
+            "sha256": "3493b45708d684c751732a9c8330b01b00239041f82c7c09344234eba0c347a2",
+            "size_bytes": 9527
+          },
+          "src/generated/blue_catbird/labyrinth/device.rs": {
+            "sha256": "1ce01b6a018e604716032327d916c2997b6ae07a316733509eecc46172102ccf",
+            "size_bytes": 27815
+          },
+          "src/generated/blue_catbird/labyrinth/epoch.rs": {
+            "sha256": "32ac956531ba148e3e3b936d7df0437738ecf97bd6140fb00a81648ab6ce297c",
+            "size_bytes": 18596
+          },
+          "src/generated/blue_catbird/labyrinth/epoch_member.rs": {
+            "sha256": "3228dbbcb98d59c3444b3d54a13da33327ac78771d5072cf735ef58c663d4f48",
+            "size_bytes": 20467
+          },
+          "src/generated/blue_catbird/labyrinth/find_meks.rs": {
+            "sha256": "61d2390c9da854638cd9ff75ca65e49d4a29d1bf1cb43fb5ea9e060089177016",
+            "size_bytes": 29172
+          },
+          "src/generated/blue_catbird/labyrinth/get_attachment_blob.rs": {
+            "sha256": "6419cf046f74fb19d1af8c1a1ec15d4658b1987e5e4591a9452516e620830e72",
+            "size_bytes": 15546
+          },
+          "src/generated/blue_catbird/labyrinth/get_attachment_ref.rs": {
+            "sha256": "084bab09d40b9ba29ca15b39f325d71e1d703022567efefb5d00d7725c38561d",
+            "size_bytes": 9761
+          },
+          "src/generated/blue_catbird/labyrinth/get_chat_device_keys.rs": {
+            "sha256": "704dbfb84b67b7fa25bb0b9edaf8ed791d3d86edd987e985766383dbaf594dfd",
+            "size_bytes": 26656
+          },
+          "src/generated/blue_catbird/labyrinth/get_device.rs": {
+            "sha256": "4697fed41c2c221b74377c5633e88334c29a1273c1e1b95aa6d1fbebff285eb5",
+            "size_bytes": 7636
+          },
+          "src/generated/blue_catbird/labyrinth/get_epoch.rs": {
+            "sha256": "23c954789922d3cc6a17dde3e3392440ff782d5664643b1e5c8260cddf5beee6",
+            "size_bytes": 6655
+          },
+          "src/generated/blue_catbird/labyrinth/get_epoch_head.rs": {
+            "sha256": "b6b01ea6387b1804ae5b8acb618801bea94040942105129a1c621a4da9662a9a",
+            "size_bytes": 8475
+          },
+          "src/generated/blue_catbird/labyrinth/get_member_devices.rs": {
+            "sha256": "a4b52616bc2543e70798095c7cbdb6dfb0917dd908ade174b2c2475a5587f248",
+            "size_bytes": 30868
+          },
+          "src/generated/blue_catbird/labyrinth/get_messages.rs": {
+            "sha256": "a684e21d15d69cabba940292fb96f6ed07e87de040d296800b6f5d7b0a29517d",
+            "size_bytes": 29522
+          },
+          "src/generated/blue_catbird/labyrinth/get_virtual_device.rs": {
+            "sha256": "15669fdaea6abf1068cb1020aafac84a777345809d4d2848878add073d9d1953",
+            "size_bytes": 7935
+          },
+          "src/generated/blue_catbird/labyrinth/labyrinth_relay.rs": {
+            "sha256": "ecd01be72ae3f7dff35ff5017e66c8d8537a810743cede113e3f32ec4a655627",
+            "size_bytes": 22192
+          },
+          "src/generated/blue_catbird/labyrinth/list_batches.rs": {
+            "sha256": "edac5a87ebfd490184ae4571d6f76f3a9e52718c6bce9fa17dbe7d7f838372a5",
+            "size_bytes": 36229
+          },
+          "src/generated/blue_catbird/labyrinth/list_devices.rs": {
+            "sha256": "78f9e90aec9548496c5de4181c1e63bd528a99d846e2166a64eac2cb3c81c8c3",
+            "size_bytes": 6503
+          },
+          "src/generated/blue_catbird/labyrinth/list_epoch_members.rs": {
+            "sha256": "98c037fb62cc963471895bdbcb7dbd9d4f480561437a248edebe1b064fa484dd",
+            "size_bytes": 9395
+          },
+          "src/generated/blue_catbird/labyrinth/list_epochs.rs": {
+            "sha256": "514228d9845583b8f29513abb5d5868d6ded400ba6f939ec3abf47d74328c382",
+            "size_bytes": 18857
+          },
+          "src/generated/blue_catbird/labyrinth/list_owner_batches.rs": {
+            "sha256": "8957b4e760c404e307d88d40e8478c7058f965cd9bb7e7843440e027cd5dabc2",
+            "size_bytes": 31287
+          },
+          "src/generated/blue_catbird/labyrinth/list_owner_threads.rs": {
+            "sha256": "aad60c1b258e42445ca6e035fe7ba414ff26133f65305a8d67f7b7d3381dac04",
+            "size_bytes": 13368
+          },
+          "src/generated/blue_catbird/labyrinth/list_threads.rs": {
+            "sha256": "e02bff219a82a7c1d5b25c7cfc24ce6f3b786395892b3ee06a9ee3b537000984",
+            "size_bytes": 14730
+          },
+          "src/generated/blue_catbird/labyrinth/list_virtual_devices.rs": {
+            "sha256": "274c3d1b31696235d5f64db004f6e2fcb4e318720069600e3238f1b4de8fd4cc",
+            "size_bytes": 6844
+          },
+          "src/generated/blue_catbird/labyrinth/mailbox_keys.rs": {
+            "sha256": "f33d3511d30588d7266e0ed43add364c0f7d59b803b9bb9e1ed7a0905e4ab2c4",
+            "size_bytes": 17528
+          },
+          "src/generated/blue_catbird/labyrinth/mark_device_revoked.rs": {
+            "sha256": "fb2aced4087e0d71d183930ca43e077bdc6a485199a4f4126fd1ffd842e53fd8",
+            "size_bytes": 11066
+          },
+          "src/generated/blue_catbird/labyrinth/mek.rs": {
+            "sha256": "91dee8002182bdb6fad70b2beedbd26badc89ede2acf4c29a663d41d56c43d99",
+            "size_bytes": 49951
+          },
+          "src/generated/blue_catbird/labyrinth/owner_batch.rs": {
+            "sha256": "15dfa4683d479415dce1f48fc77e6ce680fa3507ef70c0d8241934dcfcff9ade",
+            "size_bytes": 17101
+          },
+          "src/generated/blue_catbird/labyrinth/publish_epoch_head.rs": {
+            "sha256": "9d32073ce7786e3d35caaa8b77964e31901aacff9dc8a7c1fd86bcb5ea30f603",
+            "size_bytes": 11099
+          },
+          "src/generated/blue_catbird/labyrinth/purge_mailbox.rs": {
+            "sha256": "f2d612d65643136b02cda85d41182384b092a24aa79be534e335edb63294b0ee",
+            "size_bytes": 4557
+          },
+          "src/generated/blue_catbird/labyrinth/put_attachment_ref.rs": {
+            "sha256": "3741e0219f6000d42dadf8c0b57d3f79e17bcff25119983240ea9ddd1242157d",
+            "size_bytes": 19817
+          },
+          "src/generated/blue_catbird/labyrinth/redact_message.rs": {
+            "sha256": "dc3f1e3abbaffbe4a7a00042080fe17ba57a50f703e9c00b19eeb85942842bee",
+            "size_bytes": 12518
+          },
+          "src/generated/blue_catbird/labyrinth/register_orf_state.rs": {
+            "sha256": "922f8eedf733fee7e5bfeb70ffead2bb20f06c4c1cb62d56d10cb6d99e7ced22",
+            "size_bytes": 23985
+          },
+          "src/generated/blue_catbird/labyrinth/touch_virtual_device.rs": {
+            "sha256": "25bdce910b11cf811d69f26c0f328b81439533c085c6a45d26ad1bcdf3cba601",
+            "size_bytes": 8997
+          },
+          "src/generated/blue_catbird/labyrinth/virtual_device.rs": {
+            "sha256": "d66ee27e3a2619b49ee486195c531be7300b5ee8794b7e021e07918c242bf81c",
+            "size_bytes": 53240
+          },
+          "src/generated/blue_catbird/mlsDS.rs": {
+            "sha256": "5fd120cc811427908b957b715695c6f6403adce05feba4ae70e82f8709596179",
+            "size_bytes": 102986
+          },
+          "src/generated/blue_catbird/mlsDS/delete_federation_peer.rs": {
+            "sha256": "ff1bd2ce479d80a2e7603e90fa4011de95edecb14e580ce497a25bf0aec3a38b",
+            "size_bytes": 3466
+          },
+          "src/generated/blue_catbird/mlsDS/deliver_message.rs": {
+            "sha256": "12a08dd47db75c778adcfe5e1f784cd995837b3f1e98358f1354325e63668e0c",
+            "size_bytes": 18484
+          },
+          "src/generated/blue_catbird/mlsDS/deliver_welcome.rs": {
+            "sha256": "fe4bca0b0409f011b9cfa9218d67aa4d4332252e95a7b2d84abeff6c08a70f04",
+            "size_bytes": 39849
+          },
+          "src/generated/blue_catbird/mlsDS/fetch_key_package.rs": {
+            "sha256": "66997bb9768278324e081faac5c17f2d3bba9bbd2b77e197e1a883df56fb50aa",
+            "size_bytes": 10181
+          },
+          "src/generated/blue_catbird/mlsDS/get_convo_digest.rs": {
+            "sha256": "e16055fb097da684bca13dab864ee49c8a1086e9251d58c7ee40d462bf0a3782",
+            "size_bytes": 8624
+          },
+          "src/generated/blue_catbird/mlsDS/get_convo_events.rs": {
+            "sha256": "b2c0c1d9299dd37f90b941745cb3b3f413c80a09f74d220cf5366f917009c8a7",
+            "size_bytes": 48842
+          },
+          "src/generated/blue_catbird/mlsDS/get_federation_mode.rs": {
+            "sha256": "05feaf2fdad8d9552d51d79bec350e6cbc9e8015bd20e1c7c56df8d861a84c2e",
+            "size_bytes": 3231
+          },
+          "src/generated/blue_catbird/mlsDS/get_federation_peers.rs": {
+            "sha256": "8b33960a0a495ad8c22e806b44ab4ceb64bbfadf1f33ecf94a9cd8ef46eca55f",
+            "size_bytes": 20721
+          },
+          "src/generated/blue_catbird/mlsDS/health_check.rs": {
+            "sha256": "4ca035d9d2450b846798c49feb6205430973c71e3d55be1420f2c1a2f77629bd",
+            "size_bytes": 3015
+          },
+          "src/generated/blue_catbird/mlsDS/set_federation_mode.rs": {
+            "sha256": "8b3c0b39e981ab6ec1a30da81e806a3bc080464becec2153a899d86f0591c05b",
+            "size_bytes": 3658
+          },
+          "src/generated/blue_catbird/mlsDS/submit_commit.rs": {
+            "sha256": "c95131dc9640fb10ed16a07e10ec7b84e9f3bbca93f17464474b30dcc852a9c4",
+            "size_bytes": 12831
+          },
+          "src/generated/blue_catbird/mlsDS/transfer_sequencer.rs": {
+            "sha256": "2b6457eb5be0bf6aa29c8cb6117bf3a2f04f0d7d1e41c2810db3b6ed7cfd48b2",
+            "size_bytes": 12506
+          },
+          "src/generated/blue_catbird/mlsDS/upsert_federation_peer.rs": {
+            "sha256": "80ef8068b428d6a5d4c855de1719378ff1441959982977ff89a7c2e4290dc573",
+            "size_bytes": 3865
+          },
+          "src/generated/builder_types.rs": {
+            "sha256": "13f86a23f1507b4e6d9ab74a5beb0629b344fde780c5770a96e722da9d8e4f76",
+            "size_bytes": 1407
+          },
+          "src/generated/chat_bsky.rs": {
+            "sha256": "9fdd2e7e4c8f7622e82b34cb6c29e63d567e947dec19e38d7421090482cc4200",
+            "size_bytes": 385
+          },
+          "src/generated/chat_bsky/actor.rs": {
+            "sha256": "2d36c097b2ee16013f45204b4ef58a99ef3f05b8fd93742d1af97cabdf10b95b",
+            "size_bytes": 43421
+          },
+          "src/generated/chat_bsky/actor/declaration.rs": {
+            "sha256": "b3c7582df25858b847d6c0a6f63c22ae913788741473e778b4e51b42fd41eb9b",
+            "size_bytes": 17648
+          },
+          "src/generated/chat_bsky/actor/delete_account.rs": {
+            "sha256": "10ec08c65a2f137ba032b1123c065903765f8d07c5b7ae9d21f49b6d3572804b",
+            "size_bytes": 2897
+          },
+          "src/generated/chat_bsky/actor/export_account_data.rs": {
+            "sha256": "d07fb577e397b5fe7a2520a378218501224a223f7f4410ec5410f08e8b8295e3",
+            "size_bytes": 3077
+          },
+          "src/generated/chat_bsky/actor/get_status.rs": {
+            "sha256": "bd78d05b939e7bc879c883dede595caa36a6e38229b29c61aaff3da603df8c14",
+            "size_bytes": 3079
+          },
+          "src/generated/chat_bsky/auth_full_chat_client.rs": {
+            "sha256": "8a65da5169bfa9685e4fb423da6d0418d09bafd84c6bcf2dbef63d6a7b35cc76",
+            "size_bytes": 226
+          },
+          "src/generated/chat_bsky/convo.rs": {
+            "sha256": "df0c8e8aa7c53c3a72680e7cf9dd1c374e962b447cc098ab8900998ec2cbf494",
+            "size_bytes": 612065
+          },
+          "src/generated/chat_bsky/convo/accept_convo.rs": {
+            "sha256": "ea7222fd44a10cf363a71a6b21d6c6bf90a656dd4b24bb08a6b420f1562d8bbf",
+            "size_bytes": 4657
+          },
+          "src/generated/chat_bsky/convo/add_reaction.rs": {
+            "sha256": "4b5facccbde533655b71a950f3f29851aabd0317fe5704248bf315810e824c27",
+            "size_bytes": 6925
+          },
+          "src/generated/chat_bsky/convo/delete_message_for_self.rs": {
+            "sha256": "a6acfe2db1af5840fdcb3fc13041a2f87131260d6b8ffb65788932c54b915670",
+            "size_bytes": 5320
+          },
+          "src/generated/chat_bsky/convo/get_convo.rs": {
+            "sha256": "3f12bf8a2c1e094503facbed3c97ba1d4566d61bccf52e136de147ff883673a5",
+            "size_bytes": 7346
+          },
+          "src/generated/chat_bsky/convo/get_convo_availability.rs": {
+            "sha256": "3ce18cad1cda1873fc8c2468d909bb858a55edc3cb156fa9b46cc2880839dd02",
+            "size_bytes": 6871
+          },
+          "src/generated/chat_bsky/convo/get_convo_for_members.rs": {
+            "sha256": "8dd7b8740509fbc383e3ed294e7840ec9d5695d52c97ae07d9b369e073f7f511",
+            "size_bytes": 10259
+          },
+          "src/generated/chat_bsky/convo/get_convo_members.rs": {
+            "sha256": "f051f8d6345e32dd71e72bea7af0bb37b1874e00319a64ec526ef3d3ac3dd248",
+            "size_bytes": 9281
+          },
+          "src/generated/chat_bsky/convo/get_log.rs": {
+            "sha256": "49d82cb2560f584a76e7b332d3d48ca85c96c695222663ca0b36ebd96b183218",
+            "size_bytes": 10359
+          },
+          "src/generated/chat_bsky/convo/get_messages.rs": {
+            "sha256": "3a52a2a1d5ba08e3627eb49e5c6f8fd0ccf922bd25e5e8281915924ee3455a5f",
+            "size_bytes": 10134
+          },
+          "src/generated/chat_bsky/convo/get_unread_counts.rs": {
+            "sha256": "9799a4333592918569f6e411a9212391f223d38f99435e7596583fe47f5cc44a",
+            "size_bytes": 5631
+          },
+          "src/generated/chat_bsky/convo/leave_convo.rs": {
+            "sha256": "a3831b7da58abc752fe07ab368dbf2fbca8102a9280dfff30eb87e4c953230a1",
+            "size_bytes": 5006
+          },
+          "src/generated/chat_bsky/convo/list_convo_requests.rs": {
+            "sha256": "ada510164b990d8519513ef181d0b57b16e6f5fdbb8e68ba2349b382748b6cb9",
+            "size_bytes": 7465
+          },
+          "src/generated/chat_bsky/convo/list_convos.rs": {
+            "sha256": "fffb861ebcb4023657ee613847d96a603be5f0f5e1695c4e3de411537eedf36d",
+            "size_bytes": 18989
+          },
+          "src/generated/chat_bsky/convo/lock_convo.rs": {
+            "sha256": "104ca15b70e8313ea45481f679080aa3ddbf68e6b3ac16b472b79a57224dece7",
+            "size_bytes": 5322
+          },
+          "src/generated/chat_bsky/convo/mute_convo.rs": {
+            "sha256": "f2f151eb0b15c3d38c217ea2236c258227fad21690b6e70c4086a7b73930dc52",
+            "size_bytes": 4444
+          },
+          "src/generated/chat_bsky/convo/remove_reaction.rs": {
+            "sha256": "a437c4627f3d2ab97a9da6b9828812a7a4c6494948767fb99b6daf75ba7eb941",
+            "size_bytes": 6307
+          },
+          "src/generated/chat_bsky/convo/send_message.rs": {
+            "sha256": "d1d36ae61e9ea5041a47cdfd077821f4c468b2600a5d67210fcf83a5660a9a28",
+            "size_bytes": 10697
+          },
+          "src/generated/chat_bsky/convo/send_message_batch.rs": {
+            "sha256": "da000f6eb70cc4a4233d8f6ea4e6fcc3a56b7442e14e04222ab9067a3b862b02",
+            "size_bytes": 21674
+          },
+          "src/generated/chat_bsky/convo/unlock_convo.rs": {
+            "sha256": "7a7dca3b40a87f45bbc1902408596234fbe1229fce0f68a8d77412af70afd554",
+            "size_bytes": 5416
+          },
+          "src/generated/chat_bsky/convo/unmute_convo.rs": {
+            "sha256": "57190884bc3a5cee556bb2b82dc8d3af9342eab1939dd4308c9d4c43212b5294",
+            "size_bytes": 4490
+          },
+          "src/generated/chat_bsky/convo/update_all_read.rs": {
+            "sha256": "142bb689c34ed1f8a7c3f5ca51bcd9d7f04247bfe4bd90cd5f50c57b23400fc7",
+            "size_bytes": 5674
+          },
+          "src/generated/chat_bsky/convo/update_read.rs": {
+            "sha256": "7195dd70aa10dffdc836be17de218ebd348985da23c4f18988cf1e73bfac4c7b",
+            "size_bytes": 4580
+          },
+          "src/generated/chat_bsky/embed.rs": {
+            "sha256": "adc2127c7bf280039a4a23dfc542819e911ec3bc0ede3a319e881e97e3da7845",
+            "size_bytes": 277
+          },
+          "src/generated/chat_bsky/embed/join_link.rs": {
+            "sha256": "9ea329f65da9ee66611a44d808dd3efefad30c4a1269eb5a7bff3097f1afd13f",
+            "size_bytes": 12763
+          },
+          "src/generated/chat_bsky/group.rs": {
+            "sha256": "142b8cfe4bec2d6a3198adc9f72fce3169c98c3ee4d02a0475d9ad9081faaded",
+            "size_bytes": 90378
+          },
+          "src/generated/chat_bsky/group/add_members.rs": {
+            "sha256": "58179e9a0a88ae89d472b20e0848c5dd737f98ee5e3d809e348ba62031ab59e5",
+            "size_bytes": 13907
+          },
+          "src/generated/chat_bsky/group/approve_join_request.rs": {
+            "sha256": "c767089d857991f0e9ca53fdf3b08f6cc0c0948eb77269291972c86e27660509",
+            "size_bytes": 11074
+          },
+          "src/generated/chat_bsky/group/create_group.rs": {
+            "sha256": "1e78556490a86f518ce600b7be5fd65998913fa4d77c97d97b61f404d49f0c66",
+            "size_bytes": 12791
+          },
+          "src/generated/chat_bsky/group/create_join_link.rs": {
+            "sha256": "21eb368ae43b22234cc28e65c64db3e00ba0002864b56a5ddb242236c9dfb07d",
+            "size_bytes": 11946
+          },
+          "src/generated/chat_bsky/group/disable_join_link.rs": {
+            "sha256": "8875b279c44442c36184e104e5d8bb35c87ef378d1b3a79ea5574d2ededf9889",
+            "size_bytes": 5463
+          },
+          "src/generated/chat_bsky/group/edit_group.rs": {
+            "sha256": "df89961df06fd1f3a0b7278d3a663c804879ea335be00f195a8d819392d3f233",
+            "size_bytes": 5339
+          },
+          "src/generated/chat_bsky/group/edit_join_link.rs": {
+            "sha256": "8a1a89acd8235ad6cc6d6604a397c4dc9b9a1ef3c0ad852ba4f08721cfecd2ee",
+            "size_bytes": 5674
+          },
+          "src/generated/chat_bsky/group/enable_join_link.rs": {
+            "sha256": "04a4459b9ce989b0bd3dd5a312e55f569c683aa1bb25bcb30ec5b1ae01b34083",
+            "size_bytes": 5897
+          },
+          "src/generated/chat_bsky/group/get_join_link_previews.rs": {
+            "sha256": "60d5257fffa2176d5e8e0ba4fc207445857923814b20277c33269b5c33d1c092",
+            "size_bytes": 7516
+          },
+          "src/generated/chat_bsky/group/list_join_requests.rs": {
+            "sha256": "c8741b8aabe082cc408af53bb80472082674147bea8e1128288504caf7c29f0a",
+            "size_bytes": 9793
+          },
+          "src/generated/chat_bsky/group/list_mutual_groups.rs": {
+            "sha256": "de1efe735d029eb68ea7d44d99a6a2b5fdcce513db2e0d15948a2d772b4f81a3",
+            "size_bytes": 8108
+          },
+          "src/generated/chat_bsky/group/reject_join_request.rs": {
+            "sha256": "1dbbf506b0c1f37c2d55898fc275ab1d9a983d1f50de5196a2474f75542615ac",
+            "size_bytes": 10529
+          },
+          "src/generated/chat_bsky/group/remove_members.rs": {
+            "sha256": "6d2e9b4588ad2e0b341108d0fe4543abb54faada69de2fbc616e61657ed2ed70",
+            "size_bytes": 10328
+          },
+          "src/generated/chat_bsky/group/request_join.rs": {
+            "sha256": "1ed2b534a3ca28556b06bd5c217f8ebb17255f0968b5897b3fc93841b6f56023",
+            "size_bytes": 9318
+          },
+          "src/generated/chat_bsky/group/update_join_requests_read.rs": {
+            "sha256": "921e3216e3938f510760370eb3dba80ad59a01579be5a113f2641eb7cf0b1e63",
+            "size_bytes": 5164
+          },
+          "src/generated/chat_bsky/group/withdraw_join_request.rs": {
+            "sha256": "a95dcbc373edb41a30bbb84068ba8bf6d70dd7a55b98557477a29f8caf5b2296",
+            "size_bytes": 4670
+          },
+          "src/generated/chat_bsky/moderation.rs": {
+            "sha256": "5b8ee4b6fc1ecdbee2bdf98cd8d186e6ed1e6f272dff7dc7dfb274981d38fcb5",
+            "size_bytes": 31993
+          },
+          "src/generated/chat_bsky/moderation/get_actor_metadata.rs": {
+            "sha256": "2796d1534be9287af574f14ca59a4fceb116c5909a6363cf876392452bb30694",
+            "size_bytes": 22328
+          },
+          "src/generated/chat_bsky/moderation/get_convo.rs": {
+            "sha256": "bb5815fd30d49a38847d87b18802489ba0a3c77ac0509d50a8901b24d6c33adf",
+            "size_bytes": 7386
+          },
+          "src/generated/chat_bsky/moderation/get_convo_members.rs": {
+            "sha256": "eef3411b3c4dfd539727ab77a577f02408f6bf5672ae27e8fab4a5adcc882966",
+            "size_bytes": 9316
+          },
+          "src/generated/chat_bsky/moderation/get_convos.rs": {
+            "sha256": "4a5d50fa41964849e778d0e596f9fa0a53ee527bc2da5b6281e76aae9c8d7f9d",
+            "size_bytes": 6164
+          },
+          "src/generated/chat_bsky/moderation/get_message_context.rs": {
+            "sha256": "4ba23b6ea61349f3239e4a653112d7d1a9a37a4f67568422519039f247aa1ade",
+            "size_bytes": 10445
+          },
+          "src/generated/chat_bsky/moderation/subscribe_mod_events.rs": {
+            "sha256": "6ebc10761ae251e95c3b95d80a25615d7fbd3843a88824568e70dd1c13b7f225",
+            "size_bytes": 345893
+          },
+          "src/generated/chat_bsky/moderation/update_actor_access.rs": {
+            "sha256": "76333d1b5a9f0fb01814f1661dc2f9e7c11b31b50a25539c34f3b72da451a4a3",
+            "size_bytes": 9130
+          },
+          "src/generated/chat_bsky/notification.rs": {
+            "sha256": "0944721ce2c953cfe440dff993391574d0fe3cb165e13fb0aea10c1685ae448a",
+            "size_bytes": 21792
+          },
+          "src/generated/chat_bsky/notification/get_preferences.rs": {
+            "sha256": "01afc527123b23892da39e2f5b82a0977b9d0f82b37c8dfbeb9731aba9aa8af2",
+            "size_bytes": 2941
+          },
+          "src/generated/chat_bsky/notification/put_preferences.rs": {
+            "sha256": "05cdc07455ab73ab801d77e87d18e558faef8de6f2d1876e24ca037f29754b31",
+            "size_bytes": 3624
+          },
+          "src/generated/com_atproto.rs": {
+            "sha256": "870733222a83fb2e41e73b0ccb0133972ff70c0ba1361e1c3f4982cbc6f6634c",
+            "size_bytes": 521
+          },
+          "src/generated/com_atproto/admin.rs": {
+            "sha256": "21195b535b0a6c79371be671c88c229d35220f18edca6422b716573af7d39a65",
+            "size_bytes": 56978
+          },
+          "src/generated/com_atproto/admin/delete_account.rs": {
+            "sha256": "15b11cc714a1f9c59ec1f995e0e90f1908c2778e9faa49804237c84407dbd662",
+            "size_bytes": 6779
+          },
+          "src/generated/com_atproto/admin/disable_account_invites.rs": {
+            "sha256": "f8dc012a682a50707cba7b454d1260aff3f9f28e41d4c7e703bfa59d5da98d40",
+            "size_bytes": 8000
+          },
+          "src/generated/com_atproto/admin/disable_invite_codes.rs": {
+            "sha256": "62d537cfff0bed9b871b0962846eda5746b4e6c3a7c0e6a8fbd526d5039ddbdd",
+            "size_bytes": 3119
+          },
+          "src/generated/com_atproto/admin/enable_account_invites.rs": {
+            "sha256": "359b38fd3446ee342a0c10aa7bf033873276fdb63e8ec63858329f434ee8e8fe",
+            "size_bytes": 7932
+          },
+          "src/generated/com_atproto/admin/get_account_info.rs": {
+            "sha256": "f977f2a557d47d647ef543a3804788ba791ef00e1049be3347af1484d74f6271",
+            "size_bytes": 6406
+          },
+          "src/generated/com_atproto/admin/get_account_infos.rs": {
+            "sha256": "f18867e576badc50f7c3ba68fd0bfefb3c9298e8e622bc84a235a80aa4f33452",
+            "size_bytes": 6470
+          },
+          "src/generated/com_atproto/admin/get_invite_codes.rs": {
+            "sha256": "443ef3a24ed30158bcc637ba3acc967313677d8feb3bcf12afd60dd5c32177c7",
+            "size_bytes": 10003
+          },
+          "src/generated/com_atproto/admin/get_subject_status.rs": {
+            "sha256": "508d3979d2f1ec9bdc832551d488813dfcb25183992a9327751178c3927e254f",
+            "size_bytes": 8633
+          },
+          "src/generated/com_atproto/admin/search_accounts.rs": {
+            "sha256": "697a6080e21d7155ab800dccf9890f4bf14875447621a69ce84cf5da48470016",
+            "size_bytes": 7319
+          },
+          "src/generated/com_atproto/admin/send_email.rs": {
+            "sha256": "2feb689897a8b0e7756530a5ce251e3919029805942e9e2f1b582912e10b7a65",
+            "size_bytes": 11353
+          },
+          "src/generated/com_atproto/admin/update_account_email.rs": {
+            "sha256": "e2969ad32a50e5558724df1e5c4133536f95a03e0939193f80a578a11032127d",
+            "size_bytes": 8463
+          },
+          "src/generated/com_atproto/admin/update_account_handle.rs": {
+            "sha256": "22916b4fd3507ad35a98a928dd95c3e3a2f9e5c149b0fc67508d29b08bf58508",
+            "size_bytes": 8514
+          },
+          "src/generated/com_atproto/admin/update_account_password.rs": {
+            "sha256": "4e7aa3ef9e4e874a6ccc299dd77409f389e4cba105b67d0930ecb64b177d855f",
+            "size_bytes": 8564
+          },
+          "src/generated/com_atproto/admin/update_account_signing_key.rs": {
+            "sha256": "5d693ab1482a1a44bf247a52dc02fd8ba0ccb4a91bc80ed7f6ab05ce4f97579d",
+            "size_bytes": 8910
+          },
+          "src/generated/com_atproto/admin/update_subject_status.rs": {
+            "sha256": "19e43d107a949799ef013cad23aef8f98e54f502824fe8d01e48ec49ce012966",
+            "size_bytes": 10953
+          },
+          "src/generated/com_atproto/identity.rs": {
+            "sha256": "a91f3b3540d1b8e5c00701d10dc7baef7ae497bd11efe251a78fb41904b697cc",
+            "size_bytes": 12740
+          },
+          "src/generated/com_atproto/identity/get_recommended_did_credentials.rs": {
+            "sha256": "ddc5a1588d3cc7656d83d2f0a1bbd6f2209ac9866680b733b7a4c02fa22492d1",
+            "size_bytes": 3828
+          },
+          "src/generated/com_atproto/identity/refresh_identity.rs": {
+            "sha256": "09f6cc03d02d027debaa287cc0d3f302578619c24e50f9f8fc258e0e639317bd",
+            "size_bytes": 9905
+          },
+          "src/generated/com_atproto/identity/request_plc_operation_signature.rs": {
+            "sha256": "f8d81101dbfc67c4f357c66cd740e4365572c4c2e4e1ad24b994e69222c74b76",
+            "size_bytes": 2834
+          },
+          "src/generated/com_atproto/identity/resolve_did.rs": {
+            "sha256": "55d685ceea990be2301a1b97263a97e850412c503fddd0b887aeeb31f5005862",
+            "size_bytes": 8137
+          },
+          "src/generated/com_atproto/identity/resolve_handle.rs": {
+            "sha256": "2e393213e409a283adaf79cb238c419a26f77e67975aae8cfa66d1a1dc9674b9",
+            "size_bytes": 7814
+          },
+          "src/generated/com_atproto/identity/resolve_identity.rs": {
+            "sha256": "a8f36abcd087a4004a41b90dc1e785bc22395283c603be2b9547afd608e963e9",
+            "size_bytes": 9042
+          },
+          "src/generated/com_atproto/identity/sign_plc_operation.rs": {
+            "sha256": "aac5edb5b7b311b598f9ac83dc9d2441e97ec621e8ce352de28584ae0be0725c",
+            "size_bytes": 4058
+          },
+          "src/generated/com_atproto/identity/submit_plc_operation.rs": {
+            "sha256": "3f2a916d8b48cacc6c76c17efc1427ef9c14133128c6fc91951f92e584c72125",
+            "size_bytes": 7163
+          },
+          "src/generated/com_atproto/identity/update_handle.rs": {
+            "sha256": "7aee9b9e705d17ef3b0d49af6c6045189eadd37fad298ab6888cedbb5126f76f",
+            "size_bytes": 6840
+          },
+          "src/generated/com_atproto/label.rs": {
+            "sha256": "62c041bfc2905e3cfd40921ffe9c83f662f033d66a2d7dfd3df48cdbc89b275c",
+            "size_bytes": 83592
+          },
+          "src/generated/com_atproto/label/query_labels.rs": {
+            "sha256": "659d6449a5e4f4006c9ffdadcde786cc070aabfa4743f06cc4d4809ef9cece4a",
+            "size_bytes": 8648
+          },
+          "src/generated/com_atproto/label/subscribe_labels.rs": {
+            "sha256": "6e23d9e69808aa73a1bc3ea08957d1cc87ad881b5cf33497fc260321b621a697",
+            "size_bytes": 23908
+          },
+          "src/generated/com_atproto/lexicon.rs": {
+            "sha256": "ef3b4f4353774f3fed030ed6bb4a00a944906e3bd717a63daf3312ccce3a5346",
+            "size_bytes": 303
+          },
+          "src/generated/com_atproto/lexicon/resolve_lexicon.rs": {
+            "sha256": "fb09d1763167cd157980147215b231eeb1372ba4657ebb439830919b5529ca5d",
+            "size_bytes": 8044
+          },
+          "src/generated/com_atproto/lexicon/schema.rs": {
+            "sha256": "3ce23f0c1bfff693441316ad9a5400865cf1c2df42d6e3736e9aea25b272e8b8",
+            "size_bytes": 10752
+          },
+          "src/generated/com_atproto/moderation.rs": {
+            "sha256": "983b72721ad2ed1c40f52fc5be782872a922db45c0943187218c4247094538a9",
+            "size_bytes": 29986
+          },
+          "src/generated/com_atproto/moderation/create_report.rs": {
+            "sha256": "8918298ca20ca7a38b6ca43796ad3e1136d22bb46a0ff74f9a88a4d949f456c0",
+            "size_bytes": 21537
+          },
+          "src/generated/com_atproto/repo.rs": {
+            "sha256": "4f8525ff5a2be7e9ac82d758ce2e4211f6b759e815c38677f6a80263c4a033b0",
+            "size_bytes": 10176
+          },
+          "src/generated/com_atproto/repo/apply_writes.rs": {
+            "sha256": "19f6fd2206d3edbfc29e5c7c0135d0a4f17e98cb6d812a6884ab893ed44ce788",
+            "size_bytes": 81940
+          },
+          "src/generated/com_atproto/repo/create_record.rs": {
+            "sha256": "d7bd82fa08be3d1a766599dba6ab84aa9d33eeb175b68771cfe803eae434cd53",
+            "size_bytes": 17531
+          },
+          "src/generated/com_atproto/repo/delete_record.rs": {
+            "sha256": "109e7c2e31fb168d970583c2406a18c704349ca824a5bc0c83a068b05ac430eb",
+            "size_bytes": 13654
+          },
+          "src/generated/com_atproto/repo/describe_repo.rs": {
+            "sha256": "a1dcbad4c6c20a359f9c6ebe5e6343da0761c92e7f1d84c400dcccf8ff3d5221",
+            "size_bytes": 6739
+          },
+          "src/generated/com_atproto/repo/get_record.rs": {
+            "sha256": "21b3784be0ab1672798ba22f98c17f91b223a31278e721ab2eb4fc3a22e940c5",
+            "size_bytes": 11322
+          },
+          "src/generated/com_atproto/repo/import_repo.rs": {
+            "sha256": "ff007745ffe3aa69dd953522ab3710469a6ef620cfc68e19b9527464ce9bb1f7",
+            "size_bytes": 2746
+          },
+          "src/generated/com_atproto/repo/list_missing_blobs.rs": {
+            "sha256": "a53fc761f556b9dd06af423df03f17e837eef549855dfe18fb06b2184d99ca3c",
+            "size_bytes": 18443
+          },
+          "src/generated/com_atproto/repo/list_records.rs": {
+            "sha256": "51e8f71f8b49e3fde2cb0f87b52ed628b9430e342a51293e021b864e6d2a403f",
+            "size_bytes": 25938
+          },
+          "src/generated/com_atproto/repo/put_record.rs": {
+            "sha256": "cd54c6b96f54b7a097bb7011b4f275da883227b78f2daec6e2be33468bc775c8",
+            "size_bytes": 18638
+          },
+          "src/generated/com_atproto/repo/strong_ref.rs": {
+            "sha256": "f9a92efc1e85c94f6f91a79e5705a1fa7c3be4580d7cdb941f98a22fe2244c5e",
+            "size_bytes": 9845
+          },
+          "src/generated/com_atproto/repo/upload_blob.rs": {
+            "sha256": "5463f2858a3386b8ef087cc7c0d7de73146070569429fa13058392c6d49b7039",
+            "size_bytes": 3087
+          },
+          "src/generated/com_atproto/server.rs": {
+            "sha256": "5ab880ca89b0951dd39d959666f0ddeca2d103be896b125f09b5ce35f5a86ce5",
+            "size_bytes": 31205
+          },
+          "src/generated/com_atproto/server/activate_account.rs": {
+            "sha256": "27de89c4716fcc0db51a628f85abe856313866cfa0d16d8609109e41dff1167d",
+            "size_bytes": 2584
+          },
+          "src/generated/com_atproto/server/check_account_status.rs": {
+            "sha256": "f0111960694f8dd6809c36782e3da692fd7c7b1a053fbaaa7252d4289b7ebf1e",
+            "size_bytes": 3194
+          },
+          "src/generated/com_atproto/server/confirm_email.rs": {
+            "sha256": "f9cfaeb44998e0b49e7492435f44240e251b4969325f2939e4e9b340b76ffbab",
+            "size_bytes": 5462
+          },
+          "src/generated/com_atproto/server/create_account.rs": {
+            "sha256": "ae8060686080b76bf070589030dc7e360ed431f655f11ed90da4cb0800e317c1",
+            "size_bytes": 17964
+          },
+          "src/generated/com_atproto/server/create_app_password.rs": {
+            "sha256": "7f0d115a2fe3d8de1b61a97e91e6256a1e6daa15047af18552de009b0fbe1eff",
+            "size_bytes": 20592
+          },
+          "src/generated/com_atproto/server/create_invite_code.rs": {
+            "sha256": "d9d1734359db016a509c073f14ce3df77198844062ce55142b3f85d1306f9de8",
+            "size_bytes": 8251
+          },
+          "src/generated/com_atproto/server/create_invite_codes.rs": {
+            "sha256": "44b89f42bba1f7a0b062f7ae60136be87f4aa47a79525639e1f7483af0f1e33c",
+            "size_bytes": 23121
+          },
+          "src/generated/com_atproto/server/create_session.rs": {
+            "sha256": "2ce45cfe2fcbbd6a6c954ddcb5d88b6b41825e1ac08b6837ee31e45fa5e13fb9",
+            "size_bytes": 9527
+          },
+          "src/generated/com_atproto/server/deactivate_account.rs": {
+            "sha256": "dbb599baac3064529a93bb7840f6758f5dffd1e8ffe29e00d9d502b2949211b1",
+            "size_bytes": 3147
+          },
+          "src/generated/com_atproto/server/delete_account.rs": {
+            "sha256": "375f02be4933ce2571d819c1f9b8fabb8cb2e054a9527ae03befd91fb765ebce",
+            "size_bytes": 11154
+          },
+          "src/generated/com_atproto/server/delete_session.rs": {
+            "sha256": "b55bd841c69cb213d0b17f40a7059e9f60a525877c7a1465fee02c476783ad4a",
+            "size_bytes": 4304
+          },
+          "src/generated/com_atproto/server/describe_server.rs": {
+            "sha256": "1d4c6ff0ae0cadd8fa99a34eba033652dac7a6f81a9af141a892e403a643c38d",
+            "size_bytes": 12189
+          },
+          "src/generated/com_atproto/server/get_account_invite_codes.rs": {
+            "sha256": "951a4c3e9ec29f71e6efccf3ab9ac1c8db666401f7ad9306bfe3b5a1ea60151f",
+            "size_bytes": 7596
+          },
+          "src/generated/com_atproto/server/get_service_auth.rs": {
+            "sha256": "f347f469eb2343fe101135fbba7815be7ec3cb6a560674906c89d442fa39156e",
+            "size_bytes": 9163
+          },
+          "src/generated/com_atproto/server/get_session.rs": {
+            "sha256": "78e92265b128388ed79eb4ed8b594cf93098ad7ef08382169e1fc812e07607f4",
+            "size_bytes": 6677
+          },
+          "src/generated/com_atproto/server/list_app_passwords.rs": {
+            "sha256": "e999348b895965cd33dd2806c8f032aa7793a7091af1246df87b8b3ea3fe96fd",
+            "size_bytes": 15548
+          },
+          "src/generated/com_atproto/server/refresh_session.rs": {
+            "sha256": "cf3292137904008617ed6d529960ad2d9556952edd874a316f3ce23d4ae7bb45",
+            "size_bytes": 8889
+          },
+          "src/generated/com_atproto/server/request_account_delete.rs": {
+            "sha256": "ff7e459546c63ba9d767dc2ca7ad4b35d83b14c11177a92b3c926b6e3a3e6ced",
+            "size_bytes": 2674
+          },
+          "src/generated/com_atproto/server/request_email_confirmation.rs": {
+            "sha256": "0eb3690ebf034cc8c922085ec2e9691d07c641e81d217458ef074b4ee17174fe",
+            "size_bytes": 2746
+          },
+          "src/generated/com_atproto/server/request_email_update.rs": {
+            "sha256": "2fa94c96c8e59c9f5baec985fda8e31b68f349697026ced5c7e904716fd9526b",
+            "size_bytes": 3019
+          },
+          "src/generated/com_atproto/server/request_password_reset.rs": {
+            "sha256": "ca7c0906f68245c319ca24e2710052af8f94d1df5c7e2f105f0565c836aee630",
+            "size_bytes": 2949
+          },
+          "src/generated/com_atproto/server/reserve_signing_key.rs": {
+            "sha256": "61efc4d81cba126f4c4a01ba3dada41ccc484e4d97c911f4722ad000df29f8f8",
+            "size_bytes": 3549
+          },
+          "src/generated/com_atproto/server/reset_password.rs": {
+            "sha256": "34d91d951917d09b582d1c0965020f8095162d58db6c2aa80a91393ab87c20b4",
+            "size_bytes": 4607
+          },
+          "src/generated/com_atproto/server/revoke_app_password.rs": {
+            "sha256": "de4786d6bbc95ea2f78b6cbfd7f3fed4334d8f42e354294c0476d28d420f5072",
+            "size_bytes": 2897
+          },
+          "src/generated/com_atproto/server/update_email.rs": {
+            "sha256": "683d54eadd867698ddf4e3abf67d09e9490a0cd5dd7073fb3372b58de6bde1c4",
+            "size_bytes": 5324
+          },
+          "src/generated/com_atproto/simplespace.rs": {
+            "sha256": "66c55b453dd7e8dc1107ea378f4353693eb59acd6a1927f9ea36bdbc269476f0",
+            "size_bytes": 21324
+          },
+          "src/generated/com_atproto/simplespace/check_user_access.rs": {
+            "sha256": "21919134e18b8bc7d2cf92ea1a6ddc056aefb18ed39f79fd7e9bd45994c1557e",
+            "size_bytes": 12266
+          },
+          "src/generated/com_atproto/simplespace/create_space.rs": {
+            "sha256": "a072a1089909f1bc8893116b3499a672c61e3dc471e8ef24d1ffdaff8530c676",
+            "size_bytes": 18187
+          },
+          "src/generated/com_atproto/simplespace/delete_space.rs": {
+            "sha256": "a69a2a670fdda622069de6c7bf67bcfa3c05f2b4423cbe6d1168957499e29cbb",
+            "size_bytes": 8583
+          },
+          "src/generated/com_atproto/simplespace/get_space.rs": {
+            "sha256": "9d18706f81134eb8345e47534ae51c70d4ec8e539e02bd483efcc511b97d36dd",
+            "size_bytes": 10198
+          },
+          "src/generated/com_atproto/simplespace/list_members.rs": {
+            "sha256": "ad5c3d395a6dc94dbd62accb446b480c3170ccb964b9817b3e93f7f2c2fbaab6",
+            "size_bytes": 23288
+          },
+          "src/generated/com_atproto/simplespace/put_member.rs": {
+            "sha256": "8498191010029d659b82540a4d6f9b521a86ac80af5c4f0d13009faa40049a39",
+            "size_bytes": 12549
+          },
+          "src/generated/com_atproto/simplespace/remove_member.rs": {
+            "sha256": "b5c103123d682f8b69488cc21be102b7aef8a31bb742bafab67d0995dc4c20ee",
+            "size_bytes": 9979
+          },
+          "src/generated/com_atproto/simplespace/update_space.rs": {
+            "sha256": "df32f94692d663883fed664d05c2421f2edb8de466e713e130190f8a2182eb17",
+            "size_bytes": 14763
+          },
+          "src/generated/com_atproto/space.rs": {
+            "sha256": "a330d550e538b0b391aa3c9cd3ce197b6e3fbbe255b8760103ebf5c3028d607b",
+            "size_bytes": 32030
+          },
+          "src/generated/com_atproto/space/apply_writes.rs": {
+            "sha256": "eab6212743f8b44299bc66d7d5c879564fec68e71a0c348f4a90b0d43d2d847e",
+            "size_bytes": 83003
+          },
+          "src/generated/com_atproto/space/create_record.rs": {
+            "sha256": "9c4765d129469b54b6a93772b26de2d247c34ae8be13af908cb72509218bc56d",
+            "size_bytes": 18499
+          },
+          "src/generated/com_atproto/space/delete_record.rs": {
+            "sha256": "32ae598abf8f20a703d56eb1592ee49d1485cbcf1aeaedbc6c76f46b243637d7",
+            "size_bytes": 13138
+          },
+          "src/generated/com_atproto/space/get_blob.rs": {
+            "sha256": "a38b55df509d90b5e6a3037bf448170839611a90d85fc8050e1f95e68646d0dc",
+            "size_bytes": 12249
+          },
+          "src/generated/com_atproto/space/get_delegation_token.rs": {
+            "sha256": "d4f7fdebf0726f101599034d3aeebf54ebd63f66175932c0002fd457850f8bbf",
+            "size_bytes": 6671
+          },
+          "src/generated/com_atproto/space/get_latest_commit.rs": {
+            "sha256": "0fbb07370873747986fa82265ed4a4d7bed6462377eff54fb2e72e26628e7cb8",
+            "size_bytes": 10947
+          },
+          "src/generated/com_atproto/space/get_record.rs": {
+            "sha256": "5fd45098d307660659f77a5476f9a7ba4bac609ce146dcf05b5776a9001ecbd4",
+            "size_bytes": 14084
+          },
+          "src/generated/com_atproto/space/get_repo.rs": {
+            "sha256": "15c894af4e656ef48e143e12482b95b3e9bd91fff3d608b301834f68b6d296d6",
+            "size_bytes": 11389
+          },
+          "src/generated/com_atproto/space/get_space_credential.rs": {
+            "sha256": "cf88e4b69febb0c75cf05c21fe8a1a22289895be4b300375c3db4a930a09f5b7",
+            "size_bytes": 12929
+          },
+          "src/generated/com_atproto/space/list_blobs.rs": {
+            "sha256": "1dd41f6ceabdb41ae1ce24e6065ec1f0e9b9d8ab8bb468107812744aff9f6012",
+            "size_bytes": 12787
+          },
+          "src/generated/com_atproto/space/list_records.rs": {
+            "sha256": "b4be6446aa0c997046dc744c15de3faf51b4f6c122e50b0176d9a3d125ae01a5",
+            "size_bytes": 34148
+          },
+          "src/generated/com_atproto/space/list_repo_ops.rs": {
+            "sha256": "5a39c55c19da1268a8ebb7e2948b19e59a237e0e3995aa145e322ccf0e672fd2",
+            "size_bytes": 37363
+          },
+          "src/generated/com_atproto/space/list_repos.rs": {
+            "sha256": "852f717312603d64f7ef26bfdd29e9aec90308a5c2c42d4c33f2d63e7eab42f4",
+            "size_bytes": 24175
+          },
+          "src/generated/com_atproto/space/list_spaces.rs": {
+            "sha256": "f572d5a2b2f8ac185fa6fd4b9de0a413d04c5d838623029a78e25327e771d476",
+            "size_bytes": 19761
+          },
+          "src/generated/com_atproto/space/notify_space_deleted.rs": {
+            "sha256": "60d2c650ece5c2eaf9a8e18715577d0ed8fd328a9382af85dde7acd5926c0a61",
+            "size_bytes": 7130
+          },
+          "src/generated/com_atproto/space/notify_write.rs": {
+            "sha256": "5afb8294e87c6e9c764965a1b36a72e498901d9c140cfe055f3b3ebbc287e677",
+            "size_bytes": 11163
+          },
+          "src/generated/com_atproto/space/put_record.rs": {
+            "sha256": "74520b1f5dfb1428b0604b0d953d71793332249004f00cb9657e24ecb851ebd3",
+            "size_bytes": 18127
+          },
+          "src/generated/com_atproto/space/register_notify.rs": {
+            "sha256": "73239b47245bf4fe13998aa35b6460842768bdeeb71f8a38b882cb018d506507",
+            "size_bytes": 10935
+          },
+          "src/generated/com_atproto/space/unregister_notify.rs": {
+            "sha256": "e285f3f12c53b376fa44bf75e4389bcc1d570f78f2404c0219ac90c903287111",
+            "size_bytes": 9746
+          },
+          "src/generated/com_atproto/sync.rs": {
+            "sha256": "61b210b8d7c72de27d1b7bbfb9673a5660b7b0eaab7f121e0d2bb40aaf33c66d",
+            "size_bytes": 3177
+          },
+          "src/generated/com_atproto/sync/get_blob.rs": {
+            "sha256": "e63ca6c72ff6a61bd3dc040086c73bd0a098336fa4c2af3d143071dd3ee8dea5",
+            "size_bytes": 10444
+          },
+          "src/generated/com_atproto/sync/get_blocks.rs": {
+            "sha256": "30b601e2c5e3d084acd8b8cbddda8cabf2f6118ef7d69ac739f86899f64280e7",
+            "size_bytes": 10621
+          },
+          "src/generated/com_atproto/sync/get_checkout.rs": {
+            "sha256": "dbbd6d2b05bbe366b20eebe8d1c2cd35c071aa56d031a4aa3400f980fc67a995",
+            "size_bytes": 6370
+          },
+          "src/generated/com_atproto/sync/get_head.rs": {
+            "sha256": "810154cfa18f75b9e6ed9efa74004b8983ee15b4ded4eaa6e4ca2a173a27abf6",
+            "size_bytes": 7327
+          },
+          "src/generated/com_atproto/sync/get_host_status.rs": {
+            "sha256": "95b1255cdc69e18dcc0a8f40769af46e085f18254c650a26a5b5ad038343ed9b",
+            "size_bytes": 8281
+          },
+          "src/generated/com_atproto/sync/get_latest_commit.rs": {
+            "sha256": "9a6e2d415a1e00d811f11da94391e8764dbed6e6740eb89480839fd11c12e8ee",
+            "size_bytes": 9119
+          },
+          "src/generated/com_atproto/sync/get_record.rs": {
+            "sha256": "bbacabf9760c9b274ed11544aab4ad30b23e09c70389252857fd203e937b0aae",
+            "size_bytes": 12232
+          },
+          "src/generated/com_atproto/sync/get_repo.rs": {
+            "sha256": "d2cbd720d1aab2a8620511960e5cfb97ce281ef80f0feb43449eeccfba6f6287",
+            "size_bytes": 9558
+          },
+          "src/generated/com_atproto/sync/get_repo_status.rs": {
+            "sha256": "b4f1cbe8c5e54a5fcac4a36b4b1f3e264a80dc75e4bfb088218afd73548a79cc",
+            "size_bytes": 11771
+          },
+          "src/generated/com_atproto/sync/list_blobs.rs": {
+            "sha256": "8ddeef05dacd40b0f7163dcecc3fde44e8d3ae9929e09182e24e3d13d74e92f5",
+            "size_bytes": 11030
+          },
+          "src/generated/com_atproto/sync/list_hosts.rs": {
+            "sha256": "53ff51b89446f5b7ba0a142094e6c640c13671a10ad0677ddb7a849a3d5f1b98",
+            "size_bytes": 14397
+          },
+          "src/generated/com_atproto/sync/list_repos.rs": {
+            "sha256": "d7435eb4641c1fac1c6ecb32c966a799ce96b01a05edc964f035dd19a18d1008",
+            "size_bytes": 25843
+          },
+          "src/generated/com_atproto/sync/list_repos_by_collection.rs": {
+            "sha256": "5f674e4145870162f9938bee4e0f669b4ddad104e3db8d43312b5d1c98f7a6aa",
+            "size_bytes": 18684
+          },
+          "src/generated/com_atproto/sync/notify_of_update.rs": {
+            "sha256": "c387b41a51dba0acd17498e4cea00a9b837e772f1d35a3c714e3334d0d18bcf6",
+            "size_bytes": 2921
+          },
+          "src/generated/com_atproto/sync/request_crawl.rs": {
+            "sha256": "a1e76bde67b7d3486843747596788549fc89f0d44eda62e2a124376dd2a2cda2",
+            "size_bytes": 4198
+          },
+          "src/generated/com_atproto/sync/subscribe_repos.rs": {
+            "sha256": "50283648cd6453636803e4f81edcdb6d3de8ce57f27625bae845e253c384477a",
+            "size_bytes": 110948
+          },
+          "src/generated/com_atproto/temp.rs": {
+            "sha256": "3cccf66a317f028fb0d4a2c625bc52720b3e991dc862fca50ce4ecac0fee89b2",
+            "size_bytes": 472
+          },
+          "src/generated/com_atproto/temp/add_reserved_handle.rs": {
+            "sha256": "f1e7a65e1b14d3dbc46bfb6a42bbe54f791691575aba0a9a192df8d6fef7cb2e",
+            "size_bytes": 3270
+          },
+          "src/generated/com_atproto/temp/check_handle_availability.rs": {
+            "sha256": "d52b83f581d9453f7f08fdaf6d8948cd46611ceedada56ade4b91e595a86862c",
+            "size_bytes": 35960
+          },
+          "src/generated/com_atproto/temp/check_signup_queue.rs": {
+            "sha256": "bce0d366cf171949b2becf6095636c8bb9722d762260ce34ffdca263dab5eb60",
+            "size_bytes": 3121
+          },
+          "src/generated/com_atproto/temp/dereference_scope.rs": {
+            "sha256": "d63d93e7683041ba6c121a111e490a3f58baac2cf89b826a0fb87d21eaccb7f1",
+            "size_bytes": 7840
+          },
+          "src/generated/com_atproto/temp/fetch_labels.rs": {
+            "sha256": "6930de9b46437b2ec0f484bc05c4c0b2dd7f316efc93d6d11fb685866ca0a906",
+            "size_bytes": 5519
+          },
+          "src/generated/com_atproto/temp/request_phone_verification.rs": {
+            "sha256": "59f2eae1570b7ea9699059b84a6bcac9924476eff4815ed2c0ab76217f87cfd3",
+            "size_bytes": 3014
+          },
+          "src/generated/com_atproto/temp/revoke_account_credentials.rs": {
+            "sha256": "52c67273d175ed4e21e575e6ce9fdc1702122adb72f631428c7b879e0926801e",
+            "size_bytes": 7458
+          },
+          "src/generated/com_germnetwork.rs": {
+            "sha256": "46b7e4be41012623226030f808b9a931a60279100c66cf9c1cf4c67a0a5f69c5",
+            "size_bytes": 279
+          },
+          "src/generated/com_germnetwork/declaration.rs": {
+            "sha256": "3eb4651b24c9361221fd0a4e1704cd27628e0290c785e273641920cf68ce547b",
+            "size_bytes": 35384
+          },
+          "src/generated/lib.rs": {
+            "sha256": "b0487ae6cc9a3bf87b57cc9ed54a19e3bed3101ac541950d6cfcb92336ebf1df",
+            "size_bytes": 1907
+          },
+          "src/generated/place_stream.rs": {
+            "sha256": "ef496ff19fb8e2c79ea7acac3c8bc2c148ce6b2fffcb69bca7e9c3a634a51ba9",
+            "size_bytes": 27953
+          },
+          "src/generated/place_stream/badge.rs": {
+            "sha256": "3b3fffd89e5bee70fb4072d57cbb5c41193b13f3fb1f45f5a87d064a887d71eb",
+            "size_bytes": 19052
+          },
+          "src/generated/place_stream/badge/get_valid_badges.rs": {
+            "sha256": "f3f46122a221e9fccd912dbd8acf70f63a000c12574bd81df68d5f4370ff4583",
+            "size_bytes": 5989
+          },
+          "src/generated/place_stream/branding.rs": {
+            "sha256": "a8ab6ba169c368d48f34d48ca4d9dbce18474ad01d3739353ef61cf462a127b2",
+            "size_bytes": 346
+          },
+          "src/generated/place_stream/branding/delete_blob.rs": {
+            "sha256": "660156546ebadb786d80fcde702a88ba4588f85f57631ae7a9f89db35b2072a7",
+            "size_bytes": 5333
+          },
+          "src/generated/place_stream/branding/get_blob.rs": {
+            "sha256": "cbe2cd0e64748d2a9fb96928ebb06b5de433ec29b827b5117deb2c793b612749",
+            "size_bytes": 8330
+          },
+          "src/generated/place_stream/branding/get_branding.rs": {
+            "sha256": "95e5e1168927bbf70d46a1b39dca3fc89aa035f98ae87c038d3ea26712c4785c",
+            "size_bytes": 16409
+          },
+          "src/generated/place_stream/branding/update_blob.rs": {
+            "sha256": "e2b91fdbc95c72b8a514602b60733f292fb6bcb5ac35653779edfe220ae55f10",
+            "size_bytes": 5783
+          },
+          "src/generated/place_stream/broadcast.rs": {
+            "sha256": "21657fa4057395f3d36d71cd96ae4fc861412d2ce8477acec58d79ab5cf4a390",
+            "size_bytes": 14864
+          },
+          "src/generated/place_stream/broadcast/get_broadcaster.rs": {
+            "sha256": "b36e7c24c75ed4690e5f8f689e52e5abe818a77cdc8e59967bbdb1b237067fb6",
+            "size_bytes": 3998
+          },
+          "src/generated/place_stream/broadcast/origin.rs": {
+            "sha256": "f7252bed4687484dd670fb7a99c453404f04f38300a4b02f6dddc9826770c139",
+            "size_bytes": 22069
+          },
+          "src/generated/place_stream/broadcast/syndication.rs": {
+            "sha256": "4cbf3e325e24a0362076e3c9b11c18dac791873e067e008b430de66101afd5fb",
+            "size_bytes": 16498
+          },
+          "src/generated/place_stream/chat.rs": {
+            "sha256": "9dbaa5c552ce4ecd6d5de275430d775e7df3ef236571e3315f73f3ef8769b28a",
+            "size_bytes": 41588
+          },
+          "src/generated/place_stream/chat/gate.rs": {
+            "sha256": "85b4cfbc753d625658d9debf53cfd4b068b77cba0ce32e57bccda219b4fdba38",
+            "size_bytes": 10703
+          },
+          "src/generated/place_stream/chat/message.rs": {
+            "sha256": "a7c036ec69df021a458afae3209e05d2d7256c6b85434a3a311816404d089905",
+            "size_bytes": 29923
+          },
+          "src/generated/place_stream/chat/pinned_record.rs": {
+            "sha256": "6021825e28b26add2c456c78ebe9298a998c0734d16da7ff3fbc1235741fbe9b",
+            "size_bytes": 17585
+          },
+          "src/generated/place_stream/chat/profile.rs": {
+            "sha256": "f691161541545826f6284bbf61399012744c96f0e703a7b56dff9a2d71a73759",
+            "size_bytes": 23174
+          },
+          "src/generated/place_stream/config.rs": {
+            "sha256": "1f923b8d72e8024f990e980a46ded0179ae9a39b4a02b257b03cbd9f1d9d0ec5",
+            "size_bytes": 279
+          },
+          "src/generated/place_stream/config/get_env.rs": {
+            "sha256": "6647de5f5f22e6c5fcf62deeb53dfaa32912d32375726cff282a3b2d12594742",
+            "size_bytes": 3482
+          },
+          "src/generated/place_stream/graph.rs": {
+            "sha256": "947144fcc97240f19f484510688ae85e69564de01feb0388a196e336fd708f62",
+            "size_bytes": 289
+          },
+          "src/generated/place_stream/graph/get_following_user.rs": {
+            "sha256": "780220dfb90e358e3efd55dac3ad62587b865a4cfee5d71523803af4862b4d7e",
+            "size_bytes": 8160
+          },
+          "src/generated/place_stream/ingest.rs": {
+            "sha256": "5367e06ed0301158c7ba88c6848886a1b52583cd6be065b622ad695dc00496f0",
+            "size_bytes": 10370
+          },
+          "src/generated/place_stream/ingest/get_ingest_urls.rs": {
+            "sha256": "fc577dd03fb6ebbd7c95a69058cdb0c52c3c27d74f7ec0b11338927d01c07d91",
+            "size_bytes": 3504
+          },
+          "src/generated/place_stream/key.rs": {
+            "sha256": "415d49de968fae1cc6fdaed5a57e228d3c287af98cd5ac17b12d22153e15d50e",
+            "size_bytes": 15367
+          },
+          "src/generated/place_stream/live.rs": {
+            "sha256": "50a78bdcbffbf7b3e9ab0ad3c2e726880b50cc8da4697d07c537f5d3d6cd3f59",
+            "size_bytes": 592
+          },
+          "src/generated/place_stream/live/deny_teleport.rs": {
+            "sha256": "6a21a13837390f8a25492681a73f6c7c57c3ba63c58da2418ef7b218cdb0b6f1",
+            "size_bytes": 9078
+          },
+          "src/generated/place_stream/live/get_live_users.rs": {
+            "sha256": "a74817ddcee60daee74cbe05b454a5001e0a25046c0ae512cb651de360aed5ce",
+            "size_bytes": 5937
+          },
+          "src/generated/place_stream/live/get_profile_card.rs": {
+            "sha256": "a4f2cabae8ed00b1c2d95f0ed9b72b5150afa247bb10225f42785ae5b13f4259",
+            "size_bytes": 7716
+          },
+          "src/generated/place_stream/live/get_recommendations.rs": {
+            "sha256": "9fe6a89bf6789d739be12f173f69c2e2c5530c4d9cafb48dc3648d636d4e26de",
+            "size_bytes": 22534
+          },
+          "src/generated/place_stream/live/get_segments.rs": {
+            "sha256": "18daaac39f089c5370df4b04c9c3e1d37cdbc285b6d340cd7da793404ba6bc06",
+            "size_bytes": 8057
+          },
+          "src/generated/place_stream/live/recommendations.rs": {
+            "sha256": "c82411911397ca26d2738a4913429b5732b59e8b474dc1b529d64646dca61951",
+            "size_bytes": 15142
+          },
+          "src/generated/place_stream/live/search_actors_typeahead.rs": {
+            "sha256": "0a36362d19b0a8a57690e422e11dc0c953c7455dd15d1bfe7a001945563bb45e",
+            "size_bytes": 19002
+          },
+          "src/generated/place_stream/live/start_livestream.rs": {
+            "sha256": "fcb5f33615937d6cf479faa1545eb1556b2f811eab354440351c66fda3b7b157",
+            "size_bytes": 9914
+          },
+          "src/generated/place_stream/live/stop_livestream.rs": {
+            "sha256": "a11ac5c27a59219d2e5ed66e0fa1569c1e351706fc19302c92ad50820e6dd8f4",
+            "size_bytes": 3376
+          },
+          "src/generated/place_stream/live/subscribe_segments.rs": {
+            "sha256": "f4fe07e2ce5dd2fbde75f4477e1c33fed7a94b63812786f79cbf9f0418322554",
+            "size_bytes": 7706
+          },
+          "src/generated/place_stream/live/teleport.rs": {
+            "sha256": "1eff69a11cd4ca1b8d345647c1ff933c4d519ea975293a087edfd4662900a550",
+            "size_bytes": 15738
+          },
+          "src/generated/place_stream/live/viewer_count.rs": {
+            "sha256": "61a75e0cf4904a01c993303f757fbed92ba93d68b618ce1681894baa580add05",
+            "size_bytes": 17450
+          },
+          "src/generated/place_stream/livestream.rs": {
+            "sha256": "5c4de54c11048586bc6a93c545c86dcfd4ca7f731d74777cc9f6f2f6e9be785d",
+            "size_bytes": 100607
+          },
+          "src/generated/place_stream/metadata.rs": {
+            "sha256": "5b4f31cf5aa86a19042a0f19181ffd7b8867712117a658250cf7cbdab2970289",
+            "size_bytes": 366
+          },
+          "src/generated/place_stream/metadata/configuration.rs": {
+            "sha256": "ff3519fc21670d99bacf09d99342f1905074b790e3e390ea4008fc27b7acca80",
+            "size_bytes": 14285
+          },
+          "src/generated/place_stream/metadata/content_rights.rs": {
+            "sha256": "0490a91c385f89e4e6ef30ee5f44d77dbbef162b12e34b33ffb3f103ec256b0f",
+            "size_bytes": 18384
+          },
+          "src/generated/place_stream/metadata/content_warnings.rs": {
+            "sha256": "da94369d16f914399fca4389dfc1dd6a83f2e19a3e197ee935635f460123ce53",
+            "size_bytes": 16735
+          },
+          "src/generated/place_stream/metadata/distribution_policy.rs": {
+            "sha256": "45355d10a81526225b6eebc6fffaa0d2e405ab38510e86df7c175f3ab1f499a6",
+            "size_bytes": 5488
+          },
+          "src/generated/place_stream/moderation.rs": {
+            "sha256": "1b3fe9d35c30a554ce95b52285b1e297c06903a0952f8d4073d7038980905fbd",
+            "size_bytes": 15294
+          },
+          "src/generated/place_stream/moderation/create_block.rs": {
+            "sha256": "bd26a6d62c8b39310b6e52b683d31d3866b2f260bc5212c281a263671ce54531",
+            "size_bytes": 11956
+          },
+          "src/generated/place_stream/moderation/create_gate.rs": {
+            "sha256": "5393c5a018dbae06bdbae93574b2473f58f50dc76e6f9f0f7fef30750f55672e",
+            "size_bytes": 11229
+          },
+          "src/generated/place_stream/moderation/create_pin.rs": {
+            "sha256": "a01901e16d472e0bbf0413d4b9fe24614e7135324e51219bdd5160468b8370e5",
+            "size_bytes": 12104
+          },
+          "src/generated/place_stream/moderation/delete_block.rs": {
+            "sha256": "2a3020dbf84eaaecb7d60b3b5eb253a3e131f79699eddacd27e5e0e47ff12d2e",
+            "size_bytes": 11089
+          },
+          "src/generated/place_stream/moderation/delete_gate.rs": {
+            "sha256": "05c0402aff47c7d53416df85455d6c78be61627cf13b212d7d8046ed931fc97a",
+            "size_bytes": 11010
+          },
+          "src/generated/place_stream/moderation/delete_pin.rs": {
+            "sha256": "28bde9d3711182096e029991d3a2725bbae79e192bbaaf3ff24d8b223dfbb6bd",
+            "size_bytes": 10931
+          },
+          "src/generated/place_stream/moderation/permission.rs": {
+            "sha256": "205154dfcfc26344015df6b01831d866f5f02016686ca301e409143b2de8210b",
+            "size_bytes": 21435
+          },
+          "src/generated/place_stream/moderation/update_livestream.rs": {
+            "sha256": "a8be7d304250a7dfee95dfbda5e0f7578db5e633dd2b1d3b72b40c8e49c5bb66",
+            "size_bytes": 12890
+          },
+          "src/generated/place_stream/multistream.rs": {
+            "sha256": "420bccc942967e9ab69f10c6bb1a6498c54b01f189271d072b11c13e7b08639e",
+            "size_bytes": 27090
+          },
+          "src/generated/place_stream/multistream/create_target.rs": {
+            "sha256": "acabed90f75d69da038e16d96f46c07642ccf10dc0761b045532e0bd786d2d36",
+            "size_bytes": 8938
+          },
+          "src/generated/place_stream/multistream/delete_target.rs": {
+            "sha256": "38b170c56fa4b72cd7026472f714b4a8726e79c66e1fce2bbdf38622817bbf54",
+            "size_bytes": 8296
+          },
+          "src/generated/place_stream/multistream/list_targets.rs": {
+            "sha256": "dede49435cedc34ff62a0817c905f2dc8b491cfc9a8e8993143c0c5c2d1643ab",
+            "size_bytes": 19902
+          },
+          "src/generated/place_stream/multistream/put_target.rs": {
+            "sha256": "45c46fe81a0414f6c6609dfeb1f0823e2a6f5e941f6bd195bb18b352a2ecf6bb",
+            "size_bytes": 9944
+          },
+          "src/generated/place_stream/multistream/target.rs": {
+            "sha256": "a1c29691e8110f032ff2bf6cd000c74a693a6878abab3fda330ee2eba2718e82",
+            "size_bytes": 17079
+          },
+          "src/generated/place_stream/muxl.rs": {
+            "sha256": "4c03a4051ebb1c9f4ce9a0e582a34dceb65e8a2d215cf888e5fd65cc54265cd5",
+            "size_bytes": 14157
+          },
+          "src/generated/place_stream/playback.rs": {
+            "sha256": "82e90a63510f66fbc3fc96a2b4eef7cb631e6c27cd81c4a3f289fa8dea6498ec",
+            "size_bytes": 335
+          },
+          "src/generated/place_stream/playback/get_playback_server.rs": {
+            "sha256": "184e58994a11c1d276bceef72402442b67c0d3ec92bda4b4a18a34c55d1a4603",
+            "size_bytes": 7422
+          },
+          "src/generated/place_stream/playback/get_video_playlist.rs": {
+            "sha256": "64a355a9c75850c024adf27fd3c1963d3ff2bdde0019cb8cfbfe94be86c42287",
+            "size_bytes": 7332
+          },
+          "src/generated/place_stream/playback/whep.rs": {
+            "sha256": "b8153431cf7812620cb9268f04c40a282cd8bb3f0cca8b948ee809853fbf33d3",
+            "size_bytes": 9474
+          },
+          "src/generated/place_stream/richtext.rs": {
+            "sha256": "dd37f83170265527d05b97af02e16c5f397e536be99bc7c6d4453fd4fc634562",
+            "size_bytes": 279
+          },
+          "src/generated/place_stream/richtext/facet.rs": {
+            "sha256": "7cf3010167d11e5815c4ff6634d3fef049b14d00e281962f355b7698097deac9",
+            "size_bytes": 11421
+          },
+          "src/generated/place_stream/segment.rs": {
+            "sha256": "af024e205617851d320cb37a8b0faf04fb568b13319b886cda7d86cb460bbc0f",
+            "size_bytes": 73686
+          },
+          "src/generated/place_stream/server.rs": {
+            "sha256": "858e8b4b85a140096a19c0d9119a22d7c6a879d39d792c49866d74d3da6595ff",
+            "size_bytes": 42936
+          },
+          "src/generated/place_stream/server/create_webhook.rs": {
+            "sha256": "149572167c0d2d338d8b187aa986063e6d216e01977b8320c80e21183d8a2be2",
+            "size_bytes": 19388
+          },
+          "src/generated/place_stream/server/delete_webhook.rs": {
+            "sha256": "ba42a995d026891dd9ab7ac1281ba5f5bfb7f5f5af346d945fc97507275be9fd",
+            "size_bytes": 5170
+          },
+          "src/generated/place_stream/server/get_server_time.rs": {
+            "sha256": "9e3bd5d77d51c90b2e63498e5cb4c50bb3b4ff4d43bb833b939c32b9e22ce451",
+            "size_bytes": 2650
+          },
+          "src/generated/place_stream/server/get_webhook.rs": {
+            "sha256": "15b27c9a87e49a39dad248d5e9945a94f8f3825ef030c78d6ed7900c2037da85",
+            "size_bytes": 7924
+          },
+          "src/generated/place_stream/server/list_webhooks.rs": {
+            "sha256": "10bbf0fc00b7d847e393198f7e74f8e5008dcd792222df99db4c1dab656672f5",
+            "size_bytes": 12079
+          },
+          "src/generated/place_stream/server/settings.rs": {
+            "sha256": "06c168d8b24c468b9226d5634eb578ca1839d1155e9b93ba0e90d1bf91b9c845",
+            "size_bytes": 9967
+          },
+          "src/generated/place_stream/server/update_webhook.rs": {
+            "sha256": "6b436e736e293a505678300f3a99fc80b289e54287026bd141fb5bf9f52585dc",
+            "size_bytes": 10460
+          },
+          "src/generated/place_stream/video.rs": {
+            "sha256": "3bc2402f48045ca7344ec39750b67d298ec999308cb6e5931e0b96845bcecc67",
+            "size_bytes": 21088
+          },
+          "src/generated/site_standard.rs": {
+            "sha256": "cecd132b2b6e6dd68e2bc4120f2f0e58def7a88d78d6c00ad11c8944db40e3da",
+            "size_bytes": 325
+          },
+          "src/generated/site_standard/document.rs": {
+            "sha256": "8418ec6f3d6d23ae7262deea4578151d5206db22cd1ab40ec19cabbaebeecb7b",
+            "size_bytes": 53535
+          },
+          "src/generated/site_standard/graph.rs": {
+            "sha256": "a3f8b9d395d7f107299f37e6843be974f68ff0f89db4f6f55d386bd67d1c3a6a",
+            "size_bytes": 303
+          },
+          "src/generated/site_standard/graph/recommend.rs": {
+            "sha256": "83ef3b21fb4f7714a86bb98802cc4c1f32f8197b622d3473c90a5d51b5c239d2",
+            "size_bytes": 13252
+          },
+          "src/generated/site_standard/graph/subscription.rs": {
+            "sha256": "328502634e9fa3305a071ced835f6fdc44278b1ebf3c619405a9ece292f9914c",
+            "size_bytes": 12877
+          },
+          "src/generated/site_standard/publication.rs": {
+            "sha256": "5d2010f970cea2194402784f58df7dabf7061cfbfbe4b6765285a55936db0867",
+            "size_bytes": 29609
+          },
+          "src/generated/site_standard/theme.rs": {
+            "sha256": "ad45eec2845e717420b02278074434d1d3bcbe902572338fccec3e1d064e88f5",
+            "size_bytes": 292
+          },
+          "src/generated/site_standard/theme/basic.rs": {
+            "sha256": "d6b959e882322fb0e6edc96a26119c3bf2334b13b3529247d56bd2f8a710dbec",
+            "size_bytes": 18954
+          },
+          "src/generated/site_standard/theme/color.rs": {
+            "sha256": "a6535f8b6b955a93d6796dd647ab010c5c66e8ee34a1ccc7d19a99476941ad59",
+            "size_bytes": 28033
+          },
+          "src/generated/tools_ozone.rs": {
+            "sha256": "665ae16a806a2c3d6cb09ddf937264835a19c2a8da31528a46ce71903a54662d",
+            "size_bytes": 464
+          },
+          "src/generated/tools_ozone/communication.rs": {
+            "sha256": "9c89b9d3881f55977879cafeddd4461206d4ae278435d31b8b9bebba84064c9d",
+            "size_bytes": 25036
+          },
+          "src/generated/tools_ozone/communication/create_template.rs": {
+            "sha256": "168cd4b404ac224be59cee64c5358b392431841a378b6d5c58375c93871d1f6b",
+            "size_bytes": 5287
+          },
+          "src/generated/tools_ozone/communication/delete_template.rs": {
+            "sha256": "a5e147aa05c06774ced3a7407ad45e53deba13945e5722052dfbb334aa248577",
+            "size_bytes": 2893
+          },
+          "src/generated/tools_ozone/communication/list_templates.rs": {
+            "sha256": "edf9a7c48d9af0c3b9fe3a15d5193086e5de603a912592d4b71385ea68d73b7d",
+            "size_bytes": 2965
+          },
+          "src/generated/tools_ozone/communication/update_template.rs": {
+            "sha256": "8eb5f7d4316ff8383a4c55386e46186eb5fd91fd37fcb21e5fe40e4cb5e57b3e",
+            "size_bytes": 5728
+          },
+          "src/generated/tools_ozone/hosting.rs": {
+            "sha256": "7a333d899ec3ee66fdb88955bc77d8ba2680f48fd5561c8b18914c7249ab50d0",
+            "size_bytes": 291
+          },
+          "src/generated/tools_ozone/hosting/get_account_history.rs": {
+            "sha256": "82f7d6eec4c592c41051af5f7e0e074a2ef8a0d831574a5943c09fe55f7f75e8",
+            "size_bytes": 49431
+          },
+          "src/generated/tools_ozone/moderation.rs": {
+            "sha256": "13eb0e1f0604b59b30fa9009d4d5fcde174513baed0bb8d641312514ec980086",
+            "size_bytes": 641385
+          },
+          "src/generated/tools_ozone/moderation/cancel_scheduled_actions.rs": {
+            "sha256": "6d06a98790ef41ac0aba65be8ef822d2109dc2dc38e582ae3e92f28ad41c2b5d",
+            "size_bytes": 34775
+          },
+          "src/generated/tools_ozone/moderation/emit_event.rs": {
+            "sha256": "cb48d8d008d184db2fe5483b020264e9bcf30d960ddb8f5abf148da21237c6fb",
+            "size_bytes": 38465
+          },
+          "src/generated/tools_ozone/moderation/get_account_timeline.rs": {
+            "sha256": "e5427d880ee632d414666b26aaeb076b71f8a23d64fc7e81be9e017ac7ecd892",
+            "size_bytes": 47954
+          },
+          "src/generated/tools_ozone/moderation/get_event.rs": {
+            "sha256": "31d9f52ca09e70d345733c417f1cb4d6c9216e0215cddf3cfe508cdffe59a396",
+            "size_bytes": 5118
+          },
+          "src/generated/tools_ozone/moderation/get_record.rs": {
+            "sha256": "e7ffe2f5f675481e9a7f6f5fbdd99b1fd9bce4f17eead4655abaf6953328234e",
+            "size_bytes": 8296
+          },
+          "src/generated/tools_ozone/moderation/get_records.rs": {
+            "sha256": "253ee26f5556aac937e82db13fc22bd8bf054932e6663bc02a6f6cae1774ba67",
+            "size_bytes": 6929
+          },
+          "src/generated/tools_ozone/moderation/get_repo.rs": {
+            "sha256": "0542108890f8d028eabcc0681ea8b4a287747d1cd2d84d3b4679b32c76305bbd",
+            "size_bytes": 7414
+          },
+          "src/generated/tools_ozone/moderation/get_reporter_stats.rs": {
+            "sha256": "888182a563130e9395423f729af1b250d368392ebf3f0f3ff58ba43649fe6003",
+            "size_bytes": 6571
+          },
+          "src/generated/tools_ozone/moderation/get_repos.rs": {
+            "sha256": "2d2ecbf1dae8bd707eb62a85184fa2f6bcec152674b7a8d25485c302a30ba7ff",
+            "size_bytes": 6805
+          },
+          "src/generated/tools_ozone/moderation/get_subjects.rs": {
+            "sha256": "a139a52016beb56152a4e9496ddd510e232f56a931c2c67057a8d84326c5de6e",
+            "size_bytes": 6273
+          },
+          "src/generated/tools_ozone/moderation/list_scheduled_actions.rs": {
+            "sha256": "973346edb32cc99f522e67ca4a9e7d1526066546402eb5baf819f7ebb0bd9a43",
+            "size_bytes": 15385
+          },
+          "src/generated/tools_ozone/moderation/query_events.rs": {
+            "sha256": "d2b1ee4a5c49c62c42d85db39327eae8d0656b33c115ae695aac5fb74a141764",
+            "size_bytes": 31101
+          },
+          "src/generated/tools_ozone/moderation/query_statuses.rs": {
+            "sha256": "f48fa6ad89abd47107e8ce17483e218296a3ec2be4fa8c0808cc5adefb923a51",
+            "size_bytes": 48989
+          },
+          "src/generated/tools_ozone/moderation/schedule_action.rs": {
+            "sha256": "6765d0da77663b6afee20f7d30d6cf7d880cc452bb6ef1658fa59d2198a64337",
+            "size_bytes": 57837
+          },
+          "src/generated/tools_ozone/moderation/search_repos.rs": {
+            "sha256": "ac18957468630efdf30400ff3148698ddcb74b3c25d61e4d3f74cde7acd41867",
+            "size_bytes": 7809
+          },
+          "src/generated/tools_ozone/queue.rs": {
+            "sha256": "28b37cdcfabccb4cd6698db1f09dcd933b2aa81e270a1af31bfb6f060121fd26",
+            "size_bytes": 59291
+          },
+          "src/generated/tools_ozone/queue/assign_moderator.rs": {
+            "sha256": "6d48dc7710ea4c06225f6fd531a1818aa6fa6e5bddb806440c690aaa3c4f5e2d",
+            "size_bytes": 9985
+          },
+          "src/generated/tools_ozone/queue/create_queue.rs": {
+            "sha256": "f46b60bc21dd20930cdbb0c56a9da5cb2bfb1cf164453b9167892d9e4e1ff7f0",
+            "size_bytes": 8947
+          },
+          "src/generated/tools_ozone/queue/delete_queue.rs": {
+            "sha256": "3d825c25745a3a0764c3212e41345b453909df9f7490866182684eb93c9b9867",
+            "size_bytes": 8092
+          },
+          "src/generated/tools_ozone/queue/get_assignments.rs": {
+            "sha256": "0b72e2f3ec27224eeb95e96329213571acc47bec543b88310ec8ac6c414b03f2",
+            "size_bytes": 9044
+          },
+          "src/generated/tools_ozone/queue/list_queues.rs": {
+            "sha256": "bf79e4352c1d70c70ee8add1dbdc90ad383b830396b9cfc89926c5dae4111ac8",
+            "size_bytes": 9142
+          },
+          "src/generated/tools_ozone/queue/route_reports.rs": {
+            "sha256": "c5164df9b600e3efaed1286f79d56fb5cef62a0140e3f9b488589da24b9e64cc",
+            "size_bytes": 10236
+          },
+          "src/generated/tools_ozone/queue/unassign_moderator.rs": {
+            "sha256": "01128ac21e8b15f8c963fe6b31e0156a8725bb30b8a4d2c7c5395aea262936ac",
+            "size_bytes": 9811
+          },
+          "src/generated/tools_ozone/queue/update_queue.rs": {
+            "sha256": "c93c4e215bf14b4f25fc1f1cb900c81f353610cd240decec653739f1e0e8f655",
+            "size_bytes": 11554
+          },
+          "src/generated/tools_ozone/report.rs": {
+            "sha256": "c54f83333296839e22c45967fd6fe29f2a607aa7fda9b1f62760ae99d8b22316",
+            "size_bytes": 213141
+          },
+          "src/generated/tools_ozone/report/assign_moderator.rs": {
+            "sha256": "90a57e7d16834b59bf64711c6ba4a0c988c8b663f10230a0a15a62298cbb9b65",
+            "size_bytes": 11877
+          },
+          "src/generated/tools_ozone/report/close_reports.rs": {
+            "sha256": "bd52683a92b7fec49507e42e2903f3cb1652a01174c3ce0aaccc66c18cdd7878",
+            "size_bytes": 10174
+          },
+          "src/generated/tools_ozone/report/create_activity.rs": {
+            "sha256": "5a5574f3cf91eea134dbe04e21b32a92f7a9a241b20309403f42786b31a0655b",
+            "size_bytes": 15321
+          },
+          "src/generated/tools_ozone/report/get_assignments.rs": {
+            "sha256": "313853f10ae3e7e4687348f3731b47ff5e2a864b15889f1c0a6c7e898bbdb0ac",
+            "size_bytes": 9058
+          },
+          "src/generated/tools_ozone/report/get_historical_stats.rs": {
+            "sha256": "e758efc8e3f31b68d1bca6cb2655b86cab32ca4cb225640a7fd92fd6bf8c911a",
+            "size_bytes": 10882
+          },
+          "src/generated/tools_ozone/report/get_latest_report.rs": {
+            "sha256": "cfe7f1cef7305efd4ea030e7f41c8c399cb71be98ac2f079a4c2f89ada854435",
+            "size_bytes": 3982
+          },
+          "src/generated/tools_ozone/report/get_live_stats.rs": {
+            "sha256": "26519354dce22d29a91d1250b2787cd38f292960df5408a0db4ec71ac07c799d",
+            "size_bytes": 7331
+          },
+          "src/generated/tools_ozone/report/get_report.rs": {
+            "sha256": "83ce6226f79cb185860e924de19235428d952895938626ea34b67e0bc7bee9a3",
+            "size_bytes": 6442
+          },
+          "src/generated/tools_ozone/report/list_activities.rs": {
+            "sha256": "655f8a61139766a8ceedd036b0cb1a3728ba246ea4700da8903edc804ac36194",
+            "size_bytes": 7938
+          },
+          "src/generated/tools_ozone/report/query_activities.rs": {
+            "sha256": "6aed2a60b5f076b68e8f7462056b04f6664be6ef24ead5c31932e8440e9ef931",
+            "size_bytes": 12838
+          },
+          "src/generated/tools_ozone/report/query_reports.rs": {
+            "sha256": "ea0587bb711ecbbe62cc5cb8af91be8f5ce335c0c9d0aa8cec3fe6f49d2b61f4",
+            "size_bytes": 28618
+          },
+          "src/generated/tools_ozone/report/reassign_queue.rs": {
+            "sha256": "a8f0f79cef837b2c52b54db1f9381571edcf2417dc8300ed3c3875d30dca8b6e",
+            "size_bytes": 12751
+          },
+          "src/generated/tools_ozone/report/refresh_stats.rs": {
+            "sha256": "25c6840858657adf73a7ef922bf0c05e75e1ca8975f2deb387d9396e04e61dde",
+            "size_bytes": 3529
+          },
+          "src/generated/tools_ozone/report/unassign_moderator.rs": {
+            "sha256": "174eda1500ee7a6f39c510a6d9859eb1be5ed41bd4a456bcbf745e1bb056f432",
+            "size_bytes": 8850
+          },
+          "src/generated/tools_ozone/safelink.rs": {
+            "sha256": "713ad6a9117e360064fe441956c6a1b1167065b9a5bd245ab4465c94d07ece56",
+            "size_bytes": 58755
+          },
+          "src/generated/tools_ozone/safelink/add_rule.rs": {
+            "sha256": "49ae4c79ce0a79a955d732452e92ce31463593bf7c75df33ab6e61f71b0bf5ae",
+            "size_bytes": 14668
+          },
+          "src/generated/tools_ozone/safelink/query_events.rs": {
+            "sha256": "041b56ada385978ed17849305a79f575e3d72239ee68774221d6e8884d84e977",
+            "size_bytes": 7033
+          },
+          "src/generated/tools_ozone/safelink/query_rules.rs": {
+            "sha256": "10730cbc857b9f5cf6b29ee3c16c1f57722a09ad4c40af7fd1336f3c8ab464a1",
+            "size_bytes": 7458
+          },
+          "src/generated/tools_ozone/safelink/remove_rule.rs": {
+            "sha256": "0b889d4533089d476e7d8a6051294464fa3e531579088aaf7b6759bbc03bc012",
+            "size_bytes": 11483
+          },
+          "src/generated/tools_ozone/safelink/update_rule.rs": {
+            "sha256": "26bd014cb1fae1e7b917ebcbed12c0a9dd4122b11603d9e479034d88a238acb1",
+            "size_bytes": 14480
+          },
+          "src/generated/tools_ozone/server.rs": {
+            "sha256": "7cf3172aef3665316fdb2604b1dc6c7ac7ce3ada3d8dade216dcafcb3f72e484",
+            "size_bytes": 281
+          },
+          "src/generated/tools_ozone/server/get_config.rs": {
+            "sha256": "dd0e613f3a8ea171dc3485b3a65ad1b57482e9a5410ac88633d5f84d09382f49",
+            "size_bytes": 14008
+          },
+          "src/generated/tools_ozone/set.rs": {
+            "sha256": "fababd86ba2c0c0baf477618cfa19a32b39804f22b9d5ef97832799922da7894",
+            "size_bytes": 23881
+          },
+          "src/generated/tools_ozone/set/add_values.rs": {
+            "sha256": "7ad8a1685bac9fb5c1dcaff096078ba5e907d6c74d33b39d36d9432d7a1dc53c",
+            "size_bytes": 7807
+          },
+          "src/generated/tools_ozone/set/delete_set.rs": {
+            "sha256": "633e4157b4b1d272a8bc0c0a9788586db9de88b747a192858ff018c2c2407ace",
+            "size_bytes": 4489
+          },
+          "src/generated/tools_ozone/set/delete_values.rs": {
+            "sha256": "33db62fa45e508495bcf87720e8e1f34411ee6e7bc19fecc5f28615e23944f1b",
+            "size_bytes": 9342
+          },
+          "src/generated/tools_ozone/set/get_values.rs": {
+            "sha256": "c301086b89248eb8538263fdb9aab32ada939e43f6190810cd2a1ee125e0b1c8",
+            "size_bytes": 8927
+          },
+          "src/generated/tools_ozone/set/query_sets.rs": {
+            "sha256": "72882f8bea153220bc5748afbb01b370fe4775df8fa778bea72f232516b34648",
+            "size_bytes": 13986
+          },
+          "src/generated/tools_ozone/set/upsert_set.rs": {
+            "sha256": "c65ae34cef76ef1ecc5904736f394171684a8d7c89bf76602d2e3c7eb07f7383",
+            "size_bytes": 3176
+          },
+          "src/generated/tools_ozone/setting.rs": {
+            "sha256": "ad4ae635fa1e6524841498a09f3118ed6156d1aa10b27fcbf57a45e6b9d8c6a8",
+            "size_bytes": 31391
+          },
+          "src/generated/tools_ozone/setting/list_options.rs": {
+            "sha256": "dfca7c9cfaf02c5188fdfc094e8540eeccc6942c867d2e4c237c8aa550825397",
+            "size_bytes": 11337
+          },
+          "src/generated/tools_ozone/setting/remove_options.rs": {
+            "sha256": "3f2b56e0c88db60c4b323aaabceb3abaf76fefd571243109fe523348da6db91a",
+            "size_bytes": 10855
+          },
+          "src/generated/tools_ozone/setting/upsert_option.rs": {
+            "sha256": "267a06c07d93201c724da979ae6a848c7da4a6be1b1a5345a329b37cd7a2919b",
+            "size_bytes": 16728
+          },
+          "src/generated/tools_ozone/signature.rs": {
+            "sha256": "98730914f9fa7edbd5cd86889e4c8c62132421590441e7610e94caf3d5a9b6cf",
+            "size_bytes": 4536
+          },
+          "src/generated/tools_ozone/signature/find_correlation.rs": {
+            "sha256": "b20a201d1542f259f7ad551ae05c7bac32df678a5d3d5487feb707a4459fa4d6",
+            "size_bytes": 6502
+          },
+          "src/generated/tools_ozone/signature/find_related_accounts.rs": {
+            "sha256": "887f24df7a87cbde06f7cf965af86c6fdcb92d13af1b7b87e8a50f734909f052",
+            "size_bytes": 21123
+          },
+          "src/generated/tools_ozone/signature/search_accounts.rs": {
+            "sha256": "7f752339a37928471315e51c3a5484ef7ffe3a9b39f7734b3824a780e1acb7f1",
+            "size_bytes": 7917
+          },
+          "src/generated/tools_ozone/team.rs": {
+            "sha256": "1b10413df290fe652467c156896b195614c8dad5119f3334e5c76f212be76862",
+            "size_bytes": 22418
+          },
+          "src/generated/tools_ozone/team/add_member.rs": {
+            "sha256": "2c4b48637690a2d951add2e730e602dde0e4cb3baa2f71f54f7ef4e028c4d802",
+            "size_bytes": 12472
+          },
+          "src/generated/tools_ozone/team/delete_member.rs": {
+            "sha256": "639706a13696f9664fff72da16581fa0099304baed3a48b2a68c45597f024518",
+            "size_bytes": 8600
+          },
+          "src/generated/tools_ozone/team/list_members.rs": {
+            "sha256": "1a3a5a58b0b07bccbfe9087d17c352cf44c78f664b25381dbff81c72b593f5eb",
+            "size_bytes": 8437
+          },
+          "src/generated/tools_ozone/team/update_member.rs": {
+            "sha256": "542c63be77150d3094c04723293fa3850a0c7ae3e17b656039b59a85674eecc7",
+            "size_bytes": 12865
+          },
+          "src/generated/tools_ozone/verification.rs": {
+            "sha256": "9d512133c5e54551e67c2e67005dd34524a58aaa19456286162a1d4291b4211c",
+            "size_bytes": 35043
+          },
+          "src/generated/tools_ozone/verification/grant_verifications.rs": {
+            "sha256": "5f3b643a5398c5a72937c950778fca1dc928a6e745117978bf8616016fea967c",
+            "size_bytes": 36132
+          },
+          "src/generated/tools_ozone/verification/list_verifications.rs": {
+            "sha256": "c35b31f8f9efef39a8fe8401ca10d26e9f7e4ff8b90ca3de07976a486951d463",
+            "size_bytes": 14822
+          },
+          "src/generated/tools_ozone/verification/revoke_verifications.rs": {
+            "sha256": "b36ab904bc6f86e9415cc489506d6f907cdf6d6ab41a1ecb55f0169ba979b5ba",
+            "size_bytes": 23332
+          },
+          "src/lib.rs": {
+            "sha256": "b5c1f64c651e088684d5a9888bb76a365fd72191d3da2307e9b8fd4f106e1ab1",
+            "size_bytes": 6605
+          },
+          "src/push_registration.rs": {
+            "sha256": "08d267b3b85c33a9513c0bf7d94504e5b5a6e470b32612a2407422c1fb363c9a",
+            "size_bytes": 5150
+          },
+          "tests/blob_upload_contract.rs": {
+            "sha256": "992700b81af1c8860e1f8368b7a8b3fb19fe0da0f72cb6b1e9ed6b098e0c9e01",
+            "size_bytes": 2750
+          },
+          "tests/blue_catbird_chat_surface.rs": {
+            "sha256": "29eab5cbb35e5dbf2d4814e29f4ed9786030b738ea05cdb3accc4e936af5e4e5",
+            "size_bytes": 4748
+          },
+          "tests/blue_catbird_circle_surface.rs": {
+            "sha256": "f55bbc69fd24bc710f19648bd89f98eef9c82c52b574a411cc8713d8a49c6ed8",
+            "size_bytes": 7215
+          },
+          "tests/com_atproto_space_surface.rs": {
+            "sha256": "98fa0d96f0463ba433825fb7ac39595b243d12d631491b3929c489b50cb35014",
+            "size_bytes": 9990
+          },
+          "tests/fixtures/commit_v2_vectors.json": {
+            "sha256": "85c60d19154ed59f3d3b06aa80a3738c32e72baecd82de15bf48baabc6f5bede",
+            "size_bytes": 6918
+          },
+          "tests/fixtures/push-registration.json": {
+            "sha256": "38da76440c3315e3b15c663b141c239c577c3e44e56c77409941df5de363ce7f",
+            "size_bytes": 1709
+          },
+          "tests/get_convo_events_contract.rs": {
+            "sha256": "1301d17b9b383abac4a6f566ff84d716c2011539117b13f0e3f22a486f0c8ca4",
+            "size_bytes": 7953
+          },
+          "tests/jacquard_0121_regressions.rs": {
+            "sha256": "bd0f037c6fd82c29883287947bad6f3b358369f9f55cadb2e8837840d50a4733",
+            "size_bytes": 1120
+          },
+          "tests/site_standard_surface.rs": {
+            "sha256": "35068e9d2abfafb64e1ec32232771192b7e28ceaacf2ec3a1a42a5b943834f43",
+            "size_bytes": 579
+          }
+        },
+        "sha256": "cd9f5d61d74df55f11de02e7854fc1ce067ae2813b9e342b3bb673e492580cf0"
+      }
+    },
+    "native_source_files": {
+      ".cargo/config.toml": {
+        "sha256": "a1e1646ff2006eba63cf65a03f6f690ba5d42dbbbaf4126531ac5170fa784d6a",
+        "size_bytes": 564
+      },
+      "Cargo.lock": {
+        "sha256": "ed098d1e51324ad762f228ce8046e97da13cee9abdc502d83871bcd4e0d5c177",
+        "size_bytes": 142825
+      },
+      "Cargo.toml": {
+        "sha256": "30730e3116210a9c8627399e9ff4efc01d3fd2cfe51cd7d2ea5aa974b9151e3b",
+        "size_bytes": 8672
+      },
+      "artifacts/team/20260422-074836/server/health.json": {
+        "sha256": "da616848f65203a0d9f0a4e93064fe4a4c219d133b192e68a309ff847adbb0b5",
+        "size_bytes": 916
+      },
+      "artifacts/team/20260422T114843Z/server/health.json": {
+        "sha256": "da616848f65203a0d9f0a4e93064fe4a4c219d133b192e68a309ff847adbb0b5",
+        "size_bytes": 916
+      },
+      "build-android.sh": {
+        "sha256": "88e10866c02387fa9b6fac9c9a641b0ad2b37e5c10cacd9da8fa63cd9b69fe19",
+        "size_bytes": 10453
+      },
+      "build-ios.sh": {
+        "sha256": "5b9110287c61808cd96eb228fb1a8ae8fe9c57b20f50bb9eaaf4961422b00447",
+        "size_bytes": 956
+      },
+      "build.rs": {
+        "sha256": "7337d5cfa659a9608e7de83db52769f6bb11344d8532f8244f6b0ee9139d6436",
+        "size_bytes": 202
+      },
+      "build_all.sh": {
+        "sha256": "6336b85856a7135dc0fdbf0827c237a87deccc33bac9b656648325fe5a549a16",
+        "size_bytes": 1136
+      },
+      "build_ios.sh": {
+        "sha256": "33e0d9996da299ef6c150b4c97081ef4efe467dfd88c6388834c528e1515cde7",
+        "size_bytes": 4282
+      },
+      "cbindgen.toml": {
+        "sha256": "76bd858e591a8b6d79ab3b4d97f0368006516706bf77fcc7a39ad4191890262e",
+        "size_bytes": 754
+      },
+      "create-xcframework.sh": {
+        "sha256": "485aaceb03f707455b5ca7a2f37cc6a584bdc255e30dd2071767b3a9481b8640",
+        "size_bytes": 5083
+      },
+      "examples/generate_mls_chat_crypto_wire.rs": {
+        "sha256": "b4f07ec34fd51f9e7577d16b9a99d004ffafd8e59f8f3c6c732932cdd7f4ad1c",
+        "size_bytes": 96393
+      },
+      "scripts/generate-python-bindings.sh": {
+        "sha256": "85887b28c75eedfbd948d275c45b38f8a1d59c36fc4726fd8682e2c1031edf0e",
+        "size_bytes": 1020
+      },
+      "scripts/generate_chat_schema.py": {
+        "sha256": "c996f67df879988387d435957175925418dfa9a487c0699d3f37021b0a0dae18",
+        "size_bytes": 14953
+      },
+      "scripts/normalize_xcframework_plist.py": {
+        "sha256": "aaeee548dc05143efacb007c2e8333381fbd188cd411be30a35aadc113819ab8",
+        "size_bytes": 1306
+      },
+      "scripts/python-package/__init__.py": {
+        "sha256": "24b4c63659755f058885bf7d75a28aa847ca855516f718f97368b31b4926a1f7",
+        "size_bytes": 269
+      },
+      "scripts/python-package/setup.py": {
+        "sha256": "3b737015daf3e71dbc8cd5cc950b8a5d8fd2a3cdaf09b4b23222f7bfe681ceeb",
+        "size_bytes": 304
+      },
+      "scripts/tests/test_normalize_xcframework_plist.py": {
+        "sha256": "0042b0aeea7de77e88535844166cbefa05ec29e380a4f3649e230531db7dcf42",
+        "size_bytes": 2971
+      },
+      "src/api.rs": {
+        "sha256": "4ed965cfaf9f43a678a6ffe21ff96e2722199d2ef0c4b3b51d0eb7d964af9cf9",
+        "size_bytes": 401380
+      },
+      "src/atproto_bytes.rs": {
+        "sha256": "fee289989c5514031fd95d41a0389ec7da8f2e17eed44a510e22f143c74e8c91",
+        "size_bytes": 5149
+      },
+      "src/bin/echo_bot.rs": {
+        "sha256": "c78b06a70f3762387e4829206dbf42e489d762e50448c5475df31c40fb24553c",
+        "size_bytes": 45607
+      },
+      "src/blob_crypto.rs": {
+        "sha256": "af4f036f88a171e6aaa32ca04f4da8391ecf44a1f154c59a64b90dbf1d5f188a",
+        "size_bytes": 2071
+      },
+      "src/bridge_mappers.rs": {
+        "sha256": "774fbee058feca88ee94c5d661794d7fc1b8771e447ecc9c4cb739e9e43bd80b",
+        "size_bytes": 17044
+      },
+      "src/catbird_mls.rs": {
+        "sha256": "680a57e150ad7ccaadc5fe63dbbe41d9284a8b4ec4d3c5f03e9d0bfa8b755aef",
+        "size_bytes": 36224
+      },
+      "src/chat_v2/append_log.rs": {
+        "sha256": "ac03db791559f5473a5023482a51617e62c5b6d67ca9b89ef6f0a69ea3dfe4bd",
+        "size_bytes": 34509
+      },
+      "src/chat_v2/content/at_uri.rs": {
+        "sha256": "3c933a31630053dd5eb8a06a2aa980de3b45324851c99f45f58dca7eb85a44df",
+        "size_bytes": 14038
+      },
+      "src/chat_v2/content/link.rs": {
+        "sha256": "c517be58dbc83378560d277dca87e77321b9fa85db2512ee206a0fe4fc915245",
+        "size_bytes": 6611
+      },
+      "src/chat_v2/content/media.rs": {
+        "sha256": "cfe967318a0c7aac7b1228042ff36dc8dbc8214fea2b873f81eda579a98a3f8e",
+        "size_bytes": 12073
+      },
+      "src/chat_v2/content/media_tests.rs": {
+        "sha256": "e15835090ce536e2956b30b74ade75282efd7f56216ca0505e9387fba5159032",
+        "size_bytes": 14468
+      },
+      "src/chat_v2/content/mod.rs": {
+        "sha256": "23127675996aa9bc78bda8392860d2d262f052927389178713e721c044857527",
+        "size_bytes": 2583
+      },
+      "src/chat_v2/content/reaction.rs": {
+        "sha256": "3d78144c758582b1f67193ed88657cbf0f0f88e5f6809a81e76cecf43e1af78a",
+        "size_bytes": 19674
+      },
+      "src/chat_v2/content/uri_tests.rs": {
+        "sha256": "08f34a529b8e1db78b99fb41240331dbfff3589d3bbdd2645d86bec003eef561",
+        "size_bytes": 18319
+      },
+      "src/chat_v2/coordinate.rs": {
+        "sha256": "73f1bf463be17e62312d60b2e87c0fe3d1a15d42fb960a19139e5ce0eda67ef4",
+        "size_bytes": 22236
+      },
+      "src/chat_v2/cursor.rs": {
+        "sha256": "67784fc2b6e26f84caa809333d956d8a8524a8e8ee7ac8a7ac30840ad79f3c6f",
+        "size_bytes": 8242
+      },
+      "src/chat_v2/endpoint_error/class.rs": {
+        "sha256": "6f132ace02d5482afb3685daa2858cba3754b32d023c6a1ffda695c6cd5a01fb",
+        "size_bytes": 15220
+      },
+      "src/chat_v2/endpoint_error/code.rs": {
+        "sha256": "9fd31d42ea7ed318b435504fcb7188687fad665c40c28a6971ea8dee898dedb6",
+        "size_bytes": 8772
+      },
+      "src/chat_v2/endpoint_error/mod.rs": {
+        "sha256": "9f5ee808798c25fb01338cb1b140ce2232946a007e2b208c3a3dff9cf8bcb6e7",
+        "size_bytes": 12946
+      },
+      "src/chat_v2/ffi.rs": {
+        "sha256": "de1cd56d2edf9fad6f07e17b2edb4fe7c1474938aa48d57530baad8076080b19",
+        "size_bytes": 42337
+      },
+      "src/chat_v2/gate_support.rs": {
+        "sha256": "485b955a28c82fddd82c4e432b8cc2584250fd1183f92dc893049b401a2b13ff",
+        "size_bytes": 38875
+      },
+      "src/chat_v2/ids/credential.rs": {
+        "sha256": "4b336511c34a99b9320d471074561ba192eecd73d6f704f5d4f5c67481fbe49d",
+        "size_bytes": 9656
+      },
+      "src/chat_v2/ids/did.rs": {
+        "sha256": "b7992fab4c97ba9725e1c4f09d1cc1904ebaec48fbb8256c945f2a67f107737f",
+        "size_bytes": 21810
+      },
+      "src/chat_v2/ids/key_id.rs": {
+        "sha256": "4a6452d2120a3c8b3d77ab42e42266eaafcc6d410eb9e3fad99059e421a0dc08",
+        "size_bytes": 8766
+      },
+      "src/chat_v2/ids/mod.rs": {
+        "sha256": "d539bba397a86b9a9546a7d12f2fdee34ed1ff9ec92701691379b9de7d6911a6",
+        "size_bytes": 1615
+      },
+      "src/chat_v2/ids/seq.rs": {
+        "sha256": "730a7c051ced742755fde5f3b6e96e57ad94acaf5617f391a31d993394704cec",
+        "size_bytes": 7248
+      },
+      "src/chat_v2/ids/timestamp.rs": {
+        "sha256": "761a2e1f1b9d767afd569c9807156b52c9695cd0b62aee0192278c04fd880795",
+        "size_bytes": 11359
+      },
+      "src/chat_v2/ids/uuid.rs": {
+        "sha256": "672630a08e59e5e7eba0375b8adcc31cfdd16821b8b4a2ae2abb538064c94702",
+        "size_bytes": 14500
+      },
+      "src/chat_v2/interval.rs": {
+        "sha256": "b6eab26addb680f436d9d77e17d57845a7657b21dce490619292857c2ee2dad0",
+        "size_bytes": 32196
+      },
+      "src/chat_v2/journal.rs": {
+        "sha256": "327763996bfc74198081cc301c6edefac081b0322446e6d84a0e64c4118ca6ed",
+        "size_bytes": 29956
+      },
+      "src/chat_v2/mod.rs": {
+        "sha256": "d28c243d4ad5b79343ecb93b0684e19f41af6bf9b4b65a572e28313189d21bfb",
+        "size_bytes": 24901
+      },
+      "src/chat_v2/participation.rs": {
+        "sha256": "06b6a1db15c07db4fe0bc8f3c48effe3e64e1b3b91320cf4fda739aed01185ae",
+        "size_bytes": 25039
+      },
+      "src/chat_v2/provenance.rs": {
+        "sha256": "85825117df420079fd8b5a03b575f0f6da3cf805e98e2f7cf52188d258b40d93",
+        "size_bytes": 16827
+      },
+      "src/chat_v2/recovery/ladder.rs": {
+        "sha256": "d363e3050d87270e1ae91722cfcff781b76304a34d342f530ec8c8cd21eba519",
+        "size_bytes": 14013
+      },
+      "src/chat_v2/recovery/mod.rs": {
+        "sha256": "1ef7cb829ca8a65350e0f559bd16e9bab41823d33e7f3e7fb9c8980761a25623",
+        "size_bytes": 5035
+      },
+      "src/chat_v2/recovery/poison.rs": {
+        "sha256": "d098d3e20f1fe709a772bd6c33bba9e0eb2880009eedf118f87d47406f31923f",
+        "size_bytes": 17963
+      },
+      "src/chat_v2/reducer/high_water_tests.rs": {
+        "sha256": "405b6d348207a029f28fc78943f77d580701161222184a1943485dfedcfe4104",
+        "size_bytes": 17449
+      },
+      "src/chat_v2/reducer/mod.rs": {
+        "sha256": "8fce7e951c5cfde630de1a25f3e75c6e9933d6df186915489b561389719d180e",
+        "size_bytes": 44343
+      },
+      "src/chat_v2/reducer/reanchor.rs": {
+        "sha256": "835e6ea3cef766b018de18c595f13d94f1e3ff029034015d8c15d8c8fd91f46a",
+        "size_bytes": 36318
+      },
+      "src/chat_v2/reducer/reset.rs": {
+        "sha256": "1562693a80603031832dc1dfec710fb756cd3408f1fb79e7e2489b27e7d37ee3",
+        "size_bytes": 32284
+      },
+      "src/chat_v2/reducer/restore_tests.rs": {
+        "sha256": "f14d2126ad56f1f4c0bd8b4357d7472790f084555ecdc2c77f1046dcda4c58f5",
+        "size_bytes": 14460
+      },
+      "src/chat_v2/reducer/terminal.rs": {
+        "sha256": "eda7092a894f4a12192c4a16083e3e7cbaaae586ffe62220132a52d68d93f187",
+        "size_bytes": 28715
+      },
+      "src/chat_v2/storage/error.rs": {
+        "sha256": "406109b425737935ef66467d9afe4b32356ba53a6dcd32e8fda5367d7ecfef05",
+        "size_bytes": 10263
+      },
+      "src/chat_v2/storage/memory.rs": {
+        "sha256": "acc4b688a6ff410a809a6d25daaa87811bdfe627acdcb1fc2f01212fea1287c8",
+        "size_bytes": 8704
+      },
+      "src/chat_v2/storage/memory_tests.rs": {
+        "sha256": "6c03c0b4c1e81cdde16fd0aa1f383fab7054520afb64a666c5c46d9acddfb165",
+        "size_bytes": 24894
+      },
+      "src/chat_v2/storage/mod.rs": {
+        "sha256": "3103bd640b3cd112ccdb37c6b3b61ce3daa5beacb821cd5d344f1256372567cb",
+        "size_bytes": 17245
+      },
+      "src/chat_v2/storage/page.rs": {
+        "sha256": "85f890689bff80bf2f62b2a3aa25b3fd4ea62cfefeed6d9c555263c2e75bee83",
+        "size_bytes": 13867
+      },
+      "src/chat_v2/storage/store.rs": {
+        "sha256": "185adffae01f606130b19a8fb1613ac248f57894b61b3cd5c00449325dc5b834",
+        "size_bytes": 20257
+      },
+      "src/chat_v2/transcript/contract.rs": {
+        "sha256": "adeca6fc50576f7f1df6c3e0399485d2bb44113fe1ec7552c9bc9055518fcdae",
+        "size_bytes": 23007
+      },
+      "src/chat_v2/transcript/contract_tests.rs": {
+        "sha256": "8cd4a525c1b88a986b2a6bcf6318860684243c03a17cda96d1bcee0cc9e62f78",
+        "size_bytes": 12867
+      },
+      "src/chat_v2/transcript/direct_request.rs": {
+        "sha256": "1a9e8950f6c65eb5368c2c00175cf881b456b7d1df71b512df8b728be8cea66c",
+        "size_bytes": 65337
+      },
+      "src/chat_v2/transcript/domain_vector_tests.rs": {
+        "sha256": "44222d3bf9ed60696c2ce56a11f9ec414eeffe2153403b9d4c8f727384e2b209",
+        "size_bytes": 10710
+      },
+      "src/chat_v2/transcript/entry.rs": {
+        "sha256": "f87e9dbae714dae8af79be7ee820df590b609d69bbefe403ab19388ba16aa78f",
+        "size_bytes": 16561
+      },
+      "src/chat_v2/transcript/entry_tests.rs": {
+        "sha256": "9277bd254a239039487fc7d1cf09dc036f717bedb76e95308984dfb3dcf4b646",
+        "size_bytes": 18790
+      },
+      "src/chat_v2/transcript/fingerprint.rs": {
+        "sha256": "d9baa974a8a56698222d932841607f8994a59b820da23b85f72dbbdd17d98d36",
+        "size_bytes": 13839
+      },
+      "src/chat_v2/transcript/fingerprint_tests.rs": {
+        "sha256": "6c04d6cc3787d9090ff1565edda6200b9e261f7477f5eb3b0cb280017ed6a730",
+        "size_bytes": 21792
+      },
+      "src/chat_v2/transcript/mod.rs": {
+        "sha256": "525f86ccd88915488adec990b40acd5c5caeb1637dee5e52f12522ae3c9d17bf",
+        "size_bytes": 11726
+      },
+      "src/chat_v2/transcript/signed.rs": {
+        "sha256": "c64538847fb7c30898ea6a2c594f4775b70f9731b6834533d99481e412f89bb8",
+        "size_bytes": 10313
+      },
+      "src/chat_v2/transcript/signed_tests.rs": {
+        "sha256": "9cce213aa83fd33b5755409330d3962aa7e1f19e260c4df1844f3b446b6af591",
+        "size_bytes": 12944
+      },
+      "src/chat_v2/transcript/strict_json.rs": {
+        "sha256": "dbab722dd3898c2ab90bfaaa4cb97491627d3c3777271fdb6658f7a017b65f9a",
+        "size_bytes": 7690
+      },
+      "src/chat_v2/transcript/tests.rs": {
+        "sha256": "110b87ae286076ae0ca438e52f235990e40f608720159519d096488b3b0b5b36",
+        "size_bytes": 16931
+      },
+      "src/chat_v2/transcript/value.rs": {
+        "sha256": "9eabc84c9a287fc020e89ca3b34a5e1eeaca756acc7cd323bc8eafc22fd83eb4",
+        "size_bytes": 5573
+      },
+      "src/chat_v2/transcript/vectors/blue.catbird.chat.defs.json": {
+        "sha256": "e7a23bc2b8e383729d8046a33cd24d86ef6cf8261989692f327e816e10343938",
+        "size_bytes": 225198
+      },
+      "src/chat_v2/transcript/vectors/direct_request_vectors.json": {
+        "sha256": "ec5671772523eb5a3e70e0ae5cde57df6636799978ecbc27dcc0778f6dedba60",
+        "size_bytes": 44325
+      },
+      "src/chat_v2/transcript/vectors/mls_ds_fingerprint_vectors.json": {
+        "sha256": "2adfcc68db037fd49dfad9f6f7945f34a26791ce7681c8e78b6a20a84ed4ba7f",
+        "size_bytes": 63083
+      },
+      "src/chat_v2/transcript/vectors/mls_ds_signing_domain_vectors.json": {
+        "sha256": "5533e6457fe4dc1b45fe7ff014940a6aea91657d23bf3d5b1493ac65aeefe984",
+        "size_bytes": 97025
+      },
+      "src/chat_v2/transcript/vectors/mls_ds_transcript_vectors.json": {
+        "sha256": "bcb7bf9411a91b50cbe07ffc854ab5f8fc0fa05e40c8de1b774305183b2002fd",
+        "size_bytes": 4298
+      },
+      "src/chat_v2/transcript/witness.rs": {
+        "sha256": "91679d06c0b1e0c79467fb9515bc7b86a0e8fc8ed7271e1798ce39a2936fa584",
+        "size_bytes": 8040
+      },
+      "src/chat_v2/wire.rs": {
+        "sha256": "05ed40984f2463102c6ba0c32a8af71ae5ee3c6173e3e7d5e11bb035fb327b4e",
+        "size_bytes": 11681
+      },
+      "src/client.rs": {
+        "sha256": "32eb9e9e85cb3bf8d490086c84db1c9ee49d1444704adcb806a24927367c71fc",
+        "size_bytes": 17607
+      },
+      "src/client_bridge.rs": {
+        "sha256": "ed70438718eaeecd8907d8ac420db2b36534db900725bae8766141cde0c1abca",
+        "size_bytes": 47608
+      },
+      "src/engine.rs": {
+        "sha256": "426e4102152be695dcef0e526529d96f5993b360f61c6227c026c7693919463a",
+        "size_bytes": 33566
+      },
+      "src/engine/server_events.rs": {
+        "sha256": "693da2adbef3d943c9251a85c5ea5b1d674ebb6cacfd937ca6ea0916b93e8661",
+        "size_bytes": 108636
+      },
+      "src/epoch_storage.rs": {
+        "sha256": "d57aabbc4b3b85d163c35cf03b58359c1b52643cf5c5a2a3512942db95345624",
+        "size_bytes": 12170
+      },
+      "src/error.rs": {
+        "sha256": "f31b95c5a4c29a7ee101c29f39655b8c23fd0cff015db14a6774c4cc7bc213ce",
+        "size_bytes": 13983
+      },
+      "src/field_encryption.rs": {
+        "sha256": "462f00b684967975e80fbf41101bc3c8fb3b28b1a42c093d693d7ce36d730f58",
+        "size_bytes": 16777
+      },
+      "src/high_level_contract.rs": {
+        "sha256": "a2297fdd9f40b6e187e815aab1ac471a7654c552f0509d5e7b69f8b813dfb140",
+        "size_bytes": 5988
+      },
+      "src/hybrid_storage.rs": {
+        "sha256": "724f6144231a06ca6f67f55da11260d7602863c3156195fa9ca7535a0c71bf66",
+        "size_bytes": 22993
+      },
+      "src/keychain.rs": {
+        "sha256": "9d4c932927c1693b499a6e82a39e4d91b47a556be4881376ada29170e8819f14",
+        "size_bytes": 358
+      },
+      "src/labyrinth/ffi.rs": {
+        "sha256": "68798d9bc76ab287f39da2cd7627bb2a6ec7810257c32eb06aac494d01e06276",
+        "size_bytes": 23136
+      },
+      "src/labyrinth/flush.rs": {
+        "sha256": "43cfbb2e693a84ce341dda6f59067cae7ff9bf91fe84388f46011b26d1d945b9",
+        "size_bytes": 8579
+      },
+      "src/labyrinth/hooks.rs": {
+        "sha256": "6a10e11c3222e802cb1ac9b98b9931abd7fd4f5b05fb952cdeaaa30701ec850c",
+        "size_bytes": 21051
+      },
+      "src/labyrinth/hooks_status.rs": {
+        "sha256": "b01e2fd525b76e78686a3f8b7cd02cb4bcf3eca945b9a4c4688faac5e5677f11",
+        "size_bytes": 8082
+      },
+      "src/labyrinth/live_space_tests.rs": {
+        "sha256": "4d3c3f1d69510eff3983c5bbb4b8741f41ca6ca03a2af41c62dca74ccc5636f1",
+        "size_bytes": 11023
+      },
+      "src/labyrinth/mod.rs": {
+        "sha256": "e646536521c110dcf3f6cfe4267fe387ba7324e9ba825330d8eaa1d45f97b138",
+        "size_bytes": 4981
+      },
+      "src/labyrinth/queue.rs": {
+        "sha256": "08149c739192d775f84a6eb2850e316a07e75291715a56facd826677c956e2fe",
+        "size_bytes": 15568
+      },
+      "src/labyrinth/queue_tests.rs": {
+        "sha256": "22d3b8e2211dfcc71e38c0a624bcd89a384daf7d53d42b8b79914cc41a4f09cd",
+        "size_bytes": 13605
+      },
+      "src/labyrinth/review_tests.rs": {
+        "sha256": "6ef160bfa2d97065349aef2422927b6a5c135d8c8ff8be23614d7767d1724f16",
+        "size_bytes": 9934
+      },
+      "src/labyrinth/session.rs": {
+        "sha256": "75f098eb0191dc4efe579cd970d9936536862932a177d938c44526e976d96a45",
+        "size_bytes": 24760
+      },
+      "src/labyrinth/signer.rs": {
+        "sha256": "f55b06e3cf490aacd146f44858de860d69c82f77423862086b0441d538051d5b",
+        "size_bytes": 4685
+      },
+      "src/labyrinth/space.rs": {
+        "sha256": "d3c29df17b3b941053894d82682a359b3f4d7314a7fbceba35312a9e305aaf16",
+        "size_bytes": 11327
+      },
+      "src/labyrinth/space_tests.rs": {
+        "sha256": "e963665d355ea9e6c695a2040a37f77d554a0a7c18b32d2fb9a56f589c15e04d",
+        "size_bytes": 12532
+      },
+      "src/labyrinth/state.rs": {
+        "sha256": "a7e1d17c061b8f6c3bae0f52b2274cf05800fa1a310585c836c47faf7ed03449",
+        "size_bytes": 2122
+      },
+      "src/labyrinth/status.rs": {
+        "sha256": "c581478acb74ad29e430e9299b1ae58900972f9dcdf6f65aa8235cd946f64778",
+        "size_bytes": 5400
+      },
+      "src/labyrinth/tests.rs": {
+        "sha256": "45d1dad7b0fb2d420353c5da18bf38746798355c6224f202a016707515d476c9",
+        "size_bytes": 29004
+      },
+      "src/labyrinth/transport.rs": {
+        "sha256": "67b5ba6f7fa0a94e0abc94f86716ac4290a996e8b6de586c022a222898b7fae7",
+        "size_bytes": 9242
+      },
+      "src/labyrinth/write_auth.rs": {
+        "sha256": "c057d1175d60d29460f46790605f73490cc0bfe62e7715a71e37346b6b645e94",
+        "size_bytes": 3039
+      },
+      "src/lib.rs": {
+        "sha256": "0c036bb0ce3247e6fcd69e4b4ad228c76e2c28da0f48770b31e8b79f60683e43",
+        "size_bytes": 5389
+      },
+      "src/logging.rs": {
+        "sha256": "15068ca2e49266191ab35809e85d804c4492e48ab764a8e4c97acde88b691433",
+        "size_bytes": 2432
+      },
+      "src/message_limits.rs": {
+        "sha256": "1c210ad9a148273912fc7289c135c46e40afeaa5ba8776a9ae50f51ab523f23c",
+        "size_bytes": 4281
+      },
+      "src/metadata.rs": {
+        "sha256": "110a7bdbaab58bcbf9e7bcccb811ee5afe949b901cb315b39424e13046747914",
+        "size_bytes": 29591
+      },
+      "src/mls_context.rs": {
+        "sha256": "7cadae392c9de024aba03ba4b782e94d6223569593b9eb372a800c7750a106fa",
+        "size_bytes": 222434
+      },
+      "src/orchestrator/account_exit.rs": {
+        "sha256": "0fd00de79c72d1df53506092eb852d6f81534672bc80b26a148c4f1a0e25b448",
+        "size_bytes": 34934
+      },
+      "src/orchestrator/account_removal.rs": {
+        "sha256": "5e48d31af7c27b83e6d4eab458991118584cc64983a72da33dbdf8308af755ff",
+        "size_bytes": 21814
+      },
+      "src/orchestrator/admission.rs": {
+        "sha256": "d8e51abbfb5d1a9c4a3e54836294c0565fc1e01d08f7d65ad802bf8e3fdde0aa",
+        "size_bytes": 40732
+      },
+      "src/orchestrator/api_client.rs": {
+        "sha256": "8a33a2044145973b9cc1830887fd21b889117c98a179281aec9823c0a0ebbf84",
+        "size_bytes": 7559
+      },
+      "src/orchestrator/authenticated_inventory.rs": {
+        "sha256": "13f95dfa05a0af6510f89cc00bad72ae41786a72b83cb0262c502c9a7697532c",
+        "size_bytes": 15856
+      },
+      "src/orchestrator/canonical_transport.rs": {
+        "sha256": "a607e7e8d1fcced97b432e5f3bbcd82f1402feafb3110d3e81e51b7c7432861d",
+        "size_bytes": 200616
+      },
+      "src/orchestrator/canonical_transport_tests.rs": {
+        "sha256": "f50dcbc0f1fd34569a9821954823e9606f46cbf924cf194231cdb1353219d0a9",
+        "size_bytes": 5637
+      },
+      "src/orchestrator/constants.rs": {
+        "sha256": "7ef3182950fbe2b8dd71ef2bfcd784421d380c364505f8352608c2052ae6aba8",
+        "size_bytes": 3987
+      },
+      "src/orchestrator/control_journal.rs": {
+        "sha256": "c229499dbc66416cfff9c9f1e596dc607e9d1e406e78ea5a9cc3e6e464d3fa73",
+        "size_bytes": 62121
+      },
+      "src/orchestrator/control_journal_resume_tests.rs": {
+        "sha256": "d08495ef1d2af344cc0be09bb4b53895315faa18250e502c932d983951e5310d",
+        "size_bytes": 16610
+      },
+      "src/orchestrator/credential_binding.rs": {
+        "sha256": "c04235b05d35f848067c741333740e9b80dc9661d6f7a312fa700d506a4746c0",
+        "size_bytes": 48288
+      },
+      "src/orchestrator/credentials.rs": {
+        "sha256": "62ba35584c8a6becbd8785e290c09e4a1eb50207cca7560fb924ad00d49cf2c8",
+        "size_bytes": 7625
+      },
+      "src/orchestrator/crypto_provider.rs": {
+        "sha256": "df9eb7f19d532dada7d26ed30035e5928438b29327c826044482fbe041a2ce87",
+        "size_bytes": 5202
+      },
+      "src/orchestrator/devices.rs": {
+        "sha256": "3ca618141aeec565498a2a456e08a8a490b21ffb0a8c0c0a8e5b04e036783bc6",
+        "size_bytes": 25778
+      },
+      "src/orchestrator/direct_adoption.rs": {
+        "sha256": "52fde49757b5dc50f79e1d0d579559f387af86206c7202547c039e69e7d2a4e6",
+        "size_bytes": 14861
+      },
+      "src/orchestrator/direct_request_bootstrap.rs": {
+        "sha256": "04050e42c27fac937d8a864d6528e1768ed77536a34e693657cb6ed98d9801b7",
+        "size_bytes": 33900
+      },
+      "src/orchestrator/direct_request_commands.rs": {
+        "sha256": "9a039502f466dd20f9e8d5a8be7211e69ac21ae1175d1546c5f9b6f4d2cd918c",
+        "size_bytes": 52327
+      },
+      "src/orchestrator/direct_request_controls.rs": {
+        "sha256": "66e64647b75b073fa360abe99d6d623d8ca7f0022d4113cfd244634846bf4812",
+        "size_bytes": 8274
+      },
+      "src/orchestrator/direct_request_intent.rs": {
+        "sha256": "6c29cfced2f4b7993a59029fd63f621f2c02e9d8cf94e48d8c36c393a02af0b3",
+        "size_bytes": 20802
+      },
+      "src/orchestrator/direct_request_journal.rs": {
+        "sha256": "82179042cfb37d77299f262c032bc8478b7c1886b948cab8790b6d958cb74d46",
+        "size_bytes": 35904
+      },
+      "src/orchestrator/direct_request_keys.rs": {
+        "sha256": "ae051da18d85fd687b0991af5e940253923f01c6ab3ef3a7ed8807daaf1e10c5",
+        "size_bytes": 21431
+      },
+      "src/orchestrator/direct_request_origin.rs": {
+        "sha256": "a7bb3a70c23ada6ad7e0469cf7025f2c8b04a9d3f3298fecb3b03fbaa0b44c0a",
+        "size_bytes": 7441
+      },
+      "src/orchestrator/direct_request_peer_keys.rs": {
+        "sha256": "0ab013d8b85383f3a3c7acb6987195bdab4d4f0c5d7cacffeab4ca412278ed1e",
+        "size_bytes": 2531
+      },
+      "src/orchestrator/direct_request_projection.rs": {
+        "sha256": "c18036eecee80ced288969c6fdf8bf8f1880932575dee1e6cdd54efb4ce47e39",
+        "size_bytes": 21569
+      },
+      "src/orchestrator/direct_request_receive.rs": {
+        "sha256": "6668675ac6ac8d2008e5ae39da5015661c498ad9b41eb6521d099fbbbb3f78ce",
+        "size_bytes": 44060
+      },
+      "src/orchestrator/direct_request_shared_crypto.rs": {
+        "sha256": "360bc64297b63f319f1e876f3015b77ec36e43fe7a082a7c1f84cd7980f13e7c",
+        "size_bytes": 16005
+      },
+      "src/orchestrator/direct_request_types.rs": {
+        "sha256": "f61e0b0564524d3197885b9c47416927ca6be800b2d325602e1a733f06955a03",
+        "size_bytes": 4769
+      },
+      "src/orchestrator/direct_requests.rs": {
+        "sha256": "3b1070c9f4b06416e9c5dab44bc41bd315b509d0faa0326fb1309c5ebedc9669",
+        "size_bytes": 17190
+      },
+      "src/orchestrator/error.rs": {
+        "sha256": "225d4b05a613d6638f46fca8fcc85dc4df9e7dfd8b32eb93d7432c3c5504847e",
+        "size_bytes": 15676
+      },
+      "src/orchestrator/event_observer.rs": {
+        "sha256": "9f69c13b97b2cb14d2ad7253e91041d22711e0039f56d3c6226ba995aab89c9b",
+        "size_bytes": 4595
+      },
+      "src/orchestrator/generated/blue.catbird.chat.defs.json": {
+        "sha256": "330c56c172e8c1eea99becb95e0933f21bd15ad229237365fd57d0f245181ac2",
+        "size_bytes": 225618
+      },
+      "src/orchestrator/generated/mls_chat_contract_vectors.json": {
+        "sha256": "67e00b09051b2a19e642b5a39017265d6ff64d549671bd2d0e2c73b8c8bfc205",
+        "size_bytes": 129773
+      },
+      "src/orchestrator/generated/mls_chat_control_fingerprint_source.json": {
+        "sha256": "9f33f318fb7492caaa0b6668f2f69a093051bbeae35f3991bc868b5b66c61d49",
+        "size_bytes": 56670
+      },
+      "src/orchestrator/generated/mls_chat_signing_domain_vectors.json": {
+        "sha256": "b8cefccccf76622f98b73fa617a27ed7a6ba40729c350639f3e43f56de2521b8",
+        "size_bytes": 97531
+      },
+      "src/orchestrator/group_invitation_reference.rs": {
+        "sha256": "7111773336b79d3b382cfc12b5ef259a1689eec10f172136165a3dd32e99a269",
+        "size_bytes": 10424
+      },
+      "src/orchestrator/groups.rs": {
+        "sha256": "454f6baffa5e387497d69ec53169c16f8c9ebebbe0f61011f55f49344f3e44be",
+        "size_bytes": 315360
+      },
+      "src/orchestrator/incoming.rs": {
+        "sha256": "a77ebd7580b626bab5a0981295b5fb070e060b5e3334e09e061fc7360c30c913",
+        "size_bytes": 15430
+      },
+      "src/orchestrator/key_packages.rs": {
+        "sha256": "5b2e92e199b4bd973c702beeb5c6e37b33c8abb88b6f72ec418e01260de7cb88",
+        "size_bytes": 10705
+      },
+      "src/orchestrator/leaf_recovery.rs": {
+        "sha256": "572b5e39a1a23905916717ccaa85d1f955ad95fc90c9b387832ab7ab89250add",
+        "size_bytes": 10690
+      },
+      "src/orchestrator/leave_fulfillment.rs": {
+        "sha256": "267cdfa129d806d43e22241e9246c315d6e6961637b628aa243e5ac44a561823",
+        "size_bytes": 17515
+      },
+      "src/orchestrator/lifecycle.rs": {
+        "sha256": "9f756f52b91a23e62e85ceb24d3c3490413aab110bb17669df3236d7c904ac98",
+        "size_bytes": 15639
+      },
+      "src/orchestrator/messaging.rs": {
+        "sha256": "a369532e2284196cc075603ddad027b24ac4e13e804da88aa20a9a257ec4ff8f",
+        "size_bytes": 114496
+      },
+      "src/orchestrator/metadata_snapshot.rs": {
+        "sha256": "4946fb9c679365755796928b7510d7b3c24db003e9b3b0784c6294998609e540",
+        "size_bytes": 18593
+      },
+      "src/orchestrator/mls_provider.rs": {
+        "sha256": "0e19dc147fb68c2b86c65249aa1efb9dc344932a60839112f72e07949398c4ab",
+        "size_bytes": 41952
+      },
+      "src/orchestrator/mod.rs": {
+        "sha256": "16bb7579d116132d7bc03322aaaaff457a99888cb4ae32c1d78aea9845f60502",
+        "size_bytes": 2926
+      },
+      "src/orchestrator/orchestrator.rs": {
+        "sha256": "2ed6fccfa56db4c59e6e8f4969f456bfaea95696bf8dbc653400924f3d3370d9",
+        "size_bytes": 71809
+      },
+      "src/orchestrator/ordering.rs": {
+        "sha256": "2513c177cf0f33d31d276a03b9c3113bea077adc70b9d84ca98815413ba03bd6",
+        "size_bytes": 2466
+      },
+      "src/orchestrator/pagination.rs": {
+        "sha256": "02bbf2fce313655100601261fb0e6e3eb17d72fe0dd0ee30f545a4ec22589a88",
+        "size_bytes": 5849
+      },
+      "src/orchestrator/projection_commit.rs": {
+        "sha256": "1d48bcc124e832e40e47e206b75ae5dfb6562c5b15b70eb8481176e87b5c462c",
+        "size_bytes": 9889
+      },
+      "src/orchestrator/recovery.rs": {
+        "sha256": "7b5eaeb758b6f41eb86e7118f835856cd60a33ed6d1edd3df6194681ee28ce3e",
+        "size_bytes": 313841
+      },
+      "src/orchestrator/reset_flow.rs": {
+        "sha256": "7182a9ff37f091cc9a54c28d98f06690846c99ed5f31b4a0fd46f102764d4f90",
+        "size_bytes": 45522
+      },
+      "src/orchestrator/staged_commit.rs": {
+        "sha256": "d023fe95aed1fa38fa87bc256e62fd5d1edc148c8b4055e36f500fb740147d59",
+        "size_bytes": 33947
+      },
+      "src/orchestrator/storage.rs": {
+        "sha256": "3d5f6c36609758dce6ef0bd6a1c7313bb8ffe06d18eeefd7d3e08f81d5eb4deb",
+        "size_bytes": 29070
+      },
+      "src/orchestrator/subscription.rs": {
+        "sha256": "0ca891c691589c822e65540dd241f181ce0be2002a384258c7371bf541505ac9",
+        "size_bytes": 72704
+      },
+      "src/orchestrator/sync.rs": {
+        "sha256": "17172a240617c91460f72ba355ff616fe4b0e2711e7b3daa9fc96dbde572771e",
+        "size_bytes": 82868
+      },
+      "src/orchestrator/terminal_lifecycle.rs": {
+        "sha256": "722b6522c08fcf4b7ce3f2f7dca34ac22eee182a8a611f2c2e3412011177d7d3",
+        "size_bytes": 46191
+      },
+      "src/orchestrator/types.rs": {
+        "sha256": "a561f3d2f3919be1f33501ac3de66c7ee6445a08b049a1fce85fa68acecc3a8f",
+        "size_bytes": 58778
+      },
+      "src/orchestrator/welcome_ack.rs": {
+        "sha256": "6f3e257f1c247315e3dad0fe2c46b2b25d1ceda741575f526b69f481029aa112",
+        "size_bytes": 24452
+      },
+      "src/orchestrator/welcome_ack/native.rs": {
+        "sha256": "734568884200a3b115c65acbb42e1f6fe0ec3e8b89b0f08ff57ebf8204f47350",
+        "size_bytes": 16154
+      },
+      "src/orchestrator/welcome_recovery.rs": {
+        "sha256": "f27975db8cc9ba163f62b582224ea686f8a127f33d01fc63f93105f771725fe4",
+        "size_bytes": 6277
+      },
+      "src/orchestrator_bridge.rs": {
+        "sha256": "8050c5f0f8d91611478468c66f84bbd0df119829fcbc1a1973e55386a67f28ee",
+        "size_bytes": 253107
+      },
+      "src/platform_lifecycle.rs": {
+        "sha256": "26c0872fc96b2dcb1583ee3ec3ba5855acd2774cafc5de08816d6b923099e1e1",
+        "size_bytes": 1601
+      },
+      "src/storage_driver_prototype.rs": {
+        "sha256": "06da331e09059bfb6dc593e20a74c82e3637083a3e3c9b1a75b6e8015bc899cd",
+        "size_bytes": 1067
+      },
+      "src/tests.rs": {
+        "sha256": "865b028a7424d70270b3fa994e0e2e88df79b7353190334b1a0d1e72e78e2155",
+        "size_bytes": 10838
+      },
+      "src/types.rs": {
+        "sha256": "24e84248c5dff647d8544a23f85e6eeacdf9293b9bc75473b8b71332d642bd1e",
+        "size_bytes": 17388
+      },
+      "src/voice.rs": {
+        "sha256": "e03a50fa9524c9232010bfb644cdce0f390ebaad98780ae76d8844ed2df8d30d",
+        "size_bytes": 38580
+      },
+      "src/wasm_client.rs": {
+        "sha256": "0f4dd77f48d2e52262642d60f8ba5a0b343c8ed07fa777d98159a0fac7473f2d",
+        "size_bytes": 15511
+      },
+      "tests/adversarial_m1_tests.rs": {
+        "sha256": "b3efd07916f06b4f76a3d1d704729d9cf1ae545bf8e024405923bf500b2a7aa3",
+        "size_bytes": 3459
+      },
+      "tests/adversarial_suite77_tests.rs": {
+        "sha256": "5dd3e94a103d952ade038c9f033e2ea011ed9de2b308b0f7e5f770995757296b",
+        "size_bytes": 6179
+      },
+      "tests/authorized_device_directory_tests.rs": {
+        "sha256": "f8f199aa9ce777cf0f9eb6db856f3c4f5da685a1cb5b1bf16bf4c097cce56fe2",
+        "size_bytes": 12090
+      },
+      "tests/c35_offline_journal_hydration.rs": {
+        "sha256": "6351d05360914ae18496b9c5f18d708b13542ce957bb4f91812ecb5af0fcfac0",
+        "size_bytes": 19632
+      },
+      "tests/clean_chat_account_exit_tests.rs": {
+        "sha256": "544d3225601cd9c64dbeabe7e6b7391f42cbcfd52c15aa3344f2d57b12c52ec3",
+        "size_bytes": 61835
+      },
+      "tests/clean_chat_account_removal_tests.rs": {
+        "sha256": "f4ae61243edbc53227758449a9cd0c231aa85ac8890c58e615ccb28d504632ba",
+        "size_bytes": 19905
+      },
+      "tests/clean_chat_admission_tests.rs": {
+        "sha256": "77162dce09d152bdfb5af88f941aad995fbe6c3b77bce103ad8d9ba0292d7830",
+        "size_bytes": 48535
+      },
+      "tests/clean_chat_c33_unsupported_federation.rs": {
+        "sha256": "f94f4e18589fe3025b5f625acc3739e90e42479e8d6b438a6ead222c6ebc5b5c",
+        "size_bytes": 23992
+      },
+      "tests/clean_chat_conversation_projection_tests.rs": {
+        "sha256": "368c1ad1c7054bdb99e9a67942a429ac7ccdc06788c8944ecf1b582bbd15af1c",
+        "size_bytes": 9661
+      },
+      "tests/clean_chat_direct_adoption_tests.rs": {
+        "sha256": "3156bcfb68b3a3d8894a00e7890e2575beb7db44c6ac3cba7813dd7dc64447a6",
+        "size_bytes": 15031
+      },
+      "tests/clean_chat_direct_request_c09_draft.rs": {
+        "sha256": "ddb411b2802716b9c21723f3891520769776bc81482e8132d64e0ba920cd1094",
+        "size_bytes": 8562
+      },
+      "tests/clean_chat_direct_request_c14_c20.rs": {
+        "sha256": "e5a5447980d3218d741d3b45c561af4ed3dd98067622ba123c01d5bbf0d6aea5",
+        "size_bytes": 32389
+      },
+      "tests/clean_chat_direct_request_c21_c22.rs": {
+        "sha256": "db27a32dfcca0bf6151e70fac0efeffd0503da9eab8d2119b76d10a35c1ae2b9",
+        "size_bytes": 4920
+      },
+      "tests/clean_chat_direct_request_crypto.rs": {
+        "sha256": "6d68b25d5af6b818b2329f5e067b92708b4779dd29ac441a09583577db730522",
+        "size_bytes": 34624
+      },
+      "tests/clean_chat_direct_request_host_projection.rs": {
+        "sha256": "ecad2338f38d855c5d4a110e7ddf09dab889e1eba3bef8e02a65d56e0054e849",
+        "size_bytes": 18060
+      },
+      "tests/clean_chat_direct_request_lifecycle.rs": {
+        "sha256": "98fc92420f3378b324f809beb615ec497a7e9853584418338da0cf47a875291f",
+        "size_bytes": 58814
+      },
+      "tests/clean_chat_direct_request_poison.rs": {
+        "sha256": "a04aacb99b10bc53b83dfc9b4464b2b28e14ddfc5d2a1b73d7241f19a8806198",
+        "size_bytes": 21295
+      },
+      "tests/clean_chat_direct_request_preview.rs": {
+        "sha256": "fb8456a77cea3147b20e34d33fde494f6fd2c007c4c8556976c9c949df7900ef",
+        "size_bytes": 3407
+      },
+      "tests/clean_chat_direct_request_restart.rs": {
+        "sha256": "889bb898a495cb36e4c1755933748b41eeda84cf275122af214bcf5ecc4b3030",
+        "size_bytes": 6977
+      },
+      "tests/clean_chat_engine_invitation_tests.rs": {
+        "sha256": "c258604d37958fa2d9ff339fae2eeaf07ccec1b26a05fefa84a06afc389f8262",
+        "size_bytes": 17745
+      },
+      "tests/clean_chat_invitation_note_tests.rs": {
+        "sha256": "f3b6d694ec33907d1670ffb85a31c293f6e7071a6b1d779293b64edd7865e664",
+        "size_bytes": 42569
+      },
+      "tests/clean_chat_leave_fulfillment_tests.rs": {
+        "sha256": "8164df36564cf086d84a98aa1d33b88cd21476c298cbf017d89b9eda73b608ba",
+        "size_bytes": 38987
+      },
+      "tests/clean_chat_lifecycle_tests.rs": {
+        "sha256": "b7640ab5431a4876a9a6a173b9202382cd377bf48c0253c5bc46fc80c31dc866",
+        "size_bytes": 14277
+      },
+      "tests/clean_chat_mutation_response_presentation.rs": {
+        "sha256": "e8250b3eb7b53f64cc60f344df5120b01d14748ef9247717f6fa5bdd44de54b3",
+        "size_bytes": 2043
+      },
+      "tests/clean_chat_recovery_conflict_tests.rs": {
+        "sha256": "f1e43c9712c433d6c0e83edc222ba020f1e1289c8329596f6b8ee9b900dd0195",
+        "size_bytes": 23440
+      },
+      "tests/clean_chat_reset_tests.rs": {
+        "sha256": "ad9f882420a9b3630a2e903ccab1989e5825e05f9767432b6bda6a2dec6cec44",
+        "size_bytes": 17119
+      },
+      "tests/clean_chat_signed_request_tests.rs": {
+        "sha256": "a736535979ce2937b35ee189c6a8ac1807b6ebc60243807e13ca0c294eecb2a0",
+        "size_bytes": 8022
+      },
+      "tests/clean_chat_terminal_close_tests.rs": {
+        "sha256": "90082e623fc42a3c941d25efce7972f6ba5056ebdac7a1e77f0360405595a223",
+        "size_bytes": 10452
+      },
+      "tests/clean_chat_welcome_ack_atomicity_tests.rs": {
+        "sha256": "ddd6c33ba00d67e08218df092948a6f828c542af55a797457045be7a1d0286a3",
+        "size_bytes": 12963
+      },
+      "tests/clean_chat_welcome_ack_tests.rs": {
+        "sha256": "2bb69044c0abfc57d5c20103599c43376f53eab00d70019e2f47fda9fc7f80a2",
+        "size_bytes": 29354
+      },
+      "tests/clean_chat_welcome_failure_tests.rs": {
+        "sha256": "847d6872897a91a1585a346b3433ec6899e89987125775010daf9c368e997a91",
+        "size_bytes": 2148
+      },
+      "tests/clean_chat_welcome_terminal_tests.rs": {
+        "sha256": "2d3dc15e69846c4af059b761f2768e925b9e010144f0a286141d0cb4ea34ab57",
+        "size_bytes": 13961
+      },
+      "tests/create_group_with_id_test.rs": {
+        "sha256": "f6d773cd62362d0fe8cfc2afabaa8132bbfc59c5317c6bc8f0de6e993649fe17",
+        "size_bytes": 17374
+      },
+      "tests/credential_binding_tests.rs": {
+        "sha256": "f1e96c79025a917915180aea94f8f50089d37f1a3fc21e467e74cc10112dde4b",
+        "size_bytes": 62904
+      },
+      "tests/crypto_wire_v09_consumer_tests.rs": {
+        "sha256": "7092fad23da00279b2814b4c30065320e559512d8c58f60795f81bc2cc98c496",
+        "size_bytes": 51300
+      },
+      "tests/e2e_harness.rs": {
+        "sha256": "7cddee6a374c4b00de752239ae2090ef862bf72f5b60fbeb648dceb536695d4d",
+        "size_bytes": 12012
+      },
+      "tests/epoch_secret_test_support.rs": {
+        "sha256": "142f803e7261ae782f5419f8454ea1f151b060915692e4cfd5e50a62110b045c",
+        "size_bytes": 2028
+      },
+      "tests/external_commit_epoch_test.rs": {
+        "sha256": "f4f04994e62a8b5faa02a38832699462968969ee0dbcf36aa2ce0897524df7c6",
+        "size_bytes": 12233
+      },
+      "tests/external_commit_own_dedup_test.rs": {
+        "sha256": "b02aff93850926dda461345f4ffd3c6a79fa278a337c27d6cd4de041c01ced63",
+        "size_bytes": 5452
+      },
+      "tests/ffi_bridge_classifier_tests.rs": {
+        "sha256": "11820fbb17b56ff6d32e49cb49061d88c49de21fffc8b757ce358990a0db8a64",
+        "size_bytes": 5989
+      },
+      "tests/fixtures/chat_endpoint_output_schemas.json": {
+        "sha256": "b5839536f4d4b441f1ead665cc6a600f4b25680849d94d8de3046978c0587082",
+        "size_bytes": 14320
+      },
+      "tests/fixtures/direct_request_unaddressed_accepted_state.json": {
+        "sha256": "3bbae93804342fd1deab3495c56394ecfedade7b49b5f31572d55e0ebd1720d1",
+        "size_bytes": 10236
+      },
+      "tests/fixtures/group-invitation-note-state.json": {
+        "sha256": "5479aec9d5944710be04da769af83e7d486815acc55d31ff010210cda6398914",
+        "size_bytes": 2725
+      },
+      "tests/fixtures/live_870_conversation_inventory_states.json": {
+        "sha256": "a5fb8e97884bd6f1a730600401bcc0bdb4bd49e2e3d47605f435efffdeeed018",
+        "size_bytes": 12336
+      },
+      "tests/fixtures/openmls_preexisting_metadata.json": {
+        "sha256": "f79b3e67c31b9219ead2c5da970acfc571b8076e0f8e721dfdd076c03d3976e3",
+        "size_bytes": 173
+      },
+      "tests/fixtures/swift_pending_conversation_state.json": {
+        "sha256": "a6d3b14ce2dd499431e578ff8b4f79df3522bc6c5c9a8071ade1ab74881d9732",
+        "size_bytes": 3349
+      },
+      "tests/fork_resolution_tests.rs": {
+        "sha256": "951806389ec778eeb7b0b6add04ef1c4771ca8d5c6c0d4969c8192f0729c76b0",
+        "size_bytes": 28744
+      },
+      "tests/full_rust_engine_lifecycle_tests.rs": {
+        "sha256": "4f0b1a13c317f269d43fba85ddc173a82238ea62895bf4775b6dee6a027fcd87",
+        "size_bytes": 10228
+      },
+      "tests/full_rust_group_lifecycle_tests.rs": {
+        "sha256": "fee9128bdd936bd4b46dacb711983f69fd110f526aa54e7d0a72d02de556b629",
+        "size_bytes": 8627
+      },
+      "tests/full_rust_messaging_pipeline_tests.rs": {
+        "sha256": "9e9911a325c677180e07aea9918542320b4c21df5146350cefb80a0b9a007ee0",
+        "size_bytes": 13936
+      },
+      "tests/full_rust_open_conversation_tests.rs": {
+        "sha256": "557e6cc94ae60b97075cc0ccc6c9a96c55aa6d16d24971d5fa791a9cb0e449e2",
+        "size_bytes": 17270
+      },
+      "tests/full_rust_recovery_scheduler_tests.rs": {
+        "sha256": "de50aac94d4e5a02eba84051cae26e6b1bb14cda173f42355d90b1de33d1bed0",
+        "size_bytes": 15869
+      },
+      "tests/full_rust_startup_reconcile_tests.rs": {
+        "sha256": "6fe11498715ed56b94c664688f6aaba8744d2a4f9a3313a23b8c17a7b022b0c7",
+        "size_bytes": 24079
+      },
+      "tests/full_rust_storage_compat_tests.rs": {
+        "sha256": "f574fef77126fa687a6481a04e0a6fab158477a1d0d63ad539a523a49cfc4270",
+        "size_bytes": 63800
+      },
+      "tests/group_metadata_test.rs": {
+        "sha256": "72272dbea526e8c9b2debd2d2282aec5fc7f5397552d8242661adf4d140f6d0b",
+        "size_bytes": 22173
+      },
+      "tests/identity_key_persistence_tests.rs": {
+        "sha256": "53c271c0f800a9ca834c88868c4a268057cda28888c59f4f0731354e8aada500",
+        "size_bytes": 2903
+      },
+      "tests/join_or_rejoin_reset_path_tests.rs": {
+        "sha256": "a4a7639cf624824cf11736c2e11650ae7a1679c381cbaddf331e1a5efceb8f22",
+        "size_bytes": 8856
+      },
+      "tests/key_package_batch_test.rs": {
+        "sha256": "e1966f14b0f4c1313fd891f70eee08fb27ebe87eb28f0ff37dd66d0b776f0e59",
+        "size_bytes": 10063
+      },
+      "tests/key_package_contract_lock_test.rs": {
+        "sha256": "eaa57fee48d31fe8d021d6fc44bfb213063424a9230a58a1519f3708d3e2af65",
+        "size_bytes": 12051
+      },
+      "tests/key_package_device_scope_tests.rs": {
+        "sha256": "c5ac06a7d59d6aa43d4ff3f4cedd54bb525c199857ab83ff480b3eaa827ad48a",
+        "size_bytes": 1992
+      },
+      "tests/key_package_replenish_crash_boundaries.rs": {
+        "sha256": "0cda99dcc4758da276ee4dad69b19cd0d92ea4c0210be379c8d2723d4b89d401",
+        "size_bytes": 19971
+      },
+      "tests/member_removal_test.rs": {
+        "sha256": "91d0a5bb2e74e3ad67c29fe39c9a1c5dc715a44747921cdfb9df7f1197791717",
+        "size_bytes": 51781
+      },
+      "tests/message_send_actor_fence_tests.rs": {
+        "sha256": "12a3ed50aff6a7b24366475158145b9a12dda2fe331a8d96955947b601040d83",
+        "size_bytes": 5079
+      },
+      "tests/messaging_security_hardening_tests.rs": {
+        "sha256": "8956b21bb77798d291e89bc38fb8801c40cca94ec01b0307ddbe756e8b378a39",
+        "size_bytes": 104143
+      },
+      "tests/mls_delete_fail_closed_tests.rs": {
+        "sha256": "a61a1932f91c875a381380656d8a443d1cdf2f7c5d17e6859e537352ce1e6220",
+        "size_bytes": 3553
+      },
+      "tests/mock_api_client.rs": {
+        "sha256": "7471e2377f0341f213addb8ee0829cd0374e3a0866fef7be5fe43f06a216a883",
+        "size_bytes": 213015
+      },
+      "tests/mock_credentials.rs": {
+        "sha256": "9ebe54e33f5f08a85532792f9a9772c0c50296cb11aff8150b6cc6f4e28f72d6",
+        "size_bytes": 15501
+      },
+      "tests/mock_storage.rs": {
+        "sha256": "f4397f2eb5e4d982f9a8c2e89f024e7516908c519a2f19ac4aa4417b8a051bdc",
+        "size_bytes": 83654
+      },
+      "tests/native_decrypt_error_class_tests.rs": {
+        "sha256": "7c115db934976d8f4829d3279ebdd94941e7f5b9e0b2d43445728754a8213ed7",
+        "size_bytes": 22684
+      },
+      "tests/persistence_repro.rs": {
+        "sha256": "ee6ef34c880bcee4c1211b98d04fc3ca0102ca2117aff71e325adf7faad0485a",
+        "size_bytes": 14882
+      },
+      "tests/policy_invite_tests.rs": {
+        "sha256": "2c0cd837e5d7904e36b8c3042c78a7dbbe958dd83ef558a348549b14bb9a3124",
+        "size_bytes": 12509
+      },
+      "tests/proposal_authorization_staging_tests.rs": {
+        "sha256": "b0e4d40397406be123a6f6de0a55f19650f449ccabbb577ce6b3336b0ce2d64c",
+        "size_bytes": 8766
+      },
+      "tests/public_api_compat_tests.rs": {
+        "sha256": "36c5c7ebbcf5bdfed5b5d90b3b04ef31d4ea69fbbf07977572fee1a3f6626bcd",
+        "size_bytes": 513
+      },
+      "tests/recovery_tracker_tests.rs": {
+        "sha256": "d9a9564207f841298ad6a0784c474aba2ab82049c74e1c676ade9ff70924e0bd",
+        "size_bytes": 5908
+      },
+      "tests/rejoin_backoff_and_inbox_sharing_tests.rs": {
+        "sha256": "4be43f9802887bd5894ab0ebe6acba7ebc0878b83e7ebe6cafd0bd7e8d3ace4b",
+        "size_bytes": 24760
+      },
+      "tests/reset_requested_event_test.rs": {
+        "sha256": "3a0953beb72a63a4a725ad690122023947cd313120e6c5fba6aa4cf11aad2d67",
+        "size_bytes": 95742
+      },
+      "tests/resolved_conversation_context_tests.rs": {
+        "sha256": "ec4288fcce3521ded0b2d8ac34c29866fae7e857378c9c25af6e1e7e87358b73",
+        "size_bytes": 94713
+      },
+      "tests/roster_omission_security_tests.rs": {
+        "sha256": "d12f38c511df723580afa7aac3fd1c4f05868c3d157ceca25cbc82fa05cf0d67",
+        "size_bytes": 4764
+      },
+      "tests/sequencer_did_sync_tests.rs": {
+        "sha256": "4b9c12a6a793f5a9c21843628984c4d32a0748f7691cf0880d005b460b40dd71",
+        "size_bytes": 8971
+      },
+      "tests/staged_commit_tests.rs": {
+        "sha256": "58c2f509acc365a1a8db9c0c9b4573d045711d2953a903e9968fa7b6d94f00f5",
+        "size_bytes": 55962
+      },
+      "tests/state_machine_tests.rs": {
+        "sha256": "0fc045472c72a230839679507e060f1cb178eae4ea9be3555023995ce5756da9",
+        "size_bytes": 43507
+      },
+      "tests/test_python_bindings.py": {
+        "sha256": "50fccba4d018f96ba84defea4b85786e6a90fb4fb81c898630358f3a2be1b78c",
+        "size_bytes": 1302
+      },
+      "tests/two_user_messaging_test.rs": {
+        "sha256": "d60b345d5089e28aa0e82ea2178867706e4b29f912676ad3f04e5fefd5bb9674",
+        "size_bytes": 18578
+      },
+      "tests/welcome_epoch_secret_fail_closed_tests.rs": {
+        "sha256": "e186ff6f6f699cf98c08c81957a820743321403718827f727905d5494eae02d0",
+        "size_bytes": 8585
+      },
+      "tests/welcome_pagination_tests.rs": {
+        "sha256": "90725a1a5cdd8f50cfc66d645d6f4b1e507e8424a9cc2f166d6af88749635760",
+        "size_bytes": 9616
+      },
+      "tests/welcome_recovery_decision_test.rs": {
+        "sha256": "9f3da881d7d55613f9944cc77c1a195e7b0e80db958cd3fe051ad1efe4cc4e02",
+        "size_bytes": 2819
+      },
+      "tests/welcome_reissue_responder.rs": {
+        "sha256": "00b55c78a7522e2388f738d1823c35de6b9f163abc01475046b17aea2c77ffd4",
+        "size_bytes": 9282
+      },
+      "tests/ws5_recovery_persistence_tests.rs": {
+        "sha256": "5a46d673c98721ab80abb854a2abcc7e5d996a1f0c5025eeefdf02fa26a32176",
+        "size_bytes": 84402
+      },
+      "uniffi-bindgen.rs": {
+        "sha256": "55a5501b6239f6f219489db85de7ead6d2bf0c927f4fa1cfd674779e33d59c31",
+        "size_bytes": 48
+      },
+      "uniffi.toml": {
+        "sha256": "9c694c215cb76355011429f209c4e208e80d3c3495065fdf740dc40205badba2",
+        "size_bytes": 186
+      },
+      "verify_completion.sh": {
+        "sha256": "635482275cdad0065a2ffd65892133c5b85590a191422062ce0e844f6a45764a",
+        "size_bytes": 2185
+      }
+    },
+    "native_source_sha256": "a1ad21cd0d3081892c5bab6be556529bd3dafc326101d504e3e7e11db579c1d3",
+    "repositories": {
+      "Petrel": {
+        "jj_change": "lovnzmtwltqszruvpqzymwlukpmprzyk",
+        "jj_commit": "c1529222a1ce7be92bf34c3eb9ff3d8a8f80c6bf",
+        "parent_jj_commit": "329b5fbe412286ff4c094246b6f30c2989e58f94",
+        "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/Petrel"
+      },
+      "PetrelCatbird": {
+        "jj_change": "yksmqxnzpqolmsstpmnzkszoyonoowzv",
+        "jj_commit": "9926624a807a65de7dfb2ff8a446c76b6aec9c14",
+        "parent_jj_commit": "ff98deedc748777537f912fa4dcd208f9bbc840e",
+        "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/PetrelCatbird"
+      },
+      "catbird-atproto": {
+        "jj_change": "tvnqtxpnulmupqtxunrllttrktqksmyz",
+        "jj_commit": "dec9ede9c9b5de307d43986eae6cd86fd5160233",
+        "parent_jj_commit": "1aef069551dcd8d92f4031e1abbd61c5a1598c69",
+        "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/catbird-atproto"
+      },
+      "catbird-mls": {
+        "jj_change": "wzzuqlsvvvxnksrvuurykkunootmozwz",
+        "jj_commit": "999f344ae077c024a7ab8751ff28546793f69fd2",
+        "parent_jj_commit": "6d01c354de142794dab5be29843ae55b6c340b1b",
+        "path": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/catbird-mls"
+      }
+    },
+    "schemas": {
+      "files": {
+        "blue.catbird.chat.acceptConversation.json": {
+          "sha256": "dcd5b85725ef7c8282bff8d77b0bd7fab4742a24b2d4b9b39c54d52de2ebcda0",
+          "size_bytes": 4017
+        },
+        "blue.catbird.chat.acknowledgeWelcome.json": {
+          "sha256": "3303d9c1855bef4348b83314fe659649974219060b87f05de627ae630e0b8e7b",
+          "size_bytes": 2367
+        },
+        "blue.catbird.chat.activateReset.json": {
+          "sha256": "ff590e6af0dc3efaface553d08e1d87b5d5999bc3ae007a0d3ec512d23e96595",
+          "size_bytes": 3452
+        },
+        "blue.catbird.chat.authFull.json": {
+          "sha256": "52a62f96c36da5026da069d89226b3d8d5632a66df7e228826b0fc245105c49c",
+          "size_bytes": 2374
+        },
+        "blue.catbird.chat.cancelDirectRequestPreparation.json": {
+          "sha256": "4054aea20ca6eb2ed53fe6ff11cde7f0bc2bf3d6b85656453d820e6cce420465",
+          "size_bytes": 2714
+        },
+        "blue.catbird.chat.cancelLeafRecovery.json": {
+          "sha256": "a11d7b0f5347c8d618b5d20a65545a7a783e95e97f656c5e058420873cd6cb81",
+          "size_bytes": 1963
+        },
+        "blue.catbird.chat.cancelLeave.json": {
+          "sha256": "207441e15d9bf5afce81f99574ba9e90477396be690f9e04d30423aa3fd0aa1f",
+          "size_bytes": 2055
+        },
+        "blue.catbird.chat.closeConversation.json": {
+          "sha256": "e0e138ddb98d3e10d4e276151ac8787932828a9a20890ac0ff7b900d3dc17702",
+          "size_bytes": 2535
+        },
+        "blue.catbird.chat.createConversation.json": {
+          "sha256": "ca16a542a837ed19b321a3c64c773251648c71fd32e95eda62bc89b873eea927",
+          "size_bytes": 2901
+        },
+        "blue.catbird.chat.declaration.json": {
+          "sha256": "06f6e2da5f48576df93cc43b22a89f62e2c043b864bbf2bcd1ecbecfdbebed21",
+          "size_bytes": 1186
+        },
+        "blue.catbird.chat.defs.json": {
+          "sha256": "e7a23bc2b8e383729d8046a33cd24d86ef6cf8261989692f327e816e10343938",
+          "size_bytes": 225198
+        },
+        "blue.catbird.chat.deleteBlob.json": {
+          "sha256": "7fe8327f222e06ed33952c03f79ecd74cc1c5d3f50d9434ee9b503b8e6f6c999",
+          "size_bytes": 2185
+        },
+        "blue.catbird.chat.device.json": {
+          "sha256": "341762297606e8139481bee9db7de3bcf9817b6a3ca5a74edb1fe5c161bbef20",
+          "size_bytes": 953
+        },
+        "blue.catbird.chat.enrollDevice.json": {
+          "sha256": "ad91d92c40368a72701880130cb68fbbd8e38b887f6d72c2882099aa9b74c23d",
+          "size_bytes": 2136
+        },
+        "blue.catbird.chat.getBlob.json": {
+          "sha256": "dd6c53ce938ec82907abdb19cba3f19ade87cc5850f356c9440d20a3b947dee9",
+          "size_bytes": 1917
+        },
+        "blue.catbird.chat.getBlobUsage.json": {
+          "sha256": "6f7ba3b7b478deff8be34ac4bf3da327d3a098286c54ae76cfa8ba91d81041b7",
+          "size_bytes": 1627
+        },
+        "blue.catbird.chat.getConversationState.json": {
+          "sha256": "75b2e89a35423d704fe4ca95ff0634be6d936013fa563be569c04bcbb8ea51eb",
+          "size_bytes": 4119
+        },
+        "blue.catbird.chat.getConversations.json": {
+          "sha256": "3eacd4dacb8dce55efd6fc7a9e9a304d166ca51505a13127bb91c7bd857fd771",
+          "size_bytes": 4028
+        },
+        "blue.catbird.chat.getDeviceKey.json": {
+          "sha256": "4f458bdba5fb474887ddbd51f656f704d17d8950e4f9a81404610db012fd38f6",
+          "size_bytes": 2790
+        },
+        "blue.catbird.chat.getDevices.json": {
+          "sha256": "6536b9061a0f4c4fee9f74680fc5772a8f0234c8886e32991a86882e30ec9c7f",
+          "size_bytes": 2351
+        },
+        "blue.catbird.chat.getDirectRequestOutcome.json": {
+          "sha256": "47b5970095183f4b2a8adcaef71c6b750e24dee724e8d3433c81a4fcd5d8ac0e",
+          "size_bytes": 2571
+        },
+        "blue.catbird.chat.getEntries.json": {
+          "sha256": "2e059acf49a1b64869b23f20b3034961bffaa3d9a39a7ace4d3997e54a0e3332",
+          "size_bytes": 3793
+        },
+        "blue.catbird.chat.getLeafRecoveryInbox.json": {
+          "sha256": "42f93143e52e4d25db3d9d4c5adcb35c19f2a9f8dbd3131c8b0de4ade1e96596",
+          "size_bytes": 4333
+        },
+        "blue.catbird.chat.getOwnDevices.json": {
+          "sha256": "a7f14ef6f71b8e0418c7301643e1a3346189ff2a8e40c8c51595162d01eb7675",
+          "size_bytes": 2577
+        },
+        "blue.catbird.chat.getPendingWelcomes.json": {
+          "sha256": "1dc66b79bc0030b94839cc39dad563cfb013715ba1017f925829cc70b72d3ad1",
+          "size_bytes": 4234
+        },
+        "blue.catbird.chat.getSubscriptionTicket.json": {
+          "sha256": "3addddff29e9d264ea38bbf8b70fc471a0cf6818e30d448111d80aeb7754b17a",
+          "size_bytes": 3665
+        },
+        "blue.catbird.chat.prepareBlobUpload.json": {
+          "sha256": "d7c63a2c6e8786083728ca4b51144917def517457b3052c55e326eff44bef516",
+          "size_bytes": 2313
+        },
+        "blue.catbird.chat.prepareDirectRequest.json": {
+          "sha256": "0a24ffa4976e9c5cc48a3981ae9752dc14623e878dcc840ca427a99bf2ce0854",
+          "size_bytes": 2703
+        },
+        "blue.catbird.chat.publishDirectRequest.json": {
+          "sha256": "38cbfc5f17a9b793c650d680a35d5b4d4a02e13afe28c4f125bcb4bb0a76316e",
+          "size_bytes": 2703
+        },
+        "blue.catbird.chat.publishDirectRequestKeys.json": {
+          "sha256": "d71265269066fc3b0b969df015f4131f5393be9e150854fb7508b68052015e58",
+          "size_bytes": 2815
+        },
+        "blue.catbird.chat.publishTyping.json": {
+          "sha256": "a5b8b5e6e798e34f178fb1be4b3a538da406206f739aa267dd0019ed61aec343",
+          "size_bytes": 1733
+        },
+        "blue.catbird.chat.rejectWelcome.json": {
+          "sha256": "708a13fb6b490adfa669e54100ed2079e7e4b5f75efbe411de0d333bddbd780a",
+          "size_bytes": 2338
+        },
+        "blue.catbird.chat.replenishKeyPackages.json": {
+          "sha256": "0b1d0f37006567eca52c75537892c69285edc6b1afcdb796780eac2141b0e321",
+          "size_bytes": 2045
+        },
+        "blue.catbird.chat.requestLeafRecovery.json": {
+          "sha256": "a07e949d0504a32d0ed79dad575f4581ec154bf85b0c02306f929d531b7b69aa",
+          "size_bytes": 2376
+        },
+        "blue.catbird.chat.requestLeave.json": {
+          "sha256": "e181f1587c3c22a91547007484ce6314002b14b989c022fef54a982fb67e62f2",
+          "size_bytes": 2473
+        },
+        "blue.catbird.chat.requestReset.json": {
+          "sha256": "3ee4ae08fb0b4b88380760aee510b12150a7ca370fbc94ed9adef210f90b3aad",
+          "size_bytes": 2385
+        },
+        "blue.catbird.chat.revokeDevice.json": {
+          "sha256": "2072b18a19aa57f83200f0fdaaf853244898928578146cb15578ffa3a6b0e520",
+          "size_bytes": 2069
+        },
+        "blue.catbird.chat.sendMessage.json": {
+          "sha256": "28af888ec0d2a43b94bb30c0ea898d82d87b347f1dfc5931bea1c99ed3489ffd",
+          "size_bytes": 3823
+        },
+        "blue.catbird.chat.submitTransition.json": {
+          "sha256": "92be39e46322ca6d60ca2a2ea5183b83ccf16aabca1e1001d6e3faf28594e449",
+          "size_bytes": 5708
+        },
+        "blue.catbird.chat.subscribeEvents.json": {
+          "sha256": "7f12b55d31b3291aca56e7f1aaf7fe4d94980a500007d5af9432d566cdc64e35",
+          "size_bytes": 1855
+        },
+        "blue.catbird.chat.updatePushToken.json": {
+          "sha256": "158ffdccc00457bd4611b9d394a31481b29138e74e6d850c323b6a7b429cc41e",
+          "size_bytes": 2156
+        },
+        "blue.catbird.chat.uploadBlob.json": {
+          "sha256": "897d3db079cd6586f9189ddab0780e1043f4c3e120be2afacf9e59f1ea8d62a0",
+          "size_bytes": 2506
+        }
+      },
+      "root": "/Users/joshlacalamito/Documents/Codex/2026-10-02/task/main-consolidation/PetrelCatbird/lexicons/blue/catbird/chat",
+      "sha256": "d2508f1dfa3022fd1d9e4d865d600fce487ff3596e635f86abdbdd5bfce9ed25"
+    }
+  }
+}

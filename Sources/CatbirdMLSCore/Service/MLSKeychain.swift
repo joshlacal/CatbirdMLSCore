@@ -9,6 +9,7 @@
 import Foundation
 import Security
 import OSLog
+import Petrel
 
 /// Errors that can occur during Keychain operations
 public enum MLSKeychainError: Error {
@@ -131,7 +132,7 @@ public class MLSKeychain {
             query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         }
 
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let status = KeychainSecItem.add(query as CFDictionary, nil)
         if status == errSecDuplicateItem {
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -139,7 +140,7 @@ public class MLSKeychain {
                 kSecAttrAccount as String: tag,
             ]
             let updateAttrs: [String: Any] = [kSecValueData as String: key]
-            let updateStatus = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+            let updateStatus = KeychainSecItem.update(updateQuery as CFDictionary, updateAttrs as CFDictionary)
             guard updateStatus == errSecSuccess else {
                 throw MLSKeychainError.storeFailed(updateStatus)
             }
@@ -166,7 +167,7 @@ public class MLSKeychain {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: AnyObject?
-        var status = SecItemCopyMatching(gpQuery as CFDictionary, &result)
+        var status = KeychainSecItem.copyMatching(gpQuery as CFDictionary, &result)
         if status == errSecSuccess, let keyData = result as? Data {
             return keyData
         }
@@ -182,7 +183,7 @@ public class MLSKeychain {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         result = nil
-        status = SecItemCopyMatching(legacyQuery as CFDictionary, &result)
+        status = KeychainSecItem.copyMatching(legacyQuery as CFDictionary, &result)
         guard status == errSecSuccess, let keyData = result as? Data else {
             // Surface not-found so the caller (get_signing_key) can return nil.
             throw MLSKeychainError.retrieveFailed(status)
@@ -202,7 +203,7 @@ public class MLSKeychain {
             kSecAttrService as String: signatureKeyService,
             kSecAttrAccount as String: tag,
         ]
-        let gpStatus = SecItemDelete(gpQuery as CFDictionary)
+        let gpStatus = KeychainSecItem.delete(gpQuery as CFDictionary)
         guard gpStatus == errSecSuccess || gpStatus == errSecItemNotFound else {
             throw MLSKeychainError.deleteFailed(gpStatus)
         }
@@ -213,7 +214,7 @@ public class MLSKeychain {
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag,
         ]
-        let legacyStatus = SecItemDelete(legacyQuery as CFDictionary)
+        let legacyStatus = KeychainSecItem.delete(legacyQuery as CFDictionary)
         guard legacyStatus == errSecSuccess || legacyStatus == errSecItemNotFound else {
             throw MLSKeychainError.deleteFailed(legacyStatus)
         }
@@ -230,7 +231,7 @@ public class MLSKeychain {
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: signatureKeyService,
             ]
-            let sigStatus = SecItemDelete(sigQuery as CFDictionary)
+            let sigStatus = KeychainSecItem.delete(sigQuery as CFDictionary)
             guard sigStatus == errSecSuccess || sigStatus == errSecItemNotFound else {
                 throw MLSKeychainError.deleteFailed(sigStatus)
             }
@@ -240,7 +241,7 @@ public class MLSKeychain {
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: groupKeyService,
             ]
-            let groupStatus = SecItemDelete(groupQuery as CFDictionary)
+            let groupStatus = KeychainSecItem.delete(groupQuery as CFDictionary)
             guard groupStatus == errSecSuccess || groupStatus == errSecItemNotFound else {
                 throw MLSKeychainError.deleteFailed(groupStatus)
             }
@@ -249,7 +250,7 @@ public class MLSKeychain {
                 kSecClass as String: kSecClassKey,
                 kSecAttrApplicationTag as String: "blue.catbird.mls.sig."
             ]
-            let status = SecItemDelete(query as CFDictionary)
+            let status = KeychainSecItem.delete(query as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {
                 throw MLSKeychainError.deleteFailed(status)
             }
@@ -306,7 +307,7 @@ public class MLSKeychain {
                 kSecAttrAccount as String: tag,
                 kSecValueData as String: key,
             ]
-            let status = SecItemAdd(query as CFDictionary, nil)
+            let status = KeychainSecItem.add(query as CFDictionary, nil)
             if status != errSecSuccess && status != errSecDuplicateItem {
                 throw MLSKeychainError.storeFailed(status)
             }
@@ -317,7 +318,7 @@ public class MLSKeychain {
                 kSecValueData as String: key,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             ]
-            let status = SecItemAdd(query as CFDictionary, nil)
+            let status = KeychainSecItem.add(query as CFDictionary, nil)
             if status != errSecSuccess {
                 throw MLSKeychainError.storeFailed(status)
             }
@@ -349,7 +350,7 @@ public class MLSKeychain {
         }
 
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = KeychainSecItem.copyMatching(query as CFDictionary, &result)
 
         guard status == errSecSuccess, let keyData = result as? Data else {
             throw MLSKeychainError.retrieveFailed(status)
@@ -378,7 +379,7 @@ public class MLSKeychain {
             ]
         }
 
-        let status = SecItemDelete(query as CFDictionary)
+        let status = KeychainSecItem.delete(query as CFDictionary)
 
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw MLSKeychainError.deleteFailed(status)

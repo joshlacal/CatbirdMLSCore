@@ -209,7 +209,9 @@ public actor MLSMembershipChangeObserver {
     
     // MARK: - Properties
     
-    private let database: MLSDatabase
+    private var database: MLSDatabase
+    private var databaseBindingID = UUID()
+    private var databaseBindingGeneration = MLSGRDBManager.storageLifecycleGeneration
     private let currentUserDID: String
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "blue.catbird", category: "MLSMembershipChangeObserver")
     
@@ -225,6 +227,19 @@ public actor MLSMembershipChangeObserver {
         self.database = database
         self.currentUserDID = currentUserDID
         logger.info("👥 MLSMembershipChangeObserver initialized")
+    }
+
+    /// Keep notification/profile handlers while replacing a suspension-closed writer.
+    internal func rebindDatabase(_ database: MLSDatabase, generation: UInt64) throws {
+        try MLSGRDBManager.requireCurrentStorageGeneration(generation)
+        self.database = database
+        databaseBindingID = UUID()
+        databaseBindingGeneration = generation
+    }
+
+    private func requireDatabaseBinding(_ bindingID: UUID) throws {
+        guard databaseBindingID == bindingID else { throw CancellationError() }
+        try MLSGRDBManager.requireCurrentStorageGeneration(databaseBindingGeneration)
     }
     
     /// Configure the change handler for UI notifications
@@ -262,10 +277,13 @@ public actor MLSMembershipChangeObserver {
         newMembers: [String],
         actorDID: String? = nil
     ) async throws -> MLSMembershipChangeBatch? {
+        let bindingID = databaseBindingID
+        try requireDatabaseBinding(bindingID)
         logger.debug("🔍 Detecting changes for \(conversationID.prefix(8))... epoch \(oldEpoch) → \(newEpoch)")
         
         // Fetch previous roster snapshot
         let previousSnapshot = try await fetchRosterSnapshot(for: conversationID, epoch: oldEpoch)
+        try requireDatabaseBinding(bindingID)
         let previousMembers = Set(previousSnapshot?.memberDIDs ?? [])
         let currentMembers = Set(newMembers)
         
@@ -289,6 +307,7 @@ public actor MLSMembershipChangeObserver {
         for did in addedDIDs {
             let baseDID = extractBaseDID(did)
             let displayName = await profileLookup?(baseDID)
+            try requireDatabaseBinding(bindingID)
             
             // Classify: Is this a new user or a new device for existing user?
             let isNewUser = !previousBaseDIDs.contains(baseDID)
@@ -308,6 +327,7 @@ public actor MLSMembershipChangeObserver {
         for did in removedDIDs {
             let baseDID = extractBaseDID(did)
             let displayName = await profileLookup?(baseDID)
+            try requireDatabaseBinding(bindingID)
             
             // Classify: Is this user completely removed or just one device?
             let isUserGone = !currentBaseDIDs.contains(baseDID)
@@ -352,6 +372,8 @@ public actor MLSMembershipChangeObserver {
         treeHash: Data?,
         actorDID: String? = nil
     ) async throws {
+        let bindingID = databaseBindingID
+        try requireDatabaseBinding(bindingID)
         // 1. Detect changes
         guard let batch = try await detectChanges(
             conversationID: conversationID,
@@ -360,6 +382,7 @@ public actor MLSMembershipChangeObserver {
             newMembers: newMembers,
             actorDID: actorDID
         ) else {
+            try requireDatabaseBinding(bindingID)
             // No membership changes, but still save roster snapshot
             try await saveRosterSnapshot(
                 conversationID: conversationID,
@@ -367,8 +390,10 @@ public actor MLSMembershipChangeObserver {
                 members: newMembers,
                 treeHash: treeHash
             )
+            try requireDatabaseBinding(bindingID)
             return
         }
+        try requireDatabaseBinding(bindingID)
         
         // 2. Save roster snapshot
         try await saveRosterSnapshot(
@@ -377,9 +402,11 @@ public actor MLSMembershipChangeObserver {
             members: newMembers,
             treeHash: treeHash
         )
+        try requireDatabaseBinding(bindingID)
         
         // 3. Record membership events
         try await recordMembershipEvents(batch)
+        try requireDatabaseBinding(bindingID)
         
         // 4. Surface changes via UI callback
         if let handler = changeHandler {
@@ -404,6 +431,8 @@ public actor MLSMembershipChangeObserver {
         members: [String],
         treeHash: Data?
     ) async throws {
+        let bindingID = databaseBindingID
+        try requireDatabaseBinding(bindingID)
         // Get previous snapshot ID for chain
         let previousSnapshot = try await database.read { db in
             try MLSRosterSnapshotModel
@@ -411,6 +440,7 @@ public actor MLSMembershipChangeObserver {
                 .order(Column("epoch").desc)
                 .fetchOne(db)
         }
+        try requireDatabaseBinding(bindingID)
         
         let snapshot = MLSRosterSnapshotModel(
             conversationID: conversationID,
@@ -423,11 +453,14 @@ public actor MLSMembershipChangeObserver {
         try await database.write { db in
             try snapshot.insert(db)
         }
+        try requireDatabaseBinding(bindingID)
         
         logger.debug("💾 Saved roster snapshot for epoch \(epoch) with \(members.count) members")
     }
     
     private func recordMembershipEvents(_ batch: MLSMembershipChangeBatch) async throws {
+        let bindingID = databaseBindingID
+        try requireDatabaseBinding(bindingID)
         try await database.write { db in
             for change in batch.changes {
                 let eventType: MLSMembershipEventModel.EventType
@@ -461,6 +494,7 @@ public actor MLSMembershipChangeObserver {
                 try event.insert(db)
             }
         }
+        try requireDatabaseBinding(bindingID)
         
         logger.debug("📝 Recorded \(batch.changes.count) membership events")
     }

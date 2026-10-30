@@ -37,6 +37,12 @@ enum MLSCanonicalPolicyProjection {
     let data = Data(json.utf8)
     try validateReadRoutingExtensions(data)
     let state = try JSONDecoder().decode(BlueCatbirdChatDefs.ConversationState.self, from: data)
+    guard !containsNonNullDirectRequest(data) || state.directRequest != nil else {
+      // Generated optional-field decoding deliberately degrades malformed
+      // forward-compatible values to nil. `directRequest` is an authority
+      // discriminator, so malformed v2 state must never look like explicit v1.
+      throw ValidationError.invalidSnapshot
+    }
     let coordinates = state.coordinates
     let maximum = 9_007_199_254_740_991
     guard isCanonicalUUID(conversationID),
@@ -59,7 +65,10 @@ enum MLSCanonicalPolicyProjection {
         throw ValidationError.invalidSnapshot
       }
       if participant.status == .value_pending {
-        guard participant.leafCount == 0, participant.invitationProvenance != nil else {
+        // Mirrors core admission::validate_conversation_policy: a request-born
+        // group gives the pending recipient real leaves before consent.
+        guard participant.leafCount == 0 || state.directRequest != nil,
+              participant.invitationProvenance != nil else {
           throw ValidationError.invalidSnapshot
         }
       }
@@ -153,6 +162,12 @@ enum MLSCanonicalPolicyProjection {
     }
   }
 
+  private static func containsNonNullDirectRequest(_ data: Data) -> Bool {
+    guard let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let value = fields["directRequest"] else { return false }
+    return !(value is NSNull)
+  }
+
   private static func sameLeafIdentity(_ lhs: BlueCatbirdChatDefs.DeviceLeafView,
                                        _ rhs: BlueCatbirdChatDefs.DeviceLeafView) -> Bool {
     lhs.userDid == rhs.userDid && lhs.deviceId == rhs.deviceId && lhs.keyId == rhs.keyId
@@ -226,6 +241,7 @@ enum MLSCanonicalPolicyProjection {
     let decoded = try JSONDecoder().decode(BlueCatbirdChatDefs.ConversationState.self, from: Data(json.utf8))
     let state = try decode(json, conversationID: conversationID,
       groupID: decoded.coordinates.groupId.data)
+    // Exact bytes, as core admission compares DIDs; never case-fold identity.
     guard state.coordinates.generation == (row["generation"] as Int),
           state.coordinates.stateVersion == (row["state_version"] as Int),
           state.participants.contains(where: { $0.userDid.description == userDID }) else {

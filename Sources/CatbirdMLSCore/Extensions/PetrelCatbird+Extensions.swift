@@ -157,6 +157,14 @@ extension BlueCatbirdChatDefs.ConversationEntry {
         if case let .blueCatbirdChatDefsCommitEntry(entry) = self { return entry }
         return nil
     }
+    public var directRequestEntry: BlueCatbirdChatDefs.DirectRequestEntry? {
+        if case let .blueCatbirdChatDefsDirectRequestEntry(entry) = self { return entry }
+        return nil
+    }
+    public var directRequestAcceptanceEntry: BlueCatbirdChatDefs.DirectRequestAcceptanceEntry? {
+        if case let .blueCatbirdChatDefsDirectRequestAcceptanceEntry(entry) = self { return entry }
+        return nil
+    }
     public var entryID: String {
         switch self {
         case .blueCatbirdChatDefsApplicationEntry(let e): return e.entryId
@@ -173,6 +181,8 @@ extension BlueCatbirdChatDefs.ConversationEntry {
         case .blueCatbirdChatDefsZeroLeafLeaveEntry(let e): return e.entryId
         case .blueCatbirdChatDefsLeaveCancellationEntry(let e): return e.entryId
         case .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(let e): return e.entryId
+        case .blueCatbirdChatDefsDirectRequestEntry(let e): return e.entryId
+        case .blueCatbirdChatDefsDirectRequestAcceptanceEntry(let e): return e.entryId
         case .unexpected: return ""
         }
     }

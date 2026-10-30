@@ -25,6 +25,35 @@ final class MLSCanonicalRustEventHandlerTests: XCTestCase {
       [conversationIDs[1], conversationIDs[0]])
   }
 
+  func testDirectRequestWelcomeSchedulesSharedCurrentStateWithoutOrdinaryWelcomeHint() async throws {
+    let conversationID = conversationIDs[0]
+    let requestWelcome = try directRequestWelcomeView(conversationID)
+    let inventory = MLSCanonicalInventorySnapshot(
+      inventorySessionId: "request-session",
+      snapshotEventCursor: "request-cursor",
+      snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
+      conversationItems: [],
+      pendingWelcomeItems: [.init(requestWelcome)],
+      leafRecoveryItems: []
+    )
+    var received: [String] = []
+    let handler = MLSCanonicalRustEventHandler.make(
+      prepareInventory: {}, processEvent: { received.append($0) })
+
+    try await MLSWebSocketManager.reconcileCanonicalInventory(inventory, with: handler)
+
+    let envelope = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(XCTUnwrap(received.first).utf8)) as? [String: Any]
+    )
+    let events = try XCTUnwrap(envelope["events"] as? [[String: Any]])
+    XCTAssertEqual(events.count, 1)
+    XCTAssertEqual(
+      events[0]["$type"] as? String,
+      BlueCatbirdChatDefs.ConversationChangedEvent.typeIdentifier
+    )
+    XCTAssertEqual(events[0]["conversationId"] as? String, conversationID)
+  }
+
   func testBatchFailureDoesNotInstallFence() async throws {
     struct Failed: Error {}
     let handler = MLSCanonicalRustEventHandler.make(
@@ -701,7 +730,8 @@ final class MLSCanonicalRustEventHandlerTests: XCTestCase {
     .init(
       inventorySessionId: "recovery-test-session", snapshotEventCursor: "recovery-test-cursor",
       snapshotExpiresAt: Date(timeIntervalSinceNow: 3_600),
-      conversationItems: conversations, pendingWelcomeItems: welcomes, leafRecoveryItems: recoveries
+      conversationItems: conversations, pendingWelcomeItems: welcomes.map { .init($0) },
+      leafRecoveryItems: recoveries
     )
   }
 
@@ -822,6 +852,23 @@ final class MLSCanonicalRustEventHandlerTests: XCTestCase {
       "recipientDid": "did:plc:recovery-test", "recipientDeviceId": id,
       "provenance": ["recoveryRequestId": id, "keyPackageRef": bytes],
       "expiresAt": "2026-09-05T12:00:00.000Z",
+    ])
+  }
+
+
+  private func directRequestWelcomeView(
+    _ id: String
+  ) throws -> BlueCatbirdChatDefs.DirectRequestWelcomeView {
+    let bytes = ["$bytes": Data(repeating: 1, count: 32).base64EncodedString()]
+    return try decode([
+      "welcomeId": id, "conversationId": id, "transitionSeq": 1, "coordinates": coordinate(id),
+      "status": "pending", "opaqueWelcome": bytes, "sha256": bytes,
+      "recipientDid": "did:plc:recovery-test", "recipientDeviceId": id,
+      "provenance": [
+        "requestId": id, "preparationDigest": bytes, "contextHash": bytes,
+        "grantId": id, "grantRevision": 1, "keyPackageRef": bytes,
+        "importUntil": "2026-09-05T12:00:00.000Z",
+      ],
     ])
   }
 }

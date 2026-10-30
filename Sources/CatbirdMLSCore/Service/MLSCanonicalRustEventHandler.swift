@@ -86,6 +86,9 @@ internal enum MLSCanonicalRustEventHandler {
           BlueCatbirdChatDefs.WelcomeAvailableEvent(
             welcomeId: value.welcomeId, conversationId: value.conversationId))
       },
+      onCanonicalPendingDirectRequestWelcome: { value in
+        try await changed(value.conversationId)
+      },
       onCanonicalLeafRecovery: { item in
         switch item {
         case .blueCatbirdChatDefsLeafRecoveryView(let value):
@@ -157,6 +160,9 @@ internal enum MLSCanonicalRustEventHandler {
         try await forward(
           BlueCatbirdChatDefs.WelcomeAvailableEvent(
             welcomeId: value.welcomeId, conversationId: value.conversationId))
+      },
+      onCanonicalPendingDirectRequestWelcome: { value in
+        try await changed(value.conversationId)
       },
       onCanonicalLeafRecovery: { item in
         switch item {

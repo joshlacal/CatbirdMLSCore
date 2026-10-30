@@ -1,0 +1,26 @@
+{
+  "purpose": "Public deterministic test vector; private seed is test-only bytes 00 through 1f. Never production credentials.",
+  "body": {
+    "protocolVersion": "2",
+    "signatureDomain": "CATBIRD-CHAT-PUSH-BINDING\u0000",
+    "authorityDid": "did:web:chat.catbird.blue",
+    "actorDid": "did:plc:abcdefghijklmnopqrstuvwx",
+    "actorDeviceId": "00112233-4455-4677-8899-aabbccddeeff",
+    "keyId": "Vkdap1RjR0wChd9dvyvKtz2mUTWIOem3dIGy6rEHcIw",
+    "authGeneration": 7,
+    "registrationId": "11223344-5566-4788-99aa-bbccddeeff00",
+    "provider": "fcm",
+    "appId": "blue.catbird",
+    "tokenGeneration": 3,
+    "tokenSha256": {
+      "$bytes": "g2dY8GQ8jAtWc2UGu7zzCYcy+dk4cWbNMFc8l9Ne4P8="
+    },
+    "enabled": true,
+    "signedAt": "2026-09-19T12:34:56.789Z"
+  },
+  "testOnlyToken": "test-only-fcm-token",
+  "publicKeyHex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "transcriptHex": "434154424952442d434841542d505553482d42494e44494e47000000000132000000196469643a7765623a636861742e636174626972642e626c7565000000206469643a706c633a6162636465666768696a6b6c6d6e6f70717273747576777800112233445546778899aabbccddeeff0000002b566b64617031526a52307743686439647679764b747a326d555457494f656d3364494779367245486349770000000000000007112233445566478899aabbccddeeff000000000366636d0000000c626c75652e636174626972640000000000000003836758f0643c8c0b56736506bbbcf3098732f9d9387166cd30573c97d35ee0ff0100000018323032362d30392d31395431323a33343a35362e3738395a",
+  "digestHex": "4606cf7b07bfe66ea91ca98d4f4e61df27897422f2a289e55c0d5154b3db86a9",
+  "signatureHex": "a8c8668a852fe00511e70387a87bfc9ead9109c93d58ae0c1fc368a30e411b5acfa1c91e1ecdfd848a5a391b8c8aa6d3bf57e6fd5ce15b3a37d7ebff224c6a01"
+}

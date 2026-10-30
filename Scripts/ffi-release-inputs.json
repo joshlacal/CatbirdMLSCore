@@ -1,13 +1,13 @@
 {
-  "source_run_id": 34004430583,
+  "source_run_id": 38708410409,
   "source_run_attempt": 1,
-  "release_tag": "v1.5.18",
+  "release_tag": "v1.5.21",
   "artifact_name": "catbird-mls-ffi",
   "sources": {
-    "CatbirdMLSCore": "c53a5186e9985fc3be0b764d981e2cb1fda1e419",
-    "catbird-mls": "1495be65e0b74336267b642b895401373d4f507b",
-    "catbird-atproto": "be86e472901097d09459fd2a6bce1e5e7a5dbcba",
-    "Petrel": "dd2ad04bafa1176d45e18be13267349f2d5ec33a",
-    "PetrelCatbird": "e750323f1094a140f8dafceab792f4eebefb6347"
+    "CatbirdMLSCore": "89e066bfc2a30aaf8ecdda0c6ce0dfe6cbf7aa7a",
+    "catbird-mls": "899fd9b3583da39a555b71ed0f9deacc8b51af5c",
+    "catbird-atproto": "279df8f5a698e9adafdee7a017fe92e84ee381c0",
+    "Petrel": "329b5fbe412286ff4c094246b6f30c2989e58f94",
+    "PetrelCatbird": "ff98deedc748777537f912fa4dcd208f9bbc840e"
   }
 }

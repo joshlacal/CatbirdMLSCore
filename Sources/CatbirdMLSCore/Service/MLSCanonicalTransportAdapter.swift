@@ -678,6 +678,8 @@ extension BlueCatbirdChatDefs.ConversationEntry {
     case .blueCatbirdChatDefsZeroLeafLeaveEntry(let e): return String(describing: e.conversationId)
     case .blueCatbirdChatDefsLeaveCancellationEntry(let e): return String(describing: e.conversationId)
     case .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsDirectRequestEntry(let e): return String(describing: e.conversationId)
+    case .blueCatbirdChatDefsDirectRequestAcceptanceEntry(let e): return String(describing: e.conversationId)
     case .unexpected: return ""
     }
   }
@@ -698,6 +700,8 @@ extension BlueCatbirdChatDefs.ConversationEntry {
     case .blueCatbirdChatDefsZeroLeafLeaveEntry(let e): return e.seq
     case .blueCatbirdChatDefsLeaveCancellationEntry(let e): return e.seq
     case .blueCatbirdChatDefsLeaveCommitFulfillmentEntry(let e): return e.seq
+    case .blueCatbirdChatDefsDirectRequestEntry(let e): return e.seq
+    case .blueCatbirdChatDefsDirectRequestAcceptanceEntry(let e): return e.seq
     case .unexpected: return 0
     }
   }

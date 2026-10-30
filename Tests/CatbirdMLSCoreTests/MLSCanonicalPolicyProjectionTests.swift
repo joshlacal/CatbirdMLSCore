@@ -87,6 +87,63 @@ final class MLSCanonicalPolicyProjectionTests: XCTestCase {
       XCTAssertThrowsError(try MLSCanonicalPolicyProjection.decode(withRawField(key, value),
         conversationID: cid, groupID: Data(repeating: 0xab, count: 32)), "Invalid routing value: \(key)=\(value)")
     }
+    XCTAssertThrowsError(
+      try MLSCanonicalPolicyProjection.decode(
+        withRawField("directRequest", "{}"),
+        conversationID: cid,
+        groupID: Data(repeating: 0xab, count: 32)
+      ),
+      "Malformed v2 authority state must not degrade to an ordinary v1 conversation"
+    )
+  }
+
+  /// Mirrors core `admission::validate_conversation_policy`: only a request-born
+  /// state may carry a pending recipient that already owns leaves.
+  func testPendingRecipientLeavesRequireDirectRequestState() throws {
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(snapshot().utf8)) as? [String: Any])
+    var participants = try XCTUnwrap(object["participants"] as? [[String: Any]])
+    participants[1]["leafCount"] = 2
+    object["participants"] = participants
+    func encoded(_ value: [String: Any]) throws -> String {
+      String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
+    }
+    let groupID = Data(repeating: 0xab, count: 32)
+    XCTAssertThrowsError(try MLSCanonicalPolicyProjection.decode(encoded(object), conversationID: cid, groupID: groupID),
+      "An ordinary invitation cannot hold leaves while pending")
+
+    let hash = ["$bytes": Data(repeating: 0x11, count: 32).base64EncodedString()]
+    object["directRequest"] = [
+      "$type": "blue.catbird.chat.defs#directRequestState",
+      "requestId": "650e8400-e29b-41d4-a716-446655440000",
+      "firstMessageId": "850e8400-e29b-41d4-a716-446655440000",
+      "senderDid": "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa",
+      "recipientDid": account,
+      "consent": "incomingPending",
+      "importUntil": "2030-01-02T00:00:00.000Z",
+      "contextHash": hash,
+      "preparationDigest": hash,
+    ]
+    let state = try MLSCanonicalPolicyProjection.decode(encoded(object), conversationID: cid, groupID: groupID)
+    XCTAssertNotNil(state.directRequest)
+    XCTAssertEqual(state.participants[1].leafCount, 2)
+  }
+
+  /// Core adopts DIDs byte-exact (`BareDid::parse` rejects uppercase) and
+  /// matches participants with `==` (admission.rs), so a case variant of the
+  /// account is never the participant. The Swift projection must agree.
+  func testParticipantIdentityIsByteExactLikeCore() async throws {
+    let manager = try await makeManager()
+    expectTrue(try await apply(manager, json: snapshot()))
+    let queue = try DatabaseQueue(path: directory.appendingPathComponent("messages.sqlite").path)
+    let variantDID = "did:plc:" + account.dropFirst("did:plc:".count).uppercased()
+    try await queue.write { [account, cid] db in
+      XCTAssertNotNil(try MLSCanonicalPolicyProjection.storedState(userDID: account, conversationID: cid, in: db))
+      try db.execute(sql: """
+        UPDATE mls_orchestrator_canonical_policy SET user_did = ?
+        WHERE user_did = ? AND conversation_id = ?
+        """, arguments: [variantDID, account, cid])
+      XCTAssertThrowsError(try MLSCanonicalPolicyProjection.storedState(userDID: variantDID, conversationID: cid, in: db))
+    }
   }
 
   func testPendingAcceptanceAtSameEpochSurvivesReopenAndRejectsStalePending() async throws {
@@ -354,6 +411,31 @@ final class MLSCanonicalPolicyProjectionTests: XCTestCase {
     )
     expectEqual(acceptedAfterAccept.count, 1)
     expectEqual(acceptedAfterAccept.first?.conversationID, cid)
+  }
+
+  /// A suspension close racing foreground resume closed the pool the manager
+  /// (and its Rust runtime) held; every later Rust op failed forever with
+  /// "SQLite error 21: Connection is closed". Recovery must recognise that
+  /// error and rebind a live pool.
+  func testClosedManagerPoolIsRecognisedAndRebound() async throws {
+    let did = "did:plc:" + String((0..<24).map { _ in "abcdefghijklmnopqrstuvwxyz234567".randomElement()! })
+    let client = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
+    let api = await MLSAPIClient(client: client, environment: .custom(serviceDID: "did:web:example.com#atproto_mls"))
+    let manager = MLSConversationManager(apiClient: api, database: try DatabaseQueue(), userDid: did,
+      atProtoClient: client, protocolAuthorityMode: .rustFull)
+    let closed = try await manager.databaseManager.getDatabasePool(for: did)
+    manager.database = closed
+    try closed.close()
+    var surfaced: Error?
+    do { _ = try await manager.database.read { _ in () } } catch { surfaced = error }
+    let grdb = try XCTUnwrap(surfaced)
+    XCTAssertTrue(MLSConversationManager.isClosedContextError(grdb))
+    XCTAssertTrue(MLSConversationManager.isClosedContextError(
+      OrchestratorBridgeError.Storage(message: "UnexpectedUniFFICallbackError(reason: \"\(grdb)\")")))
+
+    await manager.rebindDatabaseIfClosed()
+    XCTAssertFalse(manager.database as AnyObject === closed)
+    _ = try await manager.database.read { db in try Int.fetchOne(db, sql: "SELECT 1") }
   }
 
   private func makeManager(epoch: Int64 = 0) async throws -> MLSConversationManager {

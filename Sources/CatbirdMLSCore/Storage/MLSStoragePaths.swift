@@ -484,6 +484,17 @@ final class MLSStorageCoordinator: @unchecked Sendable {
     return activeAdmissionLeases[key] != nil
   }
 
+  /// Outstanding references, including the brief interval after a registry token
+  /// is removed by an ordinary close and before its admission lease is released.
+  func activeAdmissionLeaseCount(for kind: MLSDatabaseKind) -> Int {
+    activeLeasesLock.lock()
+    defer { activeLeasesLock.unlock() }
+    let prefix = "\(kind.rawValue)_"
+    return activeAdmissionLeases.reduce(0) { count, entry in
+      count + (entry.key.hasPrefix(prefix) ? entry.value.refCount : 0)
+    }
+  }
+
   /// Seam for test barriers
   #if DEBUG
   private let testLock = NSLock()
@@ -1146,7 +1157,46 @@ final class MLSStorageCoordinator: @unchecked Sendable {
 
   // MARK: - Coordinated Open & Creation
 
-  /// Authoritative single entry point for coordinating database open / creation according to
+  /// Admit a read-only inspection of an existing, fully initialized store. Unlike
+  /// coordinateOpen, this never publishes a marker, creates keys, or initializes a
+  /// missing database. The caller owns the returned handle and retained lease.
+  func coordinateExistingOpen<T>(
+    for kind: MLSDatabaseKind,
+    userDID: String,
+    openExisting: () async throws -> T
+  ) async throws -> T? {
+    _ = try MLSStoragePaths.requiredCleanContainerURL()
+    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let admissionLease = try await acquireAdmissionLease(for: kind, userDID: normalizedDID)
+    var retained = false
+    defer {
+      if !retained { admissionLease.release() }
+    }
+    #if DEBUG
+    testBarrierHook?()
+    #endif
+    guard !MLSStoragePaths.isResetActive(for: normalizedDID) else {
+      throw MLSStorageInitializationError.admissionDenied(details: "Storage reset in progress during foreground inspection")
+    }
+    switch try evaluateStateUnderLease(for: kind, userDID: normalizedDID) {
+    case .complete:
+      try MLSStoragePaths.validateDatabaseOwnerMapping(for: normalizedDID)
+      let result = try await openExisting()
+      retainAdmissionLease(admissionLease, for: kind, userDID: normalizedDID)
+      retained = true
+      return result
+    case .allAbsent:
+      return nil
+    case .incompleteAttempt:
+      throw MLSStorageInitializationError.incompleteAttempt(details: "Existing storage initialization is incomplete")
+    case .mixedState(let details):
+      throw MLSStorageInitializationError.mixedState(details: details)
+    case .unreadableState(let details):
+      throw MLSStorageInitializationError.unreadableState(details: details)
+    }
+  }
+
+  /// Authoritative entry point for ordinary database open / creation according to
   /// the fail-closed OpenMLS 0.9 cross-process storage protocol.
   func coordinateOpen<T>(
     for kind: MLSDatabaseKind,

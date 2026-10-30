@@ -62,6 +62,20 @@ public enum MLSCredentialBinding {
       .first.map(String.init) ?? identity
   }
 
+  /// True when a message/reaction sender identity belongs to `accountDID`.
+  /// Senders are stored as credential identities (`did#deviceId` for messages
+  /// received from any device, including this account's sibling devices), so
+  /// ownership compares DID roots exactly — the Swift twin of the core's
+  /// `is_own` rule (`catbird-mls/src/orchestrator/messaging.rs`).
+  public static func isSameAccount(_ senderIdentity: String, as accountDID: String) -> Bool {
+    credentialRootDID(senderIdentity) == credentialRootDID(accountDID)
+  }
+
+  /// `isSameAccount` for callers whose account DID may not be known yet; an unknown account owns nothing.
+  public static func isSameAccount(_ senderIdentity: String, as accountDID: String?) -> Bool {
+    accountDID.map { isSameAccount(senderIdentity, as: $0) } ?? false
+  }
+
   /// Structural identity-claim consistency check. Compares the DID root of
   /// `claimedIdentity` against the DID root of `expectedDID` (fragment-aware
   /// on both sides), ASCII-case-insensitively — matching the Rust twin's

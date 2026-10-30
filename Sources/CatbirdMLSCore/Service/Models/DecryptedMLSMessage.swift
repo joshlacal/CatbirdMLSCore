@@ -25,25 +25,6 @@ public struct DecryptedMLSMessage: Identifiable, Sendable {
   /// Sender's DID extracted from MLS credential
   public let senderDID: String
 
-  /// Initialize from ApplicationEntry after decryption
-  public init(
-    applicationEntry: BlueCatbirdChatDefs.ApplicationEntry,
-    payload: MLSMessagePayload,
-    senderDID: String
-  ) {
-    self.id = applicationEntry.entryId
-    self.convoId = applicationEntry.conversationId
-    switch applicationEntry.signedRequest.body {
-    case .blueCatbirdChatDefsApplicationSendBody(let body):
-      self.epoch = body.prior.epoch
-    case .unexpected:
-      self.epoch = 0
-    }
-    self.seq = applicationEntry.seq
-    self.createdAt = applicationEntry.receivedAt.date
-    self.payload = payload
-    self.senderDID = senderDID
-  }
 
   /// Simplified initializer for creating from storage data
   public init(

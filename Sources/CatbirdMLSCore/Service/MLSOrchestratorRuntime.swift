@@ -1,4 +1,5 @@
 import CatbirdMLS
+import CryptoKit
 import Foundation
 import GRDB
 import OSLog
@@ -22,7 +23,7 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
   public let bridge: OrchestratorBridge
 
   private let localContext: MlsContext?
-  private let storageAdapter: OrchestratorStorageCallback?
+  private let storageAdapter: MLSOrchestratorStorageAdapter?
   private let apiClient: OrchestratorApiCallback?
   private let credentialAdapter: OrchestratorCredentialCallback?
   private let eventCallback: OrchestratorEventCallback?
@@ -36,6 +37,8 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     apiClient: OrchestratorApiCallback,
     keychainManager: MLSKeychainManager = .shared,
     authorizedDeviceKeyResolver: (@Sendable (String) throws -> [Data]?)? = nil,
+    receiptAuthorityDocumentResolver: MLSOrchestratorCredentialAdapter.ReceiptAuthorityDocumentResolver? = nil,
+    chatDeclarationAuthorityResolver: MLSOrchestratorCredentialAdapter.ChatDeclarationAuthorityResolver? = nil,
     signingPublicKeyResolver: MLSOrchestratorCredentialAdapter.SigningPublicKeyResolver? = nil,
     signingBindingResolver: MLSOrchestratorCredentialAdapter.SigningBindingResolver? = nil,
     config: FfiOrchestratorConfig? = nil,
@@ -50,6 +53,8 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
     let credentialAdapter = MLSOrchestratorCredentialAdapter(
       keychainManager: keychainManager,
       authorizedDeviceKeyResolver: authorizedDeviceKeyResolver,
+      receiptAuthorityDocumentResolver: receiptAuthorityDocumentResolver,
+      chatDeclarationAuthorityResolver: chatDeclarationAuthorityResolver,
       transcriptSigner: { identity, transcript in
         try mlsContext.signWithIdentityKey(identity: identity, payload: transcript)
       },
@@ -141,6 +146,75 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
         metadata: MLSConversationSnapshotMetadata(ffiConversation: conversation)
       )
     }
+  }
+
+  @discardableResult
+  public func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
+    let outcome = try bridge.startDirectRequest(input: input)
+    try storageAdapter?.persistDirectRequestOperation(
+      outcome,
+      draftID: input.draftId,
+      recipientDID: input.recipientDid
+    )
+    return outcome
+  }
+
+  @discardableResult
+  public func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+    let outcome = try bridge.resumeDirectRequest(draftId: draftId)
+    try storageAdapter?.persistDirectRequestOperation(
+      outcome,
+      draftID: draftId,
+      recipientDID: nil
+    )
+    return outcome
+  }
+
+  @discardableResult
+  public func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
+    let outcome = try bridge.cancelDirectRequest(draftId: draftId)
+    try storageAdapter?.persistDirectRequestOperation(
+      outcome,
+      draftID: draftId,
+      recipientDID: nil
+    )
+    return outcome
+  }
+
+  public func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
+    let view = try bridge.refreshRequestPreview(conversationId: conversationId)
+    try storageAdapter?.persistDirectRequestView(view)
+    return view
+  }
+
+  public func listDirectRequestViews() throws -> [DirectRequestView] {
+    let views = try bridge.listDirectRequestViews()
+    try storageAdapter?.persistDirectRequestViews(views)
+    return views
+  }
+
+  public func getDirectRequestDeliveryEnabled() throws -> Bool? {
+    try bridge.getDirectRequestDeliveryEnabled()
+  }
+
+  public func setDirectRequestDeliveryEnabled(enabled: Bool) throws {
+    try bridge.setDirectRequestDeliveryEnabled(enabled: enabled)
+  }
+
+  public func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
+    let view = try bridge.closeDirectRequest(conversationId: conversationId)
+    try storageAdapter?.persistDirectRequestView(view)
+    return view
+  }
+
+  public func getGroupInvitationReference(
+    conversationId: String,
+    recipientDid: String
+  ) throws -> GroupInvitationReference? {
+    try bridge.getGroupInvitationReference(
+      conversationId: conversationId,
+      recipientDid: recipientDid
+    )
   }
 
   public func startupReconcile() throws -> FfiStartupReconcileReport {
@@ -422,6 +496,56 @@ public final class MLSOrchestratorRuntime: @unchecked Sendable {
       throw MLSConversationError.operationFailed("This device's signing identity is unavailable.")
     }
     return (deviceId, try localContext.identityPublicKey(identity: identity))
+  }
+
+  func currentPushSigningAuthority() throws -> MLSPushSigningAuthority {
+    guard let localContext,
+          let identity = try credentialAdapter?.getMlsDid(userDid: userDID),
+          let deviceID = try credentialAdapter?.getDeviceUuid(userDid: userDID),
+          identity == "\(userDID)#\(deviceID)",
+          let device = try bridge.listDevices().first(where: { $0.deviceId == deviceID }),
+          device.status == "active",
+          let keyID = device.keyId,
+          let publicKey = device.signaturePublicKey,
+          let authGeneration = device.authGeneration,
+          authGeneration > 0
+    else { throw MLSPushRegistrationError.signingAuthorityUnavailable }
+    let custodyKey = try localContext.identityPublicKey(identity: identity)
+    guard custodyKey == publicKey,
+          MLSOrchestratorCredentialAdapter.keyIdentifier(forPublicKey: publicKey) == keyID
+    else { throw MLSPushRegistrationError.signingAuthorityUnavailable }
+    return MLSPushSigningAuthority(
+      actorDID: userDID,
+      deviceID: deviceID,
+      keyID: keyID,
+      authGeneration: authGeneration,
+      publicKey: publicKey
+    )
+  }
+
+  func signPushRegistrationTranscript(
+    _ transcript: Data,
+    expectedAuthority: MLSPushSigningAuthority
+  ) throws -> Data {
+    guard !transcript.isEmpty,
+          try currentPushSigningAuthority() == expectedAuthority,
+          let localContext,
+          let identity = try credentialAdapter?.getMlsDid(userDid: userDID)
+    else { throw MLSPushRegistrationError.signingAuthorityChanged }
+    let signature = try localContext.signWithIdentityKey(identity: identity, payload: transcript)
+    guard let verifier = try? Curve25519.Signing.PublicKey(rawRepresentation: expectedAuthority.publicKey),
+          verifier.isValidSignature(signature, for: transcript)
+    else { throw MLSPushRegistrationError.invalidSignature }
+    guard try currentPushSigningAuthority() == expectedAuthority else {
+      throw MLSPushRegistrationError.signingAuthorityChanged
+    }
+    return signature
+  }
+
+  func requireCurrentPushSigningAuthority(_ expected: MLSPushSigningAuthority) throws {
+    guard try currentPushSigningAuthority() == expected else {
+      throw MLSPushRegistrationError.signingAuthorityChanged
+    }
   }
 
   public func currentDeviceInfo() throws -> MLSRegisteredDeviceInfo? {

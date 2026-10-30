@@ -51,6 +51,10 @@ public final class MLSConversationManager {
     @ObservationIgnored internal let rustDeviceAuthorizationGate = MLSDeviceAuthorizationGate()
     @ObservationIgnored internal var postReloadSyncPending = false
     @ObservationIgnored internal var activeSuspensionID: UUID?
+    @ObservationIgnored internal var suspensionTransitionID = UUID()
+    @ObservationIgnored private var databaseRefreshTask: (
+        id: UUID, userDID: String?, transition: UUID, generation: UInt64, task: Task<Void, Error>
+    )?
 
     /// Called when the database pool is refreshed after recovery.
     /// Allows the app layer to update its own cached pool references.
@@ -327,6 +331,9 @@ public final class MLSConversationManager {
     /// Serializes MLS message processing per conversation to avoid concurrent ratchet advances
     public let messageProcessingCoordinator = ConversationProcessingCoordinator()
 
+    /// Coalesces concurrent in-flight direct request preview refreshes for the same conversation ID (F81)
+    internal let directRequestPreviewCoalescer = DirectRequestPreviewCoalescer()
+
     /// Current coordination generation assigned at initialization
     /// Used to detect and abort stale tasks after account switches
     public let currentCoordinationGeneration: Int
@@ -561,23 +568,92 @@ public final class MLSConversationManager {
     /// Call this at the top of key async entry points (`syncWithServer`, `sendMessage`,
     /// `processServerMessage`, etc.) to prevent cascading "Connection is closed" errors
     /// when the pool has been recycled underneath us.
+    @MainActor
     public func refreshDatabaseIfNeeded() async throws {
-        guard let userDid = userDid else { return }
+        let generation = MLSGRDBManager.storageLifecycleGeneration
+        let transition = suspensionTransitionID
+        let observedUserDID = userDid
+        if let pending = databaseRefreshTask,
+           pending.userDID == userDid, pending.transition == transition,
+           pending.generation == generation {
+            try await pending.task.value
+            try Task.checkCancellation()
+            return
+        }
+        let id = UUID()
+        let task = Task { @MainActor [self] in
+            try await performDatabaseRefreshBinding(
+                userDID: observedUserDID, transition: transition, generation: generation, taskID: id
+            )
+        }
+        databaseRefreshTask = (id, userDid, transition, generation, task)
+        defer {
+            if databaseRefreshTask?.id == id { databaseRefreshTask = nil }
+        }
+        try await task.value
+        try Task.checkCancellation()
+    }
 
-        // Fast path: databaseManager still holds our pool — nothing to do.
-        if await databaseManager.isDatabaseOpen(for: userDid) { return }
+    @MainActor
+    private func performDatabaseRefreshBinding(
+        userDID: String?, transition: UUID, generation: UInt64, taskID: UUID
+    ) async throws {
+        guard let userDid = userDID else { return }
+        func requireCurrentBinding() throws {
+            try Task.checkCancellation()
+            try MLSGRDBManager.requireCurrentStorageGeneration(generation)
+            guard self.userDid == userDid, suspensionTransitionID == transition,
+                  databaseRefreshTask?.id == taskID, !isShuttingDown else {
+                throw CancellationError()
+            }
+        }
+        try requireCurrentBinding()
+        while true {
+            // Cache presence proves only that *some* pool is open. Another reader
+            // may already have replaced the exact pool retained by this manager.
+            let newPool = try await databaseManager.getDatabasePool(for: userDid)
+            try requireCurrentBinding()
+            guard (database as? DatabasePool) !== newPool else { return }
 
-        // Pool was closed (recovery, corruption repair, account switch, etc.) — get a fresh one.
-        logger.warning(
-            "🔄 [DB-REFRESH] Database pool was closed for \(userDid.prefix(20))... - reconnecting"
-        )
-        let newPool = try await databaseManager.getDatabasePool(for: userDid)
-        database = newPool
-        resetOrchestratorRuntime(reason: "database pool refreshed")
-        logger.info(
-            "✅ [DB-REFRESH] Got fresh database pool for \(userDid.prefix(20))..."
-        )
-        onDatabaseRefreshed?(newPool)
+            invalidateOrchestratorRuntime(reason: "database pool refreshed")
+            try await membershipChangeObserver?.rebindDatabase(newPool, generation: generation)
+            try requireCurrentBinding()
+            if let recoveryManager = await mlsClient.recovery(for: userDid) {
+                try requireCurrentBinding()
+                try await recoveryManager.rebindPersistence(
+                    MLSRecoveryStateStore(database: newPool, currentUserDID: userDid),
+                    generation: generation
+                )
+                try requireCurrentBinding()
+            }
+            // Ordinary actor-owned close/reopen does not change the emergency
+            // generation. Recheck its actual pool after all dependent awaits.
+            let currentPool = try await databaseManager.getDatabasePool(for: userDid)
+            try requireCurrentBinding()
+            guard currentPool === newPool else { continue }
+            database = newPool
+            logger.info(
+                "✅ [DB-REFRESH] Got fresh database pool for \(userDid.prefix(20))..."
+            )
+            onDatabaseRefreshed?(newPool)
+            return
+        }
+    }
+
+    /// A suspension close that races a foreground resume can close the pool this
+    /// manager (and the Rust runtime built from it) holds after the storage
+    /// manager has already reopened another, so `refreshDatabaseIfNeeded`'s
+    /// cache check passes. Probe the pool actually held here and rebind it.
+    func rebindDatabaseIfClosed() async {
+        guard let userDid, (try? await database.read { _ in () }) == nil else { return }
+        // The first call evicts a dead cached pool and throws; the second opens.
+        for _ in 0..<2 {
+            guard let pool = try? await databaseManager.getDatabasePool(for: userDid) else { continue }
+            database = pool
+            onDatabaseRefreshed?(pool)
+            logger.warning("🔄 [DB-REFRESH] Rebound closed database pool for \(userDid.prefix(20))...")
+            return
+        }
     }
 
     /// Stop all network streams and pause synchronization

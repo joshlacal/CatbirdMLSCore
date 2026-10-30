@@ -148,6 +148,7 @@ public actor MLSClient {
       $0.suspensionInProgress = false
       $0.cacheInvalidated = false
     }
+    MLSCoreContext.clearSuspensionFlag()
     MLSSuspensionFlightRecorder.shared.record(
       .resumeFromSuspension,
       details: "MLSClient clearSuspensionFlag: \(reason)",

@@ -1103,6 +1103,9 @@ public struct MLSStorageHelpers {
     currentUserDID: String
   ) throws -> [String: Int] {
     let normalizedUserDID = normalizeDID(currentUserDID)
+    // Messages from this account's sibling devices carry `did#deviceId` sender identities;
+    // they are own messages and never unread (MLSCredentialBinding.isSameAccount).
+    let accountRootDID = MLSCredentialBinding.credentialRootDID(normalizedUserDID)
     let sql: String
     if try db.tableExists(MLSConversationDeletionMarkerModel.databaseTableName) {
       sql = """
@@ -1110,7 +1113,8 @@ public struct MLSStorageHelpers {
         FROM MLSMessageModel msg
         LEFT JOIN MLSConversationDeletionMarkerModel m
           ON m.conversationID = msg.conversationID AND m.currentUserDID = msg.currentUserDID
-        WHERE msg.currentUserDID = ? AND msg.isRead = 0 AND msg.senderID != ?
+        WHERE msg.currentUserDID = ? AND msg.isRead = 0
+          AND NOT (msg.senderID = ? OR substr(msg.senderID, 1, length(?) + 1) = ? || '#')
           AND msg.processingError IS NULL AND msg.payloadExpired = 0
           AND (
             m.conversationID IS NULL
@@ -1125,12 +1129,16 @@ public struct MLSStorageHelpers {
       sql = """
         SELECT conversationID, COUNT(*) as unreadCount
         FROM MLSMessageModel
-        WHERE currentUserDID = ? AND isRead = 0 AND senderID != ?
+        WHERE currentUserDID = ? AND isRead = 0
+          AND NOT (senderID = ? OR substr(senderID, 1, length(?) + 1) = ? || '#')
           AND processingError IS NULL AND payloadExpired = 0
         GROUP BY conversationID
         """
     }
-    let rows = try Row.fetchAll(db, sql: sql, arguments: [normalizedUserDID, normalizedUserDID])
+    let rows = try Row.fetchAll(
+      db, sql: sql,
+      arguments: [normalizedUserDID, accountRootDID, accountRootDID, accountRootDID]
+    )
 
     var result: [String: Int] = [:]
     for row in rows {

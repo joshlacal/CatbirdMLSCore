@@ -476,7 +476,7 @@ public extension MLSConversationManager {
   /// Resolve a caller-supplied identifier to the canonical stable UUID
   /// required by Rust's public mutation API. Raw group hex remains confined to
   /// low-level MLS crypto paths.
-  private func rustConversationID(for requestedID: String) async throws -> String {
+  internal func rustConversationID(for requestedID: String) async throws -> String {
     guard let userDid else { throw MLSConversationError.noAuthentication }
     let groupHint = conversations[requestedID]?.groupId
     let resolved = try await database.read { db in
@@ -1540,9 +1540,30 @@ public extension MLSConversationManager {
         epoch: message.epoch,
         seq: message.seq
       )
-    case .nonApplication:
-      throw MLSConversationError.invalidMessage
-    case .controlMessage:
+    case .nonApplication, .controlMessage:
+      // If the message was already processed and stored (e.g. by prior sync or concurrent delivery),
+      // the orchestrator dedup returns None (mapped to .nonApplication). Retrieve the already-decrypted
+      // payload from local storage instead of failing with invalidMessage.
+      if let userDid = userDid,
+         let stored = try? await storage.fetchMessage(
+           messageID: message.id,
+           currentUserDID: userDid,
+           database: database
+         ),
+         let context = try? await MLSCoreContext.shared.getContext(for: userDid) {
+        let payload = stored.decryptedPayload(context: context)
+        let text = payload?.text ?? stored.plaintext ?? ""
+        return DecryptedMLSMessage(
+          id: message.id,
+          convoId: message.convoId,
+          text: text,
+          senderDID: stored.senderID,
+          createdAt: message.createdAt.date,
+          embed: payload?.embed,
+          epoch: message.epoch,
+          seq: message.seq
+        )
+      }
       throw MLSConversationError.invalidMessage
     }
   }
@@ -2186,6 +2207,12 @@ public extension MLSConversationManager {
 
     for event in events {
       switch event.kind {
+      case .requestReceived:
+        conversationsNeedingFollowup.insert(event.conversationId)
+        logger.info(
+          "🦀 [MLS-FULL-RUST] event=requestReceived source=\(source, privacy: .public) convo=\(event.conversationId.prefix(16), privacy: .private)"
+        )
+
       case .conversationUpdated:
         conversationsNeedingFollowup.insert(event.conversationId)
         logger.info(
@@ -2253,7 +2280,7 @@ public extension MLSConversationManager {
 
     switch payload.messageType {
     case .text:
-      if senderDID != userDid {
+      if !MLSCredentialBinding.isSameAccount(senderDID, as: userDid) {
         enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
       }
 
@@ -3110,7 +3137,7 @@ public extension MLSConversationManager {
 
           // Enqueue delivery ack — proof of successful decryption.
           // Only ack messages from other users (not our own SSE echo).
-          if senderDID != userDid {
+          if !MLSCredentialBinding.isSameAccount(senderDID, as: userDid) {
             enqueueDeliveryAck(messageId: message.id, conversationId: message.convoId)
           }
 

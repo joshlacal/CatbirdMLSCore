@@ -226,7 +226,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertEqual(entry.applicationEntry?.ciphertext, Data([0xAA, 0xBB]))
     XCTAssertEqual(entry.sequenceNumber, 4)
 
-    let envelope = try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app")
+    let envelope = try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: Data(), messageType: "app")
     XCTAssertEqual(envelope?.conversationId, "550e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(envelope?.senderDid, actorDID.description)
     XCTAssertEqual(envelope?.ciphertext, Data([0xAA, 0xBB]))
@@ -234,8 +234,8 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertEqual(envelope?.serverSequence, 4)
     XCTAssertEqual(envelope?.serverEpoch, 7)
     XCTAssertEqual(envelope?.timestamp, "2023-11-14T22:13:21.000Z")
-    XCTAssertNil(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit"))
-    XCTAssertEqual(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xAA, 0xBB]))
+    XCTAssertNil(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: Data(), messageType: "commit"))
+    XCTAssertEqual(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: Data())?.ciphertext, Data([0xAA, 0xBB]))
   }
   func testUnexpectedCanonicalEntryDoesNotProjectAsCiphertext() {
     let entry = BlueCatbirdChatDefs.ConversationEntry.unexpected(.object([:]))
@@ -343,15 +343,28 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     XCTAssertEqual(entry.commitEntry?.commitData, Data([0xCC, 0xDD]))
     XCTAssertEqual(entry.entryID, "750e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(entry.sequenceNumber, 5)
-    let envelope = try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "commit")
+    let envelope = try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: Data(), messageType: "commit")
     XCTAssertEqual(envelope?.conversationId, "550e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(envelope?.senderDid, did.description)
     XCTAssertEqual(envelope?.ciphertext, Data([0xCC, 0xDD]))
     XCTAssertEqual(envelope?.serverMessageId, "750e8400-e29b-41d4-a716-446655440000")
     XCTAssertEqual(envelope?.serverSequence, 5)
     XCTAssertEqual(envelope?.serverEpoch, 7)
-    XCTAssertNil(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, messageType: "app"))
-    XCTAssertEqual(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry)?.ciphertext, Data([0xCC, 0xDD]))
+    XCTAssertNil(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: Data(), messageType: "app"))
+    XCTAssertEqual(try MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: Data())?.ciphertext, Data([0xCC, 0xDD]))
+  }
+
+  /// Rust hashes and signature-checks request control rows against retained
+  /// proofs; a generated-DTO re-encode injects nested `$type` tags and made
+  /// every post-acceptance send fail with "Invalid request projection proof".
+  func testRequestControlEntryForwardsServedJSONVerbatim() throws {
+    let served = Data(Self.servedAcceptanceEntry.utf8)
+    let entry = try JSONDecoder().decode(BlueCatbirdChatDefs.ConversationEntry.self, from: served)
+    let envelope = try XCTUnwrap(MLSOrchestratorAPIAdapter.incomingEnvelope(entry, servedJSON: served))
+    XCTAssertEqual(envelope.canonicalEntryJson, Self.servedAcceptanceEntry)
+    XCTAssertTrue(envelope.ciphertext.isEmpty)
+    XCTAssertEqual(envelope.serverSequence, 2)
+    XCTAssertEqual(envelope.timestamp, "2026-09-25T07:32:27.204Z")
   }
 
   func testCanonicalEnvelopeRejectsReservedIDsAndInvalidReceiptMetadata() throws {
@@ -375,7 +388,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     entry = copyApplicationEntry(entry, receivedAt: try XCTUnwrap(ATProtocolDate(iso8601String: "2023-11-14T22:13:21.301Z")))
     XCTAssertEqual(try MLSOrchestratorAPIAdapter.applicationEnvelope(entry).timestamp, "2023-11-14T22:13:21.301Z")
     entry = copyApplicationEntry(entry, unexpectedBody: true)
-    XCTAssertThrowsError(try MLSOrchestratorAPIAdapter.incomingEnvelope(.blueCatbirdChatDefsApplicationEntry(entry)))
+    XCTAssertThrowsError(try MLSOrchestratorAPIAdapter.incomingEnvelope(.blueCatbirdChatDefsApplicationEntry(entry), servedJSON: Data()))
   }
 
   private func copyApplicationEntry(
@@ -453,4 +466,7 @@ final class MLSCanonicalTransportAdapterTests: XCTestCase {
     )
   }
 
+  /// A request acceptance row captured verbatim from `getEntries` (fixture service).
+  private static let servedAcceptanceEntry =
+    #"{"$type":"blue.catbird.chat.defs#directRequestAcceptanceEntry","conversationId":"275e36d5-6ece-42c3-8c16-32c2f3af314e","entryId":"8f446a59-b190-42d3-9f22-69207041c1c5","receivedAt":"2026-09-25T07:32:27.204Z","seq":2,"signedRequest":{"body":{"$type":"blue.catbird.chat.defs#directRequestAcceptanceBody","actorDeviceId":"984223d4-fb12-4441-9273-783a34f846b7","actorDid":"did:web:bob-8dfb8d73b7ad4a5f95882b78c6177ae3.request-fixture.catbird.blue","authGeneration":1,"idempotencyKey":"8f446a59-b190-42d3-9f22-69207041c1c5","invitationProvenance":{"invitationTransitionId":"51caf999-92c0-462b-8404-24c947c4e749","invitedByDeviceId":"c2878a92-7723-46d6-a539-606dbc2a1dfe","invitedByDid":"did:web:alice-8dfb8d73b7ad4a5f95882b78c6177ae3.request-fixture.catbird.blue"},"keyId":"-E034zmHmU1AVl_FbRIkEUMmx63DNxilXwNtPbNNJWE","next":{"confirmationTag":{"$bytes":"wcLX4Nv5ELEBY3HiDrgh57dnVMkRw9km17kFX4sbCVQ="},"conversationId":"275e36d5-6ece-42c3-8c16-32c2f3af314e","epoch":1,"generation":0,"groupContextHash":{"$bytes":"g5CnsXmGMXOmiy2/uSY1UzFKJPEgqXf3Q9pcNk6FtvY="},"groupId":{"$bytes":"hEQ3YJIipICHksFCdcB9YNE7r1n3XUOaIUZSs6U2pjc="},"lifecycle":"active","stateVersion":2},"prior":{"confirmationTag":{"$bytes":"wcLX4Nv5ELEBY3HiDrgh57dnVMkRw9km17kFX4sbCVQ="},"conversationId":"275e36d5-6ece-42c3-8c16-32c2f3af314e","epoch":1,"generation":0,"groupContextHash":{"$bytes":"g5CnsXmGMXOmiy2/uSY1UzFKJPEgqXf3Q9pcNk6FtvY="},"groupId":{"$bytes":"hEQ3YJIipICHksFCdcB9YNE7r1n3XUOaIUZSs6U2pjc="},"lifecycle":"active","stateVersion":1},"protocolVersion":"2","requestId":"51caf999-92c0-462b-8404-24c947c4e749","signatureDomain":"CATBIRD-DIRECT-REQUEST-ACCEPT\u0000","signedAt":"2026-09-25T07:32:26.697Z","transitionId":"8f446a59-b190-42d3-9f22-69207041c1c5"},"signature":{"$bytes":"eNEV/uHaROys/LE+KEkvDwrepQEGIYtw4rJ08eY/aotEe3+N5kdizMe4KCCHFjAwGK6JDtgdLfOODSTpcwiBDQ=="}}}"#
 }

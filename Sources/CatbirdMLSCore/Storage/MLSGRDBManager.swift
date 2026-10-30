@@ -74,6 +74,24 @@ public enum PeriodicCheckpointOutcome: Equatable, Sendable {
   case deferred
 }
 
+/// Observed Swift storage state after a synchronous suspension close attempt.
+/// Counts include operations owned by concurrent closers and retained admission refs.
+public struct SuspensionCloseResult: Sendable, Equatable {
+  public let closedPoolCount: Int
+  public let closedQueueCount: Int
+  public let failedPoolCount: Int
+  public let failedQueueCount: Int
+  public let remainingPoolCount: Int
+  public let remainingQueueCount: Int
+  public let inFlightOpenCount: Int
+  public let remainingAdmissionLeaseCount: Int
+
+  public var isComplete: Bool {
+    remainingPoolCount == 0 && remainingQueueCount == 0 && inFlightOpenCount == 0
+      && remainingAdmissionLeaseCount == 0
+  }
+}
+
 /// Manages encrypted GRDB DatabasePool instances with per-user isolation.
 /// Actor provides thread-safe access and automatic isolation.
 /// Uses DatabasePool for better read concurrency (multiple concurrent readers, single writer).
@@ -89,6 +107,32 @@ public actor MLSGRDBManager {
   /// For code that has direct access to an MLSConversationManager, prefer using
   /// the manager's owned database instance for proper lifecycle management.
   public static let shared = MLSGRDBManager()
+
+  /// A single foreground scene's authority to inspect existing Swift storage while
+  /// general MLS admission remains suspended. The app revokes this synchronously
+  /// on every scene transition and never reuses it for a later generation.
+  public final class ForegroundResumePermit: @unchecked Sendable {
+    private let lock = NSLock()
+    private var valid = true
+
+    public init() {}
+    public var isValid: Bool { lock.withLock { valid } }
+    public func revoke() { lock.withLock { valid = false } }
+
+    fileprivate func withValidPermit<T>(_ operation: () throws -> T) throws -> T {
+      try lock.withLock {
+        guard valid else {
+          throw MLSSQLCipherError.storageUnavailable(reason: "Foreground storage preparation was revoked")
+        }
+        return try operation()
+      }
+    }
+  }
+
+  private struct ForegroundProbeAdmission: Sendable {
+    let permit: ForegroundResumePermit
+    let generation: UInt64
+  }
 
   // MARK: - Emergency Suspension Close (0xdead10cc Prevention)
 
@@ -113,6 +157,9 @@ public actor MLSGRDBManager {
   private nonisolated(unsafe) static var activeEmergencyQueues: [UUID: EmergencyQueueEntry] = [:]
   private nonisolated(unsafe) static var failedEmergencyPools: [UUID: EmergencyPoolEntry] = [:]
   private nonisolated(unsafe) static var failedEmergencyQueues: [UUID: EmergencyQueueEntry] = [:]
+  private nonisolated(unsafe) static var closingEmergencyPools: [UUID: EmergencyPoolEntry] = [:]
+  private nonisolated(unsafe) static var closingEmergencyQueues: [UUID: EmergencyQueueEntry] = [:]
+  private nonisolated(unsafe) static var inFlightEmergencyOpenCount = 0
   private nonisolated(unsafe) static var emergencyDatabasesLock = NSLock()
   private nonisolated(unsafe) static var emergencyGeneration: UInt64 = 0
   // MARK: - Checkpoint Timeout (Signal-style thread-local)
@@ -151,98 +198,226 @@ public actor MLSGRDBManager {
     }
   }
 
-  /// Emergency synchronous close of all GRDB database pools for 0xdead10cc prevention.
-  /// Call this SYNCHRONOUSLY when transitioning to inactive/background.
-  /// This is safe to call from any thread and does not require actor isolation.
+  /// Close all registered Swift storage before ending the app's execution assertion.
+  /// The caller must first block new work with the process suspension flags and keep
+  /// its lifecycle generation valid. This method interrupts existing SQL, drains the
+  /// connections synchronously, and releases each admission lease only after close.
+  /// It does not run checkpoint SQL on already-suspended connections.
   ///
-  /// - Parameter mode: Checkpoint mode. Main app uses `.truncate` for 0xdead10cc prevention.
-  ///   NSE MUST use `.passive` — TRUNCATE from a non-owning process causes WAL corruption.
+  /// An incomplete result requires another close attempt while execution is allowed.
+  /// In-flight opens and concurrent closes are counted, never synchronously awaited.
+  public nonisolated static func closeAllDatabasesForSuspension() -> SuspensionCloseResult {
+    closeRegisteredDatabases(checkpointMode: nil, interrupt: true)
+  }
+
+  /// Emergency close with the existing checkpoint policy for non-suspension callers.
+  /// NSE callers must use `.passive`. Main-app suspension uses
+  /// `closeAllDatabasesForSuspension()` after GRDB suspension instead.
   public nonisolated static func emergencyCloseAllDatabases(
     mode: EmergencyCheckpointMode = .truncate
   ) {
-    let pid = ProcessInfo.processInfo.processIdentifier
-    let processTag = Bundle.main.bundlePath.hasSuffix(".appex") ? "NSE" : "APP"
+    _ = closeRegisteredDatabases(checkpointMode: mode, interrupt: false)
+  }
 
-    // Wait for any in-progress budget checkpoint to finish before we close pools.
-    // This prevents the race where a background PASSIVE checkpoint holds a connection
-    // while we TRUNCATE + close underneath it.
-    var spinCount = 0
-    while checkpointBudgetLock.withLock({ $0.checkpointInProgress }) && spinCount < 20 {
-      Thread.sleep(forTimeInterval: 0.005)  // 5ms per spin, 100ms max
-      spinCount += 1
-    }
-    if spinCount > 0 {
-      staticLogger.debug("[0xdead10cc-FIX] Waited \(spinCount * 5)ms for in-progress checkpoint to finish")
-    }
-    emergencyDatabasesLock.lock()
-    emergencyGeneration &+= 1
-    let poolsToClose = Array(activeEmergencyPools.values)
-    let queuesToClose = Array(activeEmergencyQueues.values)
-    activeEmergencyPools.removeAll()
-    activeEmergencyQueues.removeAll()
-    emergencyDatabasesLock.unlock()
-
-    staticLogger.warning(
-      "🚨 [0xdead10cc-FIX] [\(processTag)/\(pid)] Emergency closing \(poolsToClose.count) GRDB pools (mode=\(mode.rawValue))"
-    )
-
-    for entry in poolsToClose {
-      let checkpointSQL: String
-      switch mode {
-      case .truncate:
-        checkpointSQL = "PRAGMA wal_checkpoint(TRUNCATE);"
-      case .passive:
-        checkpointSQL = "PRAGMA wal_checkpoint(PASSIVE);"
+  private nonisolated static func closeRegisteredDatabases(
+    checkpointMode: EmergencyCheckpointMode?,
+    interrupt: Bool
+  ) -> SuspensionCloseResult {
+    if checkpointMode != nil {
+      // Preserve the existing bounded wait for legacy checkpointing callers.
+      var attempts = 0
+      while checkpointBudgetLock.withLock({ $0.checkpointInProgress }) && attempts < 20 {
+        Thread.sleep(forTimeInterval: 0.005)
+        attempts += 1
       }
+    }
+    // Claim entries without holding this lock during GRDB calls. Another closer
+    // must report our entries as outstanding until their leases are released.
+    let entries = emergencyDatabasesLock.withLock {
+      emergencyGeneration &+= 1
+      let pools = activeEmergencyPools.merging(failedEmergencyPools) { active, _ in active }
+        .filter { closingEmergencyPools[$0.key] == nil }
+      let queues = activeEmergencyQueues.merging(failedEmergencyQueues) { active, _ in active }
+        .filter { closingEmergencyQueues[$0.key] == nil }
+      activeEmergencyPools.removeAll()
+      activeEmergencyQueues.removeAll()
+      failedEmergencyPools.removeAll()
+      failedEmergencyQueues.removeAll()
+      closingEmergencyPools.merge(pools) { current, _ in current }
+      closingEmergencyQueues.merge(queues) { current, _ in current }
+      return (Array(pools.values), Array(queues.values))
+    }
 
-      // Best-effort checkpoint before close
-      do {
-        try entry.pool.writeWithoutTransaction { db in
-          Thread.current.threadDictionary[checkpointTimeoutKey] = 2  // ~50ms max
-          defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
-          try db.execute(sql: checkpointSQL)
+    if interrupt {
+      // Interrupt every handle before waiting for any one connection to drain.
+      for entry in entries.0 { entry.pool.interrupt() }
+      for entry in entries.1 { entry.queue.interrupt() }
+    }
+
+    var closedPools = 0
+    var closedQueues = 0
+    var failedPools = 0
+    var failedQueues = 0
+    for entry in entries.0 {
+      if let checkpointMode {
+        do {
+          try entry.pool.writeWithoutTransaction { db in
+            Thread.current.threadDictionary[checkpointTimeoutKey] = 2
+            defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
+            try db.execute(sql: "PRAGMA wal_checkpoint(\(checkpointMode.rawValue.uppercased()));")
+          }
+        } catch {
+          staticLogger.debug("[SuspensionClose] Checkpoint deferred: \(error)")
         }
-      } catch {
-        staticLogger.warning(
-          "⚠️ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB \(mode.rawValue) checkpoint failed for \(entry.userDID.prefix(20), privacy: .private): \(error)"
-        )
       }
-
-      // Close the pool
-      do {
-        try entry.pool.close()
-        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
-        staticLogger.debug(
-          "✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB pool closed for \(entry.userDID.prefix(20), privacy: .private)"
-        )
-      } catch {
-        emergencyDatabasesLock.lock()
-        failedEmergencyPools[entry.token] = entry
-        emergencyDatabasesLock.unlock()
-        staticLogger.warning(
-          "⚠️ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB pool close failed for \(entry.userDID.prefix(20), privacy: .private): \(error)"
-        )
-      }
+      if closeClaimedPool(entry) { closedPools += 1 } else { failedPools += 1 }
+    }
+    for entry in entries.1 {
+      if closeClaimedQueue(entry) { closedQueues += 1 } else { failedQueues += 1 }
     }
 
-    for entry in queuesToClose {
-      do {
-        try entry.queue.close()
-        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
-        staticLogger.debug(
-          "✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB lightweight queue closed for \(entry.userDID.prefix(20), privacy: .private)"
-        )
-      } catch {
-        emergencyDatabasesLock.lock()
-        failedEmergencyQueues[entry.token] = entry
-        emergencyDatabasesLock.unlock()
-        staticLogger.warning(
-          "⚠️ [0xdead10cc-FIX] [\(processTag)/\(pid)] GRDB lightweight queue close failed for \(entry.userDID.prefix(20), privacy: .private): \(error)"
-        )
+    let result = emergencyDatabasesLock.withLock {
+      SuspensionCloseResult(
+        closedPoolCount: closedPools,
+        closedQueueCount: closedQueues,
+        failedPoolCount: failedPools,
+        failedQueueCount: failedQueues,
+        remainingPoolCount: activeEmergencyPools.count + failedEmergencyPools.count + closingEmergencyPools.count,
+        remainingQueueCount: activeEmergencyQueues.count + failedEmergencyQueues.count + closingEmergencyQueues.count,
+        inFlightOpenCount: inFlightEmergencyOpenCount,
+        remainingAdmissionLeaseCount: MLSStorageCoordinator.shared.activeAdmissionLeaseCount(for: .swiftGRDB))
+    }
+    staticLogger.notice("[SuspensionClose] complete=\(result.isComplete) closedPools=\(result.closedPoolCount) closedQueues=\(result.closedQueueCount) failedPools=\(result.failedPoolCount) failedQueues=\(result.failedQueueCount) remainingPools=\(result.remainingPoolCount) remainingQueues=\(result.remainingQueueCount) pendingOpens=\(result.inFlightOpenCount) admissionRefs=\(result.remainingAdmissionLeaseCount)")
+    return result
+  }
+
+  private nonisolated static func closeClaimedPool(_ entry: EmergencyPoolEntry) -> Bool {
+    do {
+      try entry.pool.close()
+      emergencyDatabasesLock.withLock {
+        if closingEmergencyPools.removeValue(forKey: entry.token) != nil {
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
+        }
+      }
+      return true
+    } catch {
+      emergencyDatabasesLock.withLock {
+        if closingEmergencyPools.removeValue(forKey: entry.token) != nil {
+          failedEmergencyPools[entry.token] = entry
+        }
+      }
+      staticLogger.error("[SuspensionClose] Pool close failed; admission lease retained: \(error)")
+      return false
+    }
+  }
+
+  private nonisolated static func closeClaimedQueue(_ entry: EmergencyQueueEntry) -> Bool {
+    do {
+      try entry.queue.close()
+      emergencyDatabasesLock.withLock {
+        if closingEmergencyQueues.removeValue(forKey: entry.token) != nil {
+          MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
+        }
+      }
+      return true
+    } catch {
+      emergencyDatabasesLock.withLock {
+        if closingEmergencyQueues.removeValue(forKey: entry.token) != nil {
+          failedEmergencyQueues[entry.token] = entry
+        }
+      }
+      staticLogger.error("[SuspensionClose] Queue close failed; admission lease retained: \(error)")
+      return false
+    }
+  }
+
+  private nonisolated static func claimFailedPool(for userDID: String? = nil) -> EmergencyPoolEntry? {
+    emergencyDatabasesLock.withLock {
+      guard let entry = failedEmergencyPools.values.first(where: {
+        userDID == nil || MLSStoragePaths.normalizeDID($0.userDID) == userDID
+      }) else { return nil }
+      failedEmergencyPools.removeValue(forKey: entry.token)
+      closingEmergencyPools[entry.token] = entry
+      return entry
+    }
+  }
+
+  private nonisolated static func claimFailedQueue(for userDID: String? = nil) -> EmergencyQueueEntry? {
+    emergencyDatabasesLock.withLock {
+      guard let entry = failedEmergencyQueues.values.first(where: {
+        userDID == nil || MLSStoragePaths.normalizeDID($0.userDID) == userDID
+      }) else { return nil }
+      failedEmergencyQueues.removeValue(forKey: entry.token)
+      closingEmergencyQueues[entry.token] = entry
+      return entry
+    }
+  }
+
+  private nonisolated static func beginCoordinatedOpen() throws -> UInt64 {
+    try emergencyDatabasesLock.withLock {
+      guard !MLSClient.isSuspensionInProgress, !MLSCoreContext.isSuspensionInProgress else {
+        throw MLSSQLCipherError.storageUnavailable(reason: "Database open blocked during suspension")
+      }
+      inFlightEmergencyOpenCount += 1
+      return emergencyGeneration
+    }
+  }
+
+  /// Epoch of synchronous storage closure, used when rebinding retained readers
+  /// across actor awaits. A later foreground cycle must not make an old result current.
+  internal nonisolated static var storageLifecycleGeneration: UInt64 {
+    emergencyDatabasesLock.withLock { emergencyGeneration }
+  }
+
+  internal nonisolated static func requireCurrentStorageGeneration(_ generation: UInt64) throws {
+    try emergencyDatabasesLock.withLock {
+      guard emergencyGeneration == generation,
+            !MLSClient.isSuspensionInProgress, !MLSCoreContext.isSuspensionInProgress else {
+        throw MLSSQLCipherError.storageUnavailable(reason: "Storage binding superseded by suspension")
       }
     }
+  }
 
-    staticLogger.debug("✅ [0xdead10cc-FIX] [\(processTag)/\(pid)] All GRDB database pools and lightweight queues emergency closed")
+  private nonisolated static func finishCoordinatedOpen() {
+    emergencyDatabasesLock.withLock { inFlightEmergencyOpenCount -= 1 }
+  }
+
+  private nonisolated static func beginForegroundProbe(
+    permit: ForegroundResumePermit
+  ) throws -> ForegroundProbeAdmission {
+    // Permit -> registry is the only nested lock order. Neither lock crosses an
+    // await or a database call; revocation remains synchronous and inexpensive.
+    try permit.withValidPermit {
+      emergencyDatabasesLock.withLock {
+        inFlightEmergencyOpenCount += 1
+        return ForegroundProbeAdmission(permit: permit, generation: emergencyGeneration)
+      }
+    }
+  }
+
+  private nonisolated static func validateForegroundProbe(_ admission: ForegroundProbeAdmission) throws {
+    try admission.permit.withValidPermit {
+      try emergencyDatabasesLock.withLock {
+        guard emergencyGeneration == admission.generation else {
+          throw MLSSQLCipherError.storageUnavailable(reason: "Storage suspension superseded foreground preparation")
+        }
+      }
+    }
+  }
+
+  private nonisolated static func closeForegroundProbeQueue(_ entry: EmergencyQueueEntry) -> Bool {
+    let claimed: Bool? = emergencyDatabasesLock.withLock {
+      // A suspension closer may already be draining this exact queue.
+      if closingEmergencyQueues[entry.token] != nil { return nil }
+      if activeEmergencyQueues.removeValue(forKey: entry.token) != nil
+        || failedEmergencyQueues.removeValue(forKey: entry.token) != nil {
+        closingEmergencyQueues[entry.token] = entry
+        return true
+      }
+      return false // Another closer already closed and released this token.
+    }
+    guard let claimed else { return false }
+    return !claimed || closeClaimedQueue(entry)
   }
 
   /// Best-effort PASSIVE checkpoint on all registered pools WITHOUT closing them.
@@ -1082,49 +1257,14 @@ public actor MLSGRDBManager {
   /// Retries every failed emergency survivor (process-wide, not per-DID) and drops this
   /// manager's caches when an emergency close bumped the generation.
   private func retryFailedEmergencySurvivorsAndSyncGeneration() async throws {
-    // Claim and close failed survivors ONE AT A TIME under lock, restoring on failure so
-    // remaining unprocessed entries stay registered/leased.
-    while true {
-      let entry: EmergencyPoolEntry? = Self.emergencyDatabasesLock.withLock {
-        if let (tok, e) = Self.failedEmergencyPools.first {
-          Self.failedEmergencyPools.removeValue(forKey: tok)
-          return e
-        }
-        return nil
-      }
-      guard let entry else { break }
-      do {
-        try entry.pool.close()
-        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
-        logger.info("✅ [0xdead10cc-FIX] Cleaned up failed emergency pool on retry for \(entry.userDID.prefix(20), privacy: .private)")
-      } catch {
-        Self.emergencyDatabasesLock.withLock {
-          Self.failedEmergencyPools[entry.token] = entry
-        }
-        logger.critical("🚨 [0xdead10cc-FIX] Failed emergency pool could not be closed for \(entry.userDID.prefix(20), privacy: .private): \(error)")
-        throw MLSSQLCipherError.storageUnavailable(reason: "Cannot access database while unclosed emergency pool persists for \(entry.userDID)")
+    while let entry = Self.claimFailedPool() {
+      guard Self.closeClaimedPool(entry) else {
+        throw MLSSQLCipherError.storageUnavailable(reason: "Cannot access database while an unclosed emergency pool persists")
       }
     }
-
-    while true {
-      let entry: EmergencyQueueEntry? = Self.emergencyDatabasesLock.withLock {
-        if let (tok, e) = Self.failedEmergencyQueues.first {
-          Self.failedEmergencyQueues.removeValue(forKey: tok)
-          return e
-        }
-        return nil
-      }
-      guard let entry else { break }
-      do {
-        try entry.queue.close()
-        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
-        logger.info("✅ [0xdead10cc-FIX] Cleaned up failed emergency queue on retry for \(entry.userDID.prefix(20), privacy: .private)")
-      } catch {
-        Self.emergencyDatabasesLock.withLock {
-          Self.failedEmergencyQueues[entry.token] = entry
-        }
-        logger.critical("🚨 [0xdead10cc-FIX] Failed emergency queue could not be closed for \(entry.userDID.prefix(20), privacy: .private): \(error)")
-        throw MLSSQLCipherError.storageUnavailable(reason: "Cannot access database while unclosed emergency queue persists for \(entry.userDID)")
+    while let entry = Self.claimFailedQueue() {
+      guard Self.closeClaimedQueue(entry) else {
+        throw MLSSQLCipherError.storageUnavailable(reason: "Cannot access database while an unclosed emergency queue persists")
       }
     }
     let currentGen = Self.emergencyDatabasesLock.withLock { Self.emergencyGeneration }
@@ -1141,6 +1281,15 @@ public actor MLSGRDBManager {
   public let id = UUID()
 
   #if DEBUG
+  private nonisolated(unsafe) static var _afterDrainCheckpointForTesting: (@Sendable () async -> Void)?
+
+  /// Pause an ordinary asynchronous drain after checkpointing so lifecycle races
+  /// can be reproduced without delaying SQL while suspension waits for its queue.
+  nonisolated static var afterDrainCheckpointForTesting: (@Sendable () async -> Void)? {
+    get { emergencyDatabasesLock.withLock { _afterDrainCheckpointForTesting } }
+    set { emergencyDatabasesLock.withLock { _afterDrainCheckpointForTesting = newValue } }
+  }
+
   /// Test-only: number of active emergency pool tokens for a DID.
   public nonisolated static func activeEmergencyPoolTokenCount(for userDID: String) -> Int {
     emergencyDatabasesLock.lock()
@@ -1177,10 +1326,9 @@ public actor MLSGRDBManager {
     }
 
     let coordinator = MLSStorageCoordinator.shared
-    let capturedGen = Self.emergencyDatabasesLock.withLock {
-      Self.emergencyGeneration
-    }
+    let capturedGen = try Self.beginCoordinatedOpen()
     let task = Task<DatabasePool, Error> {
+      defer { Self.finishCoordinatedOpen() }
       let database = try await coordinator.coordinateOpen(for: .swiftGRDB, userDID: userDID) { attemptUUID, isFirstCreation in
         try await self.createDatabase(for: userDID, isFirstCreation: isFirstCreation)
       }
@@ -1236,10 +1384,9 @@ public actor MLSGRDBManager {
       return try await existing.task.value
     }
     let coordinator = MLSStorageCoordinator.shared
-    let capturedGen = Self.emergencyDatabasesLock.withLock {
-      Self.emergencyGeneration
-    }
+    let capturedGen = try Self.beginCoordinatedOpen()
     let task = Task<DatabaseQueue, Error> {
+      defer { Self.finishCoordinatedOpen() }
       let queue: DatabaseQueue = try await coordinator.coordinateOpen(for: .swiftGRDB, userDID: userDID) { attemptUUID, isFirstCreation in
         let dbPath = self.databasePath(for: userDID)
         let encryptionKey = try await self.encryption.getKey(for: userDID)
@@ -1371,8 +1518,11 @@ public actor MLSGRDBManager {
         let tok = poolRegistrationTokens[userDID] ?? UUID()
         let entry = EmergencyPoolEntry(token: tok, userDID: userDID, pool: db, managerID: id)
         Self.emergencyDatabasesLock.lock()
-        Self.activeEmergencyPools.removeValue(forKey: tok)
-        Self.failedEmergencyPools[entry.token] = entry
+        // A concurrent suspension closer may already own this exact token.
+        // Only transfer our active registration; never resurrect a claimed lease.
+        if Self.activeEmergencyPools.removeValue(forKey: tok) != nil {
+          Self.failedEmergencyPools[entry.token] = entry
+        }
         Self.emergencyDatabasesLock.unlock()
         logger.warning(
           "⚠️ [deinit] Failed to close database for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
@@ -1394,8 +1544,9 @@ public actor MLSGRDBManager {
         let tok = queueRegistrationTokens[userDID] ?? UUID()
         let entry = EmergencyQueueEntry(token: tok, userDID: userDID, queue: cached.queue, managerID: id)
         Self.emergencyDatabasesLock.lock()
-        Self.activeEmergencyQueues.removeValue(forKey: tok)
-        Self.failedEmergencyQueues[entry.token] = entry
+        if Self.activeEmergencyQueues.removeValue(forKey: tok) != nil {
+          Self.failedEmergencyQueues[entry.token] = entry
+        }
         Self.emergencyDatabasesLock.unlock()
         logger.warning(
           "⚠️ [deinit] Failed to close lightweight queue for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
@@ -1417,8 +1568,11 @@ public actor MLSGRDBManager {
         let tok = ephemeralPoolRegistrationTokens[userDID] ?? UUID()
         let entry = EmergencyPoolEntry(token: tok, userDID: userDID, pool: pool, managerID: id)
         Self.emergencyDatabasesLock.lock()
-        Self.activeEmergencyPools.removeValue(forKey: tok)
-        Self.failedEmergencyPools[entry.token] = entry
+        // A concurrent suspension closer may already own this exact token.
+        // Only transfer our active registration; never resurrect a claimed lease.
+        if Self.activeEmergencyPools.removeValue(forKey: tok) != nil {
+          Self.failedEmergencyPools[entry.token] = entry
+        }
         Self.emergencyDatabasesLock.unlock()
         logger.warning(
           "⚠️ [deinit] Failed to close uncached ephemeral pool for \(userDID.prefix(20), privacy: .private): \(error.localizedDescription)"
@@ -1472,43 +1626,18 @@ public actor MLSGRDBManager {
       }
     }
 
-    // Retry static failed survivors from deinitialized managers for this DID, one at a time.
-    while true {
-      let entry: EmergencyPoolEntry? = emergencyDatabasesLock.withLock {
-        for (tok, e) in failedEmergencyPools where e.userDID == normalized || e.userDID == userDID {
-          failedEmergencyPools.removeValue(forKey: tok)
-          return e
-        }
-        return nil
-      }
-      guard let entry else { break }
-      do {
-        try entry.pool.close()
-        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
-      } catch {
-        emergencyDatabasesLock.withLock {
-          failedEmergencyPools[entry.token] = entry
-        }
+    // A failed close must remain registered, but must not be immediately retried
+    // forever in this invocation. The next drain/suspension attempt can retry it.
+    while let entry = claimFailedPool(for: normalized) {
+      guard closeClaimedPool(entry) else {
         allSuccess = false
+        break
       }
     }
-    while true {
-      let entry: EmergencyQueueEntry? = emergencyDatabasesLock.withLock {
-        for (tok, e) in failedEmergencyQueues where e.userDID == normalized || e.userDID == userDID {
-          failedEmergencyQueues.removeValue(forKey: tok)
-          return e
-        }
-        return nil
-      }
-      guard let entry else { break }
-      do {
-        try entry.queue.close()
-        MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: entry.userDID)
-      } catch {
-        emergencyDatabasesLock.withLock {
-          failedEmergencyQueues[entry.token] = entry
-        }
+    while let entry = claimFailedQueue(for: normalized) {
+      guard closeClaimedQueue(entry) else {
         allSuccess = false
+        break
       }
     }
     return allSuccess
@@ -1556,6 +1685,7 @@ public actor MLSGRDBManager {
   ) async throws -> T {
     try await waitForForegroundResumePreparationIfNeeded(for: userDID, operation: "read")
     try requireDatabaseAccess(for: userDID, operation: "read")
+    try await retryFailedEmergencySurvivorsAndSyncGeneration()
 
     // ═══════════════════════════════════════════════════════════════════════════
     // SMART ROUTING: Signal-style single-pool-per-database
@@ -1636,6 +1766,7 @@ public actor MLSGRDBManager {
   ) async throws -> T {
     try await waitForForegroundResumePreparationIfNeeded(for: userDID, operation: "write")
     try requireDatabaseAccess(for: userDID, operation: "write")
+    try await retryFailedEmergencySurvivorsAndSyncGeneration()
 
     let inExtension = isRunningInExtension
     let pooledDatabase = reusablePooledDatabaseForSmartRoute(for: userDID)
@@ -1760,7 +1891,9 @@ public actor MLSGRDBManager {
     // ═══════════════════════════════════════════════════════════════════════════
     // Opening a Pool for an inactive user while another user is active causes:
     // 1. Memory spike (2 Pools × 6MB = 12MB+ SQLCipher overhead)
-    // 2. Error 7/21 (OOM) during checkpoint/transaction
+    // 2. Error 7 (SQLITE_NOMEM) during checkpoint/transaction. Error 21 is
+    //    SQLITE_MISUSE (a closed handle, whose message also reads "out of
+    //    memory"), not exhaustion; see isSQLiteError7.
     // 3. Error 11 (Corruption) from partial write
     //
     // This is no longer just a warning - we now BLOCK this dangerous operation.
@@ -1780,7 +1913,7 @@ public actor MLSGRDBManager {
         🛑 [OOM-BLOCKED] getDatabasePool BLOCKED for INACTIVE user!
         Requested: \(userDID.prefix(20), privacy: .private)
         Active: \(activeDID.prefix(20), privacy: .private)
-        This would cause Error 7/21 (OOM) → Error 11 (Corruption).
+        This would risk Error 7 (SQLITE_NOMEM) → Error 11 (Corruption).
         Use read(for:)/write(for:) instead - they auto-route to lightweight access.
         """)
       #if DEBUG
@@ -1864,18 +1997,54 @@ public actor MLSGRDBManager {
 
     // Check cache first (actor isolation provides thread-safety)
     if let existingDatabase = databases[userDID] {
+      let existingToken = poolRegistrationTokens[userDID]
+      let validationGeneration = Self.emergencyDatabasesLock.withLock { Self.emergencyGeneration }
       do {
-        _ = try await existingDatabase.read { db in
-          try Int.fetchOne(db, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
+        try await retryTransientValidation(generation: validationGeneration) {
+          // GRDB gives pooled readers an internal ten-second busy timeout. Use
+          // the existing writer for this read-only probe so its scoped busy
+          // callback can yield immediately to our interruptible retry loop.
+          _ = try await existingDatabase.writeWithoutTransaction { db in
+            try Self.requireCurrentStorageGeneration(validationGeneration)
+            let previousLimit = Thread.current.threadDictionary[Self.checkpointTimeoutKey]
+            Thread.current.threadDictionary[Self.checkpointTimeoutKey] = 0
+            defer {
+              Thread.current.threadDictionary[Self.checkpointTimeoutKey] = previousLimit
+            }
+            return try Int.fetchOne(db, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
+          }
+        }
+        guard databases[userDID] === existingDatabase,
+          Self.emergencyDatabasesLock.withLock({ Self.emergencyGeneration == validationGeneration })
+        else {
+          throw MLSSQLCipherError.storageUnavailable(reason: "Storage changed during cached pool validation")
         }
         consecutiveHMACFailures.removeValue(forKey: userDID)
         return existingDatabase
       } catch let error as CancellationError {
         throw error
       } catch {
-        try existingDatabase.close()
-        let tok = poolRegistrationTokens.removeValue(forKey: userDID)
-        if Self.unregisterFromEmergencyClose(token: tok) {
+        // Contention is not evidence of corruption. Keep the exact cached pool,
+        // registration, and admission lease so a later call can validate it.
+        if Self.isTransientValidationContention(error) { throw error }
+        if case MLSSQLCipherError.storageUnavailable = error { throw error }
+        do {
+          // Closing an already-closed pool is a no-op. A close that throws left
+          // the pool open (GRDB closes all or nothing), so the cache entry,
+          // registration and admission lease stay for a later call to retry,
+          // as the ephemeral and suspension close paths do.
+          try existingDatabase.close()
+        } catch let closeError {
+          logger.error(
+            "🚨 [DB] Cached pool failed validation (\(error.localizedDescription, privacy: .public)) and could not be closed; keeping it and its lease: \(closeError.localizedDescription, privacy: .public)"
+          )
+          throw closeError
+        }
+        if databases[userDID] === existingDatabase {
+          databases.removeValue(forKey: userDID)
+          poolRegistrationTokens.removeValue(forKey: userDID)
+        }
+        if Self.unregisterFromEmergencyClose(token: existingToken) {
           MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: userDID)
         }
         throw error
@@ -2093,10 +2262,19 @@ public actor MLSGRDBManager {
     // Check main databases cache first, then tracked uncachedEphemeralPools (both userDID and normalized)
     if let existingDatabase = databases[userDID] ?? uncachedEphemeralPools[userDID]
       ?? databases[normalized] ?? uncachedEphemeralPools[normalized] {
+      let validationGeneration = Self.emergencyDatabasesLock.withLock { Self.emergencyGeneration }
+      func stillOwnsValidatedPool() -> Bool {
+        Self.emergencyDatabasesLock.withLock({ Self.emergencyGeneration == validationGeneration })
+          && (databases[userDID] === existingDatabase || databases[normalized] === existingDatabase
+            || uncachedEphemeralPools[userDID] === existingDatabase || uncachedEphemeralPools[normalized] === existingDatabase)
+      }
       // Validate the connection is healthy
       do {
         _ = try await existingDatabase.read { db in
           try Int.fetchOne(db, sql: "SELECT 1 FROM sqlite_master LIMIT 1;")
+        }
+        guard stillOwnsValidatedPool() else {
+          throw MLSSQLCipherError.storageUnavailable(reason: "Storage changed during ephemeral pool validation")
         }
         logger.debug(
           "✅ Using validated cached ephemeral database pool for user: \(normalized, privacy: .private)"
@@ -2105,14 +2283,22 @@ public actor MLSGRDBManager {
       } catch is CancellationError {
         throw CancellationError()
       } catch {
+        guard stillOwnsValidatedPool() else { throw error }
         logger.warning(
           "⚠️ Cached ephemeral database failed validation: \(error.localizedDescription) - discarding and recreating"
         )
-        if let oldPool = uncachedEphemeralPools.removeValue(forKey: userDID) ?? uncachedEphemeralPools.removeValue(forKey: normalized) {
-          try? oldPool.close()
-          let tok = ephemeralPoolRegistrationTokens.removeValue(forKey: userDID) ?? ephemeralPoolRegistrationTokens.removeValue(forKey: normalized)
-          if Self.unregisterFromEmergencyClose(token: tok) {
-            MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: userDID)
+        if let oldPool = uncachedEphemeralPools[userDID] ?? uncachedEphemeralPools[normalized] {
+          // Failed validation does not prove SQLite released its handles. Preserve
+          // the cache, exact registration, and lease if close itself fails.
+          try oldPool.close()
+          let keys = [userDID, normalized].filter { uncachedEphemeralPools[$0] === oldPool }
+          let tokens = Set(keys.compactMap { ephemeralPoolRegistrationTokens[$0] })
+          for key in keys {
+            uncachedEphemeralPools.removeValue(forKey: key)
+            ephemeralPoolRegistrationTokens.removeValue(forKey: key)
+          }
+          for token in tokens where Self.unregisterFromEmergencyClose(token: token) {
+            MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: normalized)
           }
         }
         guard discardCachedDatabaseForRecovery(for: userDID, reason: "ephemeral cached validation failure") else {
@@ -2253,6 +2439,7 @@ public actor MLSGRDBManager {
     _ work: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
     logger.debug("📀 [Lightweight] Read requested for user: \(userDID.prefix(20), privacy: .private)")
+    try await retryFailedEmergencySurvivorsAndSyncGeneration()
 
     if !isRunningInExtension, let existingPool = databases[userDID] {
       logger.debug("   Using existing cached pool")
@@ -2268,17 +2455,26 @@ public actor MLSGRDBManager {
 
     if let cached = cachedLightweightQueues[userDID],
        Date().timeIntervalSince(cached.lastUsed) < lightweightQueueTTL {
+      let existingToken = queueRegistrationTokens[userDID]
+      let validationGeneration = Self.emergencyDatabasesLock.withLock { Self.emergencyGeneration }
       do {
         _ = try await cached.queue.read { db in
           try String.fetchOne(db, sql: "SELECT 1;")
+        }
+        guard cachedLightweightQueues[userDID]?.queue === cached.queue,
+          Self.emergencyDatabasesLock.withLock({ Self.emergencyGeneration == validationGeneration })
+        else {
+          throw MLSSQLCipherError.storageUnavailable(reason: "Storage changed during cached queue validation")
         }
         cachedLightweightQueues[userDID] = (queue: cached.queue, lastUsed: Date())
         return cached.queue
       } catch {
         try cached.queue.close()
-        cachedLightweightQueues.removeValue(forKey: userDID)
-        let tok = queueRegistrationTokens.removeValue(forKey: userDID)
-        if Self.unregisterLightweightQueueFromEmergencyClose(token: tok) {
+        if cachedLightweightQueues[userDID]?.queue === cached.queue {
+          cachedLightweightQueues.removeValue(forKey: userDID)
+          queueRegistrationTokens.removeValue(forKey: userDID)
+        }
+        if Self.unregisterLightweightQueueFromEmergencyClose(token: existingToken) {
           MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: userDID)
         }
         throw error
@@ -2306,6 +2502,7 @@ public actor MLSGRDBManager {
     _ work: @Sendable @escaping (Database) throws -> T
   ) async throws -> T {
     logger.debug("📀 [Lightweight] Write requested for user: \(userDID.prefix(20), privacy: .private)")
+    try await retryFailedEmergencySurvivorsAndSyncGeneration()
 
     if !isRunningInExtension, let existingPool = databases[userDID] {
       logger.debug("   Using existing cached pool for write")
@@ -2576,12 +2773,16 @@ public actor MLSGRDBManager {
           Timeout: \(timeout, privacy: .public)s
           Thread: \(Thread.current.description, privacy: .public)
           """)
+        let closeGeneration = Self.emergencyDatabasesLock.withLock { Self.emergencyGeneration }
         // Prevent new opens while we're trying to close.
         updateConnectionState(.closing, for: userDID)
         let wasActiveUser = (activeUserDID == userDID)
 
         // 1. Close uncached ephemeral pool if present
         if let ephemeralPool = uncachedEphemeralPools[userDID] {
+          let aliases = Set([userDID, normalized])
+          let tokens = Set(aliases.filter { uncachedEphemeralPools[$0] === ephemeralPool }
+            .compactMap { ephemeralPoolRegistrationTokens[$0] })
           logger.info(
             "🧹 [Ephemeral] Closing uncached ephemeral pool for: \(userDID.prefix(20), privacy: .private)"
           )
@@ -2606,12 +2807,22 @@ public actor MLSGRDBManager {
             return result
           }
 
+          #if DEBUG
+          await Self.afterDrainCheckpointForTesting?()
+          #endif
+          guard Self.emergencyDatabasesLock.withLock({ Self.emergencyGeneration == closeGeneration }) else {
+            return false
+          }
           do {
             try ephemeralPool.close()
-            let tok = ephemeralPoolRegistrationTokens.removeValue(forKey: userDID)
-            if Self.unregisterFromEmergencyClose(token: tok) {
-              MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: userDID)
+            for key in aliases where uncachedEphemeralPools[key] === ephemeralPool {
+              uncachedEphemeralPools.removeValue(forKey: key)
+              ephemeralPoolRegistrationTokens.removeValue(forKey: key)
             }
+            for token in tokens where Self.unregisterFromEmergencyClose(token: token) {
+              MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: normalized)
+            }
+            guard !aliases.contains(where: { uncachedEphemeralPools[$0] != nil }) else { return false }
             if checkpointOk {
               logger.info(
                 "✅ [Ephemeral] Closed ephemeral pool for: \(userDID.prefix(20), privacy: .private)")
@@ -2652,6 +2863,8 @@ public actor MLSGRDBManager {
           return true
         }
 
+        let aliases = Set([userDID, normalized])
+        let tokens = Set(aliases.filter { databases[$0] === db }.compactMap { poolRegistrationTokens[$0] })
         do {
           logger.info("📀 [Checkpoint] Starting TRUNCATE checkpoint for: \(userDID.prefix(20), privacy: .private)")
           let checkpointStart = Date()
@@ -2676,6 +2889,9 @@ public actor MLSGRDBManager {
             return result
           }
 
+          #if DEBUG
+          await Self.afterDrainCheckpointForTesting?()
+          #endif
           let duration = Date().timeIntervalSince(checkpointStart)
           let durationStr = String(format: "%.2f", duration)
 
@@ -2685,15 +2901,20 @@ public actor MLSGRDBManager {
             logger.warning("⏱️ [Checkpoint] Checkpoint timed out or failed after \(durationStr)s - proceeding with forced close")
           }
 
-          // Fail-closed: prove close before removing from cache and releasing admission lease
+          // Suspension can close this handle and foreground work can publish a
+          // replacement while the checkpoint awaits. Never retire its new lease.
+          guard Self.emergencyDatabasesLock.withLock({ Self.emergencyGeneration == closeGeneration }) else {
+            return false
+          }
           try db.close()
-          databases.removeValue(forKey: userDID)
-          databases.removeValue(forKey: normalized)
-          let tok1 = poolRegistrationTokens.removeValue(forKey: userDID)
-          let tok2 = poolRegistrationTokens.removeValue(forKey: normalized)
-          if Self.unregisterFromEmergencyClose(token: tok1 ?? tok2) {
+          for key in aliases where databases[key] === db {
+            databases.removeValue(forKey: key)
+            poolRegistrationTokens.removeValue(forKey: key)
+          }
+          for token in tokens where Self.unregisterFromEmergencyClose(token: token) {
             MLSStorageCoordinator.shared.releaseAdmissionLease(for: .swiftGRDB, userDID: normalized)
           }
+          guard !aliases.contains(where: { databases[$0] != nil }) else { return false }
           if wasActiveUser {
             activeUserDID = nil
           }
@@ -3401,8 +3622,18 @@ public actor MLSGRDBManager {
   }
 
   /// Check if an error indicates SQLite error 7 / resource exhaustion.
+  ///
+  /// A statement on a closed connection fails with SQLITE_MISUSE (21), and
+  /// SQLite's message for a closed handle reads "out of memory". That is a
+  /// use-after-close, not resource exhaustion: suspending storage for it kept
+  /// a pool closed underneath the manager from being replaced (the cached
+  /// validation probe uses the writer, which reports it this way).
   private nonisolated func isSQLiteError7(_ error: Error) -> Bool {
+    if let databaseError = error as? DatabaseError {
+      return databaseError.resultCode.primaryResultCode == .SQLITE_NOMEM
+    }
     let desc = error.localizedDescription.lowercased()
+    guard !desc.contains("sqlite error 21") else { return false }
     return desc.contains("sqlite error 7") || desc.contains("out of memory")
   }
 
@@ -4144,7 +4375,98 @@ public actor MLSGRDBManager {
     return result!
   }
 
+  private nonisolated static func readOnlyDatabaseConfiguration(encryptionKey: Data, salt: Data) -> Configuration {
+    var config = Configuration()
+    config.readonly = true
+    config.prepareDatabase { db in
+      try db.execute(sql: "PRAGMA cipher_memory_security = OFF;")
+      let hexKey = encryptionKey.map { String(format: "%02x", $0) }.joined()
+      let hexSalt = salt.map { String(format: "%02x", $0) }.joined()
+      try db.execute(sql: "PRAGMA key = \"x'\(hexKey)\(hexSalt)'\";")
+      try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
+      try db.execute(sql: "PRAGMA kdf_iter = 256000;")
+      try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
+      try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
+    }
+
+    return config
+  }
+
+  private nonisolated static func isTransientValidationContention(_ error: Error) -> Bool {
+    guard let databaseError = error as? DatabaseError else { return false }
+    return databaseError.resultCode == .SQLITE_BUSY || databaseError.resultCode == .SQLITE_LOCKED
+  }
+
+  /// Only transient SQLite contention is retried. The one-second budget covers
+  /// retries, not time queued behind an existing local database operation.
+  private func retryTransientValidation<T>(
+    generation: UInt64,
+    operation: () async throws -> T
+  ) async throws -> T {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while true {
+      try Task.checkCancellation()
+      try Self.requireCurrentStorageGeneration(generation)
+      do {
+        let value = try await operation()
+        try Task.checkCancellation()
+        try Self.requireCurrentStorageGeneration(generation)
+        return value
+      } catch {
+        try Task.checkCancellation()
+        try Self.requireCurrentStorageGeneration(generation)
+        let now = ContinuousClock.now
+        guard Self.isTransientValidationContention(error), now < deadline else {
+          throw error
+        }
+        let remaining = now.duration(to: deadline)
+        try await Task.sleep(for: min(.milliseconds(25), remaining))
+        try Task.checkCancellation()
+        try Self.requireCurrentStorageGeneration(generation)
+        guard ContinuousClock.now < deadline else { throw error }
+      }
+    }
+  }
+
   func validateExistingGRDBDatabase(at dbPath: URL, encryptionKey: Data, salt: Data) async throws {
+    let generation = Self.storageLifecycleGeneration
+    do {
+      try await retryTransientValidation(generation: generation) {
+        try await self.validateExistingGRDBDatabaseAttempt(at: dbPath, encryptionKey: encryptionKey, salt: salt)
+      }
+    } catch let error as DatabaseError {
+      throw MLSStorageInitializationError.validationFailed(
+        details: "GRDB database read-only validation failed: \(error.localizedDescription)")
+    }
+  }
+
+  /// A complete attempt owns its temporary queue and closes it before backoff.
+  /// No database, statement, or cursor escapes the validation closure.
+  private func withReadOnlyValidationQueue(
+    at dbPath: URL,
+    configuration: Configuration,
+    validate: (DatabaseQueue) async throws -> Void
+  ) async throws {
+    let queue = try DatabaseQueue(path: dbPath.path, configuration: configuration)
+    let validationResult: Result<Void, Error>
+    do {
+      try await validate(queue)
+      validationResult = .success(())
+    } catch {
+      validationResult = .failure(error)
+    }
+    do {
+      try queue.close()
+    } catch {
+      // Never retry with a connection whose explicit close failed. The local
+      // queue then deinitializes through GRDB's close_v2 cleanup path.
+      throw MLSStorageInitializationError.validationFailed(
+        details: "GRDB validation connection could not close: \(error.localizedDescription)")
+    }
+    try validationResult.get()
+  }
+
+  private func validateExistingGRDBDatabaseAttempt(at dbPath: URL, encryptionKey: Data, salt: Data) async throws {
     guard try MLSStoragePaths.fileExistsStrict(at: dbPath) else {
       throw MLSStorageInitializationError.validationFailed(details: "GRDB database file missing for validation")
     }
@@ -4159,23 +4481,9 @@ public actor MLSGRDBManager {
       throw MLSStorageInitializationError.validationFailed(details: "GRDB database file has plaintext SQLite header")
     }
 
-    var readConfig = Configuration()
-    readConfig.readonly = true
-    readConfig.prepareDatabase { db in
-      try db.execute(sql: "PRAGMA cipher_memory_security = OFF;")
-      let hexKey = encryptionKey.map { String(format: "%02x", $0) }.joined()
-      let hexSalt = salt.map { String(format: "%02x", $0) }.joined()
-      try db.execute(sql: "PRAGMA key = \"x'\(hexKey)\(hexSalt)'\";")
-      try db.execute(sql: "PRAGMA cipher_page_size = 4096;")
-      try db.execute(sql: "PRAGMA kdf_iter = 256000;")
-      try db.execute(sql: "PRAGMA cipher_hmac_algorithm = HMAC_SHA512;")
-      try db.execute(sql: "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA512;")
-    }
+    let readConfig = Self.readOnlyDatabaseConfiguration(encryptionKey: encryptionKey, salt: salt)
 
-    do {
-      let queue = try DatabaseQueue(path: dbPath.path, configuration: readConfig)
-      defer { try? queue.close() }
-
+    try await withReadOnlyValidationQueue(at: dbPath, configuration: readConfig) { queue in
       let cipherVersion: String? = try await queue.read { db in
         try String.fetchOne(db, sql: "PRAGMA cipher_version;")
       }
@@ -4291,10 +4599,6 @@ public actor MLSGRDBManager {
           details: "GRDB database missing required columns in MLSConversationModel (found: \(convoColumns))"
         )
       }
-    } catch let error as MLSStorageInitializationError {
-      throw error
-    } catch {
-      throw MLSStorageInitializationError.validationFailed(details: "GRDB database read-only validation failed: \(error.localizedDescription)")
     }
   }
 
@@ -5549,6 +5853,25 @@ public actor MLSGRDBManager {
       try MLSConversationDeletionMarkerModel.createTable(in: db)
     }
 
+    // v38: Replayable Apple presentation projection for Rust-owned encrypted
+    // direct requests. Preview payloads are field-encrypted before insertion.
+    migrator.registerMigration("v38_direct_request_projection") { db in
+      try MLSDirectRequestProjection.createTables(in: db)
+    }
+
+    // v39: Durable signed push-registration generations. Pending rows retain
+    // the exact signed request so an uncertain transport outcome is retried
+    // byte-for-byte; later acknowledged generations fence older attempts.
+    migrator.registerMigration("v39_push_registration_journal") { db in
+      try MLSPushRegistrationJournal.createTable(in: db)
+    }
+
+    // v40: Protected canonical conversation snapshots and exact alias
+    // retirement receipts for the Rust-authorized atomic projection callback.
+    migrator.registerMigration("v40_conversation_projection_commit") { db in
+      try MLSConversationProjectionCommit.createTables(in: db)
+    }
+
     return migrator
   }
 
@@ -5704,6 +6027,55 @@ public actor MLSGRDBManager {
     }
   }
 
+  private func foregroundIntegrityProbe(
+    for userDID: String,
+    admission: ForegroundProbeAdmission
+  ) async throws -> String {
+    try Self.validateForegroundProbe(admission)
+    let queue = try await MLSStorageCoordinator.shared.coordinateExistingOpen(for: .swiftGRDB, userDID: userDID) {
+      try Self.validateForegroundProbe(admission)
+      let key = try await self.encryption.getKey(for: userDID)
+      try Self.validateForegroundProbe(admission)
+      let salt = try await self.encryption.getSalt(for: userDID)
+      try Self.validateForegroundProbe(admission)
+      guard let key, key.count == 32, let salt, salt.count == 16 else {
+        throw MLSSQLCipherError.invalidEncryptionKey(reason: "Existing storage credentials are unavailable for foreground validation")
+      }
+      var config = Self.readOnlyDatabaseConfiguration(encryptionKey: key, salt: salt)
+      config.busyMode = Self.nseBusyMode(maxRetries: 20)
+      config.observesSuspensionNotifications = true
+      return try DatabaseQueue(path: self.databasePath(for: userDID).path, configuration: config)
+    }
+    guard let queue else {
+      // There is no existing store to inspect. Normal foreground bootstrap may
+      // create it later; this read-only preparation never creates keys or markers.
+      try Self.validateForegroundProbe(admission)
+      return "ok"
+    }
+
+    let entry = EmergencyQueueEntry(token: UUID(), userDID: userDID, queue: queue, managerID: id)
+    Self.emergencyDatabasesLock.withLock {
+      Self.activeEmergencyQueues[entry.token] = entry
+    }
+    var needsClose = true
+    defer {
+      if needsClose { _ = Self.closeForegroundProbeQueue(entry) }
+    }
+
+    try Self.validateForegroundProbe(admission)
+    let result = try await queue.read { db in
+      try String.fetchOne(db, sql: "PRAGMA quick_check;") ?? "no_result"
+    }
+    try Self.validateForegroundProbe(admission)
+    let closed = Self.closeForegroundProbeQueue(entry)
+    needsClose = false
+    guard closed else {
+      throw MLSSQLCipherError.storageUnavailable(reason: "Foreground storage probe has not finished closing")
+    }
+    try Self.validateForegroundProbe(admission)
+    return result
+  }
+
   private func classifyQuickIntegrityCheckResult(_ result: String) -> QuickIntegrityCheckClassification {
     let normalized = result.trimmingCharacters(in: .whitespacesAndNewlines)
     if normalized.lowercased() == "ok" {
@@ -5727,12 +6099,24 @@ public actor MLSGRDBManager {
     return .unexpected(normalized)
   }
 
-  private func runQuickIntegrityCheckWithRetry(for userDID: String) async -> QuickIntegrityCheckClassification {
+  private func runQuickIntegrityCheckWithRetry(
+    for userDID: String,
+    admission: ForegroundProbeAdmission? = nil
+  ) async -> QuickIntegrityCheckClassification {
     let maxAttempts = self.foregroundResumeTransientRetryCount
     let baseDelayNanos = self.foregroundResumeBaseRetryDelayNanos
 
     for attempt in 1...maxAttempts {
-      let result = await quickIntegrityCheck(for: userDID)
+      let result: String
+      if let admission {
+        do {
+          result = try await foregroundIntegrityProbe(for: userDID, admission: admission)
+        } catch {
+          result = "error: \(error.localizedDescription)"
+        }
+      } else {
+        result = await quickIntegrityCheck(for: userDID)
+      }
       let classification = classifyQuickIntegrityCheckResult(result)
 
       switch classification {
@@ -5757,14 +6141,26 @@ public actor MLSGRDBManager {
 
   public func prepareForForegroundResume(
     for userDID: String,
-    allowCoordinatedReset: Bool = true
+    allowCoordinatedReset: Bool = true,
+    permit: ForegroundResumePermit? = nil
   ) async throws -> ForegroundResumePreparationResult {
     if foregroundResumePreparations[userDID] != nil {
       try await waitForForegroundResumePreparationIfNeeded(
         for: userDID,
         operation: "prepareForForegroundResume"
       )
-      return .ready
+      // Completion of another preparation does not imply it succeeded. Perform
+      // this caller's own check with its still-current foreground authority.
+    }
+
+    // Count this owned probe before any lease/key/query await. Keep the count
+    // until every temporary connection has closed or moved to failed survivors.
+    let admission = try permit.map { try Self.beginForegroundProbe(permit: $0) }
+    defer {
+      if admission != nil { Self.finishCoordinatedOpen() }
+    }
+    if admission != nil {
+      try await retryFailedEmergencySurvivorsAndSyncGeneration()
     }
 
     foregroundResumePreparations[userDID] = ForegroundResumePreparation(startedAt: Date())
@@ -5775,11 +6171,12 @@ public actor MLSGRDBManager {
     defer {
       foregroundResumePreparations.removeValue(forKey: userDID)
       logger.info(
-        "✅ [RESUME-GUARD] Finished foreground resume preparation for \(userDID.prefix(20), privacy: .private)"
+        "[RESUME-GUARD] Ended foreground resume preparation for \(userDID.prefix(20), privacy: .private)"
       )
     }
 
-    let initialCheck = await runQuickIntegrityCheckWithRetry(for: userDID)
+    let initialCheck = await runQuickIntegrityCheckWithRetry(for: userDID, admission: admission)
+    if let admission { try Self.validateForegroundProbe(admission) }
 
     switch initialCheck {
     case .ok:
@@ -5789,6 +6186,11 @@ public actor MLSGRDBManager {
       return .ready
 
     case .transient(let description):
+      if admission != nil {
+        // Each scoped probe already used a fresh readonly connection. Do not
+        // checkpoint or reopen ordinary cached storage under this narrow permit.
+        throw MLSSQLCipherError.storageUnavailable(reason: "Foreground storage inspection remained busy: \(description)")
+      }
       // Transient errors (SQLITE_NOMEM, locked) after retries usually mean the pool's
       // internal reader connections are stale from suspension. Close and reopen the pool
       // to get fresh connections, then retry one more time.
@@ -5799,7 +6201,8 @@ public actor MLSGRDBManager {
       // Clear any suspension state that might block the reopen
       databaseAccessSuspensions.removeValue(forKey: userDID)
 
-      let retryCheck = await runQuickIntegrityCheckWithRetry(for: userDID)
+      let retryCheck = await runQuickIntegrityCheckWithRetry(for: userDID, admission: admission)
+      if let admission { try Self.validateForegroundProbe(admission) }
       switch retryCheck {
       case .ok:
         clearRepairState(for: userDID)
