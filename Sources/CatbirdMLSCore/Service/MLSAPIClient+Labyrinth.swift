@@ -293,12 +293,17 @@ extension MLSAPIClient {
       return (400, "SpaceDeleted", message)
     case let .authorizationRefused(_, name, message) where name == "SpaceNotFound":
       // Petrel's form of the authority's SpaceNotFound (400 upstream, 404 in
-      // Swan): the authority does not host the Space, or it is not public.
-      // Not a refusal of this reader, so answer 400 (Petrel drops the status);
-      // labyrinth maps the name to NotFound.
-      return (400, name, message)
+      // Swan). Since the October 29 Spaces release the reference authority
+      // answers SpaceNotFound to a user its policy does not authorize, so on
+      // the credential path it means "not found or not authorized". The DS
+      // pins this conversation Space, so treat it as a read refusal: 403
+      // without the name, which labyrinth maps to Forbidden (owner-archive
+      // fallback) instead of NotFound("space"). The name stays in the message.
+      let detail = message ?? error.errorDescription ?? "Space not found or not authorized"
+      return (403, nil, "\(name): \(detail)")
     case let .authorizationRefused(_, name, message):
-      // This reader was refused (upstream 400, Swan 401, or any 403):
+      // This reader was refused by name (UserNotAuthorized, AppNotAuthorized
+      // or NotAuthorized; other authorities may still send them), or any 403:
       // labyrinth's read refusal, on which history degrades.
       return (403, name, message)
     case let .tokenRejected(_, name, message, _):
@@ -309,7 +314,7 @@ extension MLSAPIClient {
       // Petrel keeps the status and the message, or the raw body when the
       // authority sent no message; recover an error name from such a body.
       // SpaceNotFound never arrives here: Petrel reports it at 400 or 404 as
-      // authorizationRefused (above).
+      // authorizationRefused (above), where it is answered as a refusal.
       guard (300...599).contains(status) else { return (502, "UpstreamFailure", message) }
       let body = (try? JSONSerialization.jsonObject(with: Data(message.utf8))) as? [String: Any]
       return (status, body?["error"] as? String, body?["message"] as? String ?? message)
