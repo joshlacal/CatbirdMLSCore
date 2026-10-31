@@ -24,7 +24,7 @@ enum MLSPublicPDSReader {
       catch { preconditionFailure("Invalid debug fixture public session") }
     }
     #endif
-    return URLSession.shared
+    return MLSBoundedURLSession.shared.underlyingSession
   }()
   static let deviceCollection = "blue.catbird.chat.device"
   static let declarationCollection = "blue.catbird.chat.declaration"
@@ -38,9 +38,9 @@ enum MLSPublicPDSReader {
   }
 
   /// Build the unauthenticated `listRecords` URL for a DID's device records on its hosting PDS.
-  /// Returns nil for a non-HTTPS endpoint (defense against downgraded/SSRF endpoints).
+  /// Returns nil for a non-HTTPS or SSRF/private endpoint.
   static func deviceRecordsListURL(pds: URL, did: String, limit: Int = 50) -> URL? {
-    guard pds.scheme?.lowercased() == "https" else { return nil }
+    guard MLSOutboundHTTPValidator.isValidPublicHTTPSServiceEndpoint(pds) else { return nil }
     guard var comps = URLComponents(url: pds, resolvingAgainstBaseURL: false) else { return nil }
 
     // Preserve any base path the PDS endpoint carries, then append the XRPC method.
@@ -52,6 +52,7 @@ enum MLSPublicPDSReader {
       URLQueryItem(name: "collection", value: deviceCollection),
       URLQueryItem(name: "limit", value: String(limit)),
     ]
+    comps.fragment = nil
     return comps.url
   }
 
@@ -79,12 +80,18 @@ enum MLSPublicPDSReader {
       throw ReaderError.invalidEndpoint
     }
 
-    var request = URLRequest(url: url)
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
     request.httpMethod = "GET"
     request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-    let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
+    let (data, http): (Data, HTTPURLResponse)
+    do {
+      (data, http) = try await MLSBoundedURLSession.fetchData(
+        for: request,
+        maxBytes: MLSBoundedURLSession.pdsRecordMaxBytes,
+        session: session
+      )
+    } catch is MLSBoundedURLSession.BoundedFetchError {
       throw ReaderError.invalidResponse
     }
     guard (200...299).contains(http.statusCode) else {
@@ -97,7 +104,7 @@ enum MLSPublicPDSReader {
 
   /// Build the unauthenticated `getRecord` URL for a DID's declaration record on its hosting PDS.
   static func declarationGetRecordURL(pds: URL, did: String) -> URL? {
-    guard pds.scheme?.lowercased() == "https" else { return nil }
+    guard MLSOutboundHTTPValidator.isValidPublicHTTPSServiceEndpoint(pds) else { return nil }
     guard var comps = URLComponents(url: pds, resolvingAgainstBaseURL: false) else { return nil }
 
     var basePath = comps.path
@@ -108,6 +115,7 @@ enum MLSPublicPDSReader {
       URLQueryItem(name: "collection", value: declarationCollection),
       URLQueryItem(name: "rkey", value: "self"),
     ]
+    comps.fragment = nil
     return comps.url
   }
 

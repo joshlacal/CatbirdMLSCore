@@ -430,9 +430,10 @@ public actor MLSGRDBManager {
 
     emergencyDatabasesLock.lock()
     let pools = Array(activeEmergencyPools.values)
+    let queues = Array(activeEmergencyQueues.values)
     emergencyDatabasesLock.unlock()
 
-    for entry in pools {
+    for entry in pools where MLSContextFreeLifecycleSuspensionOwner.isDatabaseInWALMode(atPath: entry.pool.path) {
       do {
         try entry.pool.writeWithoutTransaction { db in
           Thread.current.threadDictionary[checkpointTimeoutKey] = 2
@@ -445,6 +446,23 @@ public actor MLSGRDBManager {
       } catch {
         staticLogger.debug(
           "⚠️ [\(processTag)/\(pid)] Pre-suspension PASSIVE checkpoint skipped for \(entry.userDID.prefix(20), privacy: .private): \(error)"
+        )
+      }
+    }
+
+    for entry in queues where MLSContextFreeLifecycleSuspensionOwner.isDatabaseInWALMode(atPath: entry.queue.path) {
+      do {
+        try entry.queue.writeWithoutTransaction { db in
+          Thread.current.threadDictionary[checkpointTimeoutKey] = 2
+          defer { Thread.current.threadDictionary.removeObject(forKey: checkpointTimeoutKey) }
+          try db.execute(sql: "PRAGMA wal_checkpoint(PASSIVE);")
+        }
+        staticLogger.debug(
+          "✅ [\(processTag)/\(pid)] Pre-suspension PASSIVE queue checkpoint for \(entry.userDID.prefix(20), privacy: .private)"
+        )
+      } catch {
+        staticLogger.debug(
+          "⚠️ [\(processTag)/\(pid)] Pre-suspension PASSIVE queue checkpoint skipped for \(entry.userDID.prefix(20), privacy: .private): \(error)"
         )
       }
     }

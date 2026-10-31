@@ -13,7 +13,7 @@ public actor MLSEpochCheckpoint {
 
   private let logger = Logger(subsystem: "blue.catbird.mls", category: "MLSEpochCheckpoint")
 
-  /// In-memory cache of last known epochs per group (key: normalizedDID/groupIdHex)
+  /// In-memory cache of last known epochs per group (key: didHash/groupIdHex)
   private var epochCache: [String: EpochRecord] = [:]
 
   /// Per-DID serialized write tail task (bounded: one task per DID, chained so reset
@@ -25,6 +25,21 @@ public actor MLSEpochCheckpoint {
 
   /// File storage directory (shared container for cross-process access)
   private let checkpointDir: URL
+  private let explicitCheckpointDir: URL?
+
+  private enum PathValidationError: LocalizedError {
+    case containmentViolation(String)
+    case invalidGroupIdentifier(String)
+
+    var errorDescription: String? {
+      switch self {
+      case .containmentViolation(let path):
+        return "Epoch checkpoint path escaped checkpoint root: \(path)"
+      case .invalidGroupIdentifier(let groupId):
+        return "Invalid epoch checkpoint group identifier: \(groupId)"
+      }
+    }
+  }
 
   #if DEBUG
   private var testPreDirectoryCreationHook: (@Sendable () async -> Void)?
@@ -77,8 +92,10 @@ public actor MLSEpochCheckpoint {
 
   private init() {
     do {
-      checkpointDir = try MLSStoragePaths.checkpointsDirectory()
-      try FileManager.default.createDirectory(at: checkpointDir, withIntermediateDirectories: true)
+      let resolved = try MLSStoragePaths.checkpointsDirectory()
+      checkpointDir = resolved
+      explicitCheckpointDir = nil
+      try FileManager.default.createDirectory(at: resolved, withIntermediateDirectories: true)
     } catch {
       fatalError("Required App Group container unavailable for MLSEpochCheckpoint: \(error.localizedDescription)")
     }
@@ -86,16 +103,69 @@ public actor MLSEpochCheckpoint {
     logger.info("✅ [MLSEpochCheckpoint] Initialized at \(self.checkpointDir.path)")
   }
 
-  // MARK: - Layout
-
-  /// Per-DID checkpoint directory. Reset deletes this whole directory, so every
-  /// reader and writer must derive file paths from it.
-  private func userDirectory(_ normalizedDID: String) -> URL {
-    checkpointDir.appendingPathComponent(normalizedDID, isDirectory: true)
+  internal init(checkpointDirectory: URL) {
+    checkpointDir = checkpointDirectory
+    explicitCheckpointDir = checkpointDirectory
+    try? FileManager.default.createDirectory(at: checkpointDirectory, withIntermediateDirectories: true)
   }
 
-  private func checkpointURL(_ normalizedDID: String, _ groupIdHex: String) -> URL {
-    userDirectory(normalizedDID).appendingPathComponent("\(groupIdHex).json")
+  // MARK: - Layout
+
+  private func currentCheckpointRoot() -> URL {
+    if let explicitCheckpointDir {
+      return explicitCheckpointDir
+    }
+    return (try? MLSStoragePaths.checkpointsDirectory()) ?? checkpointDir
+  }
+
+  /// Strict validation matching `^[a-z0-9:._-]+$` with no path separators or `..` segments.
+  internal static func isSafeLegacyDirectoryComponent(_ candidate: String) -> Bool {
+    guard !candidate.isEmpty,
+          candidate != ".",
+          candidate != "..",
+          !candidate.contains(".."),
+          !candidate.contains("/"),
+          !candidate.contains("\\")
+    else {
+      return false
+    }
+    for scalar in candidate.unicodeScalars {
+      let v = scalar.value
+      let isLowerAlpha = v >= 0x61 && v <= 0x7A
+      let isDigit = v >= 0x30 && v <= 0x39
+      let isAllowedPunct = scalar == ":" || scalar == "." || scalar == "_" || scalar == "-"
+      if !(isLowerAlpha || isDigit || isAllowedPunct) {
+        return false
+      }
+    }
+    return true
+  }
+
+  /// Per-DID checkpoint directory keyed on `MLSStoragePaths.didHash(for:)` and containment-checked.
+  internal func checkpointDirectory(for userDID: String) throws -> URL {
+    let root = currentCheckpointRoot()
+    let standardizedCheckpointRoot = root.standardizedFileURL
+    let didHash = MLSStoragePaths.didHash(for: userDID)
+    let userDir = root.appendingPathComponent(didHash, isDirectory: true)
+    let standardizedUserDir = userDir.standardizedFileURL
+    guard standardizedUserDir.path.hasPrefix(standardizedCheckpointRoot.path + "/") else {
+      throw PathValidationError.containmentViolation(standardizedUserDir.path)
+    }
+    return userDir
+  }
+
+  private func checkpointURL(for userDID: String, groupIdHex: String) throws -> URL {
+    guard !groupIdHex.isEmpty, groupIdHex.allSatisfy(\.isHexDigit) else {
+      throw PathValidationError.invalidGroupIdentifier(groupIdHex)
+    }
+    let userDir = try checkpointDirectory(for: userDID)
+    let standardizedUserDir = userDir.standardizedFileURL
+    let fileURL = userDir.appendingPathComponent("\(groupIdHex).json")
+    let standardizedFileURL = fileURL.standardizedFileURL
+    guard standardizedFileURL.path.hasPrefix(standardizedUserDir.path + "/") else {
+      throw PathValidationError.containmentViolation(standardizedFileURL.path)
+    }
+    return fileURL
   }
 
   // MARK: - Public API
@@ -109,13 +179,14 @@ public actor MLSEpochCheckpoint {
     isNSE: Bool = false
   ) {
     let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let didKey = MLSStoragePaths.didHash(for: userDID)
     let groupIdHex = groupId.hexEncodedString()
-    let cacheKey = "\(normalizedDID)/\(groupIdHex)"
+    let cacheKey = "\(didKey)/\(groupIdHex)"
 
     let expectedGen = (try? MLSCoordinationStore.shared.getState().coordinationGeneration) ?? 0
 
     // Block new writes while this DID is under reset
-    if suspendedDIDs.contains(normalizedDID) || MLSStoragePaths.isResetActive(for: normalizedDID) {
+    if suspendedDIDs.contains(didKey) || MLSStoragePaths.isResetActive(for: normalizedDID) {
       logger.warning("🛡️ [EPOCH] Write blocked for \(normalizedDID.prefix(20), privacy: .private) during reset")
       return
     }
@@ -140,6 +211,18 @@ public actor MLSEpochCheckpoint {
       return
     }
 
+    // Resolve and validate paths strictly inside checkpoint root before enqueueing disk write
+    let rootSnapshot = currentCheckpointRoot().standardizedFileURL
+    let userDir: URL
+    let fileURL: URL
+    do {
+      userDir = try checkpointDirectory(for: userDID)
+      fileURL = try checkpointURL(for: userDID, groupIdHex: groupIdHex)
+    } catch {
+      logger.error("❌ [MLSEpochCheckpoint] Refusing epoch write due to invalid path: \(error.localizedDescription)")
+      return
+    }
+
     // Create record
     let record = EpochRecord(
       groupId: groupIdHex,
@@ -151,10 +234,6 @@ public actor MLSEpochCheckpoint {
     // Update in-memory cache (we passed the check)
     epochCache[cacheKey] = record
 
-    // Persist to disk (fire-and-forget for performance, but tracked for reset drain)
-    let userDir = userDirectory(normalizedDID)
-    let fileURL = checkpointURL(normalizedDID, groupIdHex)
-
     // Acquire shared reset-lifecycle lease synchronously BEFORE publishing/enqueueing the tail:
     let lifecycleLease: MLSLeaseToken
     do {
@@ -165,7 +244,7 @@ public actor MLSEpochCheckpoint {
     }
 
     // Chain this write onto the per-DID serialized tail (bounded: one task per DID).
-    let previousTail = writeTails[normalizedDID]
+    let previousTail = writeTails[didKey]
     let task = Task.detached(priority: .utility) { [logger, weak self] in
       defer { lifecycleLease.release() }
       _ = await previousTail?.value
@@ -187,6 +266,12 @@ public actor MLSEpochCheckpoint {
           await hook()
         }
         #endif
+        let standardizedUserDir = userDir.standardizedFileURL
+        guard standardizedUserDir.path.hasPrefix(rootSnapshot.path + "/"),
+              fileURL.standardizedFileURL.path.hasPrefix(standardizedUserDir.path + "/")
+        else {
+          throw PathValidationError.containmentViolation(standardizedUserDir.path)
+        }
         try FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true)
         var shouldWrite = true
         if FileManager.default.fileExists(atPath: fileURL.path) {
@@ -208,7 +293,7 @@ public actor MLSEpochCheckpoint {
         logger.error("❌ [MLSEpochCheckpoint] Failed to persist epoch: \(error.localizedDescription)")
       }
     }
-    writeTails[normalizedDID] = task
+    writeTails[didKey] = task
   }
 
   /// Check if in-memory epoch is stale compared to disk
@@ -218,9 +303,9 @@ public actor MLSEpochCheckpoint {
     groupId: Data,
     inMemoryEpoch: UInt64
   ) async -> SyncCheckResult? {
-    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let didKey = MLSStoragePaths.didHash(for: userDID)
     let groupIdHex = groupId.hexEncodedString()
-    let cacheKey = "\(normalizedDID)/\(groupIdHex)"
+    let cacheKey = "\(didKey)/\(groupIdHex)"
 
     // Try in-memory cache first (fastest)
     if let cached = epochCache[cacheKey] {
@@ -233,7 +318,9 @@ public actor MLSEpochCheckpoint {
     }
 
     // Fall back to disk read
-    let fileURL = checkpointURL(normalizedDID, groupIdHex)
+    guard let fileURL = try? checkpointURL(for: userDID, groupIdHex: groupIdHex) else {
+      return nil
+    }
 
     guard FileManager.default.fileExists(atPath: fileURL.path) else {
       // No checkpoint exists - this is first time seeing this group
@@ -266,9 +353,9 @@ public actor MLSEpochCheckpoint {
 
   /// Get the last known epoch for a group (from cache or disk)
   public func getLastKnownEpoch(userDID: String, groupId: Data) async -> UInt64? {
-    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let didKey = MLSStoragePaths.didHash(for: userDID)
     let groupIdHex = groupId.hexEncodedString()
-    let cacheKey = "\(normalizedDID)/\(groupIdHex)"
+    let cacheKey = "\(didKey)/\(groupIdHex)"
 
     // Check cache first
     if let cached = epochCache[cacheKey] {
@@ -276,8 +363,9 @@ public actor MLSEpochCheckpoint {
     }
 
     // Check disk
-    let fileURL = checkpointURL(normalizedDID, groupIdHex)
-    guard FileManager.default.fileExists(atPath: fileURL.path) else {
+    guard let fileURL = try? checkpointURL(for: userDID, groupIdHex: groupIdHex),
+          FileManager.default.fileExists(atPath: fileURL.path)
+    else {
       return nil
     }
 
@@ -293,13 +381,17 @@ public actor MLSEpochCheckpoint {
 
   /// Clear checkpoint for a group (call on group leave/delete)
   public func clearCheckpoint(userDID: String, groupId: Data) {
-    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
+    let didKey = MLSStoragePaths.didHash(for: userDID)
     let groupIdHex = groupId.hexEncodedString()
-    let cacheKey = "\(normalizedDID)/\(groupIdHex)"
+    let cacheKey = "\(didKey)/\(groupIdHex)"
     epochCache.removeValue(forKey: cacheKey)
 
-    let fileURL = checkpointURL(normalizedDID, groupIdHex)
-    try? FileManager.default.removeItem(at: fileURL)
+    if let fileURL = try? checkpointURL(for: userDID, groupIdHex: groupIdHex) {
+      let root = currentCheckpointRoot().standardizedFileURL
+      if fileURL.standardizedFileURL.path.hasPrefix(root.path + "/") {
+        try? FileManager.default.removeItem(at: fileURL)
+      }
+    }
     logger.debug("🗑️ [EPOCH] Cleared checkpoint for group \(groupIdHex.prefix(16))...")
   }
 
@@ -308,31 +400,50 @@ public actor MLSEpochCheckpoint {
   /// Throws on deletion failure so reset can abort and preserve authority.
   public func clearAllCheckpoints(userDID: String) async throws {
     let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
-    let prefix = "\(normalizedDID)/"
+    let didKey = MLSStoragePaths.didHash(for: userDID)
+    let prefix = "\(didKey)/"
 
     // 1. Block new writes for this DID
-    suspendedDIDs.insert(normalizedDID)
+    suspendedDIDs.insert(didKey)
 
     // 2. Drain the serialized write tail for this DID (all prior writes complete)
-    if let tail = writeTails.removeValue(forKey: normalizedDID) {
+    if let tail = writeTails.removeValue(forKey: didKey) {
       _ = await tail.value
     }
 
     // 3. Evict cache entries for this DID
     epochCache = epochCache.filter { !$0.key.hasPrefix(prefix) }
 
-    // 4. Delete the per-DID directory (throwing on failure)
-    let userDir = userDirectory(normalizedDID)
+    // 4. Delete the hashed per-DID directory (enforcing strict root containment)
+    let root = currentCheckpointRoot()
+    let standardizedCheckpointRoot = root.standardizedFileURL
+    let userDir = try checkpointDirectory(for: userDID)
+    let standardizedUserDir = userDir.standardizedFileURL
+    guard standardizedUserDir.path.hasPrefix(standardizedCheckpointRoot.path + "/") else {
+      throw PathValidationError.containmentViolation(standardizedUserDir.path)
+    }
     if try MLSStoragePaths.fileExistsStrict(at: userDir) {
       try FileManager.default.removeItem(at: userDir)
     }
+
+    // 5. Legacy unhashed directory cleanup: ONLY touch if normalizedDID matches strict
+    //    `^[a-z0-9:._-]+$` (no `/`, `\`, or `..`) AND remains strictly inside checkpoint root.
+    if normalizedDID != didKey && Self.isSafeLegacyDirectoryComponent(normalizedDID) {
+      let legacyDir = root.appendingPathComponent(normalizedDID, isDirectory: true)
+      let standardizedLegacyDir = legacyDir.standardizedFileURL
+      if standardizedLegacyDir.path.hasPrefix(standardizedCheckpointRoot.path + "/"),
+         try MLSStoragePaths.fileExistsStrict(at: legacyDir) {
+        try FileManager.default.removeItem(at: legacyDir)
+      }
+    }
+
     logger.info("🗑️ [EPOCH] Cleared all epoch checkpoints for \(normalizedDID.prefix(20), privacy: .private)")
   }
 
   /// Resume writes for a DID after a successful reset.
   public func resumeWrites(userDID: String) {
-    let normalizedDID = MLSStoragePaths.normalizeDID(userDID)
-    suspendedDIDs.remove(normalizedDID)
+    let didKey = MLSStoragePaths.didHash(for: userDID)
+    suspendedDIDs.remove(didKey)
   }
 
   /// Reload cache from disk (call after app foregrounding)
@@ -340,17 +451,36 @@ public actor MLSEpochCheckpoint {
     epochCache.removeAll()
 
     do {
-      let userDirs = try FileManager.default.contentsOfDirectory(at: checkpointDir, includingPropertiesForKeys: nil)
+      let root = currentCheckpointRoot()
+      let standardizedCheckpointRoot = root.standardizedFileURL
+      guard FileManager.default.fileExists(atPath: root.path) else {
+        return
+      }
+      let userDirs = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
       var reloadedCount = 0
 
       for userDir in userDirs where userDir.hasDirectoryPath {
-        let normalizedDID = userDir.lastPathComponent
+        let dirComponent = userDir.lastPathComponent
+        guard Self.isSafeLegacyDirectoryComponent(dirComponent),
+              userDir.standardizedFileURL.path.hasPrefix(standardizedCheckpointRoot.path + "/")
+        else {
+          continue
+        }
+        let didBucket: String
+        if dirComponent.count == 64 && dirComponent.allSatisfy(\.isHexDigit) {
+          didBucket = dirComponent.lowercased()
+        } else {
+          didBucket = MLSStoragePaths.didHash(for: dirComponent)
+        }
         let files = try FileManager.default.contentsOfDirectory(at: userDir, includingPropertiesForKeys: nil)
         for file in files where file.pathExtension == "json" {
           do {
             let data = try Data(contentsOf: file)
             let record = try JSONDecoder().decode(EpochRecord.self, from: data)
-            epochCache["\(normalizedDID)/\(record.groupId)"] = record
+            guard !record.groupId.isEmpty, record.groupId.allSatisfy(\.isHexDigit) else {
+              continue
+            }
+            epochCache["\(didBucket)/\(record.groupId)"] = record
             reloadedCount += 1
           } catch {
             // Skip corrupted files

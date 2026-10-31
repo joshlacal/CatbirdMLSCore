@@ -127,6 +127,31 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
     }
   }
 
+  /// Detects whether a SQLite or SQLCipher database is in WAL mode.
+  /// Checks `<dbPath>-wal` sidecar existence first so SQLCipher-encrypted databases
+  /// (whose first 16 bytes are random salt rather than `"SQLite format 3\0"`) are
+  /// properly recognized and WAL-checkpointed on background suspension.
+  public static func isDatabaseInWALMode(atPath dbPath: String) -> Bool {
+    guard !dbPath.isEmpty else { return false }
+    if FileManager.default.fileExists(atPath: dbPath + "-wal") {
+      return true
+    }
+    guard FileManager.default.fileExists(atPath: dbPath),
+          let handle = FileHandle(forReadingAtPath: dbPath)
+    else {
+      return false
+    }
+    defer { try? handle.close() }
+    guard let header = try? handle.read(upToCount: 20), header.count >= 20 else {
+      return false
+    }
+    let sqliteMagic = Data("SQLite format 3\0".utf8)
+    guard header.prefix(16) == sqliteMagic else {
+      return false
+    }
+    return header[18] == 2 || header[19] == 2
+  }
+
   /// Synchronously emergency closes all contexts if this instance is the currently active owner.
   @discardableResult
   public func emergencyCloseAllContextsIfOwned(reason: String) -> Bool {
@@ -139,6 +164,7 @@ public final class MLSContextFreeLifecycleSuspensionOwner: Sendable {
     }
 
     Self.logger.warning("🚨 [ContextFreeOwner] Emergency closing all contexts for active owner \(self.id, privacy: .public): \(reason, privacy: .public)")
+    MLSGRDBManager.flushWALOnAllDatabases()
     MLSCoreContext.interruptAllContexts()
     MLSClient.interruptAllContexts()
     MLSCoreContext.emergencyCloseAllContexts()

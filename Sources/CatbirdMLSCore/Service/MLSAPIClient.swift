@@ -311,6 +311,11 @@ public final class MLSAPIClient {
       } else {
         throw CanonicalLiveTransportError.invalidPath(ffi.path)
       }
+      do {
+        try MLSOutboundHTTPValidator.validatePreparedRequestNSID(endpoint)
+      } catch {
+        throw CanonicalLiveTransportError.invalidPath(ffi.path)
+      }
       var request = try await client.networkService.createURLRequest(
         endpoint: endpoint,
         method: ffi.method,
@@ -327,10 +332,10 @@ public final class MLSAPIClient {
       request.setValue("DPoP \(cleanAuthority.accessToken)", forHTTPHeaderField: "Authorization")
       request.setValue(cleanAuthority.dpopProof, forHTTPHeaderField: "DPoP")
       request.setValue(mlsServiceDID, forHTTPHeaderField: "atproto-proxy")
-      let (data, response) = try await URLSession.shared.data(for: request)
-      guard let httpResponse = response as? HTTPURLResponse else {
-        throw MLSAPIError.invalidResponse(message: "Clean-chat response was not HTTP")
-      }
+      let (data, httpResponse) = try await MLSBoundedURLSession.shared.data(
+        for: request,
+        maxBytes: MLSBoundedURLSession.labyrinthMaxBytes
+      )
       return (data, httpResponse)
     }
 
@@ -364,6 +369,12 @@ public final class MLSAPIClient {
         body: Data?,
         query: Data?
     ) async throws -> (data: Data, response: HTTPURLResponse) {
+        guard !nsid.utf8.contains(where: {
+            $0 <= 0x20 || $0 >= 0x7F || $0 == UInt8(ascii: "#") || $0 == UInt8(ascii: "\\")
+        }) else {
+            throw MLSAPIError.invalidResponse(message: "Invalid prepared request NSID")
+        }
+
         var endpoint = nsid.hasPrefix("/") ? String(nsid.dropFirst()) : nsid
         if endpoint.hasPrefix("xrpc/") {
             endpoint = String(endpoint.dropFirst(5))
@@ -375,7 +386,16 @@ public final class MLSAPIClient {
             endpoint = String(endpoint[..<qIndex])
         }
 
-        if let query = query, !query.isEmpty, let qStr = String(data: query, encoding: .utf8) {
+        do {
+            try MLSOutboundHTTPValidator.validatePreparedRequestNSID(endpoint)
+        } catch {
+            throw MLSAPIError.invalidResponse(message: error.localizedDescription)
+        }
+
+        if let query = query, !query.isEmpty {
+            guard let qStr = String(data: query, encoding: .utf8) else {
+                throw MLSAPIError.invalidResponse(message: "Invalid UTF-8 query in prepared request")
+            }
             if let existing = queryString, !existing.isEmpty {
                 queryString = "\(existing)&\(qStr)"
             } else {
@@ -385,9 +405,11 @@ public final class MLSAPIClient {
 
         var queryItems: [URLQueryItem]? = nil
         if let queryString = queryString, !queryString.isEmpty {
-            var dummyComponents = URLComponents()
-            dummyComponents.percentEncodedQuery = queryString
-            queryItems = dummyComponents.queryItems
+            do {
+                queryItems = try MLSOutboundHTTPValidator.parsePercentEncodedQueryItems(queryString)
+            } catch {
+                throw MLSAPIError.invalidResponse(message: error.localizedDescription)
+            }
         }
 
         let allocationDevice = MLSInventoryRequestBackoff.allocationDevice(
@@ -440,7 +462,10 @@ public final class MLSAPIClient {
     /// Runs only after a probe has already failed, so it costs nothing on the hot path
     /// and leaves the generated decode of a successful probe untouched.
     public func deviceProbeErrorCode(actorDeviceId: String) async -> String? {
-        guard let query = "actorDeviceId=\(actorDeviceId)".data(using: .utf8) else {
+        var components = URLComponents()
+        components.queryItems = [URLQueryItem(name: "actorDeviceId", value: actorDeviceId)]
+        let encodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        guard let query = encodedQuery?.data(using: .utf8) else {
             return nil
         }
         do {

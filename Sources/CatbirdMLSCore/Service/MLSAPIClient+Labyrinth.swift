@@ -65,13 +65,119 @@ extension MLSAPIClient {
     }
     guard nsid.hasPrefix(labyrinthNamespacePrefix),
           nsid.count > labyrinthNamespacePrefix.count,
-          nsid.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == ".") })
+          (try? MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)) != nil
     else {
       throw LabyrinthTransportError.invalidRequest("nsid \(nsid)")
+    }
+    guard !path.utf8.contains(where: {
+      $0 <= 0x20 || $0 >= 0x7F || $0 == UInt8(ascii: "#") || $0 == UInt8(ascii: "\\")
+    }) else {
+      throw LabyrinthTransportError.invalidRequest("path \(path)")
     }
     let route = "/xrpc/\(nsid)"
     guard path == route || path.hasPrefix(route + "?") else {
       throw LabyrinthTransportError.invalidRequest("path does not match \(nsid)")
+    }
+    if path.hasPrefix(route + "?") {
+      let queryPart = String(path.dropFirst((route + "?").count))
+      guard (try? MLSOutboundHTTPValidator.parsePercentEncodedQueryItems(queryPart)) != nil else {
+        throw LabyrinthTransportError.invalidRequest("query in path \(path)")
+      }
+    }
+  }
+
+  /// Builds a validated Labyrinth XRPC URL on `endpoint`, preserving any base path on `endpoint`
+  /// and rejecting SSRF targets, `#` fragments, `..` traversal, and control characters.
+  static func buildLabyrinthURL(endpoint: URL, nsid: String, path: String) throws -> URL {
+    do {
+      try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(endpoint)
+    } catch {
+      throw LabyrinthTransportError.serviceUnresolved(error.localizedDescription)
+    }
+    guard nsid.hasPrefix(labyrinthNamespacePrefix),
+          nsid.count > labyrinthNamespacePrefix.count,
+          (try? MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)) != nil
+    else {
+      throw LabyrinthTransportError.invalidRequest("nsid \(nsid)")
+    }
+    guard !path.utf8.contains(where: {
+      $0 <= 0x20 || $0 >= 0x7F || $0 == UInt8(ascii: "#") || $0 == UInt8(ascii: "\\")
+    }) else {
+      throw LabyrinthTransportError.invalidRequest("path \(path)")
+    }
+
+    let route = "/xrpc/\(nsid)"
+    guard path == route || path.hasPrefix(route + "?"),
+          let pathComponents = URLComponents(string: path),
+          pathComponents.scheme == nil,
+          pathComponents.host == nil,
+          pathComponents.user == nil,
+          pathComponents.password == nil,
+          pathComponents.port == nil,
+          pathComponents.fragment == nil,
+          pathComponents.percentEncodedFragment == nil,
+          pathComponents.percentEncodedPath == route,
+          pathComponents.path == route
+    else {
+      throw LabyrinthTransportError.invalidRequest("path \(path)")
+    }
+
+    if let rawQuery = pathComponents.percentEncodedQuery {
+      guard (try? MLSOutboundHTTPValidator.parsePercentEncodedQueryItems(rawQuery)) != nil else {
+        throw LabyrinthTransportError.invalidRequest("query in path \(path)")
+      }
+    }
+
+    guard var endpointComponents = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+      throw LabyrinthTransportError.invalidRequest("endpoint")
+    }
+    var basePath = endpointComponents.percentEncodedPath
+    while basePath.hasSuffix("/") {
+      basePath.removeLast()
+    }
+    endpointComponents.percentEncodedPath = basePath + route
+    endpointComponents.percentEncodedQuery = pathComponents.percentEncodedQuery
+    endpointComponents.fragment = nil
+
+    guard let builtURL = endpointComponents.url,
+          builtURL.scheme?.lowercased() == "https",
+          builtURL.host?.lowercased() == endpoint.host?.lowercased(),
+          builtURL.port == endpoint.port,
+          builtURL.fragment == nil
+    else {
+      throw LabyrinthTransportError.invalidRequest("path \(path)")
+    }
+    return builtURL
+  }
+
+  /// Applies strictly validated `catbird-labyrinth-*` headers, rejecting CR/LF/NUL injection,
+  /// non-token characters, and `Host` / `Authorization` / `Atproto-Proxy` overrides.
+  static func applyValidatedLabyrinthHeaders(
+    _ headers: [(name: String, value: String)],
+    to request: inout URLRequest
+  ) throws {
+    let requiredPrefix = "catbird-labyrinth-"
+    for header in headers {
+      guard !header.name.utf8.contains(where: { $0 <= 0x20 || $0 >= 0x7F }),
+            !header.value.utf8.contains(where: {
+              $0 == 0x0D || $0 == 0x0A || $0 == 0x00 || ($0 < 0x20 && $0 != 0x09) || $0 == 0x7F
+            })
+      else {
+        throw LabyrinthTransportError.invalidRequest("header \(header.name)")
+      }
+      let lowerName = header.name.lowercased()
+      guard lowerName != "host",
+            lowerName != "authorization",
+            lowerName != "atproto-proxy",
+            lowerName.hasPrefix(requiredPrefix),
+            lowerName.count > requiredPrefix.count,
+            lowerName.utf8.allSatisfy({
+              ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x2D
+            })
+      else {
+        throw LabyrinthTransportError.invalidRequest("header \(header.name)")
+      }
+      request.setValue(header.value, forHTTPHeaderField: header.name)
     }
   }
 
@@ -85,8 +191,7 @@ extension MLSAPIClient {
     let matches = document.service.filter { $0.id == fragment || $0.id == did + fragment }
     guard matches.count == 1, let service = matches.first,
           let endpoint = URL(string: service.serviceEndpoint),
-          endpoint.scheme == "https", endpoint.host != nil,
-          endpoint.user == nil, endpoint.password == nil, endpoint.fragment == nil
+          MLSOutboundHTTPValidator.isValidPublicHTTPSServiceEndpoint(endpoint)
     else {
       throw LabyrinthTransportError.serviceUnresolved("no unique https \(fragment) service")
     }
@@ -118,11 +223,7 @@ extension MLSAPIClient {
   ) async throws -> (data: Data, response: HTTPURLResponse) {
     try Self.validateLabyrinthRequest(method: method, nsid: nsid, path: path)
     let endpoint = try await resolveLabyrinthServiceEndpoint()
-    guard let url = URL(string: path, relativeTo: endpoint)?.absoluteURL,
-          url.host == endpoint.host
-    else {
-      throw LabyrinthTransportError.invalidRequest("path \(path)")
-    }
+    let url = try Self.buildLabyrinthURL(endpoint: endpoint, nsid: nsid, path: path)
 
     let (audience, _) = Self.splitServiceDID(mlsServiceDID)
     let expiry = Int(Date().addingTimeInterval(Self.labyrinthServiceAuthLifetime).timeIntervalSince1970)
@@ -141,19 +242,12 @@ extension MLSAPIClient {
       request.httpBody = body
       request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     }
-    for header in headers {
-      let name = header.name.lowercased()
-      guard name.hasPrefix("catbird-labyrinth-") else {
-        throw LabyrinthTransportError.invalidRequest("header \(header.name)")
-      }
-      request.setValue(header.value, forHTTPHeaderField: header.name)
-    }
+    try Self.applyValidatedLabyrinthHeaders(headers, to: &request)
 
-    let (data, response) = try await LabyrinthEndpointCache.session.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw LabyrinthTransportError.invalidRequest("non-HTTP response")
-    }
-    return (data, http)
+    return try await MLSBoundedURLSession.shared.data(
+      for: request,
+      maxBytes: MLSBoundedURLSession.labyrinthMaxBytes
+    )
   }
 
   // MARK: - PDS mailboxKeys records
@@ -517,6 +611,9 @@ extension MLSAPIClient {
   /// `com.atproto.repo.getRecord` from `did`'s own PDS, unauthenticated.
   /// Returns the record value JSON, or nil when the record or repo is absent.
   public func getLabyrinthMailboxKeys(did: String, rkey: String) async throws -> Data? {
+    guard Self.isValidMailboxKeyRkey(rkey) else {
+      throw LabyrinthTransportError.invalidRequest("invalid mailboxKeys rkey")
+    }
     let pds = try await MLSPublicPDSReader.resolveCurrentPDS(did: did)
     guard var components = URLComponents(
       url: pds.appendingPathComponent("xrpc/com.atproto.repo.getRecord"),
@@ -533,10 +630,11 @@ extension MLSAPIClient {
     var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.timeoutInterval = 15
-    let (data, response) = try await MLSPublicPDSReader.authorizationSession.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw LabyrinthTransportError.pdsFailure("non-HTTP response")
-    }
+    let (data, http) = try await MLSBoundedURLSession.fetchData(
+      for: request,
+      maxBytes: MLSBoundedURLSession.pdsRecordMaxBytes,
+      session: MLSPublicPDSReader.authorizationSession
+    )
     return try Self.mailboxKeysValue(fromGetRecord: data, status: http.statusCode)
   }
 
@@ -560,30 +658,137 @@ extension MLSAPIClient {
     }
   }
 
+  static let maxMailboxKeysDeletionPages = 20
+
+  static func isValidMailboxKeyRkey(_ rkey: String) -> Bool {
+    guard !rkey.isEmpty,
+          rkey.count <= 512,
+          rkey != ".",
+          rkey != "..",
+          !rkey.utf8.contains(where: {
+            $0 <= 0x20 || $0 >= 0x7F
+              || $0 == UInt8(ascii: "/")
+              || $0 == UInt8(ascii: "\\")
+              || $0 == UInt8(ascii: "%")
+              || $0 == UInt8(ascii: "#")
+              || $0 == UInt8(ascii: "?")
+          }),
+          (try? RecordKey(keyString: rkey)) != nil
+    else {
+      return false
+    }
+    return true
+  }
+
+  /// Extracts and strictly validates `at://<expectedDID>/blue.catbird.labyrinth.mailboxKeys/<rkey>`
+  /// URIs and optional pagination cursor from a `com.atproto.repo.listRecords` page.
+  static func extractValidatedMailboxKeyRkeys(
+    fromListRecords data: Data,
+    expectedDID: String
+  ) throws -> (rkeys: [String], nextCursor: String?) {
+    guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw LabyrinthTransportError.pdsFailure("listRecords invalid JSON")
+    }
+    let records: [[String: Any]]
+    if let rawRecords = object["records"] {
+      guard let typed = rawRecords as? [[String: Any]] else {
+        throw LabyrinthTransportError.pdsFailure("listRecords invalid records array")
+      }
+      records = typed
+    } else {
+      records = []
+    }
+
+    let expectedPrefix = "at://\(expectedDID)/\(labyrinthMailboxKeysCollection)/"
+    var validatedRkeys: [String] = []
+    validatedRkeys.reserveCapacity(records.count)
+
+    for record in records {
+      guard let uri = record["uri"] as? String,
+            uri.hasPrefix(expectedPrefix)
+      else {
+        throw LabyrinthTransportError.pdsFailure("listRecords URI outside expected mailboxKeys collection")
+      }
+      let rkey = String(uri.dropFirst(expectedPrefix.count))
+      guard isValidMailboxKeyRkey(rkey) else {
+        throw LabyrinthTransportError.pdsFailure("listRecords invalid mailboxKeys rkey")
+      }
+      validatedRkeys.append(rkey)
+    }
+
+    let nextCursor: String?
+    if records.isEmpty {
+      nextCursor = nil
+    } else if let rawCursor = object["cursor"], !(rawCursor is NSNull) {
+      guard let cursorString = rawCursor as? String, !cursorString.isEmpty else {
+        throw LabyrinthTransportError.pdsFailure("listRecords invalid cursor")
+      }
+      nextCursor = cursorString
+    } else {
+      nextCursor = nil
+    }
+
+    return (validatedRkeys, nextCursor)
+  }
+
+  static func collectValidatedMailboxKeyRkeysToDelete(
+    did: String,
+    maxPages: Int = maxMailboxKeysDeletionPages,
+    fetchPage: (String?) async throws -> (data: Data, statusCode: Int)
+  ) async throws -> [String] {
+    var cursor: String?
+    var seenCursors = Set<String>()
+    var seenRkeys = Set<String>()
+    var rkeys: [String] = []
+    var pagesFetched = 0
+
+    repeat {
+      pagesFetched += 1
+      guard pagesFetched <= maxPages else {
+        throw LabyrinthTransportError.pdsFailure("listRecords exceeded max page bound (\(maxPages))")
+      }
+
+      let (data, statusCode) = try await fetchPage(cursor)
+      guard statusCode == 200 else {
+        throw LabyrinthTransportError.pdsFailure("listRecords \(statusCode)")
+      }
+
+      let parsed = try extractValidatedMailboxKeyRkeys(fromListRecords: data, expectedDID: did)
+      for rkey in parsed.rkeys where seenRkeys.insert(rkey).inserted {
+        rkeys.append(rkey)
+      }
+
+      if let next = parsed.nextCursor {
+        guard seenCursors.insert(next).inserted else {
+          throw LabyrinthTransportError.pdsFailure("listRecords cursor loop detected")
+        }
+        guard pagesFetched < maxPages else {
+          throw LabyrinthTransportError.pdsFailure("listRecords exceeded max page bound (\(maxPages))")
+        }
+        cursor = next
+      } else {
+        cursor = nil
+      }
+    } while cursor != nil
+
+    return rkeys
+  }
+
   /// Deletes every `blue.catbird.labyrinth.mailboxKeys` record in the
   /// signed-in account's repo (account deletion).
   public func deleteLabyrinthMailboxKeys() async throws {
     guard let did = await authenticatedUserDID() else { throw MLSAPIError.noAuthentication }
-    var cursor: String?
-    var rkeys: [String] = []
-    repeat {
+    let rkeys = try await Self.collectValidatedMailboxKeyRkeysToDelete(did: did) { cursor in
       var query = [
         URLQueryItem(name: "repo", value: did),
         URLQueryItem(name: "collection", value: Self.labyrinthMailboxKeysCollection),
         URLQueryItem(name: "limit", value: "100"),
       ]
       if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
-      let (data, response) = try await authenticatedRepoCall(
+      let (data, response) = try await self.authenticatedRepoCall(
         method: "GET", endpoint: "com.atproto.repo.listRecords", body: nil, query: query)
-      guard response.statusCode == 200,
-            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-      else {
-        throw LabyrinthTransportError.pdsFailure("listRecords \(response.statusCode)")
-      }
-      let records = object["records"] as? [[String: Any]] ?? []
-      rkeys += records.compactMap { ($0["uri"] as? String)?.split(separator: "/").last.map(String.init) }
-      cursor = records.isEmpty ? nil : object["cursor"] as? String
-    } while cursor != nil
+      return (data, response.statusCode)
+    }
 
     for rkey in rkeys {
       let body = try JSONSerialization.data(withJSONObject: [
@@ -616,23 +821,8 @@ extension MLSAPIClient {
 final class LabyrinthEndpointCache: @unchecked Sendable {
   static let shared = LabyrinthEndpointCache()
 
-  static let session: URLSession = {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.httpCookieStorage = nil
-    configuration.urlCredentialStorage = nil
-    configuration.httpShouldSetCookies = false
-    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-    return URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
-  }()
-
-  private final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(
-      _ session: URLSession, task: URLSessionTask,
-      willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
-      completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-      completionHandler(nil)
-    }
+  static var session: URLSession {
+    MLSBoundedURLSession.shared.underlyingSession
   }
 
   private let lock = NSLock()

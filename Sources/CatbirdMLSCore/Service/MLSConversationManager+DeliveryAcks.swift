@@ -347,40 +347,19 @@ extension MLSConversationManager {
     }
 
     guard let userDid = userDid else { return }
-    guard requesterDID != userDid else { return }
+    let mlsContext = try? await MLSCoreContext.shared.getContext(for: userDid)
+    let currentVerifiedEpoch = conversations[conversationId].map { Int64($0.coordinates.epoch) }
 
-    // Check if we hold the plaintext for the requested message. Prefer the
-    // new encrypted column; fall back to legacy plaintext for pre-migration
-    // rows.
-    guard let storedMessage = try? await database.read({ db in
-      try MLSMessageModel
-        .filter(
-          MLSMessageModel.Columns.messageID == payload.messageId &&
-          MLSMessageModel.Columns.currentUserDID == MLSStorageHelpers.normalizeDID(userDid)
-        )
-        .filter(MLSMessageModel.Columns.isTombstone == 0)
-        .fetchOne(db)
-    })
-    else { return }
-
-    let originalPayload: MLSMessagePayload
-    if let encrypted = storedMessage.payloadEncrypted, !encrypted.isEmpty {
-      // Field-level encryption requires an MlsContext to recover plaintext.
-      guard let mlsContext = try? await MLSCoreContext.shared.getContext(for: userDid),
-            let plain = try? MLSFieldEncryption.decrypt(
-              context: mlsContext,
-              conversationID: storedMessage.cryptoConversationID ?? storedMessage.conversationID,
-              wire: encrypted
-            ),
-            let payload = try? MLSMessagePayload.decodeFromJSON(plain)
-      else { return }
-      originalPayload = payload
-    } else if let legacyJSON = storedMessage.payloadJSON,
-              let payload = try? MLSMessagePayload.decodeFromJSON(legacyJSON) {
-      originalPayload = payload
-    } else {
-      return
-    }
+    guard let candidate = await Self.validateAndFetchRecoveryCandidate(
+      messageId: payload.messageId,
+      conversationId: conversationId,
+      requesterDID: requesterDID,
+      currentUserDID: userDid,
+      mlsContext: mlsContext,
+      currentVerifiedEpoch: currentVerifiedEpoch,
+      database: database
+    ) else { return }
+    let originalPayload = candidate.payload
 
     // Jitter: 500–2000ms random delay before responding.
     // First responder wins; others observe the recovered message arrive on SSE and skip.
@@ -388,15 +367,13 @@ extension MLSConversationManager {
     try? await Task.sleep(nanoseconds: jitterNs)
 
     // Check if another device already responded (recovered message would reference our messageId).
-    let alreadyRecovered = (try? await database.read({ db in
-      try MLSMessageModel
-        .filter(
-          sql: "payloadJSON LIKE ?",
-          arguments: ["%\"recoveredMessageId\":\"\(payload.messageId)\"%"]
-        )
-        .filter(MLSMessageModel.Columns.conversationID == conversationId)
-        .fetchOne(db)
-    })) != nil
+    let alreadyRecovered = await Self.hasExistingRecoveryResponse(
+      forMessageId: payload.messageId,
+      conversationId: conversationId,
+      currentUserDID: userDid,
+      mlsContext: mlsContext,
+      database: database
+    )
     guard !alreadyRecovered else { return }
 
     guard let convo = conversations[conversationId] else { return }
@@ -477,5 +454,256 @@ extension MLSConversationManager {
     } catch {
       logger.error("❌ [SEND] Recovery resend failed for \(conversationId.prefix(16)): \(error.localizedDescription)")
     }
+  }
+
+  internal static func isValidRecoveryMessageId(_ messageId: String) -> Bool {
+    guard !messageId.isEmpty, messageId.count <= 128 else {
+      return false
+    }
+    for scalar in messageId.unicodeScalars {
+      // Printable ASCII without whitespace/control characters (0x21...0x7E)
+      guard scalar.value >= 0x21, scalar.value <= 0x7E else {
+        return false
+      }
+      // Reject SQL LIKE wildcards and quote/escape characters
+      switch scalar {
+      case "%", "_", "\"", "\\", "'":
+        return false
+      default:
+        continue
+      }
+    }
+    return true
+  }
+
+  internal static func validateAndFetchRecoveryCandidate(
+    messageId: String,
+    conversationId: String,
+    requesterDID: String,
+    currentUserDID: String,
+    mlsContext: MlsContext?,
+    currentVerifiedEpoch: Int64?,
+    database: MLSDatabase
+  ) async -> (storedMessage: MLSMessageModel, payload: MLSMessagePayload)? {
+    guard isValidRecoveryMessageId(messageId), !conversationId.isEmpty else {
+      return nil
+    }
+
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(
+      MLSCredentialBinding.credentialRootDID(currentUserDID)
+    )
+    let normalizedRequesterDID = MLSStorageHelpers.normalizeDID(
+      MLSCredentialBinding.credentialRootDID(requesterDID)
+    )
+    guard !normalizedUserDID.isEmpty,
+          !normalizedRequesterDID.isEmpty,
+          normalizedRequesterDID != normalizedUserDID
+    else {
+      return nil
+    }
+
+    guard let storedMessage = try? await database.read({ db -> MLSMessageModel? in
+      guard let storedMessage = try MLSMessageModel
+        .filter(MLSMessageModel.Columns.messageID == messageId)
+        .filter(MLSMessageModel.Columns.conversationID == conversationId)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
+        .fetchOne(db),
+        storedMessage.conversationID == conversationId
+      else {
+        return nil
+      }
+
+      let storedSenderDID = MLSStorageHelpers.normalizeDID(
+        MLSCredentialBinding.credentialRootDID(storedMessage.senderID)
+      )
+      guard storedSenderDID == normalizedUserDID else {
+        return nil
+      }
+
+      // Verify requester is currently an active verified member of conversationId.
+      let activeMembers = try MLSMemberModel
+        .filter(MLSMemberModel.Columns.conversationID == conversationId)
+        .filter(MLSMemberModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMemberModel.Columns.isActive == true)
+        .fetchAll(db)
+      let isCurrentMember = activeMembers.contains { member in
+        MLSStorageHelpers.normalizeDID(MLSCredentialBinding.credentialRootDID(member.did))
+          == normalizedRequesterDID
+      }
+      guard isCurrentMember else {
+        return nil
+      }
+
+      // Verify requester was a member at storedMessage.epoch (prevent pre-join exfiltration).
+      let messageEpoch = storedMessage.epoch
+      if let snapshot = try MLSRosterSnapshotModel
+        .filter(Column("conversationID") == conversationId)
+        .filter(Column("epoch") == messageEpoch)
+        .fetchOne(db) {
+        let wasInSnapshot = snapshot.memberDIDs.contains { did in
+          MLSStorageHelpers.normalizeDID(MLSCredentialBinding.credentialRootDID(did))
+            == normalizedRequesterDID
+        }
+        guard wasInSnapshot else {
+          return nil
+        }
+      } else {
+        let allEvents = try MLSMembershipEventModel
+          .filter(MLSMembershipEventModel.Columns.conversationID == conversationId)
+          .filter(MLSMembershipEventModel.Columns.currentUserDID == normalizedUserDID)
+          .order(MLSMembershipEventModel.Columns.epoch.asc, MLSMembershipEventModel.Columns.timestamp.asc)
+          .fetchAll(db)
+          .filter { event in
+            MLSStorageHelpers.normalizeDID(MLSCredentialBinding.credentialRootDID(event.memberDID))
+              == normalizedRequesterDID
+          }
+
+        if !allEvents.isEmpty {
+          var activeAtMessageEpoch = false
+          var sawJoinOrLeaveBeforeOrAtEpoch = false
+          for event in allEvents where event.epoch <= messageEpoch {
+            switch event.eventType {
+            case .joined:
+              activeAtMessageEpoch = true
+              sawJoinOrLeaveBeforeOrAtEpoch = true
+            case .left, .removed, .kicked:
+              activeAtMessageEpoch = false
+              sawJoinOrLeaveBeforeOrAtEpoch = true
+            case .roleChanged, .deviceAdded, .deviceRemoved:
+              break
+            }
+          }
+          // If the earliest recorded join is strictly after messageEpoch, or the member was not active
+          // at messageEpoch, refuse recovery.
+          if let latestJoinAfter = allEvents.last(where: { $0.eventType == .joined && $0.epoch > messageEpoch }) {
+            _ = latestJoinAfter
+            if !activeAtMessageEpoch {
+              return nil
+            }
+          }
+          guard sawJoinOrLeaveBeforeOrAtEpoch && activeAtMessageEpoch else {
+            return nil
+          }
+        } else {
+          // No roster snapshot or membership audit history proves membership at messageEpoch:
+          // refuse recovery for epochs prior to the current group state's verified epoch.
+          let dbEpoch = try Int64.fetchOne(
+            db,
+            sql: "SELECT epoch FROM MLSConversationModel WHERE conversationID = ? AND currentUserDID = ?",
+            arguments: [conversationId, normalizedUserDID]
+          )
+          guard let verifiedFloor = currentVerifiedEpoch ?? dbEpoch,
+                messageEpoch >= verifiedFloor
+          else {
+            return nil
+          }
+        }
+      }
+
+      return storedMessage
+    })
+    else {
+      return nil
+    }
+
+    let originalPayload: MLSMessagePayload
+    if let encrypted = storedMessage.payloadEncrypted, !encrypted.isEmpty {
+      guard let mlsContext,
+            let plain = try? MLSFieldEncryption.decrypt(
+              context: mlsContext,
+              conversationID: storedMessage.cryptoConversationID ?? storedMessage.conversationID,
+              wire: encrypted
+            ),
+            let payload = try? MLSMessagePayload.decodeFromJSON(plain)
+      else { return nil }
+      originalPayload = payload
+    } else if let legacyJSON = storedMessage.payloadJSON,
+              let payload = try? MLSMessagePayload.decodeFromJSON(legacyJSON) {
+      originalPayload = payload
+    } else {
+      return nil
+    }
+
+    // Only allow recovery of plain text messages (never control messages or chained recoveries).
+    guard originalPayload.messageType == .text,
+          originalPayload.recoveredMessageId == nil
+    else {
+      return nil
+    }
+
+    return (storedMessage, originalPayload)
+  }
+
+  internal static func hasExistingRecoveryResponse(
+    forMessageId messageId: String,
+    conversationId: String,
+    currentUserDID: String,
+    mlsContext: MlsContext?,
+    database: MLSDatabase
+  ) async -> Bool {
+    guard isValidRecoveryMessageId(messageId), !conversationId.isEmpty else {
+      return true
+    }
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(currentUserDID)
+    guard let candidates = try? await database.read({ db in
+      try MLSMessageModel
+        .filter(MLSMessageModel.Columns.conversationID == conversationId)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .filter(MLSMessageModel.Columns.isTombstone == 0)
+        .fetchAll(db)
+    }) else {
+      return false
+    }
+
+    for candidate in candidates {
+      if let mlsContext, let decoded = candidate.decryptedPayload(context: mlsContext) {
+        if decoded.recoveredMessageId == messageId {
+          return true
+        }
+      } else if let decoded = candidate.parsedPayload {
+        if decoded.recoveredMessageId == messageId {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  internal static func isValidIncomingRecoveryResponse(
+    recoveredMessageId: String,
+    conversationId: String,
+    senderDID: String,
+    currentUserDID: String,
+    database: MLSDatabase
+  ) async -> Bool {
+    guard isValidRecoveryMessageId(recoveredMessageId), !conversationId.isEmpty else {
+      return false
+    }
+    let normalizedUserDID = MLSStorageHelpers.normalizeDID(currentUserDID)
+    let normalizedIncomingSender = MLSStorageHelpers.normalizeDID(
+      MLSCredentialBinding.credentialRootDID(senderDID)
+    )
+    guard !normalizedIncomingSender.isEmpty else {
+      return false
+    }
+
+    guard let targetMessage = try? await database.read({ db in
+      try MLSMessageModel
+        .filter(MLSMessageModel.Columns.messageID == recoveredMessageId)
+        .filter(MLSMessageModel.Columns.currentUserDID == normalizedUserDID)
+        .fetchOne(db)
+    }) else {
+      return false
+    }
+
+    guard targetMessage.conversationID == conversationId else {
+      return false
+    }
+
+    let normalizedTargetSender = MLSStorageHelpers.normalizeDID(
+      MLSCredentialBinding.credentialRootDID(targetMessage.senderID)
+    )
+    return !normalizedTargetSender.isEmpty && normalizedTargetSender == normalizedIncomingSender
   }
 }

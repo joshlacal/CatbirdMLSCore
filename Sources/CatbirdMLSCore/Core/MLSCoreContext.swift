@@ -1270,6 +1270,22 @@ public actor MLSCoreContext {
     }
   }
 
+  internal nonisolated static func extractAuthenticatedSenderDID(from credentialIdentity: Data) throws -> String {
+    guard
+      let senderDID = String(data: credentialIdentity, encoding: .utf8),
+      senderDID.hasPrefix("did:"),
+      !senderDID.utf8.contains(where: { $0 <= 0x20 || $0 == 0x7F })
+    else {
+      throw MLSError.invalidCredential("Decrypted MLS credential identity is not a valid DID")
+    }
+    let rootDID = MLSCredentialBinding.credentialRootDID(senderDID)
+    let rootParts = rootDID.split(separator: ":", omittingEmptySubsequences: false)
+    guard rootParts.count >= 3, rootParts[0] == "did", !rootParts[1].isEmpty, !rootParts[2].isEmpty else {
+      throw MLSError.invalidCredential("Decrypted MLS credential identity has malformed DID root")
+    }
+    return senderDID
+  }
+
   private func performDecryption(
     userDid: String,
     groupId: Data,
@@ -1353,14 +1369,17 @@ public actor MLSCoreContext {
       // ═══════════════════════════════════════════════════════════════════════════════
       let accountSwitchEpochBefore = MLSAppActivityState.getAccountSwitchEpoch()
 
-      // Sender identity is authoritative for own echoes; never infer ownership from
-      // an OpenMLS error description.
+      // Sender identity in the outer envelope is untrusted; only return a local cache hit
+      // when we already persisted our own send. If uncached, fall through to OpenMLS
+      // decryption so sibling-device messages (whose outer senderID may be bare userDid)
+      // decrypt normally and spoofed outer senderIDs cannot suppress decryption.
       if let senderID = senderID {
         let normalizedSender = MLSStorageHelpers.normalizeDID(senderID)
         let normalizedUser = MLSStorageHelpers.normalizeDID(userDid)
         if normalizedSender == normalizedUser {
           logger.info(
-            "🔓 [DECRYPT] Self-sent message detected (sender == user) - checking cache only")
+            "🔓 [DECRYPT] Outer sender matches current user - checking local cache before OpenMLS decrypt"
+          )
           if let cachedPayload = try await storage.fetchPayloadForMessage(
             context: context,
             messageID,
@@ -1382,24 +1401,8 @@ public actor MLSCoreContext {
               epoch: nil
             )
           }
-          // Self-sent message NOT in cache - return placeholder to avoid corrupting state
-          // CRITICAL FIX: Do NOT throw ratchetStateDesync - that marks the conversation as corrupted
-          // and triggers rejoin flows. Instead, return a placeholder that the UI can display gracefully.
-          logger.error(
-            "❌ [DECRYPT] Self-sent message NOT in cache - plaintext was not persisted at send time!"
-          )
-          logger.error(
-            "   MessageID: \(messageID), ConvoID: \(conversationID), Epoch: \(epoch ?? -1)"
-          )
-
-          // Return placeholder instead of throwing error
-          return DecryptionOutcome(
-            plaintext: "⚠️ Message unavailable (sent from this account)",
-            embed: nil,
-            senderDID: userDid,
-            messageType: .text,
-            reaction: nil,
-            epoch: nil
+          logger.info(
+            "🔓 [DECRYPT] Message \(messageID) not in local cache despite outer sender == user; proceeding to OpenMLS decrypt (sibling device or untrusted envelope)"
           )
         }
       }
@@ -1476,20 +1479,10 @@ public actor MLSCoreContext {
         "🔓 [De-Cipher] [Gen: \(coordinationGen)] [Epoch: \(actualEpoch)] Success: Seq=\(actualSeq) | Group=\(groupId.prefix(8).hexEncodedString())..."
       )
 
-      // Extract sender DID from MLS credential (cryptographically authenticated)
-      // This is more reliable than the passed-in senderID which may be "unknown"
-      let actualSender: String
-      if let senderDID = String(data: result.senderCredential.identity, encoding: .utf8),
-         senderDID.starts(with: "did:") {
-        actualSender = senderDID
-        logger.debug("[DECRYPT] Sender extracted from MLS credential: \(senderDID.prefix(24))...")
-      } else if let fallbackSender = senderID, fallbackSender != "unknown" {
-        actualSender = fallbackSender
-        logger.debug("[DECRYPT] Using fallback sender from parameter: \(fallbackSender.prefix(24))...")
-      } else {
-        actualSender = "unknown"
-        logger.debug("[DECRYPT] Unable to extract sender from credential, using 'unknown'")
-      }
+      // Extract sender DID strictly from the cryptographically authenticated MLS credential.
+      // Never fall back to the unauthenticated outer envelope `senderID`.
+      let actualSender = try Self.extractAuthenticatedSenderDID(from: result.senderCredential.identity)
+      logger.debug("[DECRYPT] Sender extracted from MLS credential: \(actualSender.prefix(24))...")
 
       // For control messages (reactions/readReceipts/typing/etc) we cache the full payload
       // so they are filtered from chat history, and persist side effects as needed.

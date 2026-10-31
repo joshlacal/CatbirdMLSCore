@@ -3084,6 +3084,13 @@ public final class MLSStorage: @unchecked Sendable {
         return .notFound
       }
 
+      guard existing.conversationID == conversationID else {
+        self.logger.warning(
+          "[EDIT] Rejected cross-conversation edit for \(targetMessageID.prefix(16))... — target belongs to \(existing.conversationID.prefix(16))..., not \(conversationID.prefix(16))..."
+        )
+        return .dropped
+      }
+
       // A tombstoned message has no text left to edit — delete always wins.
       if existing.isTombstone == 1 {
         self.logger.info(
@@ -3154,10 +3161,11 @@ public final class MLSStorage: @unchecked Sendable {
               isEdited = 1,
               editedAt = ?,
               appliedEditSeq = ?
-          WHERE messageID = ? AND currentUserDID = ?;
+          WHERE messageID = ? AND conversationID = ? AND currentUserDID = ?;
           """,
         arguments: [
-          encryptedWire, entryHMAC, Date(), editSeq, targetMessageID, normalizedUserDID,
+          encryptedWire, entryHMAC, Date(), editSeq, targetMessageID, conversationID,
+          normalizedUserDID,
         ])
 
       self.logger.info("[EDIT] Applied edit seq=\(editSeq) to \(targetMessageID.prefix(16))...")
@@ -3198,6 +3206,13 @@ public final class MLSStorage: @unchecked Sendable {
           .fetchOne(db)
       else {
         return .notFound
+      }
+
+      guard existing.conversationID == conversationID else {
+        self.logger.warning(
+          "[DELETE] Rejected cross-conversation delete for \(targetMessageID.prefix(16))... — target belongs to \(existing.conversationID.prefix(16))..., not \(conversationID.prefix(16))..."
+        )
+        return .dropped
       }
 
       if existing.isTombstone == 1 {
@@ -3247,11 +3262,11 @@ public final class MLSStorage: @unchecked Sendable {
               entryHMAC = ?,
               isTombstone = 1,
               deletedAt = ?
-          WHERE messageID = ? AND currentUserDID = ?;
+          WHERE messageID = ? AND conversationID = ? AND currentUserDID = ?;
           """,
         arguments: [
           encryptedWire, entryHMAC, Int64(Date().timeIntervalSince1970 * 1000), targetMessageID,
-          normalizedUserDID,
+          conversationID, normalizedUserDID,
         ])
 
       // Remove all reactions attached to the target, including still-pending
@@ -3259,11 +3274,13 @@ public final class MLSStorage: @unchecked Sendable {
       _ =
         try MLSReactionModel
         .filter(MLSReactionModel.Columns.messageID == targetMessageID)
+        .filter(MLSReactionModel.Columns.conversationID == conversationID)
         .filter(MLSReactionModel.Columns.currentUserDID == normalizedUserDID)
         .deleteAll(db)
       _ =
         try MLSOrphanedReactionModel
         .filter(MLSOrphanedReactionModel.Columns.messageID == targetMessageID)
+        .filter(MLSOrphanedReactionModel.Columns.conversationID == conversationID)
         .filter(MLSOrphanedReactionModel.Columns.currentUserDID == normalizedUserDID)
         .deleteAll(db)
 
@@ -3272,6 +3289,7 @@ public final class MLSStorage: @unchecked Sendable {
       _ =
         try MLSOrphanedMutationModel
         .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+        .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
         .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.edit.rawValue)
         .deleteAll(db)
@@ -3300,6 +3318,7 @@ public final class MLSStorage: @unchecked Sendable {
       let hasPendingDelete =
         try MLSOrphanedMutationModel
         .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+        .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
         .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
         .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.delete.rawValue)
         .fetchCount(db) > 0
@@ -3319,6 +3338,7 @@ public final class MLSStorage: @unchecked Sendable {
         let existingEdits =
           try MLSOrphanedMutationModel
           .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+          .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
           .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
           .filter(MLSOrphanedMutationModel.Columns.applierDID == normalizedApplierDID)
           .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.edit.rawValue)
@@ -3341,12 +3361,14 @@ public final class MLSStorage: @unchecked Sendable {
         _ =
           try MLSOrphanedMutationModel
           .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+          .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
           .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
           .filter(MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.edit.rawValue)
           .deleteAll(db)
         _ =
           try MLSOrphanedMutationModel
           .filter(MLSOrphanedMutationModel.Columns.targetMessageID == targetMessageID)
+          .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
           .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
           .filter(
             MLSOrphanedMutationModel.Columns.mutationType == MLSMutationKind.delete.rawValue
@@ -3465,6 +3487,7 @@ public final class MLSStorage: @unchecked Sendable {
     let orphans = try await database.read { db in
       try MLSOrphanedMutationModel
         .filter(MLSOrphanedMutationModel.Columns.targetMessageID == messageID)
+        .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
         .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
         .fetchAll(db)
     }
@@ -3492,6 +3515,7 @@ public final class MLSStorage: @unchecked Sendable {
         _ =
           try MLSOrphanedMutationModel
           .filter(MLSOrphanedMutationModel.Columns.targetMessageID == messageID)
+          .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
           .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
           .deleteAll(db)
       }
@@ -3527,6 +3551,7 @@ public final class MLSStorage: @unchecked Sendable {
       _ =
         try MLSOrphanedMutationModel
         .filter(MLSOrphanedMutationModel.Columns.targetMessageID == messageID)
+        .filter(MLSOrphanedMutationModel.Columns.conversationID == conversationID)
         .filter(MLSOrphanedMutationModel.Columns.currentUserDID == normalizedUserDID)
         .deleteAll(db)
     }

@@ -3102,6 +3102,30 @@ public extension MLSConversationManager {
 
         switch payload.messageType {
         case .text:
+          if let originalId = payload.recoveredMessageId {
+            let validRecovery = await Self.isValidIncomingRecoveryResponse(
+              recoveredMessageId: originalId,
+              conversationId: message.convoId,
+              senderDID: senderDID,
+              currentUserDID: userDid,
+              database: database
+            )
+            guard validRecovery else {
+              logger.warning(
+                "🛡️ [RECOVERY] Rejecting incoming recovery response in \(message.convoId.prefix(16), privacy: .private) for \(originalId.prefix(16), privacy: .private) from \(senderDID.prefix(24), privacy: .private)"
+              )
+              _ = try await persistProcessedPayload(
+                message: message,
+                payload: MLSMessagePayload(messageType: .unknown),
+                senderID: senderDID,
+                processingError: nil,
+                validationReason: "invalid_recovery_response",
+                context: context
+              )
+              return .nonApplication
+            }
+          }
+
           // Persist payload for text messages
           let adopted = try await persistProcessedPayload(
             message: message,
@@ -3127,10 +3151,18 @@ public extension MLSConversationManager {
 
           // If this is a recovery response, mark the original failed message as recovered.
           if let originalId = payload.recoveredMessageId {
+            let normalizedOriginalSender = MLSStorageHelpers.normalizeDID(
+              MLSCredentialBinding.credentialRootDID(senderDID)
+            )
             try? await database.write { db in
               try db.execute(
-                sql: "UPDATE MLSMessageModel SET processingState = 'recovered' WHERE messageID = ? AND conversationID = ? AND currentUserDID = ?",
-                arguments: [originalId, message.convoId, MLSStorageHelpers.normalizeDID(userDid)]
+                sql: "UPDATE MLSMessageModel SET processingState = 'recovered' WHERE messageID = ? AND conversationID = ? AND currentUserDID = ? AND LOWER(TRIM(CASE WHEN INSTR(senderID, '#') > 0 THEN SUBSTR(senderID, 1, INSTR(senderID, '#') - 1) ELSE senderID END)) = ?",
+                arguments: [
+                  originalId,
+                  message.convoId,
+                  MLSStorageHelpers.normalizeDID(userDid),
+                  normalizedOriginalSender,
+                ]
               )
             }
           }

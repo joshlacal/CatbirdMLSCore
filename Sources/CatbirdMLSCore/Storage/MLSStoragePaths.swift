@@ -59,6 +59,10 @@ public enum MLSStoragePaths {
     SHA256.hash(data: Data(normalizeDID(did).utf8)).map { String(format: "%02x", $0) }.joined()
   }
 
+  public static func didHash(for userDID: String) -> String {
+    didHash(userDID)
+  }
+
   static func quarantineTag(for userDID: String) -> String {
     didHash(userDID)
   }

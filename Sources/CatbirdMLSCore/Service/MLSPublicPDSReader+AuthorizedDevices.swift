@@ -15,21 +15,8 @@ extension MLSPublicPDSReader {
     return defaultAuthorizationSession
   }
 
-  private static let defaultAuthorizationSession: URLSession = {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.httpCookieStorage = nil
-    configuration.urlCredentialStorage = nil
-    configuration.httpShouldSetCookies = false
-    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-    return URLSession(configuration: configuration, delegate: AuthorizationRedirectPolicy(), delegateQueue: nil)
-  }()
-
-  private final class AuthorizationRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-      willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
-      completionHandler: @escaping (URLRequest?) -> Void) {
-      completionHandler(nil)
-    }
+  private static var defaultAuthorizationSession: URLSession {
+    MLSBoundedURLSession.shared.underlyingSession
   }
 
   /// Strict canonical URL normalization for production trust-path endpoint matching.
@@ -96,10 +83,11 @@ extension MLSPublicPDSReader {
     let services = document.service.filter {
       ($0.id == "#atproto_pds" || $0.id == "\(did)#atproto_pds") && $0.type == "AtprotoPersonalDataServer"
     }
-    guard services.count == 1, let service = services.first,
-          let endpoint = URL(string: service.serviceEndpoint), endpoint.scheme == "https",
-          endpoint.host != nil, endpoint.user == nil, endpoint.password == nil,
-          endpoint.fragment == nil else { throw ReaderError.invalidEndpoint }
+    guard services.count == 1,
+          let service = services.first,
+          let endpoint = URL(string: service.serviceEndpoint),
+          MLSOutboundHTTPValidator.isValidPublicHTTPSServiceEndpoint(endpoint)
+    else { throw ReaderError.invalidEndpoint }
     return endpoint
   }
 
@@ -113,8 +101,7 @@ extension MLSPublicPDSReader {
     guard did.hasPrefix("did:web:") else { throw ReaderError.invalidResponse }
     if did != directRequestReceiptAuthorityDID {
       let url = try SpaceHostResolver.didDocumentURL(for: did)
-      guard let host = url.host?.lowercased(),
-            host != "localhost", host != "127.0.0.1", host != "::1"
+      guard MLSOutboundHTTPValidator.isValidPublicHTTPSServiceEndpoint(url)
       else { throw ReaderError.invalidEndpoint }
       let limits = NetworkResponseLimits(
         maximumWireBytes: 1_048_576, maximumDecodedBytes: 1_048_576)
@@ -156,9 +143,17 @@ extension MLSPublicPDSReader {
     var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.timeoutInterval = 10.0
-    let (data, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse,
-          http.statusCode == 200,
+    let (data, http): (Data, HTTPURLResponse)
+    do {
+      (data, http) = try await MLSBoundedURLSession.fetchData(
+        for: request,
+        maxBytes: MLSBoundedURLSession.pdsRecordMaxBytes,
+        session: session
+      )
+    } catch is MLSBoundedURLSession.BoundedFetchError {
+      throw ReaderError.invalidResponse
+    }
+    guard http.statusCode == 200,
           isMatchingEndpoint(http.url, expected: url),
           data.count <= 1_048_576
     else { throw ReaderError.invalidResponse }
@@ -234,9 +229,17 @@ extension MLSPublicPDSReader {
       if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
       var request = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData)
       request.setValue("application/json", forHTTPHeaderField: "Accept")
-      let (data, response) = try await session.data(for: request)
-      guard let http = response as? HTTPURLResponse,
-            http.url?.scheme == baseURL.scheme, http.url?.host == baseURL.host,
+      let (data, http): (Data, HTTPURLResponse)
+      do {
+        (data, http) = try await MLSBoundedURLSession.fetchData(
+          for: request,
+          maxBytes: MLSBoundedURLSession.pdsRecordMaxBytes,
+          session: session
+        )
+      } catch is MLSBoundedURLSession.BoundedFetchError {
+        throw ReaderError.invalidResponse
+      }
+      guard http.url?.scheme == baseURL.scheme, http.url?.host == baseURL.host,
             http.url?.port == baseURL.port else { throw ReaderError.invalidResponse }
       guard (200...299).contains(http.statusCode) else { throw ReaderError.httpStatus(http.statusCode) }
       let page = try decodeAuthorizedDevicePage(data, did: did)
