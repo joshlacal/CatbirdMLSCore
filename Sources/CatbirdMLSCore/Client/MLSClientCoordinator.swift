@@ -31,6 +31,7 @@ extension RequestCapabilities: @unchecked Sendable {}
 extension EnrollmentReceipt: @unchecked Sendable {}
 extension MemberRole: @unchecked Sendable {}
 extension PlatformChangeEvent: @unchecked Sendable {}
+extension QueuedLabyrinthArchivePayload: @unchecked Sendable {}
 
 public enum MLSAppGroupStorage {
   public static let appGroupIdentifier = "group.blue.catbird.shared"
@@ -296,6 +297,7 @@ public final class MLSClientCoordinator {
 
   @ObservationIgnored private let client: CatbirdMlsClient
   @ObservationIgnored private let observerBridge: CoordinatorObserverBridge
+  @ObservationIgnored private let outboxDrainCoalescer = OutboxDrainCoalescer()
   @ObservationIgnored private var darwinToken: DarwinNotificationToken?
   @ObservationIgnored public var onChangeCallback: (@MainActor (PlatformChangeEvent) -> Void)?
 
@@ -381,11 +383,13 @@ public final class MLSClientCoordinator {
   public func enrollDevice(grantedScopes: [String]) async throws -> EnrollmentReceipt {
     let c = client
     let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
-    return try await runOffMain {
+    let receipt = try await runOffMain {
       let receipt = try c.enrollDevice(grantedOauthScopes: grantedScopes)
       try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
       return receipt
     }
+    scheduleBackgroundOutboxDrain()
+    return receipt
   }
 
   public func createGroup(
@@ -442,9 +446,11 @@ public final class MLSClientCoordinator {
     text: String
   ) async throws -> MessageRow {
     let c = client
-    return try await runOffMain {
+    let row = try await runOffMain {
       try c.sendMessage(conversationId: conversationId, messageId: messageId, text: text)
     }
+    scheduleBackgroundOutboxDrain()
+    return row
   }
 
   public func acceptDirectRequest(requestId: String) async throws {
@@ -518,23 +524,29 @@ public final class MLSClientCoordinator {
 
   public func setupRecoveryCode() async throws -> String {
     let c = client
-    return try await runOffMain {
+    let code = try await runOffMain {
       try c.setupRecoveryCode()
     }
+    scheduleBackgroundOutboxDrain()
+    return code
   }
 
   public func restoreWithRecoveryCode(_ code: String) async throws -> LabyrinthBackupStatus {
     let c = client
-    return try await runOffMain {
+    let status = try await runOffMain {
       try c.restoreWithRecoveryCode(recoveryCodeInput: code)
     }
+    scheduleBackgroundOutboxDrain()
+    return status
   }
 
   public func registerPasskeyPrf(credentialId: Data, prfOutput32: Data) async throws -> LabyrinthBackupStatus {
     let c = client
-    return try await runOffMain {
+    let status = try await runOffMain {
       try c.registerPasskeyPrf(credentialId: credentialId, prfOutput32: prfOutput32)
     }
+    scheduleBackgroundOutboxDrain()
+    return status
   }
 
   public func initiateOtcPairing() async throws -> OtcPairingOffer {
@@ -546,9 +558,11 @@ public final class MLSClientCoordinator {
 
   public func completeOtcPairing(sixDigitCode: String) async throws -> OtcPairingCompletion {
     let c = client
-    return try await runOffMain {
+    let completion = try await runOffMain {
       try c.completeOtcPairing(sixDigitCode: sixDigitCode)
     }
+    scheduleBackgroundOutboxDrain()
+    return completion
   }
 
   public func revokeLabyrinthDevice(targetDeviceId: String) async throws -> LabyrinthBackupStatus {
@@ -568,10 +582,50 @@ public final class MLSClientCoordinator {
     }
   }
 
+  public func listPendingLabyrinthQueue(
+    conversationId: String? = nil,
+    limit: UInt32 = 100
+  ) async throws -> [QueuedLabyrinthArchivePayload] {
+    let c = client
+    return try await runOffMain {
+      try c.listPendingLabyrinthQueue(conversationId: conversationId, limit: limit)
+    }
+  }
+
+  @discardableResult
+  public func flushLabyrinthQueue() async throws -> UInt32 {
+    let c = client
+    return try await runOffMain {
+      try c.flushLabyrinthQueue()
+    }
+  }
+
+  @discardableResult
+  public func rescueConversationOnKick(conversationId: String) async throws -> UInt32 {
+    let c = client
+    return try await runOffMain {
+      try c.rescueConversationOnKick(conversationId: conversationId)
+    }
+  }
+
+  @discardableResult
+  public func restoreConversationFromOwnerMailbox(conversationId: String) async throws -> UInt32 {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    return try await runOffMain {
+      let restored = try c.restoreConversationFromOwnerMailbox(conversationId: conversationId)
+      if restored > 0 {
+        try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      }
+      return restored
+    }
+  }
+
   // MARK: - Lifecycle (I9, I11, Sign-Out)
 
   @discardableResult
   public func prepareForBackground() async throws -> BackgroundCheckpointReport {
+    outboxDrainCoalescer.setSuspended(true)
     let c = client
     return try await runOffMain {
       try c.prepareForBackground()
@@ -586,9 +640,12 @@ public final class MLSClientCoordinator {
       try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
     }
     isClosedForSession = false
+    outboxDrainCoalescer.setSuspended(false)
+    scheduleBackgroundOutboxDrain()
   }
 
   public func signOutAndWipe() async throws {
+    outboxDrainCoalescer.setSuspended(true)
     darwinToken?.unregister(notificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification)
     darwinToken = nil
     let c = client
@@ -599,6 +656,7 @@ public final class MLSClientCoordinator {
   }
 
   public func close() async {
+    outboxDrainCoalescer.setSuspended(true)
     darwinToken?.unregister(notificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification)
     darwinToken = nil
     let c = client
@@ -608,13 +666,29 @@ public final class MLSClientCoordinator {
     isClosedForSession = true
   }
 
-  // MARK: - Internal Observers
+  // MARK: - Internal Observers & Background Outbox Drain
 
   nonisolated private static let ffiDispatchQueue = DispatchQueue(
     label: "blue.catbird.mls.coordinator.ffi",
     qos: .userInitiated,
     attributes: .concurrent
   )
+
+  private func scheduleBackgroundOutboxDrain() {
+    guard !isHandleClosed else { return }
+    let coalescer = outboxDrainCoalescer
+    guard coalescer.requestDrain() else { return }
+    let c = client
+    Self.ffiDispatchQueue.async {
+      guard coalescer.beginIteration(isHandleClosed: c.isHandleClosed()) else {
+        return
+      }
+      repeat {
+        _ = try? c.flushLabyrinthQueue()
+      } while coalescer.completeIteration(isHandleClosed: c.isHandleClosed())
+        && coalescer.beginIteration(isHandleClosed: c.isHandleClosed())
+    }
+  }
 
   fileprivate func recordPlatformChange(_ event: PlatformChangeEvent) {
     changeRevision &+= 1
@@ -639,6 +713,60 @@ public final class MLSClientCoordinator {
         continuation.resume(with: Result { try operation() })
       }
     }
+  }
+}
+
+private final class OutboxDrainCoalescer: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isDraining = false
+  private var needsAnotherPass = false
+  private var isSuspended = false
+
+  func setSuspended(_ suspended: Bool) {
+    lock.lock()
+    isSuspended = suspended
+    if suspended {
+      needsAnotherPass = false
+    }
+    lock.unlock()
+  }
+
+  func requestDrain() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !isSuspended else {
+      return false
+    }
+    if isDraining {
+      needsAnotherPass = true
+      return false
+    }
+    isDraining = true
+    needsAnotherPass = false
+    return true
+  }
+
+  func beginIteration(isHandleClosed: Bool) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if isSuspended || isHandleClosed {
+      isDraining = false
+      needsAnotherPass = false
+      return false
+    }
+    needsAnotherPass = false
+    return true
+  }
+
+  func completeIteration(isHandleClosed: Bool) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if isSuspended || isHandleClosed || !needsAnotherPass {
+      isDraining = false
+      needsAnotherPass = false
+      return false
+    }
+    return true
   }
 }
 
