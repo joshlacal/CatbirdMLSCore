@@ -179,7 +179,7 @@ enum MLSPublicPDSReader {
   }
 
   private struct RecordItem: Decodable {
-    let value: MLSDeviceRecord?
+    let value: BlueCatbirdChatDevice?
 
     enum CodingKeys: String, CodingKey { case value }
 
@@ -187,7 +187,7 @@ enum MLSPublicPDSReader {
       let container = try decoder.container(keyedBy: CodingKeys.self)
       // Lenient: a `value` that isn't a device record decodes to nil instead of throwing,
       // so one foreign/legacy record can't poison the whole batch.
-      value = try? container.decode(MLSDeviceRecord.self, forKey: .value)
+      value = try? container.decode(BlueCatbirdChatDevice.self, forKey: .value)
     }
   }
 }

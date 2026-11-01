@@ -45,6 +45,8 @@ enum MLSOutboundHTTPValidator {
     "blue.catbird.mlsChat.",
     "blue.catbird.mls.",
     "blue.catbird.labyrinth.",
+    "blue.catbird.push.",
+    "com.atproto.space.",
   ]
 
   /// Validates a DID-derived `#catbird_labyrinth` or `#atproto_pds` service endpoint against SSRF,

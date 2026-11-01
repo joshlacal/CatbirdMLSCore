@@ -54,9 +54,8 @@ fi
 core_scripts_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 core_dir="$(CDPATH= cd -- "$core_scripts_dir/.." && pwd)"
 artifact_manifest_tool="$core_scripts_dir/apple-artifact-manifest.py"
-# The public v1.5.21 artifact keeps its original generated interface.
-# Updated callback metadata has new UniFFI checksums even when signatures match.
-space_bindings_dir="$core_dir/Sources/CatbirdMLSSpaces"
+# Clean-Slate unified bindings live in Sources/CatbirdMLS.
+space_bindings_dir="$core_dir/Sources/CatbirdMLS"
 if [ ! -f "$artifact_manifest_tool" ]; then
     echo "❌ Apple artifact manifest tool is absent: $artifact_manifest_tool"
     exit 1

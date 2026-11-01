@@ -430,22 +430,6 @@ private struct FfiConverterUInt32: FfiConverterPrimitive {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterInt32: FfiConverterPrimitive {
-    typealias FfiType = Int32
-    typealias SwiftType = Int32
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int32 {
-        return try lift(readInt(&buf))
-    }
-
-    static func write(_ value: Int32, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
 private struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -472,22 +456,6 @@ private struct FfiConverterInt64: FfiConverterPrimitive {
 
     static func write(_ value: Int64, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterFloat: FfiConverterPrimitive {
-    typealias FfiType = Float
-    typealias SwiftType = Float
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
-        return try lift(readFloat(&buf))
-    }
-
-    static func write(_ value: Float, into buf: inout [UInt8]) {
-        writeFloat(&buf, lower(value))
     }
 }
 
@@ -575,101 +543,73 @@ private struct FfiConverterData: FfiConverterRustBuffer {
 }
 
 /**
- * UniFFI-exported CatbirdClient — the simple chat API for Swift/Kotlin.
- *
- * Provides conversations, messages, and sync without exposing any MLS internals.
- * Swift/Kotlin provides the platform-specific storage, API, and credential backends
- * via the same callback interfaces used by OrchestratorBridge.
+ * Unified per-account MLS + Labyrinth SDK client (`Spec §6.3`).
  */
-public protocol CatbirdClientBridgeProtocol: AnyObject {
-    /**
-     * Add participants to an existing conversation.
-     */
-    func addParticipants(conversationId: String, participantDids: [String]) throws
+public protocol CatbirdMlsClientProtocol: AnyObject {
+    func acceptDirectRequest(requestId: String) throws
 
-    func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome
+    func accountDid() -> String
 
-    func closeDirectRequest(conversationId: String) throws -> DirectRequestView
+    func accountDidHash() -> String
 
-    /**
-     * List all conversations.
-     */
-    func conversations() throws -> [Conversation]
+    func acknowledgeEntriesUpTo(conversationId: String, upToSeq: Int64) throws
 
-    /**
-     * Create a new conversation.
-     */
-    func createConversation(name: String?, participantDids: [String]) throws -> Conversation
+    func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus
 
-    /**
-     * Fetch new messages from the server for a conversation.
-     */
-    func fetchNewMessages(conversationId: String, cursor: String?, limit: UInt32) throws -> [ChatMessage]
+    func completeOtcPairing(sixDigitCode: String) throws -> OtcPairingCompletion
 
-    func getDirectRequestDeliveryEnabled() throws -> Bool?
+    func createGroup(conversationId: String, sequencerDid: String, title: String?, description: String?) throws -> ConversationRow
 
-    func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference?
+    func declineDirectRequest(requestId: String) throws
 
-    /**
-     * Leave a conversation.
-     */
-    func leaveConversation(conversationId: String) throws
+    func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt
 
-    func listDirectRequestViews() throws -> [DirectRequestView]
+    func getGroupMetadata(conversationId: String) throws -> GroupMetadataRow?
 
-    /**
-     * Get message history for a conversation.
-     */
-    func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64?) throws -> [ChatMessage]
+    func handleDarwinPushWakeup() throws
 
-    func refreshRequestPreview(conversationId: String) throws -> DirectRequestView
+    func importConversationHistory(conversationId: String, messages: [MessageRow]) throws -> UInt32
 
-    /**
-     * Remove participants from a conversation.
-     */
-    func removeParticipants(conversationId: String, participantDids: [String]) throws
+    func initiateOtcPairing() throws -> OtcPairingOffer
 
-    func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome
+    func isHandleClosed() -> Bool
 
-    /**
-     * Send a text message to a conversation.
-     */
-    func sendMessage(conversationId: String, text: String) throws -> ChatMessage
+    func labyrinthStatus() throws -> LabyrinthBackupStatus
 
-    func setDirectRequestDeliveryEnabled(enabled: Bool) throws
+    func listConversations(beforeUpdatedMs: Int64?, limit: UInt32) throws -> [ConversationRow]
 
-    /**
-     * Shut down the client, releasing all resources.
-     */
-    func shutdown()
+    func listMessages(conversationId: String, beforeSeq: Int64?, limit: UInt32) throws -> [MessageRow]
 
-    func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome
+    func listRequests(consentFilter: String?) throws -> [RequestRow]
 
-    /**
-     * Sync conversations and messages with the server.
-     */
-    func sync(fullSync: Bool) throws
+    func preCutoverWipeReport() -> PreCutoverWipeReport
 
-    /**
-     * Update the read cursor for a conversation.
-     */
-    func updateCursor(conversationId: String, cursor: String) throws
+    func prepareForBackground() throws -> BackgroundCheckpointReport
 
-    /**
-     * Get the current user's DID.
-     */
-    func userDid() -> String
+    func registerPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus
+
+    func removeGroupMember(actorRole: MemberRole, conversationId: String, targetDid: String) throws
+
+    func restoreWithRecoveryCode(recoveryCodeInput: String) throws -> LabyrinthBackupStatus
+
+    func resumeFromBackground() throws
+
+    func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus
+
+    func sendMessage(conversationId: String, messageId: String, text: String) throws -> MessageRow
+
+    func setupRecoveryCode() throws -> String
+
+    func signOutAndWipe() throws
+
+    func updateGroupMetadata(conversationId: String, title: String, description: String, spaceAvatar: SpaceAvatarPointer?) throws -> GroupMetadataRow
 }
 
 /**
- * UniFFI-exported CatbirdClient — the simple chat API for Swift/Kotlin.
- *
- * Provides conversations, messages, and sync without exposing any MLS internals.
- * Swift/Kotlin provides the platform-specific storage, API, and credential backends
- * via the same callback interfaces used by OrchestratorBridge.
+ * Unified per-account MLS + Labyrinth SDK client (`Spec §6.3`).
  */
-open class CatbirdClientBridge:
-    CatbirdClientBridgeProtocol
+open class CatbirdMlsClient:
+    CatbirdMlsClientProtocol
 {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
@@ -704,2634 +644,235 @@ open class CatbirdClientBridge:
         @_documentation(visibility: private)
     #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_catbird_mls_fn_clone_catbirdclientbridge(self.pointer, $0) }
+        return try! rustCall { uniffi_catbird_mls_fn_clone_catbirdmlsclient(self.pointer, $0) }
     }
 
-    /**
-     * Create and initialize a new CatbirdClient.
-     *
-     * - `user_did`: The authenticated user's DID
-     * - `mls_context`: The low-level MLS FFI context
-     * - `storage`: Platform storage callback (same as OrchestratorBridge)
-     * - `api_client`: Platform API client callback (same as OrchestratorBridge)
-     * - `credentials`: Platform credential store callback (same as OrchestratorBridge)
-     * - `config`: Orchestrator configuration
-     */
-    public convenience init(userDid: String, mlsContext: MlsContext, storage: OrchestratorStorageCallback, apiClient: OrchestratorApiCallback, credentials: OrchestratorCredentialCallback, capabilities: SecurityStorageCapabilities, config: FfiOrchestratorConfig) throws {
-        let pointer =
-            try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-                uniffi_catbird_mls_fn_constructor_catbirdclientbridge_new(
-                    FfiConverterString.lower(userDid),
-                    FfiConverterTypeMLSContext.lower(mlsContext),
-                    FfiConverterCallbackInterfaceOrchestratorStorageCallback.lower(storage),
-                    FfiConverterCallbackInterfaceOrchestratorApiCallback.lower(apiClient),
-                    FfiConverterCallbackInterfaceOrchestratorCredentialCallback.lower(credentials),
-                    FfiConverterTypeSecurityStorageCapabilities.lower(capabilities),
-                    FfiConverterTypeFFIOrchestratorConfig.lower(config), $0
-                )
-            }
-        self.init(unsafeFromRawPointer: pointer)
-    }
+    // No primary constructor declared for this class.
 
     deinit {
         guard let pointer = pointer else {
             return
         }
 
-        try! rustCall { uniffi_catbird_mls_fn_free_catbirdclientbridge(pointer, $0) }
+        try! rustCall { uniffi_catbird_mls_fn_free_catbirdmlsclient(pointer, $0) }
     }
 
-    /**
-     * Add participants to an existing conversation.
-     */
-    open func addParticipants(conversationId: String, participantDids: [String]) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_add_participants(self.uniffiClonePointer(),
-                                                                              FfiConverterString.lower(conversationId),
-                                                                              FfiConverterSequenceString.lower(participantDids), $0)
+    public static func open(config: CatbirdMlsClientConfig, keystore: PlatformKeyStore, transport: PlatformTransport, observer: PlatformChangeObserver?) throws -> CatbirdMlsClient {
+        return try FfiConverterTypeCatbirdMlsClient.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_constructor_catbirdmlsclient_open(
+                FfiConverterTypeCatbirdMlsClientConfig.lower(config),
+                FfiConverterTypePlatformKeyStore.lower(keystore),
+                FfiConverterTypePlatformTransport.lower(transport),
+                FfiConverterOptionTypePlatformChangeObserver.lower(observer), $0
+            )
+        })
+    }
+
+    open func acceptDirectRequest(requestId: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_accept_direct_request(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(requestId), $0)
         }
     }
 
-    open func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
-        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_cancel_direct_request(self.uniffiClonePointer(),
-                                                                                   FfiConverterString.lower(draftId), $0)
-        })
-    }
-
-    open func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
-        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_close_direct_request(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    /**
-     * List all conversations.
-     */
-    open func conversations() throws -> [Conversation] {
-        return try FfiConverterSequenceTypeConversation.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_conversations(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Create a new conversation.
-     */
-    open func createConversation(name: String?, participantDids: [String]) throws -> Conversation {
-        return try FfiConverterTypeConversation.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_create_conversation(self.uniffiClonePointer(),
-                                                                                 FfiConverterOptionString.lower(name),
-                                                                                 FfiConverterSequenceString.lower(participantDids), $0)
-        })
-    }
-
-    /**
-     * Fetch new messages from the server for a conversation.
-     */
-    open func fetchNewMessages(conversationId: String, cursor: String?, limit: UInt32) throws -> [ChatMessage] {
-        return try FfiConverterSequenceTypeChatMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_fetch_new_messages(self.uniffiClonePointer(),
-                                                                                FfiConverterString.lower(conversationId),
-                                                                                FfiConverterOptionString.lower(cursor),
-                                                                                FfiConverterUInt32.lower(limit), $0)
-        })
-    }
-
-    open func getDirectRequestDeliveryEnabled() throws -> Bool? {
-        return try FfiConverterOptionBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_get_direct_request_delivery_enabled(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    open func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference? {
-        return try FfiConverterOptionTypeGroupInvitationReference.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_get_group_invitation_reference(self.uniffiClonePointer(),
-                                                                                            FfiConverterString.lower(conversationId),
-                                                                                            FfiConverterString.lower(recipientDid), $0)
-        })
-    }
-
-    /**
-     * Leave a conversation.
-     */
-    open func leaveConversation(conversationId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_leave_conversation(self.uniffiClonePointer(),
-                                                                                FfiConverterString.lower(conversationId), $0)
-        }
-    }
-
-    open func listDirectRequestViews() throws -> [DirectRequestView] {
-        return try FfiConverterSequenceTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_list_direct_request_views(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Get message history for a conversation.
-     */
-    open func messages(conversationId: String, limit: Int32?, beforeSequence: UInt64?) throws -> [ChatMessage] {
-        return try FfiConverterSequenceTypeChatMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_messages(self.uniffiClonePointer(),
-                                                                      FfiConverterString.lower(conversationId),
-                                                                      FfiConverterOptionInt32.lower(limit),
-                                                                      FfiConverterOptionUInt64.lower(beforeSequence), $0)
-        })
-    }
-
-    open func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
-        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_refresh_request_preview(self.uniffiClonePointer(),
-                                                                                     FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    /**
-     * Remove participants from a conversation.
-     */
-    open func removeParticipants(conversationId: String, participantDids: [String]) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_remove_participants(self.uniffiClonePointer(),
-                                                                                 FfiConverterString.lower(conversationId),
-                                                                                 FfiConverterSequenceString.lower(participantDids), $0)
-        }
-    }
-
-    open func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
-        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_resume_direct_request(self.uniffiClonePointer(),
-                                                                                   FfiConverterString.lower(draftId), $0)
-        })
-    }
-
-    /**
-     * Send a text message to a conversation.
-     */
-    open func sendMessage(conversationId: String, text: String) throws -> ChatMessage {
-        return try FfiConverterTypeChatMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_send_message(self.uniffiClonePointer(),
-                                                                          FfiConverterString.lower(conversationId),
-                                                                          FfiConverterString.lower(text), $0)
-        })
-    }
-
-    open func setDirectRequestDeliveryEnabled(enabled: Bool) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_set_direct_request_delivery_enabled(self.uniffiClonePointer(),
-                                                                                                 FfiConverterBool.lower(enabled), $0)
-        }
-    }
-
-    /**
-     * Shut down the client, releasing all resources.
-     */
-    open func shutdown() {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_shutdown(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    open func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
-        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_start_direct_request(self.uniffiClonePointer(),
-                                                                                  FfiConverterTypeDirectRequestInput.lower(input), $0)
-        })
-    }
-
-    /**
-     * Sync conversations and messages with the server.
-     */
-    open func sync(fullSync: Bool) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_sync(self.uniffiClonePointer(),
-                                                                  FfiConverterBool.lower(fullSync), $0)
-        }
-    }
-
-    /**
-     * Update the read cursor for a conversation.
-     */
-    open func updateCursor(conversationId: String, cursor: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_update_cursor(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(conversationId),
-                                                                           FfiConverterString.lower(cursor), $0)
-        }
-    }
-
-    /**
-     * Get the current user's DID.
-     */
-    open func userDid() -> String {
+    open func accountDid() -> String {
         return try! FfiConverterString.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_catbirdclientbridge_user_did(self.uniffiClonePointer(), $0)
-        })
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeCatbirdClientBridge: FfiConverter {
-    typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = CatbirdClientBridge
-
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> CatbirdClientBridge {
-        return CatbirdClientBridge(unsafeFromRawPointer: pointer)
-    }
-
-    public static func lower(_ value: CatbirdClientBridge) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CatbirdClientBridge {
-        let v: UInt64 = try readInt(&buf)
-        // The Rust code won't compile if a pointer won't fit in a UInt64.
-        // We have to go via `UInt` because that's the thing that's the size of a pointer.
-        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if ptr == nil {
-            throw UniffiInternalError.unexpectedNullPointer
-        }
-        return try lift(ptr!)
-    }
-
-    public static func write(_ value: CatbirdClientBridge, into buf: inout [UInt8]) {
-        // This fiddling is because `Int` is the thing that's the same size as a pointer.
-        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
-        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeCatbirdClientBridge_lift(_ pointer: UnsafeMutableRawPointer) throws -> CatbirdClientBridge {
-    return try FfiConverterTypeCatbirdClientBridge.lift(pointer)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeCatbirdClientBridge_lower(_ value: CatbirdClientBridge) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeCatbirdClientBridge.lower(value)
-}
-
-/**
- * MLS context wrapper for FFI
- *
- * Uses Mutex instead of RwLock because:
- * - SQLite Connection uses RefCell (requires Send but not Sync)
- * - Swift actor provides higher-level synchronization
- * - Per-DID contexts are isolated (no shared state across accounts)
- */
-public protocol MlsContextProtocol: AnyObject {
-    /**
-     * Add members to a group.
-     *
-     * Backwards-compatible variant: does NOT re-seal group metadata at the new
-     * epoch (the three `metadata_*` fields of [`AddMembersResult`] are `None`).
-     * Prefer [`Self::add_members_with_metadata`] so newly-added members can
-     * decrypt group metadata at their join epoch.
-     */
-    func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult
-
-    /**
-     * Async variant of add_members - offloads crypto work to avoid blocking
-     */
-    func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult
-
-    func addMembersWithAad(groupId: Data, keyPackages: [KeyPackageData], aad: Data?) throws -> AddMembersResult
-
-    /**
-     * Add members to a group AND re-seal the group metadata at the post-add
-     * epoch so the newly-added member can decrypt it.
-     *
-     * The add commit embeds a fresh `MetadataReference` (new blob locator) and
-     * advances the epoch. Without a re-sealed blob at that locator, a Welcome'd
-     * member joins at the new epoch but the only metadata blob on the server is
-     * sealed at the creation epoch — which forward secrecy prevents them from
-     * decrypting. This variant seals the supplied metadata at `epoch + 1` under
-     * the same locator/version embedded in the commit. The caller MUST upload
-     * the returned `metadata_blob_ciphertext` via
-     * `putGroupMetadataBlob(metadata_blob_locator, metadata_version)`.
-     *
-     * Pass the group's CURRENT metadata content (title/description/avatar) —
-     * this method does not bump the metadata version for a content change, it
-     * re-seals the existing content at the new epoch.
-     */
-    func addMembersWithMetadata(groupId: Data, keyPackages: [KeyPackageData], title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> AddMembersResult
-
-    /**
-     * Check if suspension has been requested. Returns MLSError::ContextClosed if so.
-     */
-    func checkSuspended() throws
-
-    /**
-     * Drop the in-memory content root key.
-     */
-    func clearContentRootKey()
-
-    /**
-     * Clear pending commit for a group
-     * This should be called when a commit is rejected by the delivery service
-     * to clean up pending state in OpenMLS
-     */
-    func clearPendingCommit(groupId: Data) throws
-
-    /**
-     * Commit all pending proposals that have been validated and stored
-     */
-    func commitPendingProposals(groupId: Data) throws -> Data
-
-    /**
-     * Compute the hash reference for a serialized KeyPackage
-     *
-     * Accepts either an MlsMessage-wrapped KeyPackage or raw KeyPackage bytes.
-     * This is useful when you need to compute a hash from KeyPackage bytes received from the server.
-     *
-     * - Parameters:
-     * - key_package_bytes: Serialized KeyPackage data
-     * - Returns: Hash reference bytes
-     * - Throws: MLSError if deserialization or hashing fails
-     */
-    func computeKeyPackageHash(keyPackageBytes: Data) throws -> Data
-
-    /**
-     * Compute the chained HMAC tag for a message entry:
-     * `HMAC(K_hmac, prev_hmac || message_id || payload_wire)`. Use
-     * `prev_hmac = None` for the first entry in a chain (seeded with zeros).
-     */
-    func computeMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data) throws -> Data
-
-    /**
-     * Confirm a previously staged commit: merge it locally, advance the
-     * epoch, and remove the handle from the pending map.
-     *
-     * `server_epoch` is used to fence against confirm calls that reference
-     * a different epoch than the one the DS actually accepted. Pass the
-     * value returned by [`mls_skip_server_epoch_fence`] for API paths that
-     * don't echo an epoch; non-sentinel values must equal the plan's
-     * `target_epoch`, otherwise the staged commit is left in place and
-     * `MLSError::EpochMismatch` is returned so the caller can choose to
-     * `discard_pending` and re-sync.
-     *
-     * Post-merge bookkeeping (storage writes, GroupInfo publish,
-     * group-state cache update, epoch-secret cleanup) is the caller's
-     * responsibility — see the module-level comment for rationale.
-     */
-    func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws -> FfiConfirmedCommit
-
-    func createExternalCommit(groupInfoBytes: Data, identityBytes: Data) throws -> ExternalCommitResult
-
-    func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data) throws -> ExternalCommitResult
-
-    func createGroup(identityBytes: Data, config: GroupConfig?) throws -> GroupCreationResult
-
-    /**
-     * Async variant of create_group - offloads crypto work to avoid blocking
-     */
-    func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws -> GroupCreationResult
-
-    func createGroupDispatch(identityBytes: Data, predeterminedGroupId: Data?, config: GroupConfig?) throws -> GroupCreationResult
-
-    /**
-     * FFI/native entry point for creating a group at a predetermined `group_id`
-     * (spec §8.5 first-responder bootstrap). `group_id` is the raw bytes of
-     * the target MLS group identifier (NOT hex-encoded). All bootstrap
-     * candidates targeting the same `groupResetEvent.newGroupId` MUST land on
-     * the same MLS GroupId so the race winner's Welcome can deserialize for
-     * every recipient.
-     */
-    func createGroupWithId(identityBytes: Data, groupId: Data, config: GroupConfig?) throws -> GroupCreationResult
-
-    func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult
-
-    /**
-     * Create `count` key packages with a SINGLE persistence pass: one bundle-row
-     * transaction and one WAL checkpoint at the end of the batch, instead of a
-     * full manifest rewrite + checkpoint per package.
-     *
-     * 0xdead10cc prevention: the suspension flag is checked between packages.
-     * On suspension the batch stops early and returns the packages created so
-     * far (their bundles are persisted before returning); ContextClosed is
-     * returned only if suspension was signaled before any package was built.
-     */
-    func createKeyPackages(identityBytes: Data, count: UInt32) throws -> [KeyPackageResult]
-
-    func createLastResortKeyPackage(identityBytes: Data) throws -> KeyPackageResult
-
-    /**
-     * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
-     *
-     * This checks the manifest storage (KeyPackageBundle cache) which is the source of truth
-     * for which key packages this device can use to process Welcome messages.
-     *
-     * NOTE: This only checks the manifest, not OpenMLS internal storage. The manifest
-     * is what we control and what should contain all bundles we've created.
-     *
-     * - Parameters:
-     * - hash_hex: Hex-encoded hash reference to search for (raw bytes, not TLS-encoded)
-     * - Returns: true if found in manifest, false otherwise
-     * - Throws: MLSError if context is not initialized or hex is invalid
-     */
-    func debugCheckKeyPackageHash(hashHex: String) throws -> Bool
-
-    /**
-     * Get detailed debug information about all group members
-     *
-     * Returns information about each member including their leaf index,
-     * credential identity, and credential type. Useful for diagnosing
-     * member duplication issues.
-     *
-     * - Parameters:
-     * - group_id: Group identifier
-     * - Returns: GroupDebugInfo with all member details
-     * - Throws: MLSError if group not found
-     */
-    func debugGroupMembers(groupId: Data) throws -> GroupDebugInfo
-
-    /**
-     * 🔍 DEBUG: List all key package hashes from manifest storage
-     *
-     * Returns hex-encoded hash references for all key packages stored in the manifest.
-     * This is useful for diagnosing NoMatchingKeyPackage errors by comparing with
-     * the hash used in a Welcome message.
-     *
-     * - Returns: Array of hex-encoded hash references
-     * - Throws: MLSError if context is not initialized
-     */
-    func debugListKeyPackageHashes() throws -> [String]
-
-    /**
-     * Decrypt an incoming MLS message (FFI surface).
-     *
-     * N38: this is a thin wrapper over [`MLSContext::decrypt_message_classified`]
-     * that RE-FLATTENS process-stage error classes to
-     * [`MLSError::DecryptionFailed`]. iOS variant-matches `.DecryptionFailed`
-     * for ratchet-desync detection (MLSClient.swift) and string-matches
-     * `"DecryptionFailed"` (Messaging.swift); catmos-cli matches it too. The
-     * typed classes (`InvalidCommit`, `WireFormatPolicyViolation`,
-     * `TlsCodec`, wrong-epoch `OpenMLS` strings) are only surfaced to the
-     * in-process orchestrator via the `MlsCryptoContext` trait impl, which
-     * calls the classified fn directly.
-     */
-    func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult
-
-    /**
-     * Async variant of decrypt_message - offloads crypto work to avoid blocking
-     */
-    func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws -> DecryptResult
-
-    /**
-     * Decrypt a wire-format payload produced by
-     * [`encrypt_message_payload`] for the same `conversation_id`.
-     */
-    func decryptMessagePayload(conversationId: String, wire: Data) throws -> Data
-
-    /**
-     * Delete an MLS group from storage
-     * This should be called when a conversation is deleted or the user leaves
-     */
-    func deleteGroup(groupId: Data) throws
-
-    /**
-     * Delete consumed key package bundles from storage
-     *
-     * Removes specific key package bundles from both in-memory cache and persistent storage.
-     * This is useful for cleaning up bundles that were consumed by the server but remain in local storage.
-     *
-     * - Parameters:
-     * - hash_refs: Array of hash references (as returned by create_key_package) to delete
-     * - Returns: Number of bundles successfully deleted
-     * - Throws: MLSError if storage operation fails
-     */
-    func deleteKeyPackageBundles(hashRefs: [Data]) throws -> UInt64
-
-    /**
-     * Task #33: discard an incoming `StagedCommit` that was previously staged,
-     * without advancing the local epoch.
-     *
-     * Use this when the platform decides (e.g. via recovery policy) that the
-     * staged commit should not be applied — for instance if a fork/reset has
-     * been observed and the platform is about to initiate a rejoin.
-     *
-     * OpenMLS's own storage is **not** modified by this call. Only the
-     * in-memory staging handle is dropped. Any OpenMLS-side bookkeeping for
-     * the staged commit (proposal queue, etc.) is unaffected; the staged
-     * commit will be garbage collected via the normal epoch-advance path.
-     *
-     * Idempotent: no-op if no entry exists for `(group_id, target_epoch)`.
-     */
-    func discardIncomingCommit(groupId: Data, targetEpoch: UInt64) throws
-
-    /**
-     * Discard a previously staged commit without advancing the epoch.
-     * Clears the OpenMLS pending commit (so future sends can construct a
-     * new one) and removes the handle from the pending map.
-     *
-     * Calling `discard_pending` on an unknown or already-consumed handle
-     * returns `MLSError::InvalidInput`.
-     */
-    func discardPending(handle: FfiStagedCommitHandle) throws
-
-    /**
-     * Discard a pending external join after server rejection
-     *
-     * CRITICAL: Call this when the delivery service rejects an external commit.
-     * Failure to call this leaves orphaned cryptographic material.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier from create_external_commit result
-     *
-     * # Returns
-     * Ok(()) on success, error if group not found
-     */
-    func discardPendingExternalJoin(groupId: Data) throws
-
-    func encryptMessage(groupId: Data, plaintext: Data) throws -> EncryptResult
-
-    /**
-     * Async variant of encrypt_message - offloads crypto work to avoid blocking
-     */
-    func encryptMessageAsync(groupId: Data, plaintext: Data) async throws -> EncryptResult
-
-    /**
-     * Encrypt `plaintext` for `conversation_id` using the installed content
-     * root key. Returns the wire-format bytes: `[version(1) | nonce(12) |
-     * ciphertext+tag]`.
-     */
-    func encryptMessagePayload(conversationId: String, plaintext: Data) throws -> Data
-
-    /**
-     * Return the RFC 9420 §8.7 `epoch_authenticator` for the group's current
-     * epoch. Used to bind quorum-reset reports (spec §8.6 / ADR-002) so that a
-     * stale client can't forge a vote for an epoch it never observed.
-     */
-    func epochAuthenticator(groupId: Data) throws -> Data
-
-    /**
-     * Get the SHA-256 hash of the TLS-serialized GroupContext.
-     * Manually export epoch secret for a group
-     * Call this after creating the conversation record in SQLCipher to ensure
-     * the foreign key constraint is satisfied when storing the epoch secret
-     */
-    func exportEpochSecret(groupId: Data) throws
-
-    func exportGroupInfo(groupId: Data, signerIdentityBytes: Data) throws -> Data
-
-    /**
-     * Export a group's state for persistent storage
-     *
-     * Returns serialized bytes that can be stored in the keychain
-     * and later restored with import_group_state.
-     *
-     * - Parameters:
-     * - group_id: Group identifier to export
-     * - Returns: Serialized group state bytes
-     * - Throws: MLSError if group not found or serialization fails
-     */
-    func exportGroupState(groupId: Data) throws -> Data
-
-    /**
-     * Export the identity key pair for backup/recovery
-     * This allows the application to store the identity key in a separate secure location (e.g. Keychain)
-     * to survive app deletion/reinstall.
-     */
-    func exportIdentityKey(identity: String) throws -> Data
-
-    /**
-     * Export the canonical metadata encryption key (MEK) for a specific epoch.
-     */
-    func exportMetadataKey(groupId: Data, epoch: UInt64) throws -> Data
-
-    /**
-     * Export the canonical metadata encryption key (MEK) from a pending staged commit.
-     */
-    func exportMetadataKeyFromPending(groupId: Data, targetEpoch: UInt64) throws -> Data
-
-    func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret
-
-    /**
-     * Finalize an epoch transition after the host's stable projection is
-     * durable. The caller-provided epoch must exactly match current crypto
-     * state; stale or speculative projections cannot trigger secret pruning.
-     */
-    func finalizeEpochTransition(groupId: Data, projectedEpoch: UInt64) throws -> UInt32
-
-    /**
-     * Flush all pending database writes and CLOSE the database connections.
-     *
-     * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
-     * is transitioning to background/inactive state. It:
-     * 1. Interrupts any in-flight SQLCipher operations (unblocks the Mutex)
-     * 2. Flushes all pending SQLite writes to disk
-     * 3. Performs WAL checkpoint to consolidate data
-     * 4. CLOSES all database connections by dropping the inner context
-     * 5. Releases all file handles so iOS doesn't kill the app
-     *
-     * After calling this, the context is CLOSED and cannot be used for any operations.
-     * The Swift side must create a new context if MLS operations are needed again.
-     */
-    func flushAndPrepareClose() throws
-
-    /**
-     * Force flush all pending database writes to disk
-     *
-     * This executes a SQLite WAL checkpoint to ensure all pending writes are
-     * durably persisted to the main database file. Call this after batch operations
-     * like creating multiple key packages to ensure they survive app restart.
-     *
-     * - Returns: Nothing on success
-     * - Throws: MLSError if flush fails
-     */
-    func flushStorage() throws
-
-    /**
-     * Get the MLS confirmation tag for a group.
-     * Returns the exact 32-byte confirmation tag bytes from storage.
-     */
-    func getConfirmationTag(groupId: Data) throws -> Data
-
-    /**
-     * Derive the current metadata key for an already-joined group.
-     *
-     * Call this immediately after joining a group via Welcome or External Commit
-     * to bootstrap metadata decryption without waiting for a subsequent commit.
-     * Returns `None` if the group is not found or key derivation fails.
-     */
-    func getCurrentMetadata(groupId: Data) throws -> CurrentMetadataInfo?
-
-    func getEpoch(groupId: Data) throws -> UInt64
-
-    /**
-     * Get the SHA-256 MLS GroupContext hash for a group.
-     */
-    func getGroupContextHash(groupId: Data) throws -> Data
-
-    /**
-     * 🔍 DIAGNOSTIC: Get detailed debug state for a group
-     *
-     * Returns diagnostic information about a group's current state including:
-     * - Current epoch
-     * - Member count
-     * - Storage verification status
-     *
-     * This is useful for diagnosing SecretReuseError issues after app restart.
-     *
-     * - Parameters:
-     * - group_id: Group identifier
-     * - Returns: JSON string with debug information
-     * - Throws: MLSError if group not found
-     */
-    func getGroupDebugState(groupId: Data) throws -> String
-
-    /**
-     * Get the current member count of a group
-     *
-     * - Parameters:
-     * - group_id: Group identifier
-     * - Returns: Number of members in the group
-     * - Throws: MLSError if group not found
-     */
-    func getGroupMemberCount(groupId: Data) throws -> UInt32
-
-    /**
-     * Get the number of key package bundles currently cached
-     *
-     * This provides a direct count of key package bundles available for
-     * processing Welcome messages. A count of 0 indicates that Welcome
-     * messages cannot be processed and bundles need to be created.
-     *
-     * - Returns: Number of cached key package bundles
-     * - Throws: MLSError if context is not initialized
-     */
-    func getKeyPackageBundleCount() throws -> UInt64
-
-    /**
-     * List all pending proposals for a group with details
-     */
-    func getPendingProposalDetails(groupId: Data) throws -> [PendingProposalDetail]
-
-    /**
-     * Get the tree hash for a group at its current epoch
-     * Used for tree hash pinning to detect state divergence
-     */
-    func getTreeHash(groupId: Data) throws -> TreeHashData
-
-    /**
-     * Check if a group exists in local storage
-     * - Parameters:
-     * - group_id: Group identifier to check
-     * - Returns: true if group exists, false otherwise
-     */
-    func groupExists(groupId: Data) -> Bool
-
-    func identityPublicKey(identity: String) throws -> Data
-
-    /**
-     * Import a group's state from persistent storage
-     *
-     * Restores a previously exported group state. The group will be
-     * available for all MLS operations after import.
-     *
-     * - Parameters:
-     * - state_bytes: Serialized group state from export_group_state
-     * - Returns: Group ID of the imported group
-     * - Throws: MLSError if deserialization fails
-     */
-    func importGroupState(stateBytes: Data) throws -> Data
-
-    /**
-     * Import an identity key pair from backup/recovery
-     * This restores the identity key into the current storage provider
-     */
-    func importIdentityKey(identity: String, keyData: Data) throws
-
-    /**
-     * Interrupt all in-flight SQLCipher operations on this context.
-     *
-     * Safe to call from any thread — does NOT require the inner Mutex.
-     * Causes any running sqlite3_step/sqlite3_exec to return SQLITE_INTERRUPT.
-     * The interrupted operation will release the Mutex, allowing flush_and_prepare_close
-     * to acquire it promptly.
-     *
-     * Call this BEFORE flush_and_prepare_close to avoid blocking on the Mutex
-     * while an in-flight FFI operation holds it (which causes 0xdead10cc).
-     */
-    func interrupt()
-
-    /**
-     * Check if this context has been closed.
-     * Returns true if close_database() or flush_and_prepare_close() has been called.
-     */
-    func isClosed() -> Bool
-
-    /**
-     * Perform a launch-time TRUNCATE checkpoint to clear leftover WAL.
-     * Call once at app startup. Safe to call even if context was just created.
-     * Tolerates SQLITE_BUSY gracefully.
-     */
-    func launchCheckpoint() throws
-
-    /**
-     * List all pending proposals for a group
-     */
-    func listPendingProposals(groupId: Data) throws -> [ProposalRef]
-
-    /**
-     * Task #33: merge an incoming `StagedCommit` that was previously staged by
-     * `process_message` / `process_message_async` / `decrypt_message` /
-     * `decrypt_message_async` / `process_commit`.
-     *
-     * This is the caller-driven confirmation step that replaces the previous
-     * auto-merge behavior. The platform must call this once it has:
-     * - Validated the incoming commit against its recovery/sync policy
-     * - Persisted any pre-merge state it needs (ordering, ack state, etc.)
-     *
-     * Returns the accepted Commit's target epoch. A removed device is now
-     * inactive and has no successor secrets even if its public epoch advances.
-     * Rust orchestrators use `merge_incoming_commit_with_outcome` to distinguish
-     * this terminal membership transition from an active epoch advance.
-     *
-     * This method durably flushes the OpenMLS merge before returning, but it
-     * deliberately does not prune retained epoch secrets. The caller must
-     * first persist its own GroupState/projection for `target_epoch`, then use
-     * `finalize_epoch_transition` (or the in-process cleanup hook). Pruning
-     * inside this method could destroy recovery material before the outer
-     * transaction is durable.
-     *
-     * Errors:
-     * - `MLSError::invalid_input` if no staged commit exists for
-     * `(group_id, target_epoch)` — the entry was never staged, or
-     * `discard_incoming_commit` already cleared it.
-     * - `MLSError::MergeFailed`, epoch mismatch, or storage failure while
-     * applying the transition. The staged handle is preserved. If OpenMLS
-     * advanced before a barrier failure, retrying completes the barrier
-     * idempotently and only then consumes the handle.
-     */
-    func mergeIncomingCommit(groupId: Data, targetEpoch: UInt64) throws -> UInt64
-
-    /**
-     * Merge a pending commit after validation.
-     *
-     * The merged OpenMLS state is durably flushed before return. Epoch-secret
-     * pruning is deliberately deferred until the host has persisted its
-     * stable GroupState projection and calls finalize_epoch_transition.
-     */
-    func mergePendingCommit(groupId: Data) throws -> MergePendingCommitResult
-
-    /**
-     * Merge a staged commit after validation
-     * This should be called after validating incoming commits from other members
-     */
-    func mergeStagedCommit(groupId: Data) throws -> UInt64
-
-    func processCommit(groupId: Data, commitData: Data) throws -> ProcessCommitResult
-
-    func processMessage(groupId: Data, messageData: Data) throws -> ProcessedContent
-
-    /**
-     * Async variant of process_message - offloads crypto work to avoid blocking
-     */
-    func processMessageAsync(groupId: Data, messageData: Data) async throws -> ProcessedContent
-
-    /**
-     * Task #33 (transitional): wrapper that runs `process_message` and
-     * immediately merges any incoming staged commit, preserving the
-     * pre-refactor auto-merge behavior.
-     *
-     * **DEPRECATED.** This exists only for platforms (iOS, Android, catmos)
-     * that have not yet migrated to the explicit stage/merge contract.
-     * New code should call `process_message` + (`merge_incoming_commit` or
-     * `discard_incoming_commit`).
-     *
-     * Logs a warning on every invocation — see server logs for migration
-     * progress.
-     */
-    func processMessageLegacyAutomerge(groupId: Data, messageData: Data) throws -> ProcessedContent
-
-    func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws -> WelcomeResult
-
-    /**
-     * Propose adding a member (does not commit)
-     *
-     * Creates a proposal that can be committed later with commit_pending_proposals.
-     * This enables multi-admin workflows where proposals accumulate before commit.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     * * `key_package_data` - Serialized key package of member to add
-     *
-     * # Returns
-     * ProposeResult containing proposal message to send and reference for tracking
-     */
-    func proposeAddMember(groupId: Data, keyPackageData: Data) throws -> ProposeResult
-
-    /**
-     * Propose removing a member (does not commit)
-     *
-     * Creates a proposal that can be committed later with commit_pending_proposals.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     * * `member_identity` - DID bytes of member to remove
-     *
-     * # Returns
-     * ProposeResult containing proposal message to send and reference for tracking
-     *
-     * # Errors
-     * * `MemberNotFound` - Member not in group
-     */
-    func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws -> ProposeResult
-
-    /**
-     * Propose self-removal from a group.
-     *
-     * Groups use PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, so SelfRemove proposals
-     * (always PublicMessage) are rejected. Uses leave_group() instead which
-     * creates a Remove proposal as PrivateMessage.
-     */
-    func proposeSelfRemove(groupId: Data) throws -> Data
-
-    /**
-     * Propose self-update (does not commit)
-     *
-     * Creates a proposal to update your own leaf node. Can be committed later
-     * with commit_pending_proposals, or by another group member.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     *
-     * # Returns
-     * ProposeResult containing proposal message to send and reference for tracking
-     */
-    func proposeSelfUpdate(groupId: Data) throws -> ProposeResult
-
-    /**
-     * Remove members from the group (cryptographically secure)
-     *
-     * Creates a commit with Remove proposals. Follows send-then-merge pattern:
-     * caller must send commit to server and call merge_pending_commit() after ACK.
-     *
-     * # Security Note
-     * This is the ONLY secure way to remove members. Server-side removal
-     * does not revoke cryptographic access until the epoch advances.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     * * `member_identities` - Array of member credentials (DID bytes) to remove
-     *
-     * # Returns
-     * Commit data to send to server (no welcome for removals)
-     *
-     * # Errors
-     * * `InvalidInput` - No valid members found to remove
-     * * `GroupNotFound` - Group does not exist
-     * * `OpenMLSError` - OpenMLS operation failed
-     */
-    func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data
-
-    func removeMembersWithAad(groupId: Data, memberIdentities: [Data], aad: Data?) throws -> RemoveMembersResult
-
-    /**
-     * Remove a proposal from the proposal queue
-     */
-    func removeProposal(groupId: Data, proposalRef: ProposalRef) throws
-
-    /**
-     * Export a secret using the Puncturable PRF tree (forward-secure within epoch).
-     *
-     * Falls back to `export_secret` with a deterministic label when the group
-     * does not have an `application_export_tree` (legacy groups created before
-     * extensions-draft-08).
-     */
-    func safeExportSecret(groupId: Data, componentId: UInt16) throws -> Data
-
-    /**
-     * Export a secret from the pending commit's Puncturable PRF tree.
-     *
-     * Falls back to `export_secret` from the pending commit when the group
-     * does not support safe export.
-     */
-    func safeExportSecretFromPending(groupId: Data, componentId: UInt16) throws -> Data
-
-    /**
-     * Create a self-update commit to refresh own leaf node
-     * This forces epoch advancement and is useful for preventing ratchet desync
-     * when changing senders (prevents SecretReuseError from concurrent sends in same epoch)
-     *
-     * # Arguments
-     * * `group_id` - Group identifier to update
-     *
-     * # Returns
-     * Commit data to be sent to server (no welcome needed for self-updates)
-     *
-     * # Note
-     * This uses the send-then-merge pattern - caller must merge after server ACK
-     */
-    func selfUpdate(groupId: Data) throws -> AddMembersResult
-
-    /**
-     * Install the content root key used by all subsequent
-     * encrypt/decrypt/hmac calls. Must be exactly 32 bytes.
-     */
-    func setContentRootKey(key: Data) throws
-
-    /**
-     * Set the credential validator callback for client-side validation
-     *
-     * This enables the Swift layer to validate credentials before accepting
-     * group state changes. The validator is called before merging commits.
-     */
-    func setCredentialValidator(validator: CredentialValidator) throws
-
-    /**
-     * Set the epoch secret storage backend
-     *
-     * This MUST be called during initialization before any MLS operations.
-     * The storage implementation should persist epoch secrets in encrypted storage (SQLCipher).
-     */
-    func setEpochSecretStorage(storage: EpochSecretStorage) throws
-
-    func setExternalJoinAuthorizer(authorizer: ExternalJoinAuthorizer) throws
-
-    /**
-     * Set the global MLS logger to receive Rust logs in Swift
-     *
-     * This allows forwarding internal MLS logs to OSLog or other Swift logging systems.
-     * The logger instance will be used for all subsequent MLS operations.
-     *
-     * - Parameters:
-     * - logger: Logger implementation conforming to MLSLogger protocol
-     */
-    func setLogger(logger: MlsLogger)
-
-    /**
-     * Set the suspension flag. When true, long-running operations bail out early
-     * to release the Mutex and file locks before iOS suspends the process.
-     * Safe to call from any thread — uses atomic store.
-     */
-    func setSuspended(value: Bool)
-
-    /**
-     * Sign arbitrary bytes using the persistent MLS signer for an identity.
-     *
-     * This is used for declaration device proof-of-possession. The signature
-     * key is the same key used in MLS credentials/key packages for `identity`.
-     */
-    func signWithIdentityKey(identity: String, payload: Data) throws -> Data
-
-    /**
-     * Stage a commit without sending it to the delivery service or merging
-     * it locally. Returns a [`crate::orchestrator_bridge::FFICommitPlan`]
-     * the caller ships to the DS; the caller then passes the embedded
-     * handle back to [`confirm_commit`](Self::confirm_commit) on success or
-     * [`discard_pending`](Self::discard_pending) on failure.
-     *
-     * `signer_identity_bytes` is the UTF-8 DID of the caller — used to
-     * export GroupInfo for the pre-merge group state (identical shape to
-     * [`MLSContext::export_group_info`]).
-     *
-     * Only one pending commit may exist per group at a time (OpenMLS
-     * constraint). Staging a second commit while one is already pending
-     * returns `MLSError::InvalidInput`.
-     *
-     * Add/Swap authority is derived from the exact multiset of bare DID roots
-     * embedded in the supplied KeyPackage credentials. The direct context has
-     * no platform credential resolver, so authorized-device-key resolution
-     * remains the responsibility of the higher-level orchestrator; callers
-     * that need that policy must use `OrchestratorBridge::stage_commit`.
-     */
-    func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data) throws -> FfiCommitPlan
-
-    func storageLifecycleStatus() -> StorageLifecycleStatus
-
-    /**
-     * Store a proposal in the proposal queue after validation
-     * The application should inspect the proposal before storing it
-     */
-    func storeProposal(groupId: Data, proposalRef: ProposalRef) throws
-
-    /**
-     * Atomically swap members: remove old + add new in a single commit.
-     */
-    func swapMembers(groupId: Data, removeIdentities: [Data], addKeyPackages: [KeyPackageData]) throws -> AddMembersResult
-
-    /**
-     * 🔒 FIX #2: Force database synchronization
-     *
-     * Forces a full WAL checkpoint to ensure all MLS state is durably persisted.
-     * Call this after critical state transitions (Welcome processing, Commit merge)
-     * to prevent SecretReuseError from incomplete persistence.
-     *
-     * - Returns: Ok(()) on success
-     * - Throws: MLSError if flush fails
-     */
-    func syncDatabase() throws
-
-    /**
-     * Update group metadata. Returns commit bytes to send to server.
-     *
-     * Used by the orchestrator's `CommitKind::UpdateMetadata` stage_commit
-     * dispatch (iOS three-phase rename path). The `metadata_json` is the
-     * legacy `GroupMetadataPayload` shape; its contents are NOT written
-     * into the MLS group context (Phase A retired 0xff00). The caller
-     * re-encrypts the metadata blob post-merge using the new epoch's
-     * metadata key (iOS `reWrapMetadataAfterMerge`). Direct callers
-     * wanting an atomic encrypted update should use
-     * `update_group_metadata_encrypted` (Phase A.2).
-     */
-    func updateGroupMetadata(groupId: Data, metadataJson: Data) throws -> Data
-
-    /**
-     * Atomic encrypted metadata update (Phase A.2).
-     *
-     * Stages the GroupContextExtensions commit + derives the post-commit
-     * metadata key from the staged commit's exporter + encrypts a fresh
-     * `GroupMetadataV1` payload, all in one call. Returns everything the
-     * caller needs to upload + send + merge:
-     * - `commit_bytes` → send to DS via `commitGroupChange`/`updateConvo`
-     * - `metadata_blob_ciphertext` → upload via `putGroupMetadataBlob` with
-     * `metadata_blob_locator` and `metadata_version`
-     * - `metadata_reference_json` → cache locally (final reference, real hash)
-     *
-     * After server ACK, caller invokes `merge_pending_commit(group_id)` to
-     * apply the commit locally; joiners on the new epoch read the
-     * MetadataReference from AppDataDictionary 0x8001 and bootstrap the
-     * blob via `getGroupMetadataBlob`.
-     */
-    func updateGroupMetadataEncrypted(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> UpdateGroupMetadataResultFfi
-
-    func updateGroupMetadataEncryptedWithAad(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, aad: Data?) throws -> UpdateGroupMetadataResultFfi
-
-    /**
-     * 🔒 FIX #3: Validate GroupInfo format before upload
-     *
-     * Verifies that a GroupInfo blob can be successfully deserialized.
-     * Call this before uploading to server to catch corruption early.
-     *
-     * The GroupInfo is serialized as an MlsMessageOut wrapper containing the actual
-     * VerifiableGroupInfo. This function handles both the wrapped and unwrapped formats.
-     *
-     * - Parameters:
-     * - group_info_bytes: The serialized GroupInfo (MlsMessageOut wrapper)
-     * - Returns: true if valid, false otherwise (with error logging)
-     */
-    func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool
-
-    /**
-     * Constant-time verify a previously-computed HMAC tag against the
-     * chain inputs.
-     */
-    func verifyMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data, expected: Data) throws -> Bool
-}
-
-/**
- * MLS context wrapper for FFI
- *
- * Uses Mutex instead of RwLock because:
- * - SQLite Connection uses RefCell (requires Send but not Sync)
- * - Swift actor provides higher-level synchronization
- * - Per-DID contexts are isolated (no shared state across accounts)
- */
-open class MlsContext:
-    MlsContextProtocol
-{
-    fileprivate let pointer: UnsafeMutableRawPointer!
-
-    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public struct NoPointer {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
-        self.pointer = pointer
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public init(noPointer _: NoPointer) {
-        pointer = nil
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_catbird_mls_fn_clone_mlscontext(self.pointer, $0) }
-    }
-
-    /**
-     * Create a new context with per-DID SQLite storage
-     *
-     * Path should be unique per account, e.g., "{appSupport}/mls-state/{did_hash}.db"
-     * This stores MLS cryptographic state only - use SQLCipher separately for user content.
-     *
-     * The SQLite connection is single-threaded (uses RefCell internally).
-     * Synchronization is provided by Swift's actor system at a higher level.
-     */
-    public convenience init(storagePath: String, encryptionKey: String, keychain: KeychainAccess) throws {
-        let pointer =
-            try rustCallWithError(FfiConverterTypeMLSError.lift) {
-                uniffi_catbird_mls_fn_constructor_mlscontext_new(
-                    FfiConverterString.lower(storagePath),
-                    FfiConverterString.lower(encryptionKey),
-                    FfiConverterCallbackInterfaceKeychainAccess.lower(keychain), $0
-                )
-            }
-        self.init(unsafeFromRawPointer: pointer)
-    }
-
-    deinit {
-        guard let pointer = pointer else {
-            return
-        }
-
-        try! rustCall { uniffi_catbird_mls_fn_free_mlscontext(pointer, $0) }
-    }
-
-    /**
-     * Add members to a group.
-     *
-     * Backwards-compatible variant: does NOT re-seal group metadata at the new
-     * epoch (the three `metadata_*` fields of [`AddMembersResult`] are `None`).
-     * Prefer [`Self::add_members_with_metadata`] so newly-added members can
-     * decrypt group metadata at their join epoch.
-     */
-    open func addMembers(groupId: Data, keyPackages: [KeyPackageData]) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_add_members(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(groupId),
-                                                                FfiConverterSequenceTypeKeyPackageData.lower(keyPackages), $0)
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_account_did(self.uniffiClonePointer(), $0)
         })
     }
 
-    /**
-     * Async variant of add_members - offloads crypto work to avoid blocking
-     */
-    open func addMembersAsync(groupId: Data, keyPackages: [KeyPackageData]) async throws -> AddMembersResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_catbird_mls_fn_method_mlscontext_add_members_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterSequenceTypeKeyPackageData.lower(keyPackages)
-                    )
-                },
-                pollFunc: ffi_catbird_mls_rust_future_poll_rust_buffer,
-                completeFunc: ffi_catbird_mls_rust_future_complete_rust_buffer,
-                freeFunc: ffi_catbird_mls_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeAddMembersResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    open func addMembersWithAad(groupId: Data, keyPackages: [KeyPackageData], aad: Data?) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_add_members_with_aad(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(groupId),
-                                                                         FfiConverterSequenceTypeKeyPackageData.lower(keyPackages),
-                                                                         FfiConverterOptionData.lower(aad), $0)
+    open func accountDidHash() -> String {
+        return try! FfiConverterString.lift(try! rustCall {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_account_did_hash(self.uniffiClonePointer(), $0)
         })
     }
 
-    /**
-     * Add members to a group AND re-seal the group metadata at the post-add
-     * epoch so the newly-added member can decrypt it.
-     *
-     * The add commit embeds a fresh `MetadataReference` (new blob locator) and
-     * advances the epoch. Without a re-sealed blob at that locator, a Welcome'd
-     * member joins at the new epoch but the only metadata blob on the server is
-     * sealed at the creation epoch — which forward secrecy prevents them from
-     * decrypting. This variant seals the supplied metadata at `epoch + 1` under
-     * the same locator/version embedded in the commit. The caller MUST upload
-     * the returned `metadata_blob_ciphertext` via
-     * `putGroupMetadataBlob(metadata_blob_locator, metadata_version)`.
-     *
-     * Pass the group's CURRENT metadata content (title/description/avatar) —
-     * this method does not bump the metadata version for a content change, it
-     * re-seals the existing content at the new epoch.
-     */
-    open func addMembersWithMetadata(groupId: Data, keyPackages: [KeyPackageData], title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_add_members_with_metadata(self.uniffiClonePointer(),
-                                                                              FfiConverterData.lower(groupId),
-                                                                              FfiConverterSequenceTypeKeyPackageData.lower(keyPackages),
-                                                                              FfiConverterOptionString.lower(title),
-                                                                              FfiConverterOptionString.lower(description),
-                                                                              FfiConverterOptionString.lower(avatarBlobLocator),
-                                                                              FfiConverterOptionString.lower(avatarContentType), $0)
-        })
-    }
-
-    /**
-     * Check if suspension has been requested. Returns MLSError::ContextClosed if so.
-     */
-    open func checkSuspended() throws {
+    open func acknowledgeEntriesUpTo(conversationId: String, upToSeq: Int64) throws {
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_check_suspended(self.uniffiClonePointer(), $0)
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_acknowledge_entries_up_to(self.uniffiClonePointer(),
+                                                                                    FfiConverterString.lower(conversationId),
+                                                                                    FfiConverterInt64.lower(upToSeq), $0)
         }
     }
 
-    /**
-     * Drop the in-memory content root key.
-     */
-    open func clearContentRootKey() {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_clear_content_root_key(self.uniffiClonePointer(), $0)
-        }
+    open func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus {
+        return try FfiConverterTypeSpacesEligibilityStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_check_spaces_eligibility(self.uniffiClonePointer(),
+                                                                                   FfiConverterSequenceString.lower(grantedOauthScopes), $0)
+        })
     }
 
-    /**
-     * Clear pending commit for a group
-     * This should be called when a commit is rejected by the delivery service
-     * to clean up pending state in OpenMLS
-     */
-    open func clearPendingCommit(groupId: Data) throws {
+    open func completeOtcPairing(sixDigitCode: String) throws -> OtcPairingCompletion {
+        return try FfiConverterTypeOtcPairingCompletion.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_complete_otc_pairing(self.uniffiClonePointer(),
+                                                                               FfiConverterString.lower(sixDigitCode), $0)
+        })
+    }
+
+    open func createGroup(conversationId: String, sequencerDid: String, title: String?, description: String?) throws -> ConversationRow {
+        return try FfiConverterTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_create_group(self.uniffiClonePointer(),
+                                                                       FfiConverterString.lower(conversationId),
+                                                                       FfiConverterString.lower(sequencerDid),
+                                                                       FfiConverterOptionString.lower(title),
+                                                                       FfiConverterOptionString.lower(description), $0)
+        })
+    }
+
+    open func declineDirectRequest(requestId: String) throws {
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_clear_pending_commit(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(groupId), $0)
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_decline_direct_request(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(requestId), $0)
         }
     }
 
-    /**
-     * Commit all pending proposals that have been validated and stored
-     */
-    open func commitPendingProposals(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_commit_pending_proposals(self.uniffiClonePointer(),
-                                                                             FfiConverterData.lower(groupId), $0)
+    open func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt {
+        return try FfiConverterTypeEnrollmentReceipt.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_enroll_device(self.uniffiClonePointer(),
+                                                                        FfiConverterSequenceString.lower(grantedOauthScopes), $0)
         })
     }
 
-    /**
-     * Compute the hash reference for a serialized KeyPackage
-     *
-     * Accepts either an MlsMessage-wrapped KeyPackage or raw KeyPackage bytes.
-     * This is useful when you need to compute a hash from KeyPackage bytes received from the server.
-     *
-     * - Parameters:
-     * - key_package_bytes: Serialized KeyPackage data
-     * - Returns: Hash reference bytes
-     * - Throws: MLSError if deserialization or hashing fails
-     */
-    open func computeKeyPackageHash(keyPackageBytes: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_compute_key_package_hash(self.uniffiClonePointer(),
-                                                                             FfiConverterData.lower(keyPackageBytes), $0)
+    open func getGroupMetadata(conversationId: String) throws -> GroupMetadataRow? {
+        return try FfiConverterOptionTypeGroupMetadataRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_get_group_metadata(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(conversationId), $0)
         })
     }
 
-    /**
-     * Compute the chained HMAC tag for a message entry:
-     * `HMAC(K_hmac, prev_hmac || message_id || payload_wire)`. Use
-     * `prev_hmac = None` for the first entry in a chain (seeded with zeros).
-     */
-    open func computeMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_compute_message_hmac(self.uniffiClonePointer(),
-                                                                         FfiConverterString.lower(conversationId),
-                                                                         FfiConverterOptionData.lower(prevHmac),
-                                                                         FfiConverterString.lower(messageId),
-                                                                         FfiConverterData.lower(payloadWire), $0)
-        })
-    }
-
-    /**
-     * Confirm a previously staged commit: merge it locally, advance the
-     * epoch, and remove the handle from the pending map.
-     *
-     * `server_epoch` is used to fence against confirm calls that reference
-     * a different epoch than the one the DS actually accepted. Pass the
-     * value returned by [`mls_skip_server_epoch_fence`] for API paths that
-     * don't echo an epoch; non-sentinel values must equal the plan's
-     * `target_epoch`, otherwise the staged commit is left in place and
-     * `MLSError::EpochMismatch` is returned so the caller can choose to
-     * `discard_pending` and re-sync.
-     *
-     * Post-merge bookkeeping (storage writes, GroupInfo publish,
-     * group-state cache update, epoch-secret cleanup) is the caller's
-     * responsibility — see the module-level comment for rationale.
-     */
-    open func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws -> FfiConfirmedCommit {
-        return try FfiConverterTypeFFIConfirmedCommit.lift(rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_confirm_commit(self.uniffiClonePointer(),
-                                                                   FfiConverterTypeFFIStagedCommitHandle.lower(handle),
-                                                                   FfiConverterUInt64.lower(serverEpoch), $0)
-        })
-    }
-
-    open func createExternalCommit(groupInfoBytes: Data, identityBytes: Data) throws -> ExternalCommitResult {
-        return try FfiConverterTypeExternalCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_external_commit(self.uniffiClonePointer(),
-                                                                           FfiConverterData.lower(groupInfoBytes),
-                                                                           FfiConverterData.lower(identityBytes), $0)
-        })
-    }
-
-    open func createExternalCommitWithPsk(groupInfoBytes: Data, identityBytes: Data, pskBytes: Data) throws -> ExternalCommitResult {
-        return try FfiConverterTypeExternalCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_external_commit_with_psk(self.uniffiClonePointer(),
-                                                                                    FfiConverterData.lower(groupInfoBytes),
-                                                                                    FfiConverterData.lower(identityBytes),
-                                                                                    FfiConverterData.lower(pskBytes), $0)
-        })
-    }
-
-    open func createGroup(identityBytes: Data, config: GroupConfig?) throws -> GroupCreationResult {
-        return try FfiConverterTypeGroupCreationResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_group(self.uniffiClonePointer(),
-                                                                 FfiConverterData.lower(identityBytes),
-                                                                 FfiConverterOptionTypeGroupConfig.lower(config), $0)
-        })
-    }
-
-    /**
-     * Async variant of create_group - offloads crypto work to avoid blocking
-     */
-    open func createGroupAsync(identityBytes: Data, config: GroupConfig?) async throws -> GroupCreationResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_catbird_mls_fn_method_mlscontext_create_group_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(identityBytes), FfiConverterOptionTypeGroupConfig.lower(config)
-                    )
-                },
-                pollFunc: ffi_catbird_mls_rust_future_poll_rust_buffer,
-                completeFunc: ffi_catbird_mls_rust_future_complete_rust_buffer,
-                freeFunc: ffi_catbird_mls_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeGroupCreationResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    open func createGroupDispatch(identityBytes: Data, predeterminedGroupId: Data?, config: GroupConfig?) throws -> GroupCreationResult {
-        return try FfiConverterTypeGroupCreationResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_group_dispatch(self.uniffiClonePointer(),
-                                                                          FfiConverterData.lower(identityBytes),
-                                                                          FfiConverterOptionData.lower(predeterminedGroupId),
-                                                                          FfiConverterOptionTypeGroupConfig.lower(config), $0)
-        })
-    }
-
-    /**
-     * FFI/native entry point for creating a group at a predetermined `group_id`
-     * (spec §8.5 first-responder bootstrap). `group_id` is the raw bytes of
-     * the target MLS group identifier (NOT hex-encoded). All bootstrap
-     * candidates targeting the same `groupResetEvent.newGroupId` MUST land on
-     * the same MLS GroupId so the race winner's Welcome can deserialize for
-     * every recipient.
-     */
-    open func createGroupWithId(identityBytes: Data, groupId: Data, config: GroupConfig?) throws -> GroupCreationResult {
-        return try FfiConverterTypeGroupCreationResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_group_with_id(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(identityBytes),
-                                                                         FfiConverterData.lower(groupId),
-                                                                         FfiConverterOptionTypeGroupConfig.lower(config), $0)
-        })
-    }
-
-    open func createKeyPackage(identityBytes: Data) throws -> KeyPackageResult {
-        return try FfiConverterTypeKeyPackageResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_key_package(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(identityBytes), $0)
-        })
-    }
-
-    /**
-     * Create `count` key packages with a SINGLE persistence pass: one bundle-row
-     * transaction and one WAL checkpoint at the end of the batch, instead of a
-     * full manifest rewrite + checkpoint per package.
-     *
-     * 0xdead10cc prevention: the suspension flag is checked between packages.
-     * On suspension the batch stops early and returns the packages created so
-     * far (their bundles are persisted before returning); ContextClosed is
-     * returned only if suspension was signaled before any package was built.
-     */
-    open func createKeyPackages(identityBytes: Data, count: UInt32) throws -> [KeyPackageResult] {
-        return try FfiConverterSequenceTypeKeyPackageResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_key_packages(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(identityBytes),
-                                                                        FfiConverterUInt32.lower(count), $0)
-        })
-    }
-
-    open func createLastResortKeyPackage(identityBytes: Data) throws -> KeyPackageResult {
-        return try FfiConverterTypeKeyPackageResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_create_last_resort_key_package(self.uniffiClonePointer(),
-                                                                                   FfiConverterData.lower(identityBytes), $0)
-        })
-    }
-
-    /**
-     * 🔍 DEBUG: Check if a specific key package hash exists in local manifest storage
-     *
-     * This checks the manifest storage (KeyPackageBundle cache) which is the source of truth
-     * for which key packages this device can use to process Welcome messages.
-     *
-     * NOTE: This only checks the manifest, not OpenMLS internal storage. The manifest
-     * is what we control and what should contain all bundles we've created.
-     *
-     * - Parameters:
-     * - hash_hex: Hex-encoded hash reference to search for (raw bytes, not TLS-encoded)
-     * - Returns: true if found in manifest, false otherwise
-     * - Throws: MLSError if context is not initialized or hex is invalid
-     */
-    open func debugCheckKeyPackageHash(hashHex: String) throws -> Bool {
-        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_debug_check_key_package_hash(self.uniffiClonePointer(),
-                                                                                 FfiConverterString.lower(hashHex), $0)
-        })
-    }
-
-    /**
-     * Get detailed debug information about all group members
-     *
-     * Returns information about each member including their leaf index,
-     * credential identity, and credential type. Useful for diagnosing
-     * member duplication issues.
-     *
-     * - Parameters:
-     * - group_id: Group identifier
-     * - Returns: GroupDebugInfo with all member details
-     * - Throws: MLSError if group not found
-     */
-    open func debugGroupMembers(groupId: Data) throws -> GroupDebugInfo {
-        return try FfiConverterTypeGroupDebugInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_debug_group_members(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * 🔍 DEBUG: List all key package hashes from manifest storage
-     *
-     * Returns hex-encoded hash references for all key packages stored in the manifest.
-     * This is useful for diagnosing NoMatchingKeyPackage errors by comparing with
-     * the hash used in a Welcome message.
-     *
-     * - Returns: Array of hex-encoded hash references
-     * - Throws: MLSError if context is not initialized
-     */
-    open func debugListKeyPackageHashes() throws -> [String] {
-        return try FfiConverterSequenceString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_debug_list_key_package_hashes(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Decrypt an incoming MLS message (FFI surface).
-     *
-     * N38: this is a thin wrapper over [`MLSContext::decrypt_message_classified`]
-     * that RE-FLATTENS process-stage error classes to
-     * [`MLSError::DecryptionFailed`]. iOS variant-matches `.DecryptionFailed`
-     * for ratchet-desync detection (MLSClient.swift) and string-matches
-     * `"DecryptionFailed"` (Messaging.swift); catmos-cli matches it too. The
-     * typed classes (`InvalidCommit`, `WireFormatPolicyViolation`,
-     * `TlsCodec`, wrong-epoch `OpenMLS` strings) are only surfaced to the
-     * in-process orchestrator via the `MlsCryptoContext` trait impl, which
-     * calls the classified fn directly.
-     */
-    open func decryptMessage(groupId: Data, ciphertext: Data) throws -> DecryptResult {
-        return try FfiConverterTypeDecryptResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_decrypt_message(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId),
-                                                                    FfiConverterData.lower(ciphertext), $0)
-        })
-    }
-
-    /**
-     * Async variant of decrypt_message - offloads crypto work to avoid blocking
-     */
-    open func decryptMessageAsync(groupId: Data, ciphertext: Data) async throws -> DecryptResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_catbird_mls_fn_method_mlscontext_decrypt_message_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterData.lower(ciphertext)
-                    )
-                },
-                pollFunc: ffi_catbird_mls_rust_future_poll_rust_buffer,
-                completeFunc: ffi_catbird_mls_rust_future_complete_rust_buffer,
-                freeFunc: ffi_catbird_mls_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeDecryptResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    /**
-     * Decrypt a wire-format payload produced by
-     * [`encrypt_message_payload`] for the same `conversation_id`.
-     */
-    open func decryptMessagePayload(conversationId: String, wire: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_decrypt_message_payload(self.uniffiClonePointer(),
-                                                                            FfiConverterString.lower(conversationId),
-                                                                            FfiConverterData.lower(wire), $0)
-        })
-    }
-
-    /**
-     * Delete an MLS group from storage
-     * This should be called when a conversation is deleted or the user leaves
-     */
-    open func deleteGroup(groupId: Data) throws {
+    open func handleDarwinPushWakeup() throws {
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_delete_group(self.uniffiClonePointer(),
-                                                                 FfiConverterData.lower(groupId), $0)
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_handle_darwin_push_wakeup(self.uniffiClonePointer(), $0)
         }
     }
 
-    /**
-     * Delete consumed key package bundles from storage
-     *
-     * Removes specific key package bundles from both in-memory cache and persistent storage.
-     * This is useful for cleaning up bundles that were consumed by the server but remain in local storage.
-     *
-     * - Parameters:
-     * - hash_refs: Array of hash references (as returned by create_key_package) to delete
-     * - Returns: Number of bundles successfully deleted
-     * - Throws: MLSError if storage operation fails
-     */
-    open func deleteKeyPackageBundles(hashRefs: [Data]) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_delete_key_package_bundles(self.uniffiClonePointer(),
-                                                                               FfiConverterSequenceData.lower(hashRefs), $0)
-        })
-    }
-
-    /**
-     * Task #33: discard an incoming `StagedCommit` that was previously staged,
-     * without advancing the local epoch.
-     *
-     * Use this when the platform decides (e.g. via recovery policy) that the
-     * staged commit should not be applied — for instance if a fork/reset has
-     * been observed and the platform is about to initiate a rejoin.
-     *
-     * OpenMLS's own storage is **not** modified by this call. Only the
-     * in-memory staging handle is dropped. Any OpenMLS-side bookkeeping for
-     * the staged commit (proposal queue, etc.) is unaffected; the staged
-     * commit will be garbage collected via the normal epoch-advance path.
-     *
-     * Idempotent: no-op if no entry exists for `(group_id, target_epoch)`.
-     */
-    open func discardIncomingCommit(groupId: Data, targetEpoch: UInt64) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_discard_incoming_commit(self.uniffiClonePointer(),
-                                                                            FfiConverterData.lower(groupId),
-                                                                            FfiConverterUInt64.lower(targetEpoch), $0)
-        }
-    }
-
-    /**
-     * Discard a previously staged commit without advancing the epoch.
-     * Clears the OpenMLS pending commit (so future sends can construct a
-     * new one) and removes the handle from the pending map.
-     *
-     * Calling `discard_pending` on an unknown or already-consumed handle
-     * returns `MLSError::InvalidInput`.
-     */
-    open func discardPending(handle: FfiStagedCommitHandle) throws {
-        try rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_discard_pending(self.uniffiClonePointer(),
-                                                                    FfiConverterTypeFFIStagedCommitHandle.lower(handle), $0)
-        }
-    }
-
-    /**
-     * Discard a pending external join after server rejection
-     *
-     * CRITICAL: Call this when the delivery service rejects an external commit.
-     * Failure to call this leaves orphaned cryptographic material.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier from create_external_commit result
-     *
-     * # Returns
-     * Ok(()) on success, error if group not found
-     */
-    open func discardPendingExternalJoin(groupId: Data) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_discard_pending_external_join(self.uniffiClonePointer(),
-                                                                                  FfiConverterData.lower(groupId), $0)
-        }
-    }
-
-    open func encryptMessage(groupId: Data, plaintext: Data) throws -> EncryptResult {
-        return try FfiConverterTypeEncryptResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_encrypt_message(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId),
-                                                                    FfiConverterData.lower(plaintext), $0)
-        })
-    }
-
-    /**
-     * Async variant of encrypt_message - offloads crypto work to avoid blocking
-     */
-    open func encryptMessageAsync(groupId: Data, plaintext: Data) async throws -> EncryptResult {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_catbird_mls_fn_method_mlscontext_encrypt_message_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterData.lower(plaintext)
-                    )
-                },
-                pollFunc: ffi_catbird_mls_rust_future_poll_rust_buffer,
-                completeFunc: ffi_catbird_mls_rust_future_complete_rust_buffer,
-                freeFunc: ffi_catbird_mls_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeEncryptResult.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    /**
-     * Encrypt `plaintext` for `conversation_id` using the installed content
-     * root key. Returns the wire-format bytes: `[version(1) | nonce(12) |
-     * ciphertext+tag]`.
-     */
-    open func encryptMessagePayload(conversationId: String, plaintext: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_encrypt_message_payload(self.uniffiClonePointer(),
-                                                                            FfiConverterString.lower(conversationId),
-                                                                            FfiConverterData.lower(plaintext), $0)
-        })
-    }
-
-    /**
-     * Return the RFC 9420 §8.7 `epoch_authenticator` for the group's current
-     * epoch. Used to bind quorum-reset reports (spec §8.6 / ADR-002) so that a
-     * stale client can't forge a vote for an epoch it never observed.
-     */
-    open func epochAuthenticator(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_epoch_authenticator(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Get the SHA-256 hash of the TLS-serialized GroupContext.
-     * Manually export epoch secret for a group
-     * Call this after creating the conversation record in SQLCipher to ensure
-     * the foreign key constraint is satisfied when storing the epoch secret
-     */
-    open func exportEpochSecret(groupId: Data) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_epoch_secret(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId), $0)
-        }
-    }
-
-    open func exportGroupInfo(groupId: Data, signerIdentityBytes: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_group_info(self.uniffiClonePointer(),
-                                                                      FfiConverterData.lower(groupId),
-                                                                      FfiConverterData.lower(signerIdentityBytes), $0)
-        })
-    }
-
-    /**
-     * Export a group's state for persistent storage
-     *
-     * Returns serialized bytes that can be stored in the keychain
-     * and later restored with import_group_state.
-     *
-     * - Parameters:
-     * - group_id: Group identifier to export
-     * - Returns: Serialized group state bytes
-     * - Throws: MLSError if group not found or serialization fails
-     */
-    open func exportGroupState(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_group_state(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Export the identity key pair for backup/recovery
-     * This allows the application to store the identity key in a separate secure location (e.g. Keychain)
-     * to survive app deletion/reinstall.
-     */
-    open func exportIdentityKey(identity: String) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_identity_key(self.uniffiClonePointer(),
-                                                                        FfiConverterString.lower(identity), $0)
-        })
-    }
-
-    /**
-     * Export the canonical metadata encryption key (MEK) for a specific epoch.
-     */
-    open func exportMetadataKey(groupId: Data, epoch: UInt64) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_metadata_key(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId),
-                                                                        FfiConverterUInt64.lower(epoch), $0)
-        })
-    }
-
-    /**
-     * Export the canonical metadata encryption key (MEK) from a pending staged commit.
-     */
-    open func exportMetadataKeyFromPending(groupId: Data, targetEpoch: UInt64) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_metadata_key_from_pending(self.uniffiClonePointer(),
-                                                                                     FfiConverterData.lower(groupId),
-                                                                                     FfiConverterUInt64.lower(targetEpoch), $0)
-        })
-    }
-
-    open func exportSecret(groupId: Data, label: String, context: Data, keyLength: UInt64) throws -> ExportedSecret {
-        return try FfiConverterTypeExportedSecret.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_export_secret(self.uniffiClonePointer(),
-                                                                  FfiConverterData.lower(groupId),
-                                                                  FfiConverterString.lower(label),
-                                                                  FfiConverterData.lower(context),
-                                                                  FfiConverterUInt64.lower(keyLength), $0)
-        })
-    }
-
-    /**
-     * Finalize an epoch transition after the host's stable projection is
-     * durable. The caller-provided epoch must exactly match current crypto
-     * state; stale or speculative projections cannot trigger secret pruning.
-     */
-    open func finalizeEpochTransition(groupId: Data, projectedEpoch: UInt64) throws -> UInt32 {
+    open func importConversationHistory(conversationId: String, messages: [MessageRow]) throws -> UInt32 {
         return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_finalize_epoch_transition(self.uniffiClonePointer(),
-                                                                              FfiConverterData.lower(groupId),
-                                                                              FfiConverterUInt64.lower(projectedEpoch), $0)
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_import_conversation_history(self.uniffiClonePointer(),
+                                                                                      FfiConverterString.lower(conversationId),
+                                                                                      FfiConverterSequenceTypeMessageRow.lower(messages), $0)
         })
     }
 
-    /**
-     * Flush all pending database writes and CLOSE the database connections.
-     *
-     * CRITICAL FOR 0xdead10cc PREVENTION: This method MUST be called when iOS
-     * is transitioning to background/inactive state. It:
-     * 1. Interrupts any in-flight SQLCipher operations (unblocks the Mutex)
-     * 2. Flushes all pending SQLite writes to disk
-     * 3. Performs WAL checkpoint to consolidate data
-     * 4. CLOSES all database connections by dropping the inner context
-     * 5. Releases all file handles so iOS doesn't kill the app
-     *
-     * After calling this, the context is CLOSED and cannot be used for any operations.
-     * The Swift side must create a new context if MLS operations are needed again.
-     */
-    open func flushAndPrepareClose() throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_flush_and_prepare_close(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Force flush all pending database writes to disk
-     *
-     * This executes a SQLite WAL checkpoint to ensure all pending writes are
-     * durably persisted to the main database file. Call this after batch operations
-     * like creating multiple key packages to ensure they survive app restart.
-     *
-     * - Returns: Nothing on success
-     * - Throws: MLSError if flush fails
-     */
-    open func flushStorage() throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_flush_storage(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Get the MLS confirmation tag for a group.
-     * Returns the exact 32-byte confirmation tag bytes from storage.
-     */
-    open func getConfirmationTag(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_confirmation_tag(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(groupId), $0)
+    open func initiateOtcPairing() throws -> OtcPairingOffer {
+        return try FfiConverterTypeOtcPairingOffer.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_initiate_otc_pairing(self.uniffiClonePointer(), $0)
         })
     }
 
-    /**
-     * Derive the current metadata key for an already-joined group.
-     *
-     * Call this immediately after joining a group via Welcome or External Commit
-     * to bootstrap metadata decryption without waiting for a subsequent commit.
-     * Returns `None` if the group is not found or key derivation fails.
-     */
-    open func getCurrentMetadata(groupId: Data) throws -> CurrentMetadataInfo? {
-        return try FfiConverterOptionTypeCurrentMetadataInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_current_metadata(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    open func getEpoch(groupId: Data) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_epoch(self.uniffiClonePointer(),
-                                                              FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Get the SHA-256 MLS GroupContext hash for a group.
-     */
-    open func getGroupContextHash(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_group_context_hash(self.uniffiClonePointer(),
-                                                                           FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * 🔍 DIAGNOSTIC: Get detailed debug state for a group
-     *
-     * Returns diagnostic information about a group's current state including:
-     * - Current epoch
-     * - Member count
-     * - Storage verification status
-     *
-     * This is useful for diagnosing SecretReuseError issues after app restart.
-     *
-     * - Parameters:
-     * - group_id: Group identifier
-     * - Returns: JSON string with debug information
-     * - Throws: MLSError if group not found
-     */
-    open func getGroupDebugState(groupId: Data) throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_group_debug_state(self.uniffiClonePointer(),
-                                                                          FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Get the current member count of a group
-     *
-     * - Parameters:
-     * - group_id: Group identifier
-     * - Returns: Number of members in the group
-     * - Throws: MLSError if group not found
-     */
-    open func getGroupMemberCount(groupId: Data) throws -> UInt32 {
-        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_group_member_count(self.uniffiClonePointer(),
-                                                                           FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Get the number of key package bundles currently cached
-     *
-     * This provides a direct count of key package bundles available for
-     * processing Welcome messages. A count of 0 indicates that Welcome
-     * messages cannot be processed and bundles need to be created.
-     *
-     * - Returns: Number of cached key package bundles
-     * - Throws: MLSError if context is not initialized
-     */
-    open func getKeyPackageBundleCount() throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_key_package_bundle_count(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * List all pending proposals for a group with details
-     */
-    open func getPendingProposalDetails(groupId: Data) throws -> [PendingProposalDetail] {
-        return try FfiConverterSequenceTypePendingProposalDetail.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_pending_proposal_details(self.uniffiClonePointer(),
-                                                                                 FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Get the tree hash for a group at its current epoch
-     * Used for tree hash pinning to detect state divergence
-     */
-    open func getTreeHash(groupId: Data) throws -> TreeHashData {
-        return try FfiConverterTypeTreeHashData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_get_tree_hash(self.uniffiClonePointer(),
-                                                                  FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Check if a group exists in local storage
-     * - Parameters:
-     * - group_id: Group identifier to check
-     * - Returns: true if group exists, false otherwise
-     */
-    open func groupExists(groupId: Data) -> Bool {
+    open func isHandleClosed() -> Bool {
         return try! FfiConverterBool.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_group_exists(self.uniffiClonePointer(),
-                                                                 FfiConverterData.lower(groupId), $0)
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_is_handle_closed(self.uniffiClonePointer(), $0)
         })
     }
 
-    open func identityPublicKey(identity: String) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_identity_public_key(self.uniffiClonePointer(),
-                                                                        FfiConverterString.lower(identity), $0)
+    open func labyrinthStatus() throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_labyrinth_status(self.uniffiClonePointer(), $0)
         })
     }
 
-    /**
-     * Import a group's state from persistent storage
-     *
-     * Restores a previously exported group state. The group will be
-     * available for all MLS operations after import.
-     *
-     * - Parameters:
-     * - state_bytes: Serialized group state from export_group_state
-     * - Returns: Group ID of the imported group
-     * - Throws: MLSError if deserialization fails
-     */
-    open func importGroupState(stateBytes: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_import_group_state(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(stateBytes), $0)
+    open func listConversations(beforeUpdatedMs: Int64?, limit: UInt32) throws -> [ConversationRow] {
+        return try FfiConverterSequenceTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_conversations(self.uniffiClonePointer(),
+                                                                             FfiConverterOptionInt64.lower(beforeUpdatedMs),
+                                                                             FfiConverterUInt32.lower(limit), $0)
         })
     }
 
-    /**
-     * Import an identity key pair from backup/recovery
-     * This restores the identity key into the current storage provider
-     */
-    open func importIdentityKey(identity: String, keyData: Data) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_import_identity_key(self.uniffiClonePointer(),
-                                                                        FfiConverterString.lower(identity),
-                                                                        FfiConverterData.lower(keyData), $0)
-        }
-    }
-
-    /**
-     * Interrupt all in-flight SQLCipher operations on this context.
-     *
-     * Safe to call from any thread — does NOT require the inner Mutex.
-     * Causes any running sqlite3_step/sqlite3_exec to return SQLITE_INTERRUPT.
-     * The interrupted operation will release the Mutex, allowing flush_and_prepare_close
-     * to acquire it promptly.
-     *
-     * Call this BEFORE flush_and_prepare_close to avoid blocking on the Mutex
-     * while an in-flight FFI operation holds it (which causes 0xdead10cc).
-     */
-    open func interrupt() {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_interrupt(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Check if this context has been closed.
-     * Returns true if close_database() or flush_and_prepare_close() has been called.
-     */
-    open func isClosed() -> Bool {
-        return try! FfiConverterBool.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_is_closed(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Perform a launch-time TRUNCATE checkpoint to clear leftover WAL.
-     * Call once at app startup. Safe to call even if context was just created.
-     * Tolerates SQLITE_BUSY gracefully.
-     */
-    open func launchCheckpoint() throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_launch_checkpoint(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * List all pending proposals for a group
-     */
-    open func listPendingProposals(groupId: Data) throws -> [ProposalRef] {
-        return try FfiConverterSequenceTypeProposalRef.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_list_pending_proposals(self.uniffiClonePointer(),
-                                                                           FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Task #33: merge an incoming `StagedCommit` that was previously staged by
-     * `process_message` / `process_message_async` / `decrypt_message` /
-     * `decrypt_message_async` / `process_commit`.
-     *
-     * This is the caller-driven confirmation step that replaces the previous
-     * auto-merge behavior. The platform must call this once it has:
-     * - Validated the incoming commit against its recovery/sync policy
-     * - Persisted any pre-merge state it needs (ordering, ack state, etc.)
-     *
-     * Returns the accepted Commit's target epoch. A removed device is now
-     * inactive and has no successor secrets even if its public epoch advances.
-     * Rust orchestrators use `merge_incoming_commit_with_outcome` to distinguish
-     * this terminal membership transition from an active epoch advance.
-     *
-     * This method durably flushes the OpenMLS merge before returning, but it
-     * deliberately does not prune retained epoch secrets. The caller must
-     * first persist its own GroupState/projection for `target_epoch`, then use
-     * `finalize_epoch_transition` (or the in-process cleanup hook). Pruning
-     * inside this method could destroy recovery material before the outer
-     * transaction is durable.
-     *
-     * Errors:
-     * - `MLSError::invalid_input` if no staged commit exists for
-     * `(group_id, target_epoch)` — the entry was never staged, or
-     * `discard_incoming_commit` already cleared it.
-     * - `MLSError::MergeFailed`, epoch mismatch, or storage failure while
-     * applying the transition. The staged handle is preserved. If OpenMLS
-     * advanced before a barrier failure, retrying completes the barrier
-     * idempotently and only then consumes the handle.
-     */
-    open func mergeIncomingCommit(groupId: Data, targetEpoch: UInt64) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_merge_incoming_commit(self.uniffiClonePointer(),
-                                                                          FfiConverterData.lower(groupId),
-                                                                          FfiConverterUInt64.lower(targetEpoch), $0)
-        })
-    }
-
-    /**
-     * Merge a pending commit after validation.
-     *
-     * The merged OpenMLS state is durably flushed before return. Epoch-secret
-     * pruning is deliberately deferred until the host has persisted its
-     * stable GroupState projection and calls finalize_epoch_transition.
-     */
-    open func mergePendingCommit(groupId: Data) throws -> MergePendingCommitResult {
-        return try FfiConverterTypeMergePendingCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_merge_pending_commit(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Merge a staged commit after validation
-     * This should be called after validating incoming commits from other members
-     */
-    open func mergeStagedCommit(groupId: Data) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_merge_staged_commit(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    open func processCommit(groupId: Data, commitData: Data) throws -> ProcessCommitResult {
-        return try FfiConverterTypeProcessCommitResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_process_commit(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(groupId),
-                                                                   FfiConverterData.lower(commitData), $0)
-        })
-    }
-
-    open func processMessage(groupId: Data, messageData: Data) throws -> ProcessedContent {
-        return try FfiConverterTypeProcessedContent.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_process_message(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId),
-                                                                    FfiConverterData.lower(messageData), $0)
-        })
-    }
-
-    /**
-     * Async variant of process_message - offloads crypto work to avoid blocking
-     */
-    open func processMessageAsync(groupId: Data, messageData: Data) async throws -> ProcessedContent {
-        return
-            try await uniffiRustCallAsync(
-                rustFutureFunc: {
-                    uniffi_catbird_mls_fn_method_mlscontext_process_message_async(
-                        self.uniffiClonePointer(),
-                        FfiConverterData.lower(groupId), FfiConverterData.lower(messageData)
-                    )
-                },
-                pollFunc: ffi_catbird_mls_rust_future_poll_rust_buffer,
-                completeFunc: ffi_catbird_mls_rust_future_complete_rust_buffer,
-                freeFunc: ffi_catbird_mls_rust_future_free_rust_buffer,
-                liftFunc: FfiConverterTypeProcessedContent.lift,
-                errorHandler: FfiConverterTypeMLSError.lift
-            )
-    }
-
-    /**
-     * Task #33 (transitional): wrapper that runs `process_message` and
-     * immediately merges any incoming staged commit, preserving the
-     * pre-refactor auto-merge behavior.
-     *
-     * **DEPRECATED.** This exists only for platforms (iOS, Android, catmos)
-     * that have not yet migrated to the explicit stage/merge contract.
-     * New code should call `process_message` + (`merge_incoming_commit` or
-     * `discard_incoming_commit`).
-     *
-     * Logs a warning on every invocation — see server logs for migration
-     * progress.
-     */
-    open func processMessageLegacyAutomerge(groupId: Data, messageData: Data) throws -> ProcessedContent {
-        return try FfiConverterTypeProcessedContent.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_process_message_legacy_automerge(self.uniffiClonePointer(),
-                                                                                     FfiConverterData.lower(groupId),
-                                                                                     FfiConverterData.lower(messageData), $0)
-        })
-    }
-
-    open func processWelcome(welcomeBytes: Data, identityBytes: Data, config: GroupConfig?) throws -> WelcomeResult {
-        return try FfiConverterTypeWelcomeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_process_welcome(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(welcomeBytes),
-                                                                    FfiConverterData.lower(identityBytes),
-                                                                    FfiConverterOptionTypeGroupConfig.lower(config), $0)
-        })
-    }
-
-    /**
-     * Propose adding a member (does not commit)
-     *
-     * Creates a proposal that can be committed later with commit_pending_proposals.
-     * This enables multi-admin workflows where proposals accumulate before commit.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     * * `key_package_data` - Serialized key package of member to add
-     *
-     * # Returns
-     * ProposeResult containing proposal message to send and reference for tracking
-     */
-    open func proposeAddMember(groupId: Data, keyPackageData: Data) throws -> ProposeResult {
-        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_propose_add_member(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(groupId),
-                                                                       FfiConverterData.lower(keyPackageData), $0)
-        })
-    }
-
-    /**
-     * Propose removing a member (does not commit)
-     *
-     * Creates a proposal that can be committed later with commit_pending_proposals.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     * * `member_identity` - DID bytes of member to remove
-     *
-     * # Returns
-     * ProposeResult containing proposal message to send and reference for tracking
-     *
-     * # Errors
-     * * `MemberNotFound` - Member not in group
-     */
-    open func proposeRemoveMember(groupId: Data, memberIdentity: Data) throws -> ProposeResult {
-        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_propose_remove_member(self.uniffiClonePointer(),
-                                                                          FfiConverterData.lower(groupId),
-                                                                          FfiConverterData.lower(memberIdentity), $0)
-        })
-    }
-
-    /**
-     * Propose self-removal from a group.
-     *
-     * Groups use PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, so SelfRemove proposals
-     * (always PublicMessage) are rejected. Uses leave_group() instead which
-     * creates a Remove proposal as PrivateMessage.
-     */
-    open func proposeSelfRemove(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_propose_self_remove(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Propose self-update (does not commit)
-     *
-     * Creates a proposal to update your own leaf node. Can be committed later
-     * with commit_pending_proposals, or by another group member.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     *
-     * # Returns
-     * ProposeResult containing proposal message to send and reference for tracking
-     */
-    open func proposeSelfUpdate(groupId: Data) throws -> ProposeResult {
-        return try FfiConverterTypeProposeResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_propose_self_update(self.uniffiClonePointer(),
-                                                                        FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Remove members from the group (cryptographically secure)
-     *
-     * Creates a commit with Remove proposals. Follows send-then-merge pattern:
-     * caller must send commit to server and call merge_pending_commit() after ACK.
-     *
-     * # Security Note
-     * This is the ONLY secure way to remove members. Server-side removal
-     * does not revoke cryptographic access until the epoch advances.
-     *
-     * # Arguments
-     * * `group_id` - Group identifier
-     * * `member_identities` - Array of member credentials (DID bytes) to remove
-     *
-     * # Returns
-     * Commit data to send to server (no welcome for removals)
-     *
-     * # Errors
-     * * `InvalidInput` - No valid members found to remove
-     * * `GroupNotFound` - Group does not exist
-     * * `OpenMLSError` - OpenMLS operation failed
-     */
-    open func removeMembers(groupId: Data, memberIdentities: [Data]) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_remove_members(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(groupId),
-                                                                   FfiConverterSequenceData.lower(memberIdentities), $0)
-        })
-    }
-
-    open func removeMembersWithAad(groupId: Data, memberIdentities: [Data], aad: Data?) throws -> RemoveMembersResult {
-        return try FfiConverterTypeRemoveMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_remove_members_with_aad(self.uniffiClonePointer(),
-                                                                            FfiConverterData.lower(groupId),
-                                                                            FfiConverterSequenceData.lower(memberIdentities),
-                                                                            FfiConverterOptionData.lower(aad), $0)
-        })
-    }
-
-    /**
-     * Remove a proposal from the proposal queue
-     */
-    open func removeProposal(groupId: Data, proposalRef: ProposalRef) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_remove_proposal(self.uniffiClonePointer(),
-                                                                    FfiConverterData.lower(groupId),
-                                                                    FfiConverterTypeProposalRef.lower(proposalRef), $0)
-        }
-    }
-
-    /**
-     * Export a secret using the Puncturable PRF tree (forward-secure within epoch).
-     *
-     * Falls back to `export_secret` with a deterministic label when the group
-     * does not have an `application_export_tree` (legacy groups created before
-     * extensions-draft-08).
-     */
-    open func safeExportSecret(groupId: Data, componentId: UInt16) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_safe_export_secret(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(groupId),
-                                                                       FfiConverterUInt16.lower(componentId), $0)
-        })
-    }
-
-    /**
-     * Export a secret from the pending commit's Puncturable PRF tree.
-     *
-     * Falls back to `export_secret` from the pending commit when the group
-     * does not support safe export.
-     */
-    open func safeExportSecretFromPending(groupId: Data, componentId: UInt16) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_safe_export_secret_from_pending(self.uniffiClonePointer(),
-                                                                                    FfiConverterData.lower(groupId),
-                                                                                    FfiConverterUInt16.lower(componentId), $0)
-        })
-    }
-
-    /**
-     * Create a self-update commit to refresh own leaf node
-     * This forces epoch advancement and is useful for preventing ratchet desync
-     * when changing senders (prevents SecretReuseError from concurrent sends in same epoch)
-     *
-     * # Arguments
-     * * `group_id` - Group identifier to update
-     *
-     * # Returns
-     * Commit data to be sent to server (no welcome needed for self-updates)
-     *
-     * # Note
-     * This uses the send-then-merge pattern - caller must merge after server ACK
-     */
-    open func selfUpdate(groupId: Data) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_self_update(self.uniffiClonePointer(),
-                                                                FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Install the content root key used by all subsequent
-     * encrypt/decrypt/hmac calls. Must be exactly 32 bytes.
-     */
-    open func setContentRootKey(key: Data) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_set_content_root_key(self.uniffiClonePointer(),
-                                                                         FfiConverterData.lower(key), $0)
-        }
-    }
-
-    /**
-     * Set the credential validator callback for client-side validation
-     *
-     * This enables the Swift layer to validate credentials before accepting
-     * group state changes. The validator is called before merging commits.
-     */
-    open func setCredentialValidator(validator: CredentialValidator) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_set_credential_validator(self.uniffiClonePointer(),
-                                                                             FfiConverterCallbackInterfaceCredentialValidator.lower(validator), $0)
-        }
-    }
-
-    /**
-     * Set the epoch secret storage backend
-     *
-     * This MUST be called during initialization before any MLS operations.
-     * The storage implementation should persist epoch secrets in encrypted storage (SQLCipher).
-     */
-    open func setEpochSecretStorage(storage: EpochSecretStorage) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_set_epoch_secret_storage(self.uniffiClonePointer(),
-                                                                             FfiConverterCallbackInterfaceEpochSecretStorage.lower(storage), $0)
-        }
-    }
-
-    open func setExternalJoinAuthorizer(authorizer: ExternalJoinAuthorizer) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_set_external_join_authorizer(self.uniffiClonePointer(),
-                                                                                 FfiConverterCallbackInterfaceExternalJoinAuthorizer.lower(authorizer), $0)
-        }
-    }
-
-    /**
-     * Set the global MLS logger to receive Rust logs in Swift
-     *
-     * This allows forwarding internal MLS logs to OSLog or other Swift logging systems.
-     * The logger instance will be used for all subsequent MLS operations.
-     *
-     * - Parameters:
-     * - logger: Logger implementation conforming to MLSLogger protocol
-     */
-    open func setLogger(logger: MlsLogger) {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_set_logger(self.uniffiClonePointer(),
-                                                               FfiConverterCallbackInterfaceMlsLogger.lower(logger), $0)
-        }
-    }
-
-    /**
-     * Set the suspension flag. When true, long-running operations bail out early
-     * to release the Mutex and file locks before iOS suspends the process.
-     * Safe to call from any thread — uses atomic store.
-     */
-    open func setSuspended(value: Bool) {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_set_suspended(self.uniffiClonePointer(),
-                                                                  FfiConverterBool.lower(value), $0)
-        }
-    }
-
-    /**
-     * Sign arbitrary bytes using the persistent MLS signer for an identity.
-     *
-     * This is used for declaration device proof-of-possession. The signature
-     * key is the same key used in MLS credentials/key packages for `identity`.
-     */
-    open func signWithIdentityKey(identity: String, payload: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_sign_with_identity_key(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(identity),
-                                                                           FfiConverterData.lower(payload), $0)
-        })
-    }
-
-    /**
-     * Stage a commit without sending it to the delivery service or merging
-     * it locally. Returns a [`crate::orchestrator_bridge::FFICommitPlan`]
-     * the caller ships to the DS; the caller then passes the embedded
-     * handle back to [`confirm_commit`](Self::confirm_commit) on success or
-     * [`discard_pending`](Self::discard_pending) on failure.
-     *
-     * `signer_identity_bytes` is the UTF-8 DID of the caller — used to
-     * export GroupInfo for the pre-merge group state (identical shape to
-     * [`MLSContext::export_group_info`]).
-     *
-     * Only one pending commit may exist per group at a time (OpenMLS
-     * constraint). Staging a second commit while one is already pending
-     * returns `MLSError::InvalidInput`.
-     *
-     * Add/Swap authority is derived from the exact multiset of bare DID roots
-     * embedded in the supplied KeyPackage credentials. The direct context has
-     * no platform credential resolver, so authorized-device-key resolution
-     * remains the responsibility of the higher-level orchestrator; callers
-     * that need that policy must use `OrchestratorBridge::stage_commit`.
-     */
-    open func stageCommit(conversationId: String, kind: FfiCommitKind, signerIdentityBytes: Data) throws -> FfiCommitPlan {
-        return try FfiConverterTypeFFICommitPlan.lift(rustCallWithError(FfiConverterTypeMLSCommitError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_stage_commit(self.uniffiClonePointer(),
-                                                                 FfiConverterString.lower(conversationId),
-                                                                 FfiConverterTypeFFICommitKind.lower(kind),
-                                                                 FfiConverterData.lower(signerIdentityBytes), $0)
-        })
-    }
-
-    open func storageLifecycleStatus() -> StorageLifecycleStatus {
-        return try! FfiConverterTypeStorageLifecycleStatus.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_storage_lifecycle_status(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Store a proposal in the proposal queue after validation
-     * The application should inspect the proposal before storing it
-     */
-    open func storeProposal(groupId: Data, proposalRef: ProposalRef) throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_store_proposal(self.uniffiClonePointer(),
-                                                                   FfiConverterData.lower(groupId),
-                                                                   FfiConverterTypeProposalRef.lower(proposalRef), $0)
-        }
-    }
-
-    /**
-     * Atomically swap members: remove old + add new in a single commit.
-     */
-    open func swapMembers(groupId: Data, removeIdentities: [Data], addKeyPackages: [KeyPackageData]) throws -> AddMembersResult {
-        return try FfiConverterTypeAddMembersResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_swap_members(self.uniffiClonePointer(),
-                                                                 FfiConverterData.lower(groupId),
-                                                                 FfiConverterSequenceData.lower(removeIdentities),
-                                                                 FfiConverterSequenceTypeKeyPackageData.lower(addKeyPackages), $0)
-        })
-    }
-
-    /**
-     * 🔒 FIX #2: Force database synchronization
-     *
-     * Forces a full WAL checkpoint to ensure all MLS state is durably persisted.
-     * Call this after critical state transitions (Welcome processing, Commit merge)
-     * to prevent SecretReuseError from incomplete persistence.
-     *
-     * - Returns: Ok(()) on success
-     * - Throws: MLSError if flush fails
-     */
-    open func syncDatabase() throws {
-        try rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_sync_database(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Update group metadata. Returns commit bytes to send to server.
-     *
-     * Used by the orchestrator's `CommitKind::UpdateMetadata` stage_commit
-     * dispatch (iOS three-phase rename path). The `metadata_json` is the
-     * legacy `GroupMetadataPayload` shape; its contents are NOT written
-     * into the MLS group context (Phase A retired 0xff00). The caller
-     * re-encrypts the metadata blob post-merge using the new epoch's
-     * metadata key (iOS `reWrapMetadataAfterMerge`). Direct callers
-     * wanting an atomic encrypted update should use
-     * `update_group_metadata_encrypted` (Phase A.2).
-     */
-    open func updateGroupMetadata(groupId: Data, metadataJson: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata(self.uniffiClonePointer(),
-                                                                          FfiConverterData.lower(groupId),
-                                                                          FfiConverterData.lower(metadataJson), $0)
-        })
-    }
-
-    /**
-     * Atomic encrypted metadata update (Phase A.2).
-     *
-     * Stages the GroupContextExtensions commit + derives the post-commit
-     * metadata key from the staged commit's exporter + encrypts a fresh
-     * `GroupMetadataV1` payload, all in one call. Returns everything the
-     * caller needs to upload + send + merge:
-     * - `commit_bytes` → send to DS via `commitGroupChange`/`updateConvo`
-     * - `metadata_blob_ciphertext` → upload via `putGroupMetadataBlob` with
-     * `metadata_blob_locator` and `metadata_version`
-     * - `metadata_reference_json` → cache locally (final reference, real hash)
-     *
-     * After server ACK, caller invokes `merge_pending_commit(group_id)` to
-     * apply the commit locally; joiners on the new epoch read the
-     * MetadataReference from AppDataDictionary 0x8001 and bootstrap the
-     * blob via `getGroupMetadataBlob`.
-     */
-    open func updateGroupMetadataEncrypted(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?) throws -> UpdateGroupMetadataResultFfi {
-        return try FfiConverterTypeUpdateGroupMetadataResultFfi.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata_encrypted(self.uniffiClonePointer(),
-                                                                                    FfiConverterData.lower(groupId),
-                                                                                    FfiConverterOptionString.lower(title),
-                                                                                    FfiConverterOptionString.lower(description),
-                                                                                    FfiConverterOptionString.lower(avatarBlobLocator),
-                                                                                    FfiConverterOptionString.lower(avatarContentType), $0)
-        })
-    }
-
-    open func updateGroupMetadataEncryptedWithAad(groupId: Data, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, aad: Data?) throws -> UpdateGroupMetadataResultFfi {
-        return try FfiConverterTypeUpdateGroupMetadataResultFfi.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_update_group_metadata_encrypted_with_aad(self.uniffiClonePointer(),
-                                                                                             FfiConverterData.lower(groupId),
-                                                                                             FfiConverterOptionString.lower(title),
-                                                                                             FfiConverterOptionString.lower(description),
-                                                                                             FfiConverterOptionString.lower(avatarBlobLocator),
-                                                                                             FfiConverterOptionString.lower(avatarContentType),
-                                                                                             FfiConverterOptionData.lower(aad), $0)
-        })
-    }
-
-    /**
-     * 🔒 FIX #3: Validate GroupInfo format before upload
-     *
-     * Verifies that a GroupInfo blob can be successfully deserialized.
-     * Call this before uploading to server to catch corruption early.
-     *
-     * The GroupInfo is serialized as an MlsMessageOut wrapper containing the actual
-     * VerifiableGroupInfo. This function handles both the wrapped and unwrapped formats.
-     *
-     * - Parameters:
-     * - group_info_bytes: The serialized GroupInfo (MlsMessageOut wrapper)
-     * - Returns: true if valid, false otherwise (with error logging)
-     */
-    open func validateGroupInfoFormat(groupInfoBytes: Data) -> Bool {
-        return try! FfiConverterBool.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_mlscontext_validate_group_info_format(self.uniffiClonePointer(),
-                                                                               FfiConverterData.lower(groupInfoBytes), $0)
-        })
-    }
-
-    /**
-     * Constant-time verify a previously-computed HMAC tag against the
-     * chain inputs.
-     */
-    open func verifyMessageHmac(conversationId: String, prevHmac: Data?, messageId: String, payloadWire: Data, expected: Data) throws -> Bool {
-        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-            uniffi_catbird_mls_fn_method_mlscontext_verify_message_hmac(self.uniffiClonePointer(),
+    open func listMessages(conversationId: String, beforeSeq: Int64?, limit: UInt32) throws -> [MessageRow] {
+        return try FfiConverterSequenceTypeMessageRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_messages(self.uniffiClonePointer(),
                                                                         FfiConverterString.lower(conversationId),
-                                                                        FfiConverterOptionData.lower(prevHmac),
-                                                                        FfiConverterString.lower(messageId),
-                                                                        FfiConverterData.lower(payloadWire),
-                                                                        FfiConverterData.lower(expected), $0)
+                                                                        FfiConverterOptionInt64.lower(beforeSeq),
+                                                                        FfiConverterUInt32.lower(limit), $0)
+        })
+    }
+
+    open func listRequests(consentFilter: String?) throws -> [RequestRow] {
+        return try FfiConverterSequenceTypeRequestRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_requests(self.uniffiClonePointer(),
+                                                                        FfiConverterOptionString.lower(consentFilter), $0)
+        })
+    }
+
+    open func preCutoverWipeReport() -> PreCutoverWipeReport {
+        return try! FfiConverterTypePreCutoverWipeReport.lift(try! rustCall {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_pre_cutover_wipe_report(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func prepareForBackground() throws -> BackgroundCheckpointReport {
+        return try FfiConverterTypeBackgroundCheckpointReport.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_prepare_for_background(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func registerPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_register_passkey_prf(self.uniffiClonePointer(),
+                                                                               FfiConverterData.lower(credentialId),
+                                                                               FfiConverterData.lower(prfOutput32), $0)
+        })
+    }
+
+    open func removeGroupMember(actorRole: MemberRole, conversationId: String, targetDid: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_remove_group_member(self.uniffiClonePointer(),
+                                                                              FfiConverterTypeMemberRole.lower(actorRole),
+                                                                              FfiConverterString.lower(conversationId),
+                                                                              FfiConverterString.lower(targetDid), $0)
+        }
+    }
+
+    open func restoreWithRecoveryCode(recoveryCodeInput: String) throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_restore_with_recovery_code(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(recoveryCodeInput), $0)
+        })
+    }
+
+    open func resumeFromBackground() throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_resume_from_background(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    open func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_revoke_labyrinth_device(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(targetDeviceId), $0)
+        })
+    }
+
+    open func sendMessage(conversationId: String, messageId: String, text: String) throws -> MessageRow {
+        return try FfiConverterTypeMessageRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_send_message(self.uniffiClonePointer(),
+                                                                       FfiConverterString.lower(conversationId),
+                                                                       FfiConverterString.lower(messageId),
+                                                                       FfiConverterString.lower(text), $0)
+        })
+    }
+
+    open func setupRecoveryCode() throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_setup_recovery_code(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func signOutAndWipe() throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_sign_out_and_wipe(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    open func updateGroupMetadata(conversationId: String, title: String, description: String, spaceAvatar: SpaceAvatarPointer?) throws -> GroupMetadataRow {
+        return try FfiConverterTypeGroupMetadataRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_update_group_metadata(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(conversationId),
+                                                                                FfiConverterString.lower(title),
+                                                                                FfiConverterString.lower(description),
+                                                                                FfiConverterOptionTypeSpaceAvatarPointer.lower(spaceAvatar), $0)
         })
     }
 }
@@ -3339,19 +880,19 @@ open class MlsContext:
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeMLSContext: FfiConverter {
+public struct FfiConverterTypeCatbirdMlsClient: FfiConverter {
     typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = MlsContext
+    typealias SwiftType = CatbirdMlsClient
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> MlsContext {
-        return MlsContext(unsafeFromRawPointer: pointer)
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> CatbirdMlsClient {
+        return CatbirdMlsClient(unsafeFromRawPointer: pointer)
     }
 
-    public static func lower(_ value: MlsContext) -> UnsafeMutableRawPointer {
+    public static func lower(_ value: CatbirdMlsClient) -> UnsafeMutableRawPointer {
         return value.uniffiClonePointer()
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsContext {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CatbirdMlsClient {
         let v: UInt64 = try readInt(&buf)
         // The Rust code won't compile if a pointer won't fit in a UInt64.
         // We have to go via `UInt` because that's the thing that's the size of a pointer.
@@ -3362,7 +903,7 @@ public struct FfiConverterTypeMLSContext: FfiConverter {
         return try lift(ptr!)
     }
 
-    public static func write(_ value: MlsContext, into buf: inout [UInt8]) {
+    public static func write(_ value: CatbirdMlsClient, into buf: inout [UInt8]) {
         // This fiddling is because `Int` is the thing that's the same size as a pointer.
         // The Rust code won't compile if a pointer won't fit in a `UInt64`.
         writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
@@ -3372,593 +913,29 @@ public struct FfiConverterTypeMLSContext: FfiConverter {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeMLSContext_lift(_ pointer: UnsafeMutableRawPointer) throws -> MlsContext {
-    return try FfiConverterTypeMLSContext.lift(pointer)
+public func FfiConverterTypeCatbirdMlsClient_lift(_ pointer: UnsafeMutableRawPointer) throws -> CatbirdMlsClient {
+    return try FfiConverterTypeCatbirdMlsClient.lift(pointer)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeMLSContext_lower(_ value: MlsContext) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeMLSContext.lower(value)
+public func FfiConverterTypeCatbirdMlsClient_lower(_ value: CatbirdMlsClient) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeCatbirdMlsClient.lower(value)
 }
 
 /**
- * UniFFI-exported MLS Orchestrator object.
- *
- * Wraps the generic MLSOrchestrator with callback-based trait implementations.
- * Swift/Kotlin provides the platform-specific storage, API, and credential backends.
+ * Platform UI invalidation observer (`Spec §6.3`).
  */
-public protocol OrchestratorBridgeProtocol: AnyObject {
-    /**
-     * Accept an invitation to a conversation (direct or group).
-     */
-    func acceptConversation(conversationId: String) throws
-
-    /**
-     * Add members to an existing group.
-     */
-    func addMembers(groupId: String, memberDids: [String]) throws
-
-    /**
-     * Add members through the Rust-owned engine and return the updated
-     * conversation snapshot for full-authority clients.
-     */
-    func addMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult
-
-    func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome
-
-    func closeDirectRequest(conversationId: String) throws -> DirectRequestView
-
-    /**
-     * Confirm a previously staged commit: merges it locally, advances the
-     * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
-     * the fence (for API paths that don't echo an epoch).
-     */
-    func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws -> FfiConfirmedCommit
-
-    /**
-     * Create a new MLS conversation through the Rust-owned engine and
-     * return the conversation snapshot needed by full-authority clients.
-     */
-    func createConversation(name: String, initialMembers: [String]?, description: String?) throws -> FfiCreateConversationResult
-
-    /**
-     * Create a new MLS group/conversation.
-     */
-    func createGroup(name: String, initialMembers: [String]?, description: String?) throws -> FfiConversationView
-
-    /**
-     * Fault-injection hook used by rustFull E2E recovery tests.
-     *
-     * Deletes only local OpenMLS group state, preserves the conversation
-     * projection, and marks the conversation for Rust-owned rejoin.
-     */
-    func debugWipeLocalGroupForRecovery(convoId: String) throws -> FfiDebugWipeLocalGroupResult
-
-    /**
-     * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
-     * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
-     */
-    func decodeOpusToPcm(opusData: Data) throws -> Data
-
-    /**
-     * Discard a staged commit without advancing the epoch. Clears the
-     * pending commit in the MLS crypto context.
-     */
-    func discardPending(handle: FfiStagedCommitHandle) throws
-
-    func emergencyClose(reason: String) throws
-
-    /**
-     * Ensure one conversation is ready for open/send work using the same
-     * recovery ordering as the Rust recovery pipeline.
-     */
-    func ensureConversationReady(convoId: String) throws -> FfiConversationReadyResult
-
-    /**
-     * Ensure device is registered with MLS service.
-     */
-    func ensureDeviceRegistered() throws -> String
-
-    /**
-     * Return the RFC 9420 §8.7 `epoch_authenticator` for a group's current
-     * epoch.
-     *
-     * Platforms hex-encode this value when calling
-     * `OrchestratorAPICallback::report_recovery_failure` so that quorum-reset
-     * reports (spec §8.6 / ADR-002) are bound to a specific epoch. Returns
-     * the raw authenticator bytes.
-     */
-    func epochAuthenticator(groupId: Data) throws -> Data
-
-    /**
-     * Fetch and process new messages from server.
-     */
-    func fetchMessages(conversationId: String, cursor: String?, limit: UInt32) throws -> FfiFetchMessagesResult
-
-    /**
-     * Fulfill an open leaf recovery request for a conversation.
-     */
-    func fulfillLeafRecovery(conversationId: String) throws
-
-    /**
-     * Snapshot of a conversation quarantine state, if any.
-     */
-    func getConversationQuarantineState(convoId: String) -> FfiQuarantineState?
-
-    /**
-     * Project the orchestrator's current conversation recovery state into the
-     * Swift `ConversationRecoveryState` vocabulary.
-     *
-     * Unknown conversations default to `Healthy` so adding this method does not
-     * change behavior for clients that have not opted into Rust authority. When
-     * Rust has a cached group state but the low-level MLS context no longer has
-     * matching local group state, the projection reports `GroupMissing`.
-     */
-    func getConversationRecoveryState(conversationId: String) throws -> FfiConversationRecoveryState
-
-    func getDirectRequestDeliveryEnabled() throws -> Bool?
-
-    func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference?
-
-    /**
-     * Get key package stats.
-     */
-    func getKeyPackageStats() throws -> FfiKeyPackageStats
-
-    /**
-     * Handle a server-initiated group reset (`GroupResetEvent` delivered via
-     * SSE/WS from the DS).
-     *
-     * **Deprecated alias for `record_group_reset` (WS-5.1, invariant S1).**
-     * This method no longer performs an inline `join_or_rejoin`: the
-     * orchestrator transitions the conversation to `RESET_PENDING`, persists
-     * the payload via `mark_reset_pending`, deletes the old local MLS group,
-     * atomically arms `needs_rejoin`, clears per-conversation recovery
-     * trackers, and rebinds the group id. The deferred-recovery loop driven by
-     * `sync_with_server` performs the actual rejoin on the next cycle —
-     * inline External Commits from event paths are the production
-     * epoch-inflation pattern (spec §8.5).
-     *
-     * - `convo_id`: stable conversation id.
-     * - `new_group_id_hex`: hex-encoded new MLS group id advertised by the DS.
-     * - `reset_generation`: monotonic reset counter from the DS.
-     *
-     * Kept for FFI ABI compatibility; new code should call
-     * `record_group_reset`.
-     */
-    func handleGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws
-
-    /**
-     * Initialize the orchestrator for a user DID.
-     */
-    func initialize(userDid: String) throws
-
-    func initializeEngine(userDid: String) throws
-
-    func interruptStorage(reason: String) throws
-
-    /**
-     * Join an existing group via Welcome message.
-     */
-    func joinGroup(welcomeData: Data) throws -> FfiConversationView
-
-    /**
-     * Join or rejoin one conversation through the normal Rust recovery path.
-     *
-     * Unlike `perform_silent_recovery`, this does not delete or re-register
-     * the device. It delegates to `MLSOrchestrator::join_or_rejoin`, preserving
-     * the Welcome-first and ResetPending-bootstrap-before-External-Commit
-     * ordering used by sync and incoming-message recovery.
-     */
-    func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult
-
-    /**
-     * What background archiving and deletion could not do (show it):
-     * quarantined messages, members left out of a conversation's archive
-     * (with pin conflicts to resolve), dropped messages, and a pending
-     * remote deletion.
-     */
-    func labyrinthArchiveStatus() throws -> FfiLabyrinthArchiveStatus
-
-    /**
-     * Forget the recorded exclusions and dropped messages (the user saw them).
-     */
-    func labyrinthClearArchiveReports() throws
-
-    /**
-     * Create a recovery code. Show it to the user once; it is not stored.
-     */
-    func labyrinthCreateRecoveryCode() throws -> String
-
-    /**
-     * Delete the account's history backup everywhere: the server mailbox
-     * and every message the account archived (shown to others as removed),
-     * the PDS `mailboxKeys` records, and this device's state. This
-     * device's state is erased even if the server cannot be reached; the
-     * remote half is then retried (`remote_pending`).
-     */
-    func labyrinthDeleteAccount() throws -> FfiLabyrinthDeletion
-
-    /**
-     * Turn on encrypted history backup for the signed-in account on this
-     * device. Returns this device's Labyrinth device key (hex).
-     */
-    func labyrinthEnableBackup() throws -> String
-
-    /**
-     * Archive every queued sent message now. Call it when the app is about
-     * to suspend and at launch (a killed process leaves its queue saved).
-     * Returns how many messages were archived.
-     */
-    func labyrinthFlushArchive() throws -> UInt64
-
-    /**
-     * Store a conversation's archived history locally (new device).
-     */
-    func labyrinthImportHistory(conversationId: String) throws -> FfiLabyrinthImport
-
-    /**
-     * The conversations this account has backed-up history in. A
-     * non-empty `incomplete_sequencers` means the list is partial.
-     */
-    func labyrinthListThreads() throws -> FfiLabyrinthThreads
-
-    /**
-     * Decrypted history of a conversation in `[from_ms, until_ms)`.
-     */
-    func labyrinthLoadHistoryPage(conversationId: String, fromMs: UInt64?, untilMs: UInt64?) throws -> FfiLabyrinthHistory
-
-    /**
-     * A contact's history keys changed (they reset their backup): the
-     * safety-number change to show, like Signal. Fails if the new keys are
-     * not vouched for by one of the contact's current chat devices.
-     */
-    func labyrinthProposeRepin(did: String) throws -> FfiLabyrinthRepinProposal
-
-    /**
-     * The user accepted the new safety number: trust the contact's new
-     * history keys (`new_head_hex` from the proposal).
-     */
-    func labyrinthRepinPeer(did: String, newHeadHex: String) throws
-
-    /**
-     * Enroll this device into the account's backup with a recovery code.
-     * Returns this device's Labyrinth device key (hex).
-     */
-    func labyrinthRestoreWithRecoveryCode(code: String) throws -> String
-
-    /**
-     * Retry every quarantined message now. Returns how many there were.
-     */
-    func labyrinthRetryQuarantined() throws -> UInt64
-
-    /**
-     * Retry a pending remote account deletion now. Returns true when
-     * nothing is pending any more.
-     */
-    func labyrinthRetryRemoteDeletion() throws -> Bool
-
-    /**
-     * Revoke another device of this account from the backup.
-     */
-    func labyrinthRevokeDevice(deviceKeyHex: String) throws -> UInt64
-
-    /**
-     * Sign-out or account removal on this device: erase this device's
-     * backup state and queue. The account's backup on the server stays, so
-     * a later sign-in restores with a recovery code. Returns whether any
-     * state was saved.
-     */
-    func labyrinthSignOut() throws -> Bool
-
-    /**
-     * Leave a conversation through the Rust-owned engine and return the
-     * identifiers Swift needs to clean up local state immediately.
-     */
-    func leaveConversation(conversationId: String) throws -> FfiLeaveResult
-
-    /**
-     * Leave a conversation.
-     */
-    func leaveGroup(convoId: String) throws
-
-    /**
-     * Return the current account's reconciled native display projection,
-     * retaining durable rows when no matching runtime view is available.
-     */
-    func listConversations(userDid: String) throws -> [FfiConversationView]
-
-    /**
-     * List registered devices.
-     */
-    func listDevices() throws -> [FfiDeviceInfo]
-
-    func listDirectRequestViews() throws -> [DirectRequestView]
-
-    /**
-     * Perform full silent recovery.
-     */
-    func performSilentRecovery(conversationIds: [String]) throws
-
-    /**
-     * Prepare a canonical clean-chat signed mutation.
-     *
-     * This method accepts only actor/device binding metadata. It deliberately
-     * returns no Authorization or DPoP proof: direct-DS and Nest-proxy
-     * adapters attach their own transport credentials after signing.
-     */
-    func prepareCleanChatSignedRequest(binding: CleanChatSigningContextFfi, operation: CleanChatOperationFfi, bodyJson: Data) throws -> CleanChatPreparedRequestFfi
-
-    func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult
-
-    /**
-     * Encode PCM audio to Opus, extract waveform, encrypt blob.
-     * Returns the encrypted data + metadata needed to upload and send.
-     */
-    func prepareVoiceMessage(pcmPath: String, sampleRate: UInt32) throws -> FfiVoicePrepareResult
-
-    /**
-     * Process an incoming encrypted envelope.
-     */
-    func processIncoming(envelope: FfiIncomingEnvelope) throws -> FfiMessage?
-
-    /**
-     * Process an incoming encrypted envelope through the Rust-owned engine.
-     */
-    func processIncomingMessage(envelope: FfiIncomingEnvelope, serverEpoch: UInt64?) throws -> FfiMessageProcessingResult
-
-    /**
-     * Process a server event envelope through the Rust-owned engine.
-     */
-    func processServerEvent(eventJson: String) throws -> [FfiEngineEvent]
-
-    /**
-     * Publish a single key package.
-     */
-    func publishKeyPackage() throws
-
-    func reattachAfterSuspend(userDid: String, reason: String) throws
-
-    /**
-     * Persist a `groupResetEvent` WITHOUT performing inline recovery
-     * (spec §8.5 Phase 1, ADR-008 D2 deferred-recovery invariant).
-     *
-     * Platforms whose event/SSE/WS handler must not run External Commits
-     * inline (catmos, BIRDaemon, and Phase 3 iOS/Android event paths)
-     * should call this from the event handler. The deferred-recovery
-     * loop driven by `MLSOrchestrator::sync_with_server` will pick the
-     * conversation up via the `needs_rejoin` flag set here, then route
-     * it through `join_or_rejoin` — which now includes a first-responder
-     * bootstrap step gated on `ConversationState::ResetPending`.
-     *
-     * New code should prefer this over `handle_group_reset`. As of WS-5.1
-     * the legacy `handle_group_reset` is a pure deprecated alias for this
-     * method — its historical inline `join_or_rejoin` (the part that
-     * violated the "no External Commits in event handlers" invariant) has
-     * been removed; both entry points now only record deferred-recovery
-     * state.
-     */
-    func recordGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws
-
-    /**
-     * Outcome-returning variant of `record_group_reset` for platforms that
-     * need to distinguish recorded resets from stale/self-echo no-ops before
-     * triggering UI notifications or sync work.
-     */
-    func recordGroupResetOutcome(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws -> FfiResetRecordOutcome
-
-    /**
-     * Persist a Phase 2.5 `resetRequestedEvent` from the DS — the indirect-
-     * trigger SSE event where the server has NOT minted a new MLS group id
-     * and is asking subscribed clients to elect a first responder
-     * (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1).
-     *
-     * Same deferred-recovery contract as `record_group_reset`: this writes
-     * `RESET_PENDING` state + payload, deletes the old local MLS group,
-     * clears recovery counters, and flips `needs_rejoin` so the next
-     * `MLSOrchestrator::sync_with_server` cycle drives `join_or_rejoin`,
-     * which already includes the first-responder bootstrap branch
-     * (`recovery.rs:1173-1215`). NO inline External Commit — preserves the
-     * "no External Commits in event handlers" invariant that orchestrator-
-     * using clients (catmos, BIRDaemon, WASM) rely on to avoid the
-     * epoch-inflation class of bug observed in March 2026.
-     *
-     * - `convo_id`: stable conversation id.
-     * - `crypto_session_id`: prior session id, now in `reset_requested`
-     * server-side (lexicon `cryptoSessionId`).
-     * - `reset_generation`: monotonic per conversation (lexicon `generation`,
-     * `i32` here to match the existing `reset_generation` field).
-     * - `trigger`: `quorumVote | systemSweep | inlineCommit409 |
-     * inlineGroupInfo404 | adminRequest` (lexicon-owned set; logged here).
-     * - `request_event_id`: deterministic dedup key from the server (plan
-     * §3 idempotency scheme).
-     * - `expected_new_mls_group_id_hex`: usually `None` (indirect triggers
-     * never mint client-visible material per Phase 2.5 §1 locked decision);
-     * admin path may pass `Some(hex_id)`. When `None`, this function mints
-     * a fresh local UUIDv4-style 32-hex-char id for the client's race-
-     * bootstrap candidate; the server's `crypto_sessions UNIQUE
-     * (conversation_id, generation)` chokepoint constraint serializes the
-     * winner, race losers see HTTP 409 `AlreadyBootstrapped` and drop
-     * their pre-bootstrap MLS group cleanly.
-     *
-     * Idempotency: if the conversation is already `RESET_PENDING` at the
-     * same `reset_generation`, the call is a no-op (logged at INFO with the
-     * `request_event_id` for audit).
-     */
-    func recordResetRequested(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws
-
-    /**
-     * Outcome-returning variant of `record_reset_requested` for platforms
-     * that need to avoid follow-up sync/UI churn when Rust classified the
-     * event as stale or self-echo.
-     */
-    func recordResetRequestedOutcome(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws -> FfiResetRecordOutcome
-
-    func refreshRequestPreview(conversationId: String) throws -> DirectRequestView
-
-    /**
-     * Remove a device.
-     */
-    func removeDevice(deviceId: String) throws
-
-    /**
-     * Remove members from a group.
-     */
-    func removeMembers(groupId: String, memberDids: [String]) throws
-
-    /**
-     * Remove members through the Rust-owned engine and return the updated
-     * conversation snapshot for full-authority clients.
-     */
-    func removeMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult
-
-    /**
-     * Check and replenish key packages if needed.
-     */
-    func replenishKeyPackagesIfNeeded() throws
-
-    /**
-     * Task #43: report unrecoverable local state to the server so the A7 reset
-     * pyramid can take over (the server will eventually issue a GroupResetEvent
-     * to move all members to a new group).
-     *
-     * This does **not** touch local MLS state or create External Commits. It's
-     * a pure notification. Callback errors on the `report_recovery_failure`
-     * path are logged and swallowed internally.
-     */
-    func reportUnrecoverableLocal(convoId: String, reason: String) throws
-
-    /**
-     * Fulfill a Welcome-reissue request as an admin member (rustFull mode).
-     * Mirrors `swap_members` (no external commit): removes the recipient's
-     * stale leaf and re-adds them with a fresh key package, threading
-     * `request_id` as the server idempotency key so the delivery service marks
-     * the reissue request answered.
-     */
-    func respondToWelcomeReissue(convoId: String, recipientDeviceDid: String, requestId: String) throws
-
-    func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome
-
-    func resumeFromSuspend(reason: String) throws
-
-    func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport
-
-    /**
-     * Send a text message.
-     */
-    func sendMessage(conversationId: String, text: String) throws -> FfiMessage
-
-    /**
-     * Send a JSON-encoded MLS message payload envelope.
-     */
-    func sendPayloadJson(conversationId: String, payloadJson: String) throws -> FfiMessage
-
-    /**
-     * Send a JSON-encoded MLS message payload through the Rust-owned engine.
-     */
-    func sendPayloadResultJson(conversationId: String, payloadJson: String) throws -> FfiSendResult
-
-    /**
-     * Send an encrypted reaction payload.
-     */
-    func sendReaction(conversationId: String, messageId: String, emoji: String, action: String) throws -> FfiMessage
-
-    /**
-     * Send a voice message (audio embed) to a conversation.
-     * Call prepare_voice_message first, upload the encrypted blob,
-     * then call this with the blob_id from the upload.
-     */
-    func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv: Data, sha256: String, size: UInt64, durationMs: UInt64, waveform: [Float], transcript: String?) throws -> FfiMessage
-
-    func setDirectRequestDeliveryEnabled(enabled: Bool) throws
-
-    /**
-     * Install (or replace) the Layer 3 event callback. Pass None to detach.
-     */
-    func setEventCallback(callback: OrchestratorEventCallback?)
-
-    /**
-     * Opt in to returning/storing known non-displayable MLS control payloads
-     * from `process_incoming`.
-     *
-     * Defaults off for source compatibility with existing clients. Catbird iOS
-     * enables this in Rust-authoritative mode and handles the side effects in
-     * Swift after Rust has performed the MLS decrypt/process step.
-     */
-    func setStoreControlMessages(enabled: Bool)
-
-    /**
-     * Shut down the orchestrator.
-     */
-    func shutdown()
-
-    /**
-     * Sign a server-issued device-authentication challenge with the
-     * initialized user's persistent MLS identity key.
-     *
-     * The caller cannot select an identity or access key material. The
-     * signature is bound to the user DID owned by this orchestrator's active
-     * lifecycle, and is therefore refused before initialization or after
-     * shutdown.
-     */
-    func signDeviceAuthChallenge(challenge: Data) throws -> Data
-
-    /**
-     * Stage a commit without sending or merging it. Returns a plan; call
-     * [`confirm_commit`](Self::confirm_commit) on DS success or
-     * [`discard_pending`](Self::discard_pending) on failure.
-     */
-    func stageCommit(conversationId: String, kind: FfiCommitKind) throws -> FfiCommitPlan
-
-    func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome
-
-    func startupReconcile() throws -> FfiStartupReconcileReport
-
-    func storageLifecycleStatus() -> StorageLifecycleStatus
-
-    /**
-     * Atomically swap members in a single commit.
-     */
-    func swapMembers(groupId: String, removeDids: [String], addDids: [String]) throws
-
-    /**
-     * Sync conversations with the server.
-     */
-    func syncWithServer(fullSync: Bool) throws
-
-    /**
-     * Update a group's encrypted metadata (title / description / avatar) for
-     * full-authority (rustFull) clients.
-     *
-     * Stages a GroupContextExtensions commit that embeds a fresh
-     * `MetadataReference`, uploads the re-encrypted metadata blob, submits the
-     * commit, and merges locally. When `avatar_bytes` is provided the avatar
-     * image is encrypted at the SAME post-commit (epoch, metadata_version) and
-     * uploaded to `avatar_blob_locator`, so joiners can fetch + decrypt it.
-     *
-     * The whole desired metadata state must be supplied on every call (the
-     * commit replaces the blob): to rename without dropping the avatar, pass
-     * the current avatar bytes + locator alongside the new title.
-     */
-    func updateGroupMetadataEncrypted(conversationId: String, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, avatarBytes: Data?) throws
-
-    /**
-     * User explicitly tapped Reset conversation in the UI. Reports a vote
-     * to the server (spec section 8.6 quorum) and clears local quarantine.
-     */
-    func userConfirmedManualReset(convoId: String) throws
+public protocol PlatformChangeObserver: AnyObject {
+    func onChange(event: PlatformChangeEvent)
 }
 
 /**
- * UniFFI-exported MLS Orchestrator object.
- *
- * Wraps the generic MLSOrchestrator with callback-based trait implementations.
- * Swift/Kotlin provides the platform-specific storage, API, and credential backends.
+ * Platform UI invalidation observer (`Spec §6.3`).
  */
-open class OrchestratorBridge:
-    OrchestratorBridgeProtocol
+open class PlatformChangeObserverImpl:
+    PlatformChangeObserver
 {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
@@ -3993,1110 +970,97 @@ open class OrchestratorBridge:
         @_documentation(visibility: private)
     #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_catbird_mls_fn_clone_orchestratorbridge(self.pointer, $0) }
+        return try! rustCall { uniffi_catbird_mls_fn_clone_platformchangeobserver(self.pointer, $0) }
     }
 
-    /**
-     * Create a new orchestrator bridge.
-     *
-     * - `mls_context`: The low-level MLS FFI context (same as used directly)
-     * - `storage`: Platform storage callback
-     * - `api_client`: Platform API client callback
-     * - `credentials`: Platform credential store callback
-     * - `config`: Orchestrator configuration
-     */
-    public convenience init(mlsContext: MlsContext, storage: OrchestratorStorageCallback, apiClient: OrchestratorApiCallback, credentials: OrchestratorCredentialCallback, capabilities: SecurityStorageCapabilities, config: FfiOrchestratorConfig) throws {
-        let pointer =
-            try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-                uniffi_catbird_mls_fn_constructor_orchestratorbridge_new(
-                    FfiConverterTypeMLSContext.lower(mlsContext),
-                    FfiConverterCallbackInterfaceOrchestratorStorageCallback.lower(storage),
-                    FfiConverterCallbackInterfaceOrchestratorApiCallback.lower(apiClient),
-                    FfiConverterCallbackInterfaceOrchestratorCredentialCallback.lower(credentials),
-                    FfiConverterTypeSecurityStorageCapabilities.lower(capabilities),
-                    FfiConverterTypeFFIOrchestratorConfig.lower(config), $0
-                )
-            }
-        self.init(unsafeFromRawPointer: pointer)
-    }
+    // No primary constructor declared for this class.
 
     deinit {
         guard let pointer = pointer else {
             return
         }
 
-        try! rustCall { uniffi_catbird_mls_fn_free_orchestratorbridge(pointer, $0) }
+        try! rustCall { uniffi_catbird_mls_fn_free_platformchangeobserver(pointer, $0) }
     }
 
-    /**
-     * Accept an invitation to a conversation (direct or group).
-     */
-    open func acceptConversation(conversationId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_accept_conversation(self.uniffiClonePointer(),
-                                                                                FfiConverterString.lower(conversationId), $0)
-        }
-    }
-
-    /**
-     * Add members to an existing group.
-     */
-    open func addMembers(groupId: String, memberDids: [String]) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_add_members(self.uniffiClonePointer(),
-                                                                        FfiConverterString.lower(groupId),
-                                                                        FfiConverterSequenceString.lower(memberDids), $0)
-        }
-    }
-
-    /**
-     * Add members through the Rust-owned engine and return the updated
-     * conversation snapshot for full-authority clients.
-     */
-    open func addMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult {
-        return try FfiConverterTypeFFIGroupMutationResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_add_members_result(self.uniffiClonePointer(),
-                                                                               FfiConverterString.lower(conversationId),
-                                                                               FfiConverterSequenceString.lower(memberDids), $0)
-        })
-    }
-
-    open func cancelDirectRequest(draftId: String) throws -> DirectRequestOutcome {
-        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_cancel_direct_request(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(draftId), $0)
-        })
-    }
-
-    open func closeDirectRequest(conversationId: String) throws -> DirectRequestView {
-        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_close_direct_request(self.uniffiClonePointer(),
-                                                                                 FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    /**
-     * Confirm a previously staged commit: merges it locally, advances the
-     * epoch, publishes updated GroupInfo. Pass `server_epoch = 0` to skip
-     * the fence (for API paths that don't echo an epoch).
-     */
-    open func confirmCommit(handle: FfiStagedCommitHandle, serverEpoch: UInt64) throws -> FfiConfirmedCommit {
-        return try FfiConverterTypeFFIConfirmedCommit.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_confirm_commit(self.uniffiClonePointer(),
-                                                                           FfiConverterTypeFFIStagedCommitHandle.lower(handle),
-                                                                           FfiConverterUInt64.lower(serverEpoch), $0)
-        })
-    }
-
-    /**
-     * Create a new MLS conversation through the Rust-owned engine and
-     * return the conversation snapshot needed by full-authority clients.
-     */
-    open func createConversation(name: String, initialMembers: [String]?, description: String?) throws -> FfiCreateConversationResult {
-        return try FfiConverterTypeFFICreateConversationResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_create_conversation(self.uniffiClonePointer(),
-                                                                                FfiConverterString.lower(name),
-                                                                                FfiConverterOptionSequenceString.lower(initialMembers),
-                                                                                FfiConverterOptionString.lower(description), $0)
-        })
-    }
-
-    /**
-     * Create a new MLS group/conversation.
-     */
-    open func createGroup(name: String, initialMembers: [String]?, description: String?) throws -> FfiConversationView {
-        return try FfiConverterTypeFFIConversationView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_create_group(self.uniffiClonePointer(),
-                                                                         FfiConverterString.lower(name),
-                                                                         FfiConverterOptionSequenceString.lower(initialMembers),
-                                                                         FfiConverterOptionString.lower(description), $0)
-        })
-    }
-
-    /**
-     * Fault-injection hook used by rustFull E2E recovery tests.
-     *
-     * Deletes only local OpenMLS group state, preserves the conversation
-     * projection, and marks the conversation for Rust-owned rejoin.
-     */
-    open func debugWipeLocalGroupForRecovery(convoId: String) throws -> FfiDebugWipeLocalGroupResult {
-        return try FfiConverterTypeFFIDebugWipeLocalGroupResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_debug_wipe_local_group_for_recovery(self.uniffiClonePointer(),
-                                                                                                FfiConverterString.lower(convoId), $0)
-        })
-    }
-
-    /**
-     * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
-     * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
-     */
-    open func decodeOpusToPcm(opusData: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_decode_opus_to_pcm(self.uniffiClonePointer(),
-                                                                               FfiConverterData.lower(opusData), $0)
-        })
-    }
-
-    /**
-     * Discard a staged commit without advancing the epoch. Clears the
-     * pending commit in the MLS crypto context.
-     */
-    open func discardPending(handle: FfiStagedCommitHandle) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_discard_pending(self.uniffiClonePointer(),
-                                                                            FfiConverterTypeFFIStagedCommitHandle.lower(handle), $0)
-        }
-    }
-
-    open func emergencyClose(reason: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_emergency_close(self.uniffiClonePointer(),
-                                                                            FfiConverterString.lower(reason), $0)
-        }
-    }
-
-    /**
-     * Ensure one conversation is ready for open/send work using the same
-     * recovery ordering as the Rust recovery pipeline.
-     */
-    open func ensureConversationReady(convoId: String) throws -> FfiConversationReadyResult {
-        return try FfiConverterTypeFFIConversationReadyResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_ensure_conversation_ready(self.uniffiClonePointer(),
-                                                                                      FfiConverterString.lower(convoId), $0)
-        })
-    }
-
-    /**
-     * Ensure device is registered with MLS service.
-     */
-    open func ensureDeviceRegistered() throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_ensure_device_registered(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Return the RFC 9420 §8.7 `epoch_authenticator` for a group's current
-     * epoch.
-     *
-     * Platforms hex-encode this value when calling
-     * `OrchestratorAPICallback::report_recovery_failure` so that quorum-reset
-     * reports (spec §8.6 / ADR-002) are bound to a specific epoch. Returns
-     * the raw authenticator bytes.
-     */
-    open func epochAuthenticator(groupId: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_epoch_authenticator(self.uniffiClonePointer(),
-                                                                                FfiConverterData.lower(groupId), $0)
-        })
-    }
-
-    /**
-     * Fetch and process new messages from server.
-     */
-    open func fetchMessages(conversationId: String, cursor: String?, limit: UInt32) throws -> FfiFetchMessagesResult {
-        return try FfiConverterTypeFFIFetchMessagesResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_fetch_messages(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(conversationId),
-                                                                           FfiConverterOptionString.lower(cursor),
-                                                                           FfiConverterUInt32.lower(limit), $0)
-        })
-    }
-
-    /**
-     * Fulfill an open leaf recovery request for a conversation.
-     */
-    open func fulfillLeafRecovery(conversationId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_fulfill_leaf_recovery(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(conversationId), $0)
-        }
-    }
-
-    /**
-     * Snapshot of a conversation quarantine state, if any.
-     */
-    open func getConversationQuarantineState(convoId: String) -> FfiQuarantineState? {
-        return try! FfiConverterOptionTypeFFIQuarantineState.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_get_conversation_quarantine_state(self.uniffiClonePointer(),
-                                                                                              FfiConverterString.lower(convoId), $0)
-        })
-    }
-
-    /**
-     * Project the orchestrator's current conversation recovery state into the
-     * Swift `ConversationRecoveryState` vocabulary.
-     *
-     * Unknown conversations default to `Healthy` so adding this method does not
-     * change behavior for clients that have not opted into Rust authority. When
-     * Rust has a cached group state but the low-level MLS context no longer has
-     * matching local group state, the projection reports `GroupMissing`.
-     */
-    open func getConversationRecoveryState(conversationId: String) throws -> FfiConversationRecoveryState {
-        return try FfiConverterTypeFFIConversationRecoveryState.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_get_conversation_recovery_state(self.uniffiClonePointer(),
-                                                                                            FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    open func getDirectRequestDeliveryEnabled() throws -> Bool? {
-        return try FfiConverterOptionBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_get_direct_request_delivery_enabled(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    open func getGroupInvitationReference(conversationId: String, recipientDid: String) throws -> GroupInvitationReference? {
-        return try FfiConverterOptionTypeGroupInvitationReference.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_get_group_invitation_reference(self.uniffiClonePointer(),
-                                                                                           FfiConverterString.lower(conversationId),
-                                                                                           FfiConverterString.lower(recipientDid), $0)
-        })
-    }
-
-    /**
-     * Get key package stats.
-     */
-    open func getKeyPackageStats() throws -> FfiKeyPackageStats {
-        return try FfiConverterTypeFFIKeyPackageStats.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_get_key_package_stats(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Handle a server-initiated group reset (`GroupResetEvent` delivered via
-     * SSE/WS from the DS).
-     *
-     * **Deprecated alias for `record_group_reset` (WS-5.1, invariant S1).**
-     * This method no longer performs an inline `join_or_rejoin`: the
-     * orchestrator transitions the conversation to `RESET_PENDING`, persists
-     * the payload via `mark_reset_pending`, deletes the old local MLS group,
-     * atomically arms `needs_rejoin`, clears per-conversation recovery
-     * trackers, and rebinds the group id. The deferred-recovery loop driven by
-     * `sync_with_server` performs the actual rejoin on the next cycle —
-     * inline External Commits from event paths are the production
-     * epoch-inflation pattern (spec §8.5).
-     *
-     * - `convo_id`: stable conversation id.
-     * - `new_group_id_hex`: hex-encoded new MLS group id advertised by the DS.
-     * - `reset_generation`: monotonic reset counter from the DS.
-     *
-     * Kept for FFI ABI compatibility; new code should call
-     * `record_group_reset`.
-     */
-    open func handleGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_handle_group_reset(self.uniffiClonePointer(),
-                                                                               FfiConverterString.lower(convoId),
-                                                                               FfiConverterString.lower(newGroupIdHex),
-                                                                               FfiConverterInt32.lower(resetGeneration), $0)
-        }
-    }
-
-    /**
-     * Initialize the orchestrator for a user DID.
-     */
-    open func initialize(userDid: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_initialize(self.uniffiClonePointer(),
-                                                                       FfiConverterString.lower(userDid), $0)
-        }
-    }
-
-    open func initializeEngine(userDid: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_initialize_engine(self.uniffiClonePointer(),
-                                                                              FfiConverterString.lower(userDid), $0)
-        }
-    }
-
-    open func interruptStorage(reason: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_interrupt_storage(self.uniffiClonePointer(),
-                                                                              FfiConverterString.lower(reason), $0)
-        }
-    }
-
-    /**
-     * Join an existing group via Welcome message.
-     */
-    open func joinGroup(welcomeData: Data) throws -> FfiConversationView {
-        return try FfiConverterTypeFFIConversationView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_join_group(self.uniffiClonePointer(),
-                                                                       FfiConverterData.lower(welcomeData), $0)
-        })
-    }
-
-    /**
-     * Join or rejoin one conversation through the normal Rust recovery path.
-     *
-     * Unlike `perform_silent_recovery`, this does not delete or re-register
-     * the device. It delegates to `MLSOrchestrator::join_or_rejoin`, preserving
-     * the Welcome-first and ResetPending-bootstrap-before-External-Commit
-     * ordering used by sync and incoming-message recovery.
-     */
-    open func joinOrRejoin(convoId: String) throws -> FfiJoinOrRejoinResult {
-        return try FfiConverterTypeFFIJoinOrRejoinResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_join_or_rejoin(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(convoId), $0)
-        })
-    }
-
-    /**
-     * What background archiving and deletion could not do (show it):
-     * quarantined messages, members left out of a conversation's archive
-     * (with pin conflicts to resolve), dropped messages, and a pending
-     * remote deletion.
-     */
-    open func labyrinthArchiveStatus() throws -> FfiLabyrinthArchiveStatus {
-        return try FfiConverterTypeFfiLabyrinthArchiveStatus.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_archive_status(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Forget the recorded exclusions and dropped messages (the user saw them).
-     */
-    open func labyrinthClearArchiveReports() throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_clear_archive_reports(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Create a recovery code. Show it to the user once; it is not stored.
-     */
-    open func labyrinthCreateRecoveryCode() throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_create_recovery_code(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Delete the account's history backup everywhere: the server mailbox
-     * and every message the account archived (shown to others as removed),
-     * the PDS `mailboxKeys` records, and this device's state. This
-     * device's state is erased even if the server cannot be reached; the
-     * remote half is then retried (`remote_pending`).
-     */
-    open func labyrinthDeleteAccount() throws -> FfiLabyrinthDeletion {
-        return try FfiConverterTypeFfiLabyrinthDeletion.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_delete_account(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Turn on encrypted history backup for the signed-in account on this
-     * device. Returns this device's Labyrinth device key (hex).
-     */
-    open func labyrinthEnableBackup() throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_enable_backup(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Archive every queued sent message now. Call it when the app is about
-     * to suspend and at launch (a killed process leaves its queue saved).
-     * Returns how many messages were archived.
-     */
-    open func labyrinthFlushArchive() throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_flush_archive(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Store a conversation's archived history locally (new device).
-     */
-    open func labyrinthImportHistory(conversationId: String) throws -> FfiLabyrinthImport {
-        return try FfiConverterTypeFfiLabyrinthImport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_import_history(self.uniffiClonePointer(),
-                                                                                     FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    /**
-     * The conversations this account has backed-up history in. A
-     * non-empty `incomplete_sequencers` means the list is partial.
-     */
-    open func labyrinthListThreads() throws -> FfiLabyrinthThreads {
-        return try FfiConverterTypeFfiLabyrinthThreads.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_list_threads(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Decrypted history of a conversation in `[from_ms, until_ms)`.
-     */
-    open func labyrinthLoadHistoryPage(conversationId: String, fromMs: UInt64?, untilMs: UInt64?) throws -> FfiLabyrinthHistory {
-        return try FfiConverterTypeFfiLabyrinthHistory.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_load_history_page(self.uniffiClonePointer(),
-                                                                                        FfiConverterString.lower(conversationId),
-                                                                                        FfiConverterOptionUInt64.lower(fromMs),
-                                                                                        FfiConverterOptionUInt64.lower(untilMs), $0)
-        })
-    }
-
-    /**
-     * A contact's history keys changed (they reset their backup): the
-     * safety-number change to show, like Signal. Fails if the new keys are
-     * not vouched for by one of the contact's current chat devices.
-     */
-    open func labyrinthProposeRepin(did: String) throws -> FfiLabyrinthRepinProposal {
-        return try FfiConverterTypeFfiLabyrinthRepinProposal.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_propose_repin(self.uniffiClonePointer(),
-                                                                                    FfiConverterString.lower(did), $0)
-        })
-    }
-
-    /**
-     * The user accepted the new safety number: trust the contact's new
-     * history keys (`new_head_hex` from the proposal).
-     */
-    open func labyrinthRepinPeer(did: String, newHeadHex: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_repin_peer(self.uniffiClonePointer(),
-                                                                                 FfiConverterString.lower(did),
-                                                                                 FfiConverterString.lower(newHeadHex), $0)
-        }
-    }
-
-    /**
-     * Enroll this device into the account's backup with a recovery code.
-     * Returns this device's Labyrinth device key (hex).
-     */
-    open func labyrinthRestoreWithRecoveryCode(code: String) throws -> String {
-        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_restore_with_recovery_code(self.uniffiClonePointer(),
-                                                                                                 FfiConverterString.lower(code), $0)
-        })
-    }
-
-    /**
-     * Retry every quarantined message now. Returns how many there were.
-     */
-    open func labyrinthRetryQuarantined() throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_retry_quarantined(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Retry a pending remote account deletion now. Returns true when
-     * nothing is pending any more.
-     */
-    open func labyrinthRetryRemoteDeletion() throws -> Bool {
-        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_retry_remote_deletion(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Revoke another device of this account from the backup.
-     */
-    open func labyrinthRevokeDevice(deviceKeyHex: String) throws -> UInt64 {
-        return try FfiConverterUInt64.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_revoke_device(self.uniffiClonePointer(),
-                                                                                    FfiConverterString.lower(deviceKeyHex), $0)
-        })
-    }
-
-    /**
-     * Sign-out or account removal on this device: erase this device's
-     * backup state and queue. The account's backup on the server stays, so
-     * a later sign-in restores with a recovery code. Returns whether any
-     * state was saved.
-     */
-    open func labyrinthSignOut() throws -> Bool {
-        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_labyrinth_sign_out(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Leave a conversation through the Rust-owned engine and return the
-     * identifiers Swift needs to clean up local state immediately.
-     */
-    open func leaveConversation(conversationId: String) throws -> FfiLeaveResult {
-        return try FfiConverterTypeFFILeaveResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_leave_conversation(self.uniffiClonePointer(),
-                                                                               FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    /**
-     * Leave a conversation.
-     */
-    open func leaveGroup(convoId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_leave_group(self.uniffiClonePointer(),
-                                                                        FfiConverterString.lower(convoId), $0)
-        }
-    }
-
-    /**
-     * Return the current account's reconciled native display projection,
-     * retaining durable rows when no matching runtime view is available.
-     */
-    open func listConversations(userDid: String) throws -> [FfiConversationView] {
-        return try FfiConverterSequenceTypeFFIConversationView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_list_conversations(self.uniffiClonePointer(),
-                                                                               FfiConverterString.lower(userDid), $0)
-        })
-    }
-
-    /**
-     * List registered devices.
-     */
-    open func listDevices() throws -> [FfiDeviceInfo] {
-        return try FfiConverterSequenceTypeFFIDeviceInfo.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_list_devices(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    open func listDirectRequestViews() throws -> [DirectRequestView] {
-        return try FfiConverterSequenceTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_list_direct_request_views(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Perform full silent recovery.
-     */
-    open func performSilentRecovery(conversationIds: [String]) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_perform_silent_recovery(self.uniffiClonePointer(),
-                                                                                    FfiConverterSequenceString.lower(conversationIds), $0)
-        }
-    }
-
-    /**
-     * Prepare a canonical clean-chat signed mutation.
-     *
-     * This method accepts only actor/device binding metadata. It deliberately
-     * returns no Authorization or DPoP proof: direct-DS and Nest-proxy
-     * adapters attach their own transport credentials after signing.
-     */
-    open func prepareCleanChatSignedRequest(binding: CleanChatSigningContextFfi, operation: CleanChatOperationFfi, bodyJson: Data) throws -> CleanChatPreparedRequestFfi {
-        return try FfiConverterTypeCleanChatPreparedRequestFfi.lift(rustCallWithError(FfiConverterTypeCleanChatTransportFfiError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_prepare_clean_chat_signed_request(self.uniffiClonePointer(),
-                                                                                              FfiConverterTypeCleanChatSigningContextFfi.lower(binding),
-                                                                                              FfiConverterTypeCleanChatOperationFfi.lower(operation),
-                                                                                              FfiConverterData.lower(bodyJson), $0)
-        })
-    }
-
-    open func prepareForSuspend(reason: String, deadlineMs: UInt64) throws -> FfiSuspendResult {
-        return try FfiConverterTypeFFISuspendResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_prepare_for_suspend(self.uniffiClonePointer(),
-                                                                                FfiConverterString.lower(reason),
-                                                                                FfiConverterUInt64.lower(deadlineMs), $0)
-        })
-    }
-
-    /**
-     * Encode PCM audio to Opus, extract waveform, encrypt blob.
-     * Returns the encrypted data + metadata needed to upload and send.
-     */
-    open func prepareVoiceMessage(pcmPath: String, sampleRate: UInt32) throws -> FfiVoicePrepareResult {
-        return try FfiConverterTypeFFIVoicePrepareResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_prepare_voice_message(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(pcmPath),
-                                                                                  FfiConverterUInt32.lower(sampleRate), $0)
-        })
-    }
-
-    /**
-     * Process an incoming encrypted envelope.
-     */
-    open func processIncoming(envelope: FfiIncomingEnvelope) throws -> FfiMessage? {
-        return try FfiConverterOptionTypeFFIMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_process_incoming(self.uniffiClonePointer(),
-                                                                             FfiConverterTypeFFIIncomingEnvelope.lower(envelope), $0)
-        })
-    }
-
-    /**
-     * Process an incoming encrypted envelope through the Rust-owned engine.
-     */
-    open func processIncomingMessage(envelope: FfiIncomingEnvelope, serverEpoch: UInt64?) throws -> FfiMessageProcessingResult {
-        return try FfiConverterTypeFFIMessageProcessingResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_process_incoming_message(self.uniffiClonePointer(),
-                                                                                     FfiConverterTypeFFIIncomingEnvelope.lower(envelope),
-                                                                                     FfiConverterOptionUInt64.lower(serverEpoch), $0)
-        })
-    }
-
-    /**
-     * Process a server event envelope through the Rust-owned engine.
-     */
-    open func processServerEvent(eventJson: String) throws -> [FfiEngineEvent] {
-        return try FfiConverterSequenceTypeFFIEngineEvent.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_process_server_event(self.uniffiClonePointer(),
-                                                                                 FfiConverterString.lower(eventJson), $0)
-        })
-    }
-
-    /**
-     * Publish a single key package.
-     */
-    open func publishKeyPackage() throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_publish_key_package(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    open func reattachAfterSuspend(userDid: String, reason: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_reattach_after_suspend(self.uniffiClonePointer(),
-                                                                                   FfiConverterString.lower(userDid),
-                                                                                   FfiConverterString.lower(reason), $0)
-        }
-    }
-
-    /**
-     * Persist a `groupResetEvent` WITHOUT performing inline recovery
-     * (spec §8.5 Phase 1, ADR-008 D2 deferred-recovery invariant).
-     *
-     * Platforms whose event/SSE/WS handler must not run External Commits
-     * inline (catmos, BIRDaemon, and Phase 3 iOS/Android event paths)
-     * should call this from the event handler. The deferred-recovery
-     * loop driven by `MLSOrchestrator::sync_with_server` will pick the
-     * conversation up via the `needs_rejoin` flag set here, then route
-     * it through `join_or_rejoin` — which now includes a first-responder
-     * bootstrap step gated on `ConversationState::ResetPending`.
-     *
-     * New code should prefer this over `handle_group_reset`. As of WS-5.1
-     * the legacy `handle_group_reset` is a pure deprecated alias for this
-     * method — its historical inline `join_or_rejoin` (the part that
-     * violated the "no External Commits in event handlers" invariant) has
-     * been removed; both entry points now only record deferred-recovery
-     * state.
-     */
-    open func recordGroupReset(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_record_group_reset(self.uniffiClonePointer(),
-                                                                               FfiConverterString.lower(convoId),
-                                                                               FfiConverterString.lower(newGroupIdHex),
-                                                                               FfiConverterInt32.lower(resetGeneration), $0)
-        }
-    }
-
-    /**
-     * Outcome-returning variant of `record_group_reset` for platforms that
-     * need to distinguish recorded resets from stale/self-echo no-ops before
-     * triggering UI notifications or sync work.
-     */
-    open func recordGroupResetOutcome(convoId: String, newGroupIdHex: String, resetGeneration: Int32) throws -> FfiResetRecordOutcome {
-        return try FfiConverterTypeFFIResetRecordOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_record_group_reset_outcome(self.uniffiClonePointer(),
-                                                                                       FfiConverterString.lower(convoId),
-                                                                                       FfiConverterString.lower(newGroupIdHex),
-                                                                                       FfiConverterInt32.lower(resetGeneration), $0)
-        })
-    }
-
-    /**
-     * Persist a Phase 2.5 `resetRequestedEvent` from the DS — the indirect-
-     * trigger SSE event where the server has NOT minted a new MLS group id
-     * and is asking subscribed clients to elect a first responder
-     * (`docs/plans/phase-2-5-indirect-funneling.md` §3, §5 Stage 1).
-     *
-     * Same deferred-recovery contract as `record_group_reset`: this writes
-     * `RESET_PENDING` state + payload, deletes the old local MLS group,
-     * clears recovery counters, and flips `needs_rejoin` so the next
-     * `MLSOrchestrator::sync_with_server` cycle drives `join_or_rejoin`,
-     * which already includes the first-responder bootstrap branch
-     * (`recovery.rs:1173-1215`). NO inline External Commit — preserves the
-     * "no External Commits in event handlers" invariant that orchestrator-
-     * using clients (catmos, BIRDaemon, WASM) rely on to avoid the
-     * epoch-inflation class of bug observed in March 2026.
-     *
-     * - `convo_id`: stable conversation id.
-     * - `crypto_session_id`: prior session id, now in `reset_requested`
-     * server-side (lexicon `cryptoSessionId`).
-     * - `reset_generation`: monotonic per conversation (lexicon `generation`,
-     * `i32` here to match the existing `reset_generation` field).
-     * - `trigger`: `quorumVote | systemSweep | inlineCommit409 |
-     * inlineGroupInfo404 | adminRequest` (lexicon-owned set; logged here).
-     * - `request_event_id`: deterministic dedup key from the server (plan
-     * §3 idempotency scheme).
-     * - `expected_new_mls_group_id_hex`: usually `None` (indirect triggers
-     * never mint client-visible material per Phase 2.5 §1 locked decision);
-     * admin path may pass `Some(hex_id)`. When `None`, this function mints
-     * a fresh local UUIDv4-style 32-hex-char id for the client's race-
-     * bootstrap candidate; the server's `crypto_sessions UNIQUE
-     * (conversation_id, generation)` chokepoint constraint serializes the
-     * winner, race losers see HTTP 409 `AlreadyBootstrapped` and drop
-     * their pre-bootstrap MLS group cleanly.
-     *
-     * Idempotency: if the conversation is already `RESET_PENDING` at the
-     * same `reset_generation`, the call is a no-op (logged at INFO with the
-     * `request_event_id` for audit).
-     */
-    open func recordResetRequested(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_record_reset_requested(self.uniffiClonePointer(),
-                                                                                   FfiConverterString.lower(convoId),
-                                                                                   FfiConverterString.lower(cryptoSessionId),
-                                                                                   FfiConverterInt32.lower(resetGeneration),
-                                                                                   FfiConverterString.lower(trigger),
-                                                                                   FfiConverterString.lower(requestEventId),
-                                                                                   FfiConverterOptionString.lower(expectedNewMlsGroupIdHex), $0)
-        }
-    }
-
-    /**
-     * Outcome-returning variant of `record_reset_requested` for platforms
-     * that need to avoid follow-up sync/UI churn when Rust classified the
-     * event as stale or self-echo.
-     */
-    open func recordResetRequestedOutcome(convoId: String, cryptoSessionId: String, resetGeneration: Int32, trigger: String, requestEventId: String, expectedNewMlsGroupIdHex: String?) throws -> FfiResetRecordOutcome {
-        return try FfiConverterTypeFFIResetRecordOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_record_reset_requested_outcome(self.uniffiClonePointer(),
-                                                                                           FfiConverterString.lower(convoId),
-                                                                                           FfiConverterString.lower(cryptoSessionId),
-                                                                                           FfiConverterInt32.lower(resetGeneration),
-                                                                                           FfiConverterString.lower(trigger),
-                                                                                           FfiConverterString.lower(requestEventId),
-                                                                                           FfiConverterOptionString.lower(expectedNewMlsGroupIdHex), $0)
-        })
-    }
-
-    open func refreshRequestPreview(conversationId: String) throws -> DirectRequestView {
-        return try FfiConverterTypeDirectRequestView.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_refresh_request_preview(self.uniffiClonePointer(),
-                                                                                    FfiConverterString.lower(conversationId), $0)
-        })
-    }
-
-    /**
-     * Remove a device.
-     */
-    open func removeDevice(deviceId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_remove_device(self.uniffiClonePointer(),
-                                                                          FfiConverterString.lower(deviceId), $0)
-        }
-    }
-
-    /**
-     * Remove members from a group.
-     */
-    open func removeMembers(groupId: String, memberDids: [String]) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_remove_members(self.uniffiClonePointer(),
-                                                                           FfiConverterString.lower(groupId),
-                                                                           FfiConverterSequenceString.lower(memberDids), $0)
-        }
-    }
-
-    /**
-     * Remove members through the Rust-owned engine and return the updated
-     * conversation snapshot for full-authority clients.
-     */
-    open func removeMembersResult(conversationId: String, memberDids: [String]) throws -> FfiGroupMutationResult {
-        return try FfiConverterTypeFFIGroupMutationResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_remove_members_result(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(conversationId),
-                                                                                  FfiConverterSequenceString.lower(memberDids), $0)
-        })
-    }
-
-    /**
-     * Check and replenish key packages if needed.
-     */
-    open func replenishKeyPackagesIfNeeded() throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_replenish_key_packages_if_needed(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Task #43: report unrecoverable local state to the server so the A7 reset
-     * pyramid can take over (the server will eventually issue a GroupResetEvent
-     * to move all members to a new group).
-     *
-     * This does **not** touch local MLS state or create External Commits. It's
-     * a pure notification. Callback errors on the `report_recovery_failure`
-     * path are logged and swallowed internally.
-     */
-    open func reportUnrecoverableLocal(convoId: String, reason: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_report_unrecoverable_local(self.uniffiClonePointer(),
-                                                                                       FfiConverterString.lower(convoId),
-                                                                                       FfiConverterString.lower(reason), $0)
-        }
-    }
-
-    /**
-     * Fulfill a Welcome-reissue request as an admin member (rustFull mode).
-     * Mirrors `swap_members` (no external commit): removes the recipient's
-     * stale leaf and re-adds them with a fresh key package, threading
-     * `request_id` as the server idempotency key so the delivery service marks
-     * the reissue request answered.
-     */
-    open func respondToWelcomeReissue(convoId: String, recipientDeviceDid: String, requestId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_respond_to_welcome_reissue(self.uniffiClonePointer(),
-                                                                                       FfiConverterString.lower(convoId),
-                                                                                       FfiConverterString.lower(recipientDeviceDid),
-                                                                                       FfiConverterString.lower(requestId), $0)
-        }
-    }
-
-    open func resumeDirectRequest(draftId: String) throws -> DirectRequestOutcome {
-        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_resume_direct_request(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(draftId), $0)
-        })
-    }
-
-    open func resumeFromSuspend(reason: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_resume_from_suspend(self.uniffiClonePointer(),
-                                                                                FfiConverterString.lower(reason), $0)
-        }
-    }
-
-    open func runDeferredRecovery(reason: String) throws -> FfiDeferredRecoveryReport {
-        return try FfiConverterTypeFFIDeferredRecoveryReport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_run_deferred_recovery(self.uniffiClonePointer(),
-                                                                                  FfiConverterString.lower(reason), $0)
-        })
-    }
-
-    /**
-     * Send a text message.
-     */
-    open func sendMessage(conversationId: String, text: String) throws -> FfiMessage {
-        return try FfiConverterTypeFFIMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_send_message(self.uniffiClonePointer(),
-                                                                         FfiConverterString.lower(conversationId),
-                                                                         FfiConverterString.lower(text), $0)
-        })
-    }
-
-    /**
-     * Send a JSON-encoded MLS message payload envelope.
-     */
-    open func sendPayloadJson(conversationId: String, payloadJson: String) throws -> FfiMessage {
-        return try FfiConverterTypeFFIMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_send_payload_json(self.uniffiClonePointer(),
-                                                                              FfiConverterString.lower(conversationId),
-                                                                              FfiConverterString.lower(payloadJson), $0)
-        })
-    }
-
-    /**
-     * Send a JSON-encoded MLS message payload through the Rust-owned engine.
-     */
-    open func sendPayloadResultJson(conversationId: String, payloadJson: String) throws -> FfiSendResult {
-        return try FfiConverterTypeFFISendResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_send_payload_result_json(self.uniffiClonePointer(),
-                                                                                     FfiConverterString.lower(conversationId),
-                                                                                     FfiConverterString.lower(payloadJson), $0)
-        })
-    }
-
-    /**
-     * Send an encrypted reaction payload.
-     */
-    open func sendReaction(conversationId: String, messageId: String, emoji: String, action: String) throws -> FfiMessage {
-        return try FfiConverterTypeFFIMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_send_reaction(self.uniffiClonePointer(),
-                                                                          FfiConverterString.lower(conversationId),
-                                                                          FfiConverterString.lower(messageId),
-                                                                          FfiConverterString.lower(emoji),
-                                                                          FfiConverterString.lower(action), $0)
-        })
-    }
-
-    /**
-     * Send a voice message (audio embed) to a conversation.
-     * Call prepare_voice_message first, upload the encrypted blob,
-     * then call this with the blob_id from the upload.
-     */
-    open func sendVoiceMessage(conversationId: String, blobId: String, key: Data, iv: Data, sha256: String, size: UInt64, durationMs: UInt64, waveform: [Float], transcript: String?) throws -> FfiMessage {
-        return try FfiConverterTypeFFIMessage.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_send_voice_message(self.uniffiClonePointer(),
-                                                                               FfiConverterString.lower(conversationId),
-                                                                               FfiConverterString.lower(blobId),
-                                                                               FfiConverterData.lower(key),
-                                                                               FfiConverterData.lower(iv),
-                                                                               FfiConverterString.lower(sha256),
-                                                                               FfiConverterUInt64.lower(size),
-                                                                               FfiConverterUInt64.lower(durationMs),
-                                                                               FfiConverterSequenceFloat.lower(waveform),
-                                                                               FfiConverterOptionString.lower(transcript), $0)
-        })
-    }
-
-    open func setDirectRequestDeliveryEnabled(enabled: Bool) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_set_direct_request_delivery_enabled(self.uniffiClonePointer(),
-                                                                                                FfiConverterBool.lower(enabled), $0)
-        }
-    }
-
-    /**
-     * Install (or replace) the Layer 3 event callback. Pass None to detach.
-     */
-    open func setEventCallback(callback: OrchestratorEventCallback?) {
+    open func onChange(event: PlatformChangeEvent) {
         try! rustCall {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_set_event_callback(self.uniffiClonePointer(),
-                                                                               FfiConverterOptionCallbackInterfaceOrchestratorEventCallback.lower(callback), $0)
+            uniffi_catbird_mls_fn_method_platformchangeobserver_on_change(self.uniffiClonePointer(),
+                                                                          FfiConverterTypePlatformChangeEvent.lower(event), $0)
         }
     }
+}
 
-    /**
-     * Opt in to returning/storing known non-displayable MLS control payloads
-     * from `process_incoming`.
-     *
-     * Defaults off for source compatibility with existing clients. Catbird iOS
-     * enables this in Rust-authoritative mode and handles the side effects in
-     * Swift after Rust has performed the MLS decrypt/process step.
-     */
-    open func setStoreControlMessages(enabled: Bool) {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_set_store_control_messages(self.uniffiClonePointer(),
-                                                                                       FfiConverterBool.lower(enabled), $0)
+/// Magic number for the Rust proxy to call using the same mechanism as every other method,
+/// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
+
+/// Put the implementation in a struct so we don't pollute the top-level namespace
+private enum UniffiCallbackInterfacePlatformChangeObserver {
+    /// Create the VTable using a series of closures.
+    /// Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfacePlatformChangeObserver = .init(
+        onChange: { (
+            uniffiHandle: UInt64,
+            event: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterTypePlatformChangeObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onChange(
+                    event: FfiConverterTypePlatformChangeEvent.lift(event)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) in
+            let result = try? FfiConverterTypePlatformChangeObserver.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface PlatformChangeObserver: handle missing in uniffiFree")
+            }
         }
-    }
+    )
+}
 
-    /**
-     * Shut down the orchestrator.
-     */
-    open func shutdown() {
-        try! rustCall {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_shutdown(self.uniffiClonePointer(), $0)
-        }
-    }
-
-    /**
-     * Sign a server-issued device-authentication challenge with the
-     * initialized user's persistent MLS identity key.
-     *
-     * The caller cannot select an identity or access key material. The
-     * signature is bound to the user DID owned by this orchestrator's active
-     * lifecycle, and is therefore refused before initialization or after
-     * shutdown.
-     */
-    open func signDeviceAuthChallenge(challenge: Data) throws -> Data {
-        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_sign_device_auth_challenge(self.uniffiClonePointer(),
-                                                                                       FfiConverterData.lower(challenge), $0)
-        })
-    }
-
-    /**
-     * Stage a commit without sending or merging it. Returns a plan; call
-     * [`confirm_commit`](Self::confirm_commit) on DS success or
-     * [`discard_pending`](Self::discard_pending) on failure.
-     */
-    open func stageCommit(conversationId: String, kind: FfiCommitKind) throws -> FfiCommitPlan {
-        return try FfiConverterTypeFFICommitPlan.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_stage_commit(self.uniffiClonePointer(),
-                                                                         FfiConverterString.lower(conversationId),
-                                                                         FfiConverterTypeFFICommitKind.lower(kind), $0)
-        })
-    }
-
-    open func startDirectRequest(input: DirectRequestInput) throws -> DirectRequestOutcome {
-        return try FfiConverterTypeDirectRequestOutcome.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_start_direct_request(self.uniffiClonePointer(),
-                                                                                 FfiConverterTypeDirectRequestInput.lower(input), $0)
-        })
-    }
-
-    open func startupReconcile() throws -> FfiStartupReconcileReport {
-        return try FfiConverterTypeFFIStartupReconcileReport.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_startup_reconcile(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    open func storageLifecycleStatus() -> StorageLifecycleStatus {
-        return try! FfiConverterTypeStorageLifecycleStatus.lift(try! rustCall {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_storage_lifecycle_status(self.uniffiClonePointer(), $0)
-        })
-    }
-
-    /**
-     * Atomically swap members in a single commit.
-     */
-    open func swapMembers(groupId: String, removeDids: [String], addDids: [String]) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_swap_members(self.uniffiClonePointer(),
-                                                                         FfiConverterString.lower(groupId),
-                                                                         FfiConverterSequenceString.lower(removeDids),
-                                                                         FfiConverterSequenceString.lower(addDids), $0)
-        }
-    }
-
-    /**
-     * Sync conversations with the server.
-     */
-    open func syncWithServer(fullSync: Bool) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_sync_with_server(self.uniffiClonePointer(),
-                                                                             FfiConverterBool.lower(fullSync), $0)
-        }
-    }
-
-    /**
-     * Update a group's encrypted metadata (title / description / avatar) for
-     * full-authority (rustFull) clients.
-     *
-     * Stages a GroupContextExtensions commit that embeds a fresh
-     * `MetadataReference`, uploads the re-encrypted metadata blob, submits the
-     * commit, and merges locally. When `avatar_bytes` is provided the avatar
-     * image is encrypted at the SAME post-commit (epoch, metadata_version) and
-     * uploaded to `avatar_blob_locator`, so joiners can fetch + decrypt it.
-     *
-     * The whole desired metadata state must be supplied on every call (the
-     * commit replaces the blob): to rename without dropping the avatar, pass
-     * the current avatar bytes + locator alongside the new title.
-     */
-    open func updateGroupMetadataEncrypted(conversationId: String, title: String?, description: String?, avatarBlobLocator: String?, avatarContentType: String?, avatarBytes: Data?) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_update_group_metadata_encrypted(self.uniffiClonePointer(),
-                                                                                            FfiConverterString.lower(conversationId),
-                                                                                            FfiConverterOptionString.lower(title),
-                                                                                            FfiConverterOptionString.lower(description),
-                                                                                            FfiConverterOptionString.lower(avatarBlobLocator),
-                                                                                            FfiConverterOptionString.lower(avatarContentType),
-                                                                                            FfiConverterOptionData.lower(avatarBytes), $0)
-        }
-    }
-
-    /**
-     * User explicitly tapped Reset conversation in the UI. Reports a vote
-     * to the server (spec section 8.6 quorum) and clears local quarantine.
-     */
-    open func userConfirmedManualReset(convoId: String) throws {
-        try rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-            uniffi_catbird_mls_fn_method_orchestratorbridge_user_confirmed_manual_reset(self.uniffiClonePointer(),
-                                                                                        FfiConverterString.lower(convoId), $0)
-        }
-    }
+private func uniffiCallbackInitPlatformChangeObserver() {
+    uniffi_catbird_mls_fn_init_callback_vtable_platformchangeobserver(&UniffiCallbackInterfacePlatformChangeObserver.vtable)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeOrchestratorBridge: FfiConverter {
+public struct FfiConverterTypePlatformChangeObserver: FfiConverter {
+    fileprivate static var handleMap = UniffiHandleMap<PlatformChangeObserver>()
+
     typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = OrchestratorBridge
+    typealias SwiftType = PlatformChangeObserver
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> OrchestratorBridge {
-        return OrchestratorBridge(unsafeFromRawPointer: pointer)
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PlatformChangeObserver {
+        return PlatformChangeObserverImpl(unsafeFromRawPointer: pointer)
     }
 
-    public static func lower(_ value: OrchestratorBridge) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
+    public static func lower(_ value: PlatformChangeObserver) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrchestratorBridge {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformChangeObserver {
         let v: UInt64 = try readInt(&buf)
         // The Rust code won't compile if a pointer won't fit in a UInt64.
         // We have to go via `UInt` because that's the thing that's the size of a pointer.
@@ -5107,7 +1071,7 @@ public struct FfiConverterTypeOrchestratorBridge: FfiConverter {
         return try lift(ptr!)
     }
 
-    public static func write(_ value: OrchestratorBridge, into buf: inout [UInt8]) {
+    public static func write(_ value: PlatformChangeObserver, into buf: inout [UInt8]) {
         // This fiddling is because `Int` is the thing that's the same size as a pointer.
         // The Rust code won't compile if a pointer won't fit in a `UInt64`.
         writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
@@ -5117,15 +1081,1093 @@ public struct FfiConverterTypeOrchestratorBridge: FfiConverter {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeOrchestratorBridge_lift(_ pointer: UnsafeMutableRawPointer) throws -> OrchestratorBridge {
-    return try FfiConverterTypeOrchestratorBridge.lift(pointer)
+public func FfiConverterTypePlatformChangeObserver_lift(_ pointer: UnsafeMutableRawPointer) throws -> PlatformChangeObserver {
+    return try FfiConverterTypePlatformChangeObserver.lift(pointer)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeOrchestratorBridge_lower(_ value: OrchestratorBridge) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeOrchestratorBridge.lower(value)
+public func FfiConverterTypePlatformChangeObserver_lower(_ value: PlatformChangeObserver) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePlatformChangeObserver.lower(value)
+}
+
+/**
+ * Platform key custody trait (`Spec §6.3`, `Gate 9`, `I8`).
+ */
+public protocol PlatformKeyStore: AnyObject {
+    /**
+     * Load or generate the 32-byte raw SQLCipher key for `<account_did_hash>.db`.
+     */
+    func loadOrCreateDbKey(accountDidHash: String) throws -> Data
+
+    /**
+     * Load a serialized OpenMLS signature keypair by canonical key ID.
+     */
+    func loadSignatureKeypair(keyId: String) throws -> Data?
+
+    /**
+     * Persist a serialized OpenMLS signature keypair by canonical key ID.
+     */
+    func storeSignatureKeypair(keyId: String, keypairBytes: Data) throws
+
+    /**
+     * Delete all Keychain/Keystore secrets for `account_did_hash` on sign-out.
+     */
+    func deleteAccountKeys(accountDidHash: String) throws
+
+    /**
+     * Load a non-expired cached `chat-dpop` / service-auth token (`I10`).
+     */
+    func loadCachedChatDpopToken(accountDidHash: String) throws -> String?
+
+    /**
+     * Cache a fresh `chat-dpop` / service-auth token for NSE / background push catch-up (`I10`).
+     */
+    func storeCachedChatDpopToken(accountDidHash: String, token: String, expiresAtMs: Int64) throws
+}
+
+/**
+ * Platform key custody trait (`Spec §6.3`, `Gate 9`, `I8`).
+ */
+open class PlatformKeyStoreImpl:
+    PlatformKeyStore
+{
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public init(noPointer _: NoPointer) {
+        pointer = nil
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_catbird_mls_fn_clone_platformkeystore(self.pointer, $0) }
+    }
+
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_catbird_mls_fn_free_platformkeystore(pointer, $0) }
+    }
+
+    /**
+     * Load or generate the 32-byte raw SQLCipher key for `<account_did_hash>.db`.
+     */
+    open func loadOrCreateDbKey(accountDidHash: String) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformkeystore_load_or_create_db_key(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(accountDidHash), $0)
+        })
+    }
+
+    /**
+     * Load a serialized OpenMLS signature keypair by canonical key ID.
+     */
+    open func loadSignatureKeypair(keyId: String) throws -> Data? {
+        return try FfiConverterOptionData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformkeystore_load_signature_keypair(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(keyId), $0)
+        })
+    }
+
+    /**
+     * Persist a serialized OpenMLS signature keypair by canonical key ID.
+     */
+    open func storeSignatureKeypair(keyId: String, keypairBytes: Data) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformkeystore_store_signature_keypair(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(keyId),
+                                                                                  FfiConverterData.lower(keypairBytes), $0)
+        }
+    }
+
+    /**
+     * Delete all Keychain/Keystore secrets for `account_did_hash` on sign-out.
+     */
+    open func deleteAccountKeys(accountDidHash: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformkeystore_delete_account_keys(self.uniffiClonePointer(),
+                                                                              FfiConverterString.lower(accountDidHash), $0)
+        }
+    }
+
+    /**
+     * Load a non-expired cached `chat-dpop` / service-auth token (`I10`).
+     */
+    open func loadCachedChatDpopToken(accountDidHash: String) throws -> String? {
+        return try FfiConverterOptionString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformkeystore_load_cached_chat_dpop_token(self.uniffiClonePointer(),
+                                                                                      FfiConverterString.lower(accountDidHash), $0)
+        })
+    }
+
+    /**
+     * Cache a fresh `chat-dpop` / service-auth token for NSE / background push catch-up (`I10`).
+     */
+    open func storeCachedChatDpopToken(accountDidHash: String, token: String, expiresAtMs: Int64) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformkeystore_store_cached_chat_dpop_token(self.uniffiClonePointer(),
+                                                                                       FfiConverterString.lower(accountDidHash),
+                                                                                       FfiConverterString.lower(token),
+                                                                                       FfiConverterInt64.lower(expiresAtMs), $0)
+        }
+    }
+}
+
+/// Put the implementation in a struct so we don't pollute the top-level namespace
+private enum UniffiCallbackInterfacePlatformKeyStore {
+    /// Create the VTable using a series of closures.
+    /// Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfacePlatformKeyStore = .init(
+        loadOrCreateDbKey: { (
+            uniffiHandle: UInt64,
+            accountDidHash: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterTypePlatformKeyStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadOrCreateDbKey(
+                    accountDidHash: FfiConverterString.lift(accountDidHash)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        loadSignatureKeypair: { (
+            uniffiHandle: UInt64,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterTypePlatformKeyStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadSignatureKeypair(
+                    keyId: FfiConverterString.lift(keyId)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        storeSignatureKeypair: { (
+            uniffiHandle: UInt64,
+            keyId: RustBuffer,
+            keypairBytes: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterTypePlatformKeyStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.storeSignatureKeypair(
+                    keyId: FfiConverterString.lift(keyId),
+                    keypairBytes: FfiConverterData.lift(keypairBytes)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        deleteAccountKeys: { (
+            uniffiHandle: UInt64,
+            accountDidHash: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterTypePlatformKeyStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.deleteAccountKeys(
+                    accountDidHash: FfiConverterString.lift(accountDidHash)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        loadCachedChatDpopToken: { (
+            uniffiHandle: UInt64,
+            accountDidHash: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String? in
+                guard let uniffiObj = try? FfiConverterTypePlatformKeyStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadCachedChatDpopToken(
+                    accountDidHash: FfiConverterString.lift(accountDidHash)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        storeCachedChatDpopToken: { (
+            uniffiHandle: UInt64,
+            accountDidHash: RustBuffer,
+            token: RustBuffer,
+            expiresAtMs: Int64,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterTypePlatformKeyStore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.storeCachedChatDpopToken(
+                    accountDidHash: FfiConverterString.lift(accountDidHash),
+                    token: FfiConverterString.lift(token),
+                    expiresAtMs: FfiConverterInt64.lift(expiresAtMs)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) in
+            let result = try? FfiConverterTypePlatformKeyStore.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface PlatformKeyStore: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitPlatformKeyStore() {
+    uniffi_catbird_mls_fn_init_callback_vtable_platformkeystore(&UniffiCallbackInterfacePlatformKeyStore.vtable)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformKeyStore: FfiConverter {
+    fileprivate static var handleMap = UniffiHandleMap<PlatformKeyStore>()
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PlatformKeyStore
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PlatformKeyStore {
+        return PlatformKeyStoreImpl(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PlatformKeyStore) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformKeyStore {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if ptr == nil {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PlatformKeyStore, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformKeyStore_lift(_ pointer: UnsafeMutableRawPointer) throws -> PlatformKeyStore {
+    return try FfiConverterTypePlatformKeyStore.lift(pointer)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformKeyStore_lower(_ value: PlatformKeyStore) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePlatformKeyStore.lower(value)
+}
+
+/**
+ * Platform network transport trait (`Spec §6.3`, `D1`, `Gate 7`).
+ */
+public protocol PlatformTransport: AnyObject {
+    /**
+     * Execute an HTTP request against the user's home `mls-ds` or ATProto PDS,
+     * preserving `Atproto-Space-Mac` and `Atproto-Space-Credential` headers.
+     */
+    func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse
+
+    /**
+     * Start or reconnect the single home-`mls-ds` realtime WebSocket stream (`D1`).
+     */
+    func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws
+
+    /**
+     * Close the realtime WebSocket stream cleanly (e.g. on backgrounding or sign-out).
+     */
+    func disconnectRealtimeStream() throws
+}
+
+/**
+ * Platform network transport trait (`Spec §6.3`, `D1`, `Gate 7`).
+ */
+open class PlatformTransportImpl:
+    PlatformTransport
+{
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public init(noPointer _: NoPointer) {
+        pointer = nil
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_catbird_mls_fn_clone_platformtransport(self.pointer, $0) }
+    }
+
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_catbird_mls_fn_free_platformtransport(pointer, $0) }
+    }
+
+    /**
+     * Execute an HTTP request against the user's home `mls-ds` or ATProto PDS,
+     * preserving `Atproto-Space-Mac` and `Atproto-Space-Credential` headers.
+     */
+    open func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
+        return try FfiConverterTypePlatformHttpResponse.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformtransport_execute_http(self.uniffiClonePointer(),
+                                                                        FfiConverterTypePlatformHttpRequest.lower(request), $0)
+        })
+    }
+
+    /**
+     * Start or reconnect the single home-`mls-ds` realtime WebSocket stream (`D1`).
+     */
+    open func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformtransport_connect_realtime_stream(self.uniffiClonePointer(),
+                                                                                   FfiConverterString.lower(homeDsEndpoint),
+                                                                                   FfiConverterOptionInt64.lower(cursorSeq), $0)
+        }
+    }
+
+    /**
+     * Close the realtime WebSocket stream cleanly (e.g. on backgrounding or sign-out).
+     */
+    open func disconnectRealtimeStream() throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_platformtransport_disconnect_realtime_stream(self.uniffiClonePointer(), $0)
+        }
+    }
+}
+
+/// Put the implementation in a struct so we don't pollute the top-level namespace
+private enum UniffiCallbackInterfacePlatformTransport {
+    /// Create the VTable using a series of closures.
+    /// Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfacePlatformTransport = .init(
+        executeHttp: { (
+            uniffiHandle: UInt64,
+            request: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> PlatformHttpResponse in
+                guard let uniffiObj = try? FfiConverterTypePlatformTransport.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.executeHttp(
+                    request: FfiConverterTypePlatformHttpRequest.lift(request)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypePlatformHttpResponse.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        connectRealtimeStream: { (
+            uniffiHandle: UInt64,
+            homeDsEndpoint: RustBuffer,
+            cursorSeq: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterTypePlatformTransport.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.connectRealtimeStream(
+                    homeDsEndpoint: FfiConverterString.lift(homeDsEndpoint),
+                    cursorSeq: FfiConverterOptionInt64.lift(cursorSeq)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        disconnectRealtimeStream: { (
+            uniffiHandle: UInt64,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterTypePlatformTransport.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.disconnectRealtimeStream(
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) in
+            let result = try? FfiConverterTypePlatformTransport.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface PlatformTransport: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitPlatformTransport() {
+    uniffi_catbird_mls_fn_init_callback_vtable_platformtransport(&UniffiCallbackInterfacePlatformTransport.vtable)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformTransport: FfiConverter {
+    fileprivate static var handleMap = UniffiHandleMap<PlatformTransport>()
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PlatformTransport
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PlatformTransport {
+        return PlatformTransportImpl(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PlatformTransport) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformTransport {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if ptr == nil {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PlatformTransport, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformTransport_lift(_ pointer: UnsafeMutableRawPointer) throws -> PlatformTransport {
+    return try FfiConverterTypePlatformTransport.lift(pointer)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformTransport_lower(_ value: PlatformTransport) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePlatformTransport.lower(value)
+}
+
+/**
+ * Synchronous blocking HTTP transport for NSE / FCM catch-up (`G1` — zero Tokio runtime).
+ */
+public protocol PushFetchTransport: AnyObject {
+    /**
+     * Fetch sequenced `chat.entries` with `seq > after_seq` (and optional `metadata_snapshots`).
+     */
+    func fetchMissingEntries(conversationId: String, afterSeq: Int64, chatDpopToken: String) throws -> PushFetchBundle
+
+    /**
+     * Fetch DID-rooted authorized ATProto chat device keys for `did` (`I4` / `F-02`).
+     */
+    func getAuthorizedDeviceKeys(did: String, chatDpopToken: String?) throws -> [AuthorizedPeerDeviceKey]
+}
+
+/**
+ * Synchronous blocking HTTP transport for NSE / FCM catch-up (`G1` — zero Tokio runtime).
+ */
+open class PushFetchTransportImpl:
+    PushFetchTransport
+{
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public init(noPointer _: NoPointer) {
+        pointer = nil
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_catbird_mls_fn_clone_pushfetchtransport(self.pointer, $0) }
+    }
+
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_catbird_mls_fn_free_pushfetchtransport(pointer, $0) }
+    }
+
+    /**
+     * Fetch sequenced `chat.entries` with `seq > after_seq` (and optional `metadata_snapshots`).
+     */
+    open func fetchMissingEntries(conversationId: String, afterSeq: Int64, chatDpopToken: String) throws -> PushFetchBundle {
+        return try FfiConverterTypePushFetchBundle.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_pushfetchtransport_fetch_missing_entries(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(conversationId),
+                                                                                  FfiConverterInt64.lower(afterSeq),
+                                                                                  FfiConverterString.lower(chatDpopToken), $0)
+        })
+    }
+
+    /**
+     * Fetch DID-rooted authorized ATProto chat device keys for `did` (`I4` / `F-02`).
+     */
+    open func getAuthorizedDeviceKeys(did: String, chatDpopToken: String?) throws -> [AuthorizedPeerDeviceKey] {
+        return try FfiConverterSequenceTypeAuthorizedPeerDeviceKey.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_pushfetchtransport_get_authorized_device_keys(self.uniffiClonePointer(),
+                                                                                       FfiConverterString.lower(did),
+                                                                                       FfiConverterOptionString.lower(chatDpopToken), $0)
+        })
+    }
+}
+
+/// Put the implementation in a struct so we don't pollute the top-level namespace
+private enum UniffiCallbackInterfacePushFetchTransport {
+    /// Create the VTable using a series of closures.
+    /// Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfacePushFetchTransport = .init(
+        fetchMissingEntries: { (
+            uniffiHandle: UInt64,
+            conversationId: RustBuffer,
+            afterSeq: Int64,
+            chatDpopToken: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> PushFetchBundle in
+                guard let uniffiObj = try? FfiConverterTypePushFetchTransport.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.fetchMissingEntries(
+                    conversationId: FfiConverterString.lift(conversationId),
+                    afterSeq: FfiConverterInt64.lift(afterSeq),
+                    chatDpopToken: FfiConverterString.lift(chatDpopToken)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypePushFetchBundle.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        getAuthorizedDeviceKeys: { (
+            uniffiHandle: UInt64,
+            did: RustBuffer,
+            chatDpopToken: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [AuthorizedPeerDeviceKey] in
+                guard let uniffiObj = try? FfiConverterTypePushFetchTransport.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.getAuthorizedDeviceKeys(
+                    did: FfiConverterString.lift(did),
+                    chatDpopToken: FfiConverterOptionString.lift(chatDpopToken)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeAuthorizedPeerDeviceKey.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) in
+            let result = try? FfiConverterTypePushFetchTransport.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface PushFetchTransport: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitPushFetchTransport() {
+    uniffi_catbird_mls_fn_init_callback_vtable_pushfetchtransport(&UniffiCallbackInterfacePushFetchTransport.vtable)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushFetchTransport: FfiConverter {
+    fileprivate static var handleMap = UniffiHandleMap<PushFetchTransport>()
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PushFetchTransport
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PushFetchTransport {
+        return PushFetchTransportImpl(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PushFetchTransport) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushFetchTransport {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if ptr == nil {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PushFetchTransport, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushFetchTransport_lift(_ pointer: UnsafeMutableRawPointer) throws -> PushFetchTransport {
+    return try FfiConverterTypePushFetchTransport.lift(pointer)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushFetchTransport_lower(_ value: PushFetchTransport) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePushFetchTransport.lower(value)
+}
+
+/**
+ * Synchronous keystore interface for NSE / FCM (`sha256(normalized_did)`-keyed, zero OAuth refresh).
+ */
+public protocol PushKeystore: AnyObject {
+    /**
+     * Load the 32-byte raw SQLCipher DB key for `<account_did_hash>.db`.
+     */
+    func loadDbKey(accountDidHash: String) throws -> Data
+
+    /**
+     * Load a serialized OpenMLS signature keypair from platform Keychain/Keystore if stored externally.
+     */
+    func loadSignatureKeypair(keyId: String) throws -> Data?
+
+    /**
+     * Return a non-expired cached `chat-dpop` / service-auth JWT, or `None` if missing/expired (`I10`).
+     */
+    func loadCachedChatDpopToken(accountDidHash: String) throws -> String?
+}
+
+/**
+ * Synchronous keystore interface for NSE / FCM (`sha256(normalized_did)`-keyed, zero OAuth refresh).
+ */
+open class PushKeystoreImpl:
+    PushKeystore
+{
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    // Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+    public required init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public init(noPointer _: NoPointer) {
+        pointer = nil
+    }
+
+    #if swift(>=5.8)
+        @_documentation(visibility: private)
+    #endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_catbird_mls_fn_clone_pushkeystore(self.pointer, $0) }
+    }
+
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_catbird_mls_fn_free_pushkeystore(pointer, $0) }
+    }
+
+    /**
+     * Load the 32-byte raw SQLCipher DB key for `<account_did_hash>.db`.
+     */
+    open func loadDbKey(accountDidHash: String) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_pushkeystore_load_db_key(self.uniffiClonePointer(),
+                                                                  FfiConverterString.lower(accountDidHash), $0)
+        })
+    }
+
+    /**
+     * Load a serialized OpenMLS signature keypair from platform Keychain/Keystore if stored externally.
+     */
+    open func loadSignatureKeypair(keyId: String) throws -> Data? {
+        return try FfiConverterOptionData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_pushkeystore_load_signature_keypair(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(keyId), $0)
+        })
+    }
+
+    /**
+     * Return a non-expired cached `chat-dpop` / service-auth JWT, or `None` if missing/expired (`I10`).
+     */
+    open func loadCachedChatDpopToken(accountDidHash: String) throws -> String? {
+        return try FfiConverterOptionString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_pushkeystore_load_cached_chat_dpop_token(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(accountDidHash), $0)
+        })
+    }
+}
+
+/// Put the implementation in a struct so we don't pollute the top-level namespace
+private enum UniffiCallbackInterfacePushKeystore {
+    /// Create the VTable using a series of closures.
+    /// Swift automatically converts these into C callback functions.
+    static var vtable: UniffiVTableCallbackInterfacePushKeystore = .init(
+        loadDbKey: { (
+            uniffiHandle: UInt64,
+            accountDidHash: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data in
+                guard let uniffiObj = try? FfiConverterTypePushKeystore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadDbKey(
+                    accountDidHash: FfiConverterString.lift(accountDidHash)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        loadSignatureKeypair: { (
+            uniffiHandle: UInt64,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> Data? in
+                guard let uniffiObj = try? FfiConverterTypePushKeystore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadSignatureKeypair(
+                    keyId: FfiConverterString.lift(keyId)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        loadCachedChatDpopToken: { (
+            uniffiHandle: UInt64,
+            accountDidHash: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String? in
+                guard let uniffiObj = try? FfiConverterTypePushKeystore.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadCachedChatDpopToken(
+                    accountDidHash: FfiConverterString.lift(accountDidHash)
+                )
+            }
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMLSError.lower
+            )
+        },
+        uniffiFree: { (uniffiHandle: UInt64) in
+            let result = try? FfiConverterTypePushKeystore.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface PushKeystore: handle missing in uniffiFree")
+            }
+        }
+    )
+}
+
+private func uniffiCallbackInitPushKeystore() {
+    uniffi_catbird_mls_fn_init_callback_vtable_pushkeystore(&UniffiCallbackInterfacePushKeystore.vtable)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushKeystore: FfiConverter {
+    fileprivate static var handleMap = UniffiHandleMap<PushKeystore>()
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PushKeystore
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PushKeystore {
+        return PushKeystoreImpl(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PushKeystore) -> UnsafeMutableRawPointer {
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushKeystore {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if ptr == nil {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PushKeystore, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushKeystore_lift(_ pointer: UnsafeMutableRawPointer) throws -> PushKeystore {
+    return try FfiConverterTypePushKeystore.lift(pointer)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushKeystore_lower(_ value: PushKeystore) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePushKeystore.lower(value)
 }
 
 public struct AddMembersResult {
@@ -5291,99 +2333,290 @@ public func FfiConverterTypeAddProposalInfo_lower(_ value: AddProposalInfo) -> R
 }
 
 /**
- * A chat message with sender info and timestamps.
+ * Authorized peer device signing key published in the user's ATProto repo (`ADR-009` / `I4`).
  */
-public struct ChatMessage {
-    public var id: String
-    public var conversationId: String
-    public var senderDid: String
-    public var content: String
-    public var timestamp: String
-    public var isOwn: Bool
+public struct AuthorizedPeerDeviceKey {
+    public var did: String
+    public var deviceId: String
+    public var signaturePublicKey: Data
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(id: String, conversationId: String, senderDid: String, content: String, timestamp: String, isOwn: Bool) {
-        self.id = id
-        self.conversationId = conversationId
-        self.senderDid = senderDid
-        self.content = content
-        self.timestamp = timestamp
-        self.isOwn = isOwn
+    public init(did: String, deviceId: String, signaturePublicKey: Data) {
+        self.did = did
+        self.deviceId = deviceId
+        self.signaturePublicKey = signaturePublicKey
     }
 }
 
-extension ChatMessage: Equatable, Hashable {
-    public static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        if lhs.id != rhs.id {
+extension AuthorizedPeerDeviceKey: Equatable, Hashable {
+    public static func == (lhs: AuthorizedPeerDeviceKey, rhs: AuthorizedPeerDeviceKey) -> Bool {
+        if lhs.did != rhs.did {
             return false
         }
-        if lhs.conversationId != rhs.conversationId {
+        if lhs.deviceId != rhs.deviceId {
             return false
         }
-        if lhs.senderDid != rhs.senderDid {
-            return false
-        }
-        if lhs.content != rhs.content {
-            return false
-        }
-        if lhs.timestamp != rhs.timestamp {
-            return false
-        }
-        if lhs.isOwn != rhs.isOwn {
+        if lhs.signaturePublicKey != rhs.signaturePublicKey {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(conversationId)
-        hasher.combine(senderDid)
-        hasher.combine(content)
-        hasher.combine(timestamp)
-        hasher.combine(isOwn)
+        hasher.combine(did)
+        hasher.combine(deviceId)
+        hasher.combine(signaturePublicKey)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeChatMessage: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChatMessage {
+public struct FfiConverterTypeAuthorizedPeerDeviceKey: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AuthorizedPeerDeviceKey {
         return
-            try ChatMessage(
-                id: FfiConverterString.read(from: &buf),
-                conversationId: FfiConverterString.read(from: &buf),
-                senderDid: FfiConverterString.read(from: &buf),
-                content: FfiConverterString.read(from: &buf),
-                timestamp: FfiConverterString.read(from: &buf),
-                isOwn: FfiConverterBool.read(from: &buf)
+            try AuthorizedPeerDeviceKey(
+                did: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                signaturePublicKey: FfiConverterData.read(from: &buf)
             )
     }
 
-    public static func write(_ value: ChatMessage, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterString.write(value.senderDid, into: &buf)
-        FfiConverterString.write(value.content, into: &buf)
-        FfiConverterString.write(value.timestamp, into: &buf)
-        FfiConverterBool.write(value.isOwn, into: &buf)
+    public static func write(_ value: AuthorizedPeerDeviceKey, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.did, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterData.write(value.signaturePublicKey, into: &buf)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeChatMessage_lift(_ buf: RustBuffer) throws -> ChatMessage {
-    return try FfiConverterTypeChatMessage.lift(buf)
+public func FfiConverterTypeAuthorizedPeerDeviceKey_lift(_ buf: RustBuffer) throws -> AuthorizedPeerDeviceKey {
+    return try FfiConverterTypeAuthorizedPeerDeviceKey.lift(buf)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeChatMessage_lower(_ value: ChatMessage) -> RustBuffer {
-    return FfiConverterTypeChatMessage.lower(value)
+public func FfiConverterTypeAuthorizedPeerDeviceKey_lower(_ value: AuthorizedPeerDeviceKey) -> RustBuffer {
+    return FfiConverterTypeAuthorizedPeerDeviceKey.lower(value)
+}
+
+/**
+ * Telemetry returned by [`MlsAccountDb::prepare_for_background`].
+ */
+public struct BackgroundCheckpointReport {
+    public var busy: Int64
+    public var logFrames: Int64
+    public var checkpointedFrames: Int64
+    public var handleClosed: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(busy: Int64, logFrames: Int64, checkpointedFrames: Int64, handleClosed: Bool) {
+        self.busy = busy
+        self.logFrames = logFrames
+        self.checkpointedFrames = checkpointedFrames
+        self.handleClosed = handleClosed
+    }
+}
+
+extension BackgroundCheckpointReport: Equatable, Hashable {
+    public static func == (lhs: BackgroundCheckpointReport, rhs: BackgroundCheckpointReport) -> Bool {
+        if lhs.busy != rhs.busy {
+            return false
+        }
+        if lhs.logFrames != rhs.logFrames {
+            return false
+        }
+        if lhs.checkpointedFrames != rhs.checkpointedFrames {
+            return false
+        }
+        if lhs.handleClosed != rhs.handleClosed {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(busy)
+        hasher.combine(logFrames)
+        hasher.combine(checkpointedFrames)
+        hasher.combine(handleClosed)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBackgroundCheckpointReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BackgroundCheckpointReport {
+        return
+            try BackgroundCheckpointReport(
+                busy: FfiConverterInt64.read(from: &buf),
+                logFrames: FfiConverterInt64.read(from: &buf),
+                checkpointedFrames: FfiConverterInt64.read(from: &buf),
+                handleClosed: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: BackgroundCheckpointReport, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.busy, into: &buf)
+        FfiConverterInt64.write(value.logFrames, into: &buf)
+        FfiConverterInt64.write(value.checkpointedFrames, into: &buf)
+        FfiConverterBool.write(value.handleClosed, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackgroundCheckpointReport_lift(_ buf: RustBuffer) throws -> BackgroundCheckpointReport {
+    return try FfiConverterTypeBackgroundCheckpointReport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackgroundCheckpointReport_lower(_ value: BackgroundCheckpointReport) -> RustBuffer {
+    return FfiConverterTypeBackgroundCheckpointReport.lower(value)
+}
+
+/**
+ * Configuration for opening a per-account [`super::CatbirdMlsClient`].
+ */
+public struct CatbirdMlsClientConfig {
+    /**
+     * Root storage directory (`<AppGroup>` on iOS/macOS, internal files dir on Android,
+     * app data dir on desktop/CLI). Databases live at `<storage_root>/catbird-mls/<did_hash>.db`.
+     */
+    public var storageRoot: String
+    /**
+     * Account DID (`did:plc:...` or `did:web:...`).
+     */
+    public var accountDid: String
+    /**
+     * Logical device identifier (`dev-...`).
+     */
+    public var deviceId: String
+    /**
+     * User's declared `#atproto_mls` home `mls-ds` DID (`D1`).
+     */
+    public var homeDsDid: String
+    /**
+     * User's declared `#atproto_mls` home `mls-ds` HTTPS base URL.
+     */
+    public var homeDsEndpoint: String
+    /**
+     * User's ATProto PDS HTTPS base URL.
+     */
+    public var pdsEndpoint: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(
+        /* 
+         * Root storage directory (`<AppGroup>` on iOS/macOS, internal files dir on Android,
+         * app data dir on desktop/CLI). Databases live at `<storage_root>/catbird-mls/<did_hash>.db`.
+         */ storageRoot: String,
+        /* 
+            * Account DID (`did:plc:...` or `did:web:...`).
+            */ accountDid: String,
+        /* 
+            * Logical device identifier (`dev-...`).
+            */ deviceId: String,
+        /* 
+            * User's declared `#atproto_mls` home `mls-ds` DID (`D1`).
+            */ homeDsDid: String,
+        /* 
+            * User's declared `#atproto_mls` home `mls-ds` HTTPS base URL.
+            */ homeDsEndpoint: String,
+        /* 
+            * User's ATProto PDS HTTPS base URL.
+            */ pdsEndpoint: String
+    ) {
+        self.storageRoot = storageRoot
+        self.accountDid = accountDid
+        self.deviceId = deviceId
+        self.homeDsDid = homeDsDid
+        self.homeDsEndpoint = homeDsEndpoint
+        self.pdsEndpoint = pdsEndpoint
+    }
+}
+
+extension CatbirdMlsClientConfig: Equatable, Hashable {
+    public static func == (lhs: CatbirdMlsClientConfig, rhs: CatbirdMlsClientConfig) -> Bool {
+        if lhs.storageRoot != rhs.storageRoot {
+            return false
+        }
+        if lhs.accountDid != rhs.accountDid {
+            return false
+        }
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.homeDsDid != rhs.homeDsDid {
+            return false
+        }
+        if lhs.homeDsEndpoint != rhs.homeDsEndpoint {
+            return false
+        }
+        if lhs.pdsEndpoint != rhs.pdsEndpoint {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(storageRoot)
+        hasher.combine(accountDid)
+        hasher.combine(deviceId)
+        hasher.combine(homeDsDid)
+        hasher.combine(homeDsEndpoint)
+        hasher.combine(pdsEndpoint)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCatbirdMlsClientConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CatbirdMlsClientConfig {
+        return
+            try CatbirdMlsClientConfig(
+                storageRoot: FfiConverterString.read(from: &buf),
+                accountDid: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                homeDsDid: FfiConverterString.read(from: &buf),
+                homeDsEndpoint: FfiConverterString.read(from: &buf),
+                pdsEndpoint: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CatbirdMlsClientConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.storageRoot, into: &buf)
+        FfiConverterString.write(value.accountDid, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.homeDsDid, into: &buf)
+        FfiConverterString.write(value.homeDsEndpoint, into: &buf)
+        FfiConverterString.write(value.pdsEndpoint, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCatbirdMlsClientConfig_lift(_ buf: RustBuffer) throws -> CatbirdMlsClientConfig {
+    return try FfiConverterTypeCatbirdMlsClientConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCatbirdMlsClientConfig_lower(_ value: CatbirdMlsClientConfig) -> RustBuffer {
+    return FfiConverterTypeCatbirdMlsClientConfig.lower(value)
 }
 
 /**
@@ -6106,86 +3339,6 @@ public func FfiConverterTypeCleanChatPreparedRequestFfi_lower(_ value: CleanChat
     return FfiConverterTypeCleanChatPreparedRequestFfi.lower(value)
 }
 
-/**
- * Public-key/signature result for the non-exporting signed-request callback.
- */
-public struct CleanChatSigningAuthorityFfi {
-    public var publicKey: Data
-    public var signature: Data
-    public var deviceId: String
-    public var authGeneration: Int64?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(publicKey: Data, signature: Data, deviceId: String, authGeneration: Int64?) {
-        self.publicKey = publicKey
-        self.signature = signature
-        self.deviceId = deviceId
-        self.authGeneration = authGeneration
-    }
-}
-
-extension CleanChatSigningAuthorityFfi: Equatable, Hashable {
-    public static func == (lhs: CleanChatSigningAuthorityFfi, rhs: CleanChatSigningAuthorityFfi) -> Bool {
-        if lhs.publicKey != rhs.publicKey {
-            return false
-        }
-        if lhs.signature != rhs.signature {
-            return false
-        }
-        if lhs.deviceId != rhs.deviceId {
-            return false
-        }
-        if lhs.authGeneration != rhs.authGeneration {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(publicKey)
-        hasher.combine(signature)
-        hasher.combine(deviceId)
-        hasher.combine(authGeneration)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeCleanChatSigningAuthorityFfi: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CleanChatSigningAuthorityFfi {
-        return
-            try CleanChatSigningAuthorityFfi(
-                publicKey: FfiConverterData.read(from: &buf),
-                signature: FfiConverterData.read(from: &buf),
-                deviceId: FfiConverterString.read(from: &buf),
-                authGeneration: FfiConverterOptionInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: CleanChatSigningAuthorityFfi, into buf: inout [UInt8]) {
-        FfiConverterData.write(value.publicKey, into: &buf)
-        FfiConverterData.write(value.signature, into: &buf)
-        FfiConverterString.write(value.deviceId, into: &buf)
-        FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeCleanChatSigningAuthorityFfi_lift(_ buf: RustBuffer) throws -> CleanChatSigningAuthorityFfi {
-    return try FfiConverterTypeCleanChatSigningAuthorityFfi.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeCleanChatSigningAuthorityFfi_lower(_ value: CleanChatSigningAuthorityFfi) -> RustBuffer {
-    return FfiConverterTypeCleanChatSigningAuthorityFfi.lower(value)
-}
-
 public struct CleanChatSigningContextFfi {
     public var actorDid: String
     public var deviceId: String
@@ -6407,100 +3560,129 @@ public func FfiConverterTypeCommitResult_lower(_ value: CommitResult) -> RustBuf
     return FfiConverterTypeCommitResult.lower(value)
 }
 
-/**
- * A chat conversation, hiding all MLS group internals.
- */
-public struct Conversation {
-    public var id: String
-    public var name: String?
-    public var participants: [Participant]
-    public var lastMessage: ChatMessage?
-    public var unreadCount: Int32
-    public var createdAt: String?
+public struct ConversationRow {
+    public var conversationId: String
+    public var groupId: Data
+    public var generation: Int64
+    public var epoch: Int64
+    public var lastSeq: Int64
+    public var sequencerDid: String
+    public var spaceUri: String?
+    public var title: String?
+    public var unreadCount: Int64
+    public var updatedAtMs: Int64
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(id: String, name: String?, participants: [Participant], lastMessage: ChatMessage?, unreadCount: Int32, createdAt: String?) {
-        self.id = id
-        self.name = name
-        self.participants = participants
-        self.lastMessage = lastMessage
+    public init(conversationId: String, groupId: Data, generation: Int64, epoch: Int64, lastSeq: Int64, sequencerDid: String, spaceUri: String?, title: String?, unreadCount: Int64, updatedAtMs: Int64) {
+        self.conversationId = conversationId
+        self.groupId = groupId
+        self.generation = generation
+        self.epoch = epoch
+        self.lastSeq = lastSeq
+        self.sequencerDid = sequencerDid
+        self.spaceUri = spaceUri
+        self.title = title
         self.unreadCount = unreadCount
-        self.createdAt = createdAt
+        self.updatedAtMs = updatedAtMs
     }
 }
 
-extension Conversation: Equatable, Hashable {
-    public static func == (lhs: Conversation, rhs: Conversation) -> Bool {
-        if lhs.id != rhs.id {
+extension ConversationRow: Equatable, Hashable {
+    public static func == (lhs: ConversationRow, rhs: ConversationRow) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
             return false
         }
-        if lhs.name != rhs.name {
+        if lhs.groupId != rhs.groupId {
             return false
         }
-        if lhs.participants != rhs.participants {
+        if lhs.generation != rhs.generation {
             return false
         }
-        if lhs.lastMessage != rhs.lastMessage {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.lastSeq != rhs.lastSeq {
+            return false
+        }
+        if lhs.sequencerDid != rhs.sequencerDid {
+            return false
+        }
+        if lhs.spaceUri != rhs.spaceUri {
+            return false
+        }
+        if lhs.title != rhs.title {
             return false
         }
         if lhs.unreadCount != rhs.unreadCount {
             return false
         }
-        if lhs.createdAt != rhs.createdAt {
+        if lhs.updatedAtMs != rhs.updatedAtMs {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(name)
-        hasher.combine(participants)
-        hasher.combine(lastMessage)
+        hasher.combine(conversationId)
+        hasher.combine(groupId)
+        hasher.combine(generation)
+        hasher.combine(epoch)
+        hasher.combine(lastSeq)
+        hasher.combine(sequencerDid)
+        hasher.combine(spaceUri)
+        hasher.combine(title)
         hasher.combine(unreadCount)
-        hasher.combine(createdAt)
+        hasher.combine(updatedAtMs)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeConversation: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Conversation {
+public struct FfiConverterTypeConversationRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConversationRow {
         return
-            try Conversation(
-                id: FfiConverterString.read(from: &buf),
-                name: FfiConverterOptionString.read(from: &buf),
-                participants: FfiConverterSequenceTypeParticipant.read(from: &buf),
-                lastMessage: FfiConverterOptionTypeChatMessage.read(from: &buf),
-                unreadCount: FfiConverterInt32.read(from: &buf),
-                createdAt: FfiConverterOptionString.read(from: &buf)
+            try ConversationRow(
+                conversationId: FfiConverterString.read(from: &buf),
+                groupId: FfiConverterData.read(from: &buf),
+                generation: FfiConverterInt64.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf),
+                lastSeq: FfiConverterInt64.read(from: &buf),
+                sequencerDid: FfiConverterString.read(from: &buf),
+                spaceUri: FfiConverterOptionString.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                unreadCount: FfiConverterInt64.read(from: &buf),
+                updatedAtMs: FfiConverterInt64.read(from: &buf)
             )
     }
 
-    public static func write(_ value: Conversation, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterOptionString.write(value.name, into: &buf)
-        FfiConverterSequenceTypeParticipant.write(value.participants, into: &buf)
-        FfiConverterOptionTypeChatMessage.write(value.lastMessage, into: &buf)
-        FfiConverterInt32.write(value.unreadCount, into: &buf)
-        FfiConverterOptionString.write(value.createdAt, into: &buf)
+    public static func write(_ value: ConversationRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterData.write(value.groupId, into: &buf)
+        FfiConverterInt64.write(value.generation, into: &buf)
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterInt64.write(value.lastSeq, into: &buf)
+        FfiConverterString.write(value.sequencerDid, into: &buf)
+        FfiConverterOptionString.write(value.spaceUri, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterInt64.write(value.unreadCount, into: &buf)
+        FfiConverterInt64.write(value.updatedAtMs, into: &buf)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeConversation_lift(_ buf: RustBuffer) throws -> Conversation {
-    return try FfiConverterTypeConversation.lift(buf)
+public func FfiConverterTypeConversationRow_lift(_ buf: RustBuffer) throws -> ConversationRow {
+    return try FfiConverterTypeConversationRow.lift(buf)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeConversation_lower(_ value: Conversation) -> RustBuffer {
-    return FfiConverterTypeConversation.lower(value)
+public func FfiConverterTypeConversationRow_lower(_ value: ConversationRow) -> RustBuffer {
+    return FfiConverterTypeConversationRow.lower(value)
 }
 
 public struct CredentialData {
@@ -7037,6 +4219,118 @@ public func FfiConverterTypeEncryptResult_lower(_ value: EncryptResult) -> RustB
     return FfiConverterTypeEncryptResult.lower(value)
 }
 
+/**
+ * Enrollment receipt returned when a device enrolls on its home `mls-ds` + Spaces (`D4`, `I15`, `I16`).
+ */
+public struct EnrollmentReceipt {
+    public var accountDid: String
+    public var accountDidHash: String
+    public var deviceId: String
+    public var signaturePublicKey: Data
+    public var directRequestKpBytes: Data
+    public var recoveryKpBytes: Data
+    public var mailboxSpaceUri: String
+    public var labyrinthBackupEnabled: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(accountDid: String, accountDidHash: String, deviceId: String, signaturePublicKey: Data, directRequestKpBytes: Data, recoveryKpBytes: Data, mailboxSpaceUri: String, labyrinthBackupEnabled: Bool) {
+        self.accountDid = accountDid
+        self.accountDidHash = accountDidHash
+        self.deviceId = deviceId
+        self.signaturePublicKey = signaturePublicKey
+        self.directRequestKpBytes = directRequestKpBytes
+        self.recoveryKpBytes = recoveryKpBytes
+        self.mailboxSpaceUri = mailboxSpaceUri
+        self.labyrinthBackupEnabled = labyrinthBackupEnabled
+    }
+}
+
+extension EnrollmentReceipt: Equatable, Hashable {
+    public static func == (lhs: EnrollmentReceipt, rhs: EnrollmentReceipt) -> Bool {
+        if lhs.accountDid != rhs.accountDid {
+            return false
+        }
+        if lhs.accountDidHash != rhs.accountDidHash {
+            return false
+        }
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.signaturePublicKey != rhs.signaturePublicKey {
+            return false
+        }
+        if lhs.directRequestKpBytes != rhs.directRequestKpBytes {
+            return false
+        }
+        if lhs.recoveryKpBytes != rhs.recoveryKpBytes {
+            return false
+        }
+        if lhs.mailboxSpaceUri != rhs.mailboxSpaceUri {
+            return false
+        }
+        if lhs.labyrinthBackupEnabled != rhs.labyrinthBackupEnabled {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(accountDid)
+        hasher.combine(accountDidHash)
+        hasher.combine(deviceId)
+        hasher.combine(signaturePublicKey)
+        hasher.combine(directRequestKpBytes)
+        hasher.combine(recoveryKpBytes)
+        hasher.combine(mailboxSpaceUri)
+        hasher.combine(labyrinthBackupEnabled)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEnrollmentReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EnrollmentReceipt {
+        return
+            try EnrollmentReceipt(
+                accountDid: FfiConverterString.read(from: &buf),
+                accountDidHash: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                signaturePublicKey: FfiConverterData.read(from: &buf),
+                directRequestKpBytes: FfiConverterData.read(from: &buf),
+                recoveryKpBytes: FfiConverterData.read(from: &buf),
+                mailboxSpaceUri: FfiConverterString.read(from: &buf),
+                labyrinthBackupEnabled: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: EnrollmentReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountDid, into: &buf)
+        FfiConverterString.write(value.accountDidHash, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterData.write(value.signaturePublicKey, into: &buf)
+        FfiConverterData.write(value.directRequestKpBytes, into: &buf)
+        FfiConverterData.write(value.recoveryKpBytes, into: &buf)
+        FfiConverterString.write(value.mailboxSpaceUri, into: &buf)
+        FfiConverterBool.write(value.labyrinthBackupEnabled, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnrollmentReceipt_lift(_ buf: RustBuffer) throws -> EnrollmentReceipt {
+    return try FfiConverterTypeEnrollmentReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEnrollmentReceipt_lower(_ value: EnrollmentReceipt) -> RustBuffer {
+    return FfiConverterTypeEnrollmentReceipt.lower(value)
+}
+
 public struct ExportedSecret {
     public var secret: Data
 
@@ -7168,2668 +4462,112 @@ public func FfiConverterTypeExternalCommitResult_lower(_ value: ExternalCommitRe
     return FfiConverterTypeExternalCommitResult.lower(value)
 }
 
-public struct FfiAddMembersResult {
-    public var success: Bool
-    public var newEpoch: UInt64
-    public var receipt: FfiSequencerReceipt?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(success: Bool, newEpoch: UInt64, receipt: FfiSequencerReceipt?) {
-        self.success = success
-        self.newEpoch = newEpoch
-        self.receipt = receipt
-    }
-}
-
-extension FfiAddMembersResult: Equatable, Hashable {
-    public static func == (lhs: FfiAddMembersResult, rhs: FfiAddMembersResult) -> Bool {
-        if lhs.success != rhs.success {
-            return false
-        }
-        if lhs.newEpoch != rhs.newEpoch {
-            return false
-        }
-        if lhs.receipt != rhs.receipt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(success)
-        hasher.combine(newEpoch)
-        hasher.combine(receipt)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIAddMembersResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiAddMembersResult {
-        return
-            try FfiAddMembersResult(
-                success: FfiConverterBool.read(from: &buf),
-                newEpoch: FfiConverterUInt64.read(from: &buf),
-                receipt: FfiConverterOptionTypeFFISequencerReceipt.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiAddMembersResult, into buf: inout [UInt8]) {
-        FfiConverterBool.write(value.success, into: &buf)
-        FfiConverterUInt64.write(value.newEpoch, into: &buf)
-        FfiConverterOptionTypeFFISequencerReceipt.write(value.receipt, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIAddMembersResult_lift(_ buf: RustBuffer) throws -> FfiAddMembersResult {
-    return try FfiConverterTypeFFIAddMembersResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIAddMembersResult_lower(_ value: FfiAddMembersResult) -> RustBuffer {
-    return FfiConverterTypeFFIAddMembersResult.lower(value)
-}
-
 /**
- * Plan returned from `stage_commit` — ship this to the DS, then confirm.
+ * Encrypted `chat.metadata_snapshots` blob fetched on group metadata cache miss (`1A`).
  */
-public struct FfiCommitPlan {
-    public var handle: FfiStagedCommitHandle
-    public var commitBytes: Data
-    public var welcomeBytes: Data?
-    public var groupInfo: Data
-    public var sourceEpoch: UInt64
-    public var targetEpoch: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(handle: FfiStagedCommitHandle, commitBytes: Data, welcomeBytes: Data?, groupInfo: Data, sourceEpoch: UInt64, targetEpoch: UInt64) {
-        self.handle = handle
-        self.commitBytes = commitBytes
-        self.welcomeBytes = welcomeBytes
-        self.groupInfo = groupInfo
-        self.sourceEpoch = sourceEpoch
-        self.targetEpoch = targetEpoch
-    }
-}
-
-extension FfiCommitPlan: Equatable, Hashable {
-    public static func == (lhs: FfiCommitPlan, rhs: FfiCommitPlan) -> Bool {
-        if lhs.handle != rhs.handle {
-            return false
-        }
-        if lhs.commitBytes != rhs.commitBytes {
-            return false
-        }
-        if lhs.welcomeBytes != rhs.welcomeBytes {
-            return false
-        }
-        if lhs.groupInfo != rhs.groupInfo {
-            return false
-        }
-        if lhs.sourceEpoch != rhs.sourceEpoch {
-            return false
-        }
-        if lhs.targetEpoch != rhs.targetEpoch {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(handle)
-        hasher.combine(commitBytes)
-        hasher.combine(welcomeBytes)
-        hasher.combine(groupInfo)
-        hasher.combine(sourceEpoch)
-        hasher.combine(targetEpoch)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFICommitPlan: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCommitPlan {
-        return
-            try FfiCommitPlan(
-                handle: FfiConverterTypeFFIStagedCommitHandle.read(from: &buf),
-                commitBytes: FfiConverterData.read(from: &buf),
-                welcomeBytes: FfiConverterOptionData.read(from: &buf),
-                groupInfo: FfiConverterData.read(from: &buf),
-                sourceEpoch: FfiConverterUInt64.read(from: &buf),
-                targetEpoch: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiCommitPlan, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIStagedCommitHandle.write(value.handle, into: &buf)
-        FfiConverterData.write(value.commitBytes, into: &buf)
-        FfiConverterOptionData.write(value.welcomeBytes, into: &buf)
-        FfiConverterData.write(value.groupInfo, into: &buf)
-        FfiConverterUInt64.write(value.sourceEpoch, into: &buf)
-        FfiConverterUInt64.write(value.targetEpoch, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFICommitPlan_lift(_ buf: RustBuffer) throws -> FfiCommitPlan {
-    return try FfiConverterTypeFFICommitPlan.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFICommitPlan_lower(_ value: FfiCommitPlan) -> RustBuffer {
-    return FfiConverterTypeFFICommitPlan.lower(value)
-}
-
-/**
- * Summary returned from `confirm_commit`.
- */
-public struct FfiConfirmedCommit {
-    public var newEpoch: UInt64
-    public var metadataKey: Data?
-    public var metadataReference: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(newEpoch: UInt64, metadataKey: Data?, metadataReference: String?) {
-        self.newEpoch = newEpoch
-        self.metadataKey = metadataKey
-        self.metadataReference = metadataReference
-    }
-}
-
-extension FfiConfirmedCommit: Equatable, Hashable {
-    public static func == (lhs: FfiConfirmedCommit, rhs: FfiConfirmedCommit) -> Bool {
-        if lhs.newEpoch != rhs.newEpoch {
-            return false
-        }
-        if lhs.metadataKey != rhs.metadataKey {
-            return false
-        }
-        if lhs.metadataReference != rhs.metadataReference {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(newEpoch)
-        hasher.combine(metadataKey)
-        hasher.combine(metadataReference)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIConfirmedCommit: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConfirmedCommit {
-        return
-            try FfiConfirmedCommit(
-                newEpoch: FfiConverterUInt64.read(from: &buf),
-                metadataKey: FfiConverterOptionData.read(from: &buf),
-                metadataReference: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiConfirmedCommit, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.newEpoch, into: &buf)
-        FfiConverterOptionData.write(value.metadataKey, into: &buf)
-        FfiConverterOptionString.write(value.metadataReference, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConfirmedCommit_lift(_ buf: RustBuffer) throws -> FfiConfirmedCommit {
-    return try FfiConverterTypeFFIConfirmedCommit.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConfirmedCommit_lower(_ value: FfiConfirmedCommit) -> RustBuffer {
-    return FfiConverterTypeFFIConfirmedCommit.lower(value)
-}
-
-public struct FfiConversationListPage {
-    public var conversations: [FfiConversationView]
-    public var cursor: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversations: [FfiConversationView], cursor: String?) {
-        self.conversations = conversations
-        self.cursor = cursor
-    }
-}
-
-extension FfiConversationListPage: Equatable, Hashable {
-    public static func == (lhs: FfiConversationListPage, rhs: FfiConversationListPage) -> Bool {
-        if lhs.conversations != rhs.conversations {
-            return false
-        }
-        if lhs.cursor != rhs.cursor {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversations)
-        hasher.combine(cursor)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIConversationListPage: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationListPage {
-        return
-            try FfiConversationListPage(
-                conversations: FfiConverterSequenceTypeFFIConversationView.read(from: &buf),
-                cursor: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiConversationListPage, into buf: inout [UInt8]) {
-        FfiConverterSequenceTypeFFIConversationView.write(value.conversations, into: &buf)
-        FfiConverterOptionString.write(value.cursor, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationListPage_lift(_ buf: RustBuffer) throws -> FfiConversationListPage {
-    return try FfiConverterTypeFFIConversationListPage.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationListPage_lower(_ value: FfiConversationListPage) -> RustBuffer {
-    return FfiConverterTypeFFIConversationListPage.lower(value)
-}
-
-public struct FfiConversationReadyResult {
-    public var recoveryState: FfiConversationRecoveryState
-    public var epoch: UInt64?
-    public var sendAllowed: Bool
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(recoveryState: FfiConversationRecoveryState, epoch: UInt64?, sendAllowed: Bool) {
-        self.recoveryState = recoveryState
-        self.epoch = epoch
-        self.sendAllowed = sendAllowed
-    }
-}
-
-extension FfiConversationReadyResult: Equatable, Hashable {
-    public static func == (lhs: FfiConversationReadyResult, rhs: FfiConversationReadyResult) -> Bool {
-        if lhs.recoveryState != rhs.recoveryState {
-            return false
-        }
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.sendAllowed != rhs.sendAllowed {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(recoveryState)
-        hasher.combine(epoch)
-        hasher.combine(sendAllowed)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIConversationReadyResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationReadyResult {
-        return
-            try FfiConversationReadyResult(
-                recoveryState: FfiConverterTypeFFIConversationRecoveryState.read(from: &buf),
-                epoch: FfiConverterOptionUInt64.read(from: &buf),
-                sendAllowed: FfiConverterBool.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiConversationReadyResult, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIConversationRecoveryState.write(value.recoveryState, into: &buf)
-        FfiConverterOptionUInt64.write(value.epoch, into: &buf)
-        FfiConverterBool.write(value.sendAllowed, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationReadyResult_lift(_ buf: RustBuffer) throws -> FfiConversationReadyResult {
-    return try FfiConverterTypeFFIConversationReadyResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationReadyResult_lower(_ value: FfiConversationReadyResult) -> RustBuffer {
-    return FfiConverterTypeFFIConversationReadyResult.lower(value)
-}
-
-public struct FfiConversationState {
-    public var state: String
-    public var newGroupId: String?
-    public var resetGeneration: Int32?
-    public var notifiedAtMs: Int64?
-    public var quarantineReason: String?
-    public var quarantinedSinceMs: Int64?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(state: String, newGroupId: String?, resetGeneration: Int32?, notifiedAtMs: Int64?, quarantineReason: String?, quarantinedSinceMs: Int64?) {
-        self.state = state
-        self.newGroupId = newGroupId
-        self.resetGeneration = resetGeneration
-        self.notifiedAtMs = notifiedAtMs
-        self.quarantineReason = quarantineReason
-        self.quarantinedSinceMs = quarantinedSinceMs
-    }
-}
-
-extension FfiConversationState: Equatable, Hashable {
-    public static func == (lhs: FfiConversationState, rhs: FfiConversationState) -> Bool {
-        if lhs.state != rhs.state {
-            return false
-        }
-        if lhs.newGroupId != rhs.newGroupId {
-            return false
-        }
-        if lhs.resetGeneration != rhs.resetGeneration {
-            return false
-        }
-        if lhs.notifiedAtMs != rhs.notifiedAtMs {
-            return false
-        }
-        if lhs.quarantineReason != rhs.quarantineReason {
-            return false
-        }
-        if lhs.quarantinedSinceMs != rhs.quarantinedSinceMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(state)
-        hasher.combine(newGroupId)
-        hasher.combine(resetGeneration)
-        hasher.combine(notifiedAtMs)
-        hasher.combine(quarantineReason)
-        hasher.combine(quarantinedSinceMs)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIConversationState: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationState {
-        return
-            try FfiConversationState(
-                state: FfiConverterString.read(from: &buf),
-                newGroupId: FfiConverterOptionString.read(from: &buf),
-                resetGeneration: FfiConverterOptionInt32.read(from: &buf),
-                notifiedAtMs: FfiConverterOptionInt64.read(from: &buf),
-                quarantineReason: FfiConverterOptionString.read(from: &buf),
-                quarantinedSinceMs: FfiConverterOptionInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiConversationState, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.state, into: &buf)
-        FfiConverterOptionString.write(value.newGroupId, into: &buf)
-        FfiConverterOptionInt32.write(value.resetGeneration, into: &buf)
-        FfiConverterOptionInt64.write(value.notifiedAtMs, into: &buf)
-        FfiConverterOptionString.write(value.quarantineReason, into: &buf)
-        FfiConverterOptionInt64.write(value.quarantinedSinceMs, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationState_lift(_ buf: RustBuffer) throws -> FfiConversationState {
-    return try FfiConverterTypeFFIConversationState.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationState_lower(_ value: FfiConversationState) -> RustBuffer {
-    return FfiConverterTypeFFIConversationState.lower(value)
-}
-
-public struct FfiConversationView {
-    /**
-     * Full canonical conversationState JSON; None is unknown admission.
-     */
-    public var canonicalStateJson: String?
-    public var groupId: String
-    /**
-     * Stable conversation identifier (survives group resets).
-     */
-    public var conversationId: String
-    public var epoch: UInt64
-    public var members: [FfiMemberView]
-    public var name: String?
-    public var description: String?
-    public var avatarUrl: String?
-    public var createdAt: String?
-    public var updatedAt: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(
-        /* 
-         * Full canonical conversationState JSON; None is unknown admission.
-         */ canonicalStateJson: String?, groupId: String,
-        /* 
-            * Stable conversation identifier (survives group resets).
-            */ conversationId: String, epoch: UInt64, members: [FfiMemberView], name: String?, description: String?, avatarUrl: String?, createdAt: String?, updatedAt: String?
-    ) {
-        self.canonicalStateJson = canonicalStateJson
-        self.groupId = groupId
-        self.conversationId = conversationId
-        self.epoch = epoch
-        self.members = members
-        self.name = name
-        self.description = description
-        self.avatarUrl = avatarUrl
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
-    }
-}
-
-extension FfiConversationView: Equatable, Hashable {
-    public static func == (lhs: FfiConversationView, rhs: FfiConversationView) -> Bool {
-        if lhs.canonicalStateJson != rhs.canonicalStateJson {
-            return false
-        }
-        if lhs.groupId != rhs.groupId {
-            return false
-        }
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.members != rhs.members {
-            return false
-        }
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.description != rhs.description {
-            return false
-        }
-        if lhs.avatarUrl != rhs.avatarUrl {
-            return false
-        }
-        if lhs.createdAt != rhs.createdAt {
-            return false
-        }
-        if lhs.updatedAt != rhs.updatedAt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(canonicalStateJson)
-        hasher.combine(groupId)
-        hasher.combine(conversationId)
-        hasher.combine(epoch)
-        hasher.combine(members)
-        hasher.combine(name)
-        hasher.combine(description)
-        hasher.combine(avatarUrl)
-        hasher.combine(createdAt)
-        hasher.combine(updatedAt)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIConversationView: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationView {
-        return
-            try FfiConversationView(
-                canonicalStateJson: FfiConverterOptionString.read(from: &buf),
-                groupId: FfiConverterString.read(from: &buf),
-                conversationId: FfiConverterString.read(from: &buf),
-                epoch: FfiConverterUInt64.read(from: &buf),
-                members: FfiConverterSequenceTypeFFIMemberView.read(from: &buf),
-                name: FfiConverterOptionString.read(from: &buf),
-                description: FfiConverterOptionString.read(from: &buf),
-                avatarUrl: FfiConverterOptionString.read(from: &buf),
-                createdAt: FfiConverterOptionString.read(from: &buf),
-                updatedAt: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiConversationView, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.canonicalStateJson, into: &buf)
-        FfiConverterString.write(value.groupId, into: &buf)
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterUInt64.write(value.epoch, into: &buf)
-        FfiConverterSequenceTypeFFIMemberView.write(value.members, into: &buf)
-        FfiConverterOptionString.write(value.name, into: &buf)
-        FfiConverterOptionString.write(value.description, into: &buf)
-        FfiConverterOptionString.write(value.avatarUrl, into: &buf)
-        FfiConverterOptionString.write(value.createdAt, into: &buf)
-        FfiConverterOptionString.write(value.updatedAt, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationView_lift(_ buf: RustBuffer) throws -> FfiConversationView {
-    return try FfiConverterTypeFFIConversationView.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationView_lower(_ value: FfiConversationView) -> RustBuffer {
-    return FfiConverterTypeFFIConversationView.lower(value)
-}
-
-public struct FfiCreateConversationResult {
-    public var conversation: FfiConversationView
-    public var commitData: Data?
-    public var welcomeData: Data?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversation: FfiConversationView, commitData: Data?, welcomeData: Data?) {
-        self.conversation = conversation
-        self.commitData = commitData
-        self.welcomeData = welcomeData
-    }
-}
-
-extension FfiCreateConversationResult: Equatable, Hashable {
-    public static func == (lhs: FfiCreateConversationResult, rhs: FfiCreateConversationResult) -> Bool {
-        if lhs.conversation != rhs.conversation {
-            return false
-        }
-        if lhs.commitData != rhs.commitData {
-            return false
-        }
-        if lhs.welcomeData != rhs.welcomeData {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversation)
-        hasher.combine(commitData)
-        hasher.combine(welcomeData)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFICreateConversationResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCreateConversationResult {
-        return
-            try FfiCreateConversationResult(
-                conversation: FfiConverterTypeFFIConversationView.read(from: &buf),
-                commitData: FfiConverterOptionData.read(from: &buf),
-                welcomeData: FfiConverterOptionData.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiCreateConversationResult, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIConversationView.write(value.conversation, into: &buf)
-        FfiConverterOptionData.write(value.commitData, into: &buf)
-        FfiConverterOptionData.write(value.welcomeData, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFICreateConversationResult_lift(_ buf: RustBuffer) throws -> FfiCreateConversationResult {
-    return try FfiConverterTypeFFICreateConversationResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFICreateConversationResult_lower(_ value: FfiCreateConversationResult) -> RustBuffer {
-    return FfiConverterTypeFFICreateConversationResult.lower(value)
-}
-
-public struct FfiDebugWipeLocalGroupResult {
-    public var conversationId: String
-    public var groupId: String?
-    public var deletedLocalGroup: Bool
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String, groupId: String?, deletedLocalGroup: Bool) {
-        self.conversationId = conversationId
-        self.groupId = groupId
-        self.deletedLocalGroup = deletedLocalGroup
-    }
-}
-
-extension FfiDebugWipeLocalGroupResult: Equatable, Hashable {
-    public static func == (lhs: FfiDebugWipeLocalGroupResult, rhs: FfiDebugWipeLocalGroupResult) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.groupId != rhs.groupId {
-            return false
-        }
-        if lhs.deletedLocalGroup != rhs.deletedLocalGroup {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(groupId)
-        hasher.combine(deletedLocalGroup)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIDebugWipeLocalGroupResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDebugWipeLocalGroupResult {
-        return
-            try FfiDebugWipeLocalGroupResult(
-                conversationId: FfiConverterString.read(from: &buf),
-                groupId: FfiConverterOptionString.read(from: &buf),
-                deletedLocalGroup: FfiConverterBool.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiDebugWipeLocalGroupResult, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterOptionString.write(value.groupId, into: &buf)
-        FfiConverterBool.write(value.deletedLocalGroup, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDebugWipeLocalGroupResult_lift(_ buf: RustBuffer) throws -> FfiDebugWipeLocalGroupResult {
-    return try FfiConverterTypeFFIDebugWipeLocalGroupResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDebugWipeLocalGroupResult_lower(_ value: FfiDebugWipeLocalGroupResult) -> RustBuffer {
-    return FfiConverterTypeFFIDebugWipeLocalGroupResult.lower(value)
-}
-
-public struct FfiDeferredRecoveryReport {
-    public var scanned: UInt32
-    public var attempted: UInt32
-    public var recovered: UInt32
-    public var skipped: UInt32
-    public var failed: UInt32
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(scanned: UInt32, attempted: UInt32, recovered: UInt32, skipped: UInt32, failed: UInt32) {
-        self.scanned = scanned
-        self.attempted = attempted
-        self.recovered = recovered
-        self.skipped = skipped
-        self.failed = failed
-    }
-}
-
-extension FfiDeferredRecoveryReport: Equatable, Hashable {
-    public static func == (lhs: FfiDeferredRecoveryReport, rhs: FfiDeferredRecoveryReport) -> Bool {
-        if lhs.scanned != rhs.scanned {
-            return false
-        }
-        if lhs.attempted != rhs.attempted {
-            return false
-        }
-        if lhs.recovered != rhs.recovered {
-            return false
-        }
-        if lhs.skipped != rhs.skipped {
-            return false
-        }
-        if lhs.failed != rhs.failed {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(scanned)
-        hasher.combine(attempted)
-        hasher.combine(recovered)
-        hasher.combine(skipped)
-        hasher.combine(failed)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIDeferredRecoveryReport: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeferredRecoveryReport {
-        return
-            try FfiDeferredRecoveryReport(
-                scanned: FfiConverterUInt32.read(from: &buf),
-                attempted: FfiConverterUInt32.read(from: &buf),
-                recovered: FfiConverterUInt32.read(from: &buf),
-                skipped: FfiConverterUInt32.read(from: &buf),
-                failed: FfiConverterUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiDeferredRecoveryReport, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.scanned, into: &buf)
-        FfiConverterUInt32.write(value.attempted, into: &buf)
-        FfiConverterUInt32.write(value.recovered, into: &buf)
-        FfiConverterUInt32.write(value.skipped, into: &buf)
-        FfiConverterUInt32.write(value.failed, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeferredRecoveryReport_lift(_ buf: RustBuffer) throws -> FfiDeferredRecoveryReport {
-    return try FfiConverterTypeFFIDeferredRecoveryReport.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeferredRecoveryReport_lower(_ value: FfiDeferredRecoveryReport) -> RustBuffer {
-    return FfiConverterTypeFFIDeferredRecoveryReport.lower(value)
-}
-
-public struct FfiDeliveryStatusPair {
-    public var messageId: String
-    public var status: FfiDeliveryStatus
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(messageId: String, status: FfiDeliveryStatus) {
-        self.messageId = messageId
-        self.status = status
-    }
-}
-
-extension FfiDeliveryStatusPair: Equatable, Hashable {
-    public static func == (lhs: FfiDeliveryStatusPair, rhs: FfiDeliveryStatusPair) -> Bool {
-        if lhs.messageId != rhs.messageId {
-            return false
-        }
-        if lhs.status != rhs.status {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(messageId)
-        hasher.combine(status)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIDeliveryStatusPair: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeliveryStatusPair {
-        return
-            try FfiDeliveryStatusPair(
-                messageId: FfiConverterString.read(from: &buf),
-                status: FfiConverterTypeFFIDeliveryStatus.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiDeliveryStatusPair, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.messageId, into: &buf)
-        FfiConverterTypeFFIDeliveryStatus.write(value.status, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeliveryStatusPair_lift(_ buf: RustBuffer) throws -> FfiDeliveryStatusPair {
-    return try FfiConverterTypeFFIDeliveryStatusPair.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeliveryStatusPair_lower(_ value: FfiDeliveryStatusPair) -> RustBuffer {
-    return FfiConverterTypeFFIDeliveryStatusPair.lower(value)
-}
-
-public struct FfiDeviceInfo {
-    public var deviceId: String
-    public var mlsDid: String
-    public var deviceUuid: String
-    public var createdAt: String?
-    public var keyId: String?
-    public var signaturePublicKey: Data?
-    public var authGeneration: Int64?
-    public var status: String?
-    public var availablePackageCount: UInt32?
-    public var reservedPackageCount: UInt32?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(deviceId: String, mlsDid: String, deviceUuid: String, createdAt: String?, keyId: String?, signaturePublicKey: Data?, authGeneration: Int64?, status: String?, availablePackageCount: UInt32?, reservedPackageCount: UInt32?) {
-        self.deviceId = deviceId
-        self.mlsDid = mlsDid
-        self.deviceUuid = deviceUuid
-        self.createdAt = createdAt
-        self.keyId = keyId
-        self.signaturePublicKey = signaturePublicKey
-        self.authGeneration = authGeneration
-        self.status = status
-        self.availablePackageCount = availablePackageCount
-        self.reservedPackageCount = reservedPackageCount
-    }
-}
-
-extension FfiDeviceInfo: Equatable, Hashable {
-    public static func == (lhs: FfiDeviceInfo, rhs: FfiDeviceInfo) -> Bool {
-        if lhs.deviceId != rhs.deviceId {
-            return false
-        }
-        if lhs.mlsDid != rhs.mlsDid {
-            return false
-        }
-        if lhs.deviceUuid != rhs.deviceUuid {
-            return false
-        }
-        if lhs.createdAt != rhs.createdAt {
-            return false
-        }
-        if lhs.keyId != rhs.keyId {
-            return false
-        }
-        if lhs.signaturePublicKey != rhs.signaturePublicKey {
-            return false
-        }
-        if lhs.authGeneration != rhs.authGeneration {
-            return false
-        }
-        if lhs.status != rhs.status {
-            return false
-        }
-        if lhs.availablePackageCount != rhs.availablePackageCount {
-            return false
-        }
-        if lhs.reservedPackageCount != rhs.reservedPackageCount {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(deviceId)
-        hasher.combine(mlsDid)
-        hasher.combine(deviceUuid)
-        hasher.combine(createdAt)
-        hasher.combine(keyId)
-        hasher.combine(signaturePublicKey)
-        hasher.combine(authGeneration)
-        hasher.combine(status)
-        hasher.combine(availablePackageCount)
-        hasher.combine(reservedPackageCount)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIDeviceInfo: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeviceInfo {
-        return
-            try FfiDeviceInfo(
-                deviceId: FfiConverterString.read(from: &buf),
-                mlsDid: FfiConverterString.read(from: &buf),
-                deviceUuid: FfiConverterString.read(from: &buf),
-                createdAt: FfiConverterOptionString.read(from: &buf),
-                keyId: FfiConverterOptionString.read(from: &buf),
-                signaturePublicKey: FfiConverterOptionData.read(from: &buf),
-                authGeneration: FfiConverterOptionInt64.read(from: &buf),
-                status: FfiConverterOptionString.read(from: &buf),
-                availablePackageCount: FfiConverterOptionUInt32.read(from: &buf),
-                reservedPackageCount: FfiConverterOptionUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiDeviceInfo, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.deviceId, into: &buf)
-        FfiConverterString.write(value.mlsDid, into: &buf)
-        FfiConverterString.write(value.deviceUuid, into: &buf)
-        FfiConverterOptionString.write(value.createdAt, into: &buf)
-        FfiConverterOptionString.write(value.keyId, into: &buf)
-        FfiConverterOptionData.write(value.signaturePublicKey, into: &buf)
-        FfiConverterOptionInt64.write(value.authGeneration, into: &buf)
-        FfiConverterOptionString.write(value.status, into: &buf)
-        FfiConverterOptionUInt32.write(value.availablePackageCount, into: &buf)
-        FfiConverterOptionUInt32.write(value.reservedPackageCount, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeviceInfo_lift(_ buf: RustBuffer) throws -> FfiDeviceInfo {
-    return try FfiConverterTypeFFIDeviceInfo.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeviceInfo_lower(_ value: FfiDeviceInfo) -> RustBuffer {
-    return FfiConverterTypeFFIDeviceInfo.lower(value)
-}
-
-public struct FfiEngineEvent {
-    public var kind: FfiEngineEventKind
-    public var conversationId: String
-    public var messageId: String?
-    public var recoveryState: FfiConversationRecoveryState?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(kind: FfiEngineEventKind, conversationId: String, messageId: String?, recoveryState: FfiConversationRecoveryState?) {
-        self.kind = kind
-        self.conversationId = conversationId
-        self.messageId = messageId
-        self.recoveryState = recoveryState
-    }
-}
-
-extension FfiEngineEvent: Equatable, Hashable {
-    public static func == (lhs: FfiEngineEvent, rhs: FfiEngineEvent) -> Bool {
-        if lhs.kind != rhs.kind {
-            return false
-        }
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.messageId != rhs.messageId {
-            return false
-        }
-        if lhs.recoveryState != rhs.recoveryState {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(kind)
-        hasher.combine(conversationId)
-        hasher.combine(messageId)
-        hasher.combine(recoveryState)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIEngineEvent: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEngineEvent {
-        return
-            try FfiEngineEvent(
-                kind: FfiConverterTypeFFIEngineEventKind.read(from: &buf),
-                conversationId: FfiConverterString.read(from: &buf),
-                messageId: FfiConverterOptionString.read(from: &buf),
-                recoveryState: FfiConverterOptionTypeFFIConversationRecoveryState.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiEngineEvent, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIEngineEventKind.write(value.kind, into: &buf)
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterOptionString.write(value.messageId, into: &buf)
-        FfiConverterOptionTypeFFIConversationRecoveryState.write(value.recoveryState, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIEngineEvent_lift(_ buf: RustBuffer) throws -> FfiEngineEvent {
-    return try FfiConverterTypeFFIEngineEvent.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIEngineEvent_lower(_ value: FfiEngineEvent) -> RustBuffer {
-    return FfiConverterTypeFFIEngineEvent.lower(value)
-}
-
-public struct FfiFetchMessagesResult {
-    public var messages: [FfiMessage]
-    public var cursor: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(messages: [FfiMessage], cursor: String?) {
-        self.messages = messages
-        self.cursor = cursor
-    }
-}
-
-extension FfiFetchMessagesResult: Equatable, Hashable {
-    public static func == (lhs: FfiFetchMessagesResult, rhs: FfiFetchMessagesResult) -> Bool {
-        if lhs.messages != rhs.messages {
-            return false
-        }
-        if lhs.cursor != rhs.cursor {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(messages)
-        hasher.combine(cursor)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIFetchMessagesResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFetchMessagesResult {
-        return
-            try FfiFetchMessagesResult(
-                messages: FfiConverterSequenceTypeFFIMessage.read(from: &buf),
-                cursor: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiFetchMessagesResult, into buf: inout [UInt8]) {
-        FfiConverterSequenceTypeFFIMessage.write(value.messages, into: &buf)
-        FfiConverterOptionString.write(value.cursor, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIFetchMessagesResult_lift(_ buf: RustBuffer) throws -> FfiFetchMessagesResult {
-    return try FfiConverterTypeFFIFetchMessagesResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIFetchMessagesResult_lower(_ value: FfiFetchMessagesResult) -> RustBuffer {
-    return FfiConverterTypeFFIFetchMessagesResult.lower(value)
-}
-
-public struct FfiGatewayResponse {
-    public var status: UInt16
-    public var contentType: String?
-    public var body: Data
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(status: UInt16, contentType: String?, body: Data) {
-        self.status = status
-        self.contentType = contentType
-        self.body = body
-    }
-}
-
-extension FfiGatewayResponse: Equatable, Hashable {
-    public static func == (lhs: FfiGatewayResponse, rhs: FfiGatewayResponse) -> Bool {
-        if lhs.status != rhs.status {
-            return false
-        }
-        if lhs.contentType != rhs.contentType {
-            return false
-        }
-        if lhs.body != rhs.body {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(status)
-        hasher.combine(contentType)
-        hasher.combine(body)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIGatewayResponse: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiGatewayResponse {
-        return
-            try FfiGatewayResponse(
-                status: FfiConverterUInt16.read(from: &buf),
-                contentType: FfiConverterOptionString.read(from: &buf),
-                body: FfiConverterData.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiGatewayResponse, into buf: inout [UInt8]) {
-        FfiConverterUInt16.write(value.status, into: &buf)
-        FfiConverterOptionString.write(value.contentType, into: &buf)
-        FfiConverterData.write(value.body, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIGatewayResponse_lift(_ buf: RustBuffer) throws -> FfiGatewayResponse {
-    return try FfiConverterTypeFFIGatewayResponse.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIGatewayResponse_lower(_ value: FfiGatewayResponse) -> RustBuffer {
-    return FfiConverterTypeFFIGatewayResponse.lower(value)
-}
-
-public struct FfiGroupMutationResult {
-    public var conversation: FfiConversationView
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversation: FfiConversationView) {
-        self.conversation = conversation
-    }
-}
-
-extension FfiGroupMutationResult: Equatable, Hashable {
-    public static func == (lhs: FfiGroupMutationResult, rhs: FfiGroupMutationResult) -> Bool {
-        if lhs.conversation != rhs.conversation {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversation)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIGroupMutationResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiGroupMutationResult {
-        return
-            try FfiGroupMutationResult(
-                conversation: FfiConverterTypeFFIConversationView.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiGroupMutationResult, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIConversationView.write(value.conversation, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIGroupMutationResult_lift(_ buf: RustBuffer) throws -> FfiGroupMutationResult {
-    return try FfiConverterTypeFFIGroupMutationResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIGroupMutationResult_lower(_ value: FfiGroupMutationResult) -> RustBuffer {
-    return FfiConverterTypeFFIGroupMutationResult.lower(value)
-}
-
-public struct FfiGroupState {
-    public var groupId: String
-    public var conversationId: String
-    public var epoch: UInt64
-    public var members: [String]
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(groupId: String, conversationId: String, epoch: UInt64, members: [String]) {
-        self.groupId = groupId
-        self.conversationId = conversationId
-        self.epoch = epoch
-        self.members = members
-    }
-}
-
-extension FfiGroupState: Equatable, Hashable {
-    public static func == (lhs: FfiGroupState, rhs: FfiGroupState) -> Bool {
-        if lhs.groupId != rhs.groupId {
-            return false
-        }
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.members != rhs.members {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(groupId)
-        hasher.combine(conversationId)
-        hasher.combine(epoch)
-        hasher.combine(members)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIGroupState: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiGroupState {
-        return
-            try FfiGroupState(
-                groupId: FfiConverterString.read(from: &buf),
-                conversationId: FfiConverterString.read(from: &buf),
-                epoch: FfiConverterUInt64.read(from: &buf),
-                members: FfiConverterSequenceString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiGroupState, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.groupId, into: &buf)
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterUInt64.write(value.epoch, into: &buf)
-        FfiConverterSequenceString.write(value.members, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIGroupState_lift(_ buf: RustBuffer) throws -> FfiGroupState {
-    return try FfiConverterTypeFFIGroupState.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIGroupState_lower(_ value: FfiGroupState) -> RustBuffer {
-    return FfiConverterTypeFFIGroupState.lower(value)
-}
-
-public struct FfiIncomingEnvelope {
-    public var canonicalEntryJson: String?
-    public var conversationId: String
-    public var senderDid: String
+public struct FetchedMetadataSnapshot {
+    public var epoch: Int64
+    public var metadataVersion: Int64
+    public var nonce: Data
     public var ciphertext: Data
-    public var timestamp: String
-    public var serverMessageId: String?
-    public var serverSequence: UInt64?
-    public var serverEpoch: UInt64?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(canonicalEntryJson: String?, conversationId: String, senderDid: String, ciphertext: Data, timestamp: String, serverMessageId: String?, serverSequence: UInt64?, serverEpoch: UInt64?) {
-        self.canonicalEntryJson = canonicalEntryJson
-        self.conversationId = conversationId
-        self.senderDid = senderDid
+    public init(epoch: Int64, metadataVersion: Int64, nonce: Data, ciphertext: Data) {
+        self.epoch = epoch
+        self.metadataVersion = metadataVersion
+        self.nonce = nonce
         self.ciphertext = ciphertext
-        self.timestamp = timestamp
-        self.serverMessageId = serverMessageId
-        self.serverSequence = serverSequence
-        self.serverEpoch = serverEpoch
     }
 }
 
-extension FfiIncomingEnvelope: Equatable, Hashable {
-    public static func == (lhs: FfiIncomingEnvelope, rhs: FfiIncomingEnvelope) -> Bool {
-        if lhs.canonicalEntryJson != rhs.canonicalEntryJson {
+extension FetchedMetadataSnapshot: Equatable, Hashable {
+    public static func == (lhs: FetchedMetadataSnapshot, rhs: FetchedMetadataSnapshot) -> Bool {
+        if lhs.epoch != rhs.epoch {
             return false
         }
-        if lhs.conversationId != rhs.conversationId {
+        if lhs.metadataVersion != rhs.metadataVersion {
             return false
         }
-        if lhs.senderDid != rhs.senderDid {
+        if lhs.nonce != rhs.nonce {
             return false
         }
         if lhs.ciphertext != rhs.ciphertext {
             return false
         }
-        if lhs.timestamp != rhs.timestamp {
-            return false
-        }
-        if lhs.serverMessageId != rhs.serverMessageId {
-            return false
-        }
-        if lhs.serverSequence != rhs.serverSequence {
-            return false
-        }
-        if lhs.serverEpoch != rhs.serverEpoch {
-            return false
-        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(canonicalEntryJson)
-        hasher.combine(conversationId)
-        hasher.combine(senderDid)
+        hasher.combine(epoch)
+        hasher.combine(metadataVersion)
+        hasher.combine(nonce)
         hasher.combine(ciphertext)
-        hasher.combine(timestamp)
-        hasher.combine(serverMessageId)
-        hasher.combine(serverSequence)
-        hasher.combine(serverEpoch)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFFIIncomingEnvelope: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiIncomingEnvelope {
+public struct FfiConverterTypeFetchedMetadataSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FetchedMetadataSnapshot {
         return
-            try FfiIncomingEnvelope(
-                canonicalEntryJson: FfiConverterOptionString.read(from: &buf),
-                conversationId: FfiConverterString.read(from: &buf),
-                senderDid: FfiConverterString.read(from: &buf),
-                ciphertext: FfiConverterData.read(from: &buf),
-                timestamp: FfiConverterString.read(from: &buf),
-                serverMessageId: FfiConverterOptionString.read(from: &buf),
-                serverSequence: FfiConverterOptionUInt64.read(from: &buf),
-                serverEpoch: FfiConverterOptionUInt64.read(from: &buf)
+            try FetchedMetadataSnapshot(
+                epoch: FfiConverterInt64.read(from: &buf),
+                metadataVersion: FfiConverterInt64.read(from: &buf),
+                nonce: FfiConverterData.read(from: &buf),
+                ciphertext: FfiConverterData.read(from: &buf)
             )
     }
 
-    public static func write(_ value: FfiIncomingEnvelope, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.canonicalEntryJson, into: &buf)
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterString.write(value.senderDid, into: &buf)
+    public static func write(_ value: FetchedMetadataSnapshot, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterInt64.write(value.metadataVersion, into: &buf)
+        FfiConverterData.write(value.nonce, into: &buf)
         FfiConverterData.write(value.ciphertext, into: &buf)
-        FfiConverterString.write(value.timestamp, into: &buf)
-        FfiConverterOptionString.write(value.serverMessageId, into: &buf)
-        FfiConverterOptionUInt64.write(value.serverSequence, into: &buf)
-        FfiConverterOptionUInt64.write(value.serverEpoch, into: &buf)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFFIIncomingEnvelope_lift(_ buf: RustBuffer) throws -> FfiIncomingEnvelope {
-    return try FfiConverterTypeFFIIncomingEnvelope.lift(buf)
+public func FfiConverterTypeFetchedMetadataSnapshot_lift(_ buf: RustBuffer) throws -> FetchedMetadataSnapshot {
+    return try FfiConverterTypeFetchedMetadataSnapshot.lift(buf)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFFIIncomingEnvelope_lower(_ value: FfiIncomingEnvelope) -> RustBuffer {
-    return FfiConverterTypeFFIIncomingEnvelope.lower(value)
-}
-
-public struct FfiJoinOrRejoinResult {
-    public var epoch: UInt64
-    public var recoveryState: FfiConversationRecoveryState
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(epoch: UInt64, recoveryState: FfiConversationRecoveryState) {
-        self.epoch = epoch
-        self.recoveryState = recoveryState
-    }
-}
-
-extension FfiJoinOrRejoinResult: Equatable, Hashable {
-    public static func == (lhs: FfiJoinOrRejoinResult, rhs: FfiJoinOrRejoinResult) -> Bool {
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.recoveryState != rhs.recoveryState {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(epoch)
-        hasher.combine(recoveryState)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIJoinOrRejoinResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiJoinOrRejoinResult {
-        return
-            try FfiJoinOrRejoinResult(
-                epoch: FfiConverterUInt64.read(from: &buf),
-                recoveryState: FfiConverterTypeFFIConversationRecoveryState.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiJoinOrRejoinResult, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.epoch, into: &buf)
-        FfiConverterTypeFFIConversationRecoveryState.write(value.recoveryState, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIJoinOrRejoinResult_lift(_ buf: RustBuffer) throws -> FfiJoinOrRejoinResult {
-    return try FfiConverterTypeFFIJoinOrRejoinResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIJoinOrRejoinResult_lower(_ value: FfiJoinOrRejoinResult) -> RustBuffer {
-    return FfiConverterTypeFFIJoinOrRejoinResult.lower(value)
-}
-
-public struct FfiKeyPackageRef {
-    public var did: String
-    public var keyPackageData: Data
-    public var hash: String?
-    public var cipherSuite: String
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(did: String, keyPackageData: Data, hash: String?, cipherSuite: String) {
-        self.did = did
-        self.keyPackageData = keyPackageData
-        self.hash = hash
-        self.cipherSuite = cipherSuite
-    }
-}
-
-extension FfiKeyPackageRef: Equatable, Hashable {
-    public static func == (lhs: FfiKeyPackageRef, rhs: FfiKeyPackageRef) -> Bool {
-        if lhs.did != rhs.did {
-            return false
-        }
-        if lhs.keyPackageData != rhs.keyPackageData {
-            return false
-        }
-        if lhs.hash != rhs.hash {
-            return false
-        }
-        if lhs.cipherSuite != rhs.cipherSuite {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(did)
-        hasher.combine(keyPackageData)
-        hasher.combine(hash)
-        hasher.combine(cipherSuite)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIKeyPackageRef: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageRef {
-        return
-            try FfiKeyPackageRef(
-                did: FfiConverterString.read(from: &buf),
-                keyPackageData: FfiConverterData.read(from: &buf),
-                hash: FfiConverterOptionString.read(from: &buf),
-                cipherSuite: FfiConverterString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiKeyPackageRef, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.did, into: &buf)
-        FfiConverterData.write(value.keyPackageData, into: &buf)
-        FfiConverterOptionString.write(value.hash, into: &buf)
-        FfiConverterString.write(value.cipherSuite, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIKeyPackageRef_lift(_ buf: RustBuffer) throws -> FfiKeyPackageRef {
-    return try FfiConverterTypeFFIKeyPackageRef.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIKeyPackageRef_lower(_ value: FfiKeyPackageRef) -> RustBuffer {
-    return FfiConverterTypeFFIKeyPackageRef.lower(value)
-}
-
-public struct FfiKeyPackageStats {
-    public var available: UInt32
-    public var total: UInt32
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(available: UInt32, total: UInt32) {
-        self.available = available
-        self.total = total
-    }
-}
-
-extension FfiKeyPackageStats: Equatable, Hashable {
-    public static func == (lhs: FfiKeyPackageStats, rhs: FfiKeyPackageStats) -> Bool {
-        if lhs.available != rhs.available {
-            return false
-        }
-        if lhs.total != rhs.total {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(available)
-        hasher.combine(total)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIKeyPackageStats: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageStats {
-        return
-            try FfiKeyPackageStats(
-                available: FfiConverterUInt32.read(from: &buf),
-                total: FfiConverterUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiKeyPackageStats, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.available, into: &buf)
-        FfiConverterUInt32.write(value.total, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIKeyPackageStats_lift(_ buf: RustBuffer) throws -> FfiKeyPackageStats {
-    return try FfiConverterTypeFFIKeyPackageStats.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIKeyPackageStats_lower(_ value: FfiKeyPackageStats) -> RustBuffer {
-    return FfiConverterTypeFFIKeyPackageStats.lower(value)
-}
-
-public struct FfiKeyPackageSyncResult {
-    public var orphanedCount: UInt32
-    public var deletedCount: UInt32
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(orphanedCount: UInt32, deletedCount: UInt32) {
-        self.orphanedCount = orphanedCount
-        self.deletedCount = deletedCount
-    }
-}
-
-extension FfiKeyPackageSyncResult: Equatable, Hashable {
-    public static func == (lhs: FfiKeyPackageSyncResult, rhs: FfiKeyPackageSyncResult) -> Bool {
-        if lhs.orphanedCount != rhs.orphanedCount {
-            return false
-        }
-        if lhs.deletedCount != rhs.deletedCount {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(orphanedCount)
-        hasher.combine(deletedCount)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIKeyPackageSyncResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageSyncResult {
-        return
-            try FfiKeyPackageSyncResult(
-                orphanedCount: FfiConverterUInt32.read(from: &buf),
-                deletedCount: FfiConverterUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiKeyPackageSyncResult, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.orphanedCount, into: &buf)
-        FfiConverterUInt32.write(value.deletedCount, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIKeyPackageSyncResult_lift(_ buf: RustBuffer) throws -> FfiKeyPackageSyncResult {
-    return try FfiConverterTypeFFIKeyPackageSyncResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIKeyPackageSyncResult_lower(_ value: FfiKeyPackageSyncResult) -> RustBuffer {
-    return FfiConverterTypeFFIKeyPackageSyncResult.lower(value)
+public func FfiConverterTypeFetchedMetadataSnapshot_lower(_ value: FetchedMetadataSnapshot) -> RustBuffer {
+    return FfiConverterTypeFetchedMetadataSnapshot.lower(value)
 }
 
 /**
- * One extra HTTP header of a Labyrinth request
- * ([`OrchestratorAPICallback::submit_labyrinth_request`]).
+ * Sequenced `chat.entries` item fetched during push gap catch-up.
  */
-public struct FfiLabyrinthHeader {
-    public var name: String
-    public var value: String
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(name: String, value: String) {
-        self.name = name
-        self.value = value
-    }
-}
-
-extension FfiLabyrinthHeader: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthHeader, rhs: FfiLabyrinthHeader) -> Bool {
-        if lhs.name != rhs.name {
-            return false
-        }
-        if lhs.value != rhs.value {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(name)
-        hasher.combine(value)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFILabyrinthHeader: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthHeader {
-        return
-            try FfiLabyrinthHeader(
-                name: FfiConverterString.read(from: &buf),
-                value: FfiConverterString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthHeader, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.name, into: &buf)
-        FfiConverterString.write(value.value, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFILabyrinthHeader_lift(_ buf: RustBuffer) throws -> FfiLabyrinthHeader {
-    return try FfiConverterTypeFFILabyrinthHeader.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFILabyrinthHeader_lower(_ value: FfiLabyrinthHeader) -> RustBuffer {
-    return FfiConverterTypeFFILabyrinthHeader.lower(value)
-}
-
-public struct FfiLeaveResult {
-    public var conversationId: String
-    public var groupId: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String, groupId: String?) {
-        self.conversationId = conversationId
-        self.groupId = groupId
-    }
-}
-
-extension FfiLeaveResult: Equatable, Hashable {
-    public static func == (lhs: FfiLeaveResult, rhs: FfiLeaveResult) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.groupId != rhs.groupId {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(groupId)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFILeaveResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLeaveResult {
-        return
-            try FfiLeaveResult(
-                conversationId: FfiConverterString.read(from: &buf),
-                groupId: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLeaveResult, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterOptionString.write(value.groupId, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFILeaveResult_lift(_ buf: RustBuffer) throws -> FfiLeaveResult {
-    return try FfiConverterTypeFFILeaveResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFILeaveResult_lower(_ value: FfiLeaveResult) -> RustBuffer {
-    return FfiConverterTypeFFILeaveResult.lower(value)
-}
-
-public struct FfiMemberView {
-    public var did: String
-    public var role: String
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(did: String, role: String) {
-        self.did = did
-        self.role = role
-    }
-}
-
-extension FfiMemberView: Equatable, Hashable {
-    public static func == (lhs: FfiMemberView, rhs: FfiMemberView) -> Bool {
-        if lhs.did != rhs.did {
-            return false
-        }
-        if lhs.role != rhs.role {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(did)
-        hasher.combine(role)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIMemberView: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMemberView {
-        return
-            try FfiMemberView(
-                did: FfiConverterString.read(from: &buf),
-                role: FfiConverterString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiMemberView, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.did, into: &buf)
-        FfiConverterString.write(value.role, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMemberView_lift(_ buf: RustBuffer) throws -> FfiMemberView {
-    return try FfiConverterTypeFFIMemberView.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMemberView_lower(_ value: FfiMemberView) -> RustBuffer {
-    return FfiConverterTypeFFIMemberView.lower(value)
-}
-
-public struct FfiMessage {
-    public var id: String
-    public var conversationId: String
+public struct FetchedPushEntry {
+    public var entryId: String
+    public var seq: Int64
+    public var epoch: Int64
+    public var entryKind: String
     public var senderDid: String
-    public var text: String
-    public var timestamp: String
-    public var epoch: UInt64
-    public var sequenceNumber: UInt64
-    public var isOwn: Bool
-    public var deliveryStatus: FfiDeliveryStatus?
-    public var payloadJson: String?
+    public var mlsBytes: Data
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(id: String, conversationId: String, senderDid: String, text: String, timestamp: String, epoch: UInt64, sequenceNumber: UInt64, isOwn: Bool, deliveryStatus: FfiDeliveryStatus?, payloadJson: String?) {
-        self.id = id
-        self.conversationId = conversationId
-        self.senderDid = senderDid
-        self.text = text
-        self.timestamp = timestamp
-        self.epoch = epoch
-        self.sequenceNumber = sequenceNumber
-        self.isOwn = isOwn
-        self.deliveryStatus = deliveryStatus
-        self.payloadJson = payloadJson
-    }
-}
-
-extension FfiMessage: Equatable, Hashable {
-    public static func == (lhs: FfiMessage, rhs: FfiMessage) -> Bool {
-        if lhs.id != rhs.id {
-            return false
-        }
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.senderDid != rhs.senderDid {
-            return false
-        }
-        if lhs.text != rhs.text {
-            return false
-        }
-        if lhs.timestamp != rhs.timestamp {
-            return false
-        }
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.sequenceNumber != rhs.sequenceNumber {
-            return false
-        }
-        if lhs.isOwn != rhs.isOwn {
-            return false
-        }
-        if lhs.deliveryStatus != rhs.deliveryStatus {
-            return false
-        }
-        if lhs.payloadJson != rhs.payloadJson {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(conversationId)
-        hasher.combine(senderDid)
-        hasher.combine(text)
-        hasher.combine(timestamp)
-        hasher.combine(epoch)
-        hasher.combine(sequenceNumber)
-        hasher.combine(isOwn)
-        hasher.combine(deliveryStatus)
-        hasher.combine(payloadJson)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIMessage: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMessage {
-        return
-            try FfiMessage(
-                id: FfiConverterString.read(from: &buf),
-                conversationId: FfiConverterString.read(from: &buf),
-                senderDid: FfiConverterString.read(from: &buf),
-                text: FfiConverterString.read(from: &buf),
-                timestamp: FfiConverterString.read(from: &buf),
-                epoch: FfiConverterUInt64.read(from: &buf),
-                sequenceNumber: FfiConverterUInt64.read(from: &buf),
-                isOwn: FfiConverterBool.read(from: &buf),
-                deliveryStatus: FfiConverterOptionTypeFFIDeliveryStatus.read(from: &buf),
-                payloadJson: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiMessage, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.id, into: &buf)
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterString.write(value.senderDid, into: &buf)
-        FfiConverterString.write(value.text, into: &buf)
-        FfiConverterString.write(value.timestamp, into: &buf)
-        FfiConverterUInt64.write(value.epoch, into: &buf)
-        FfiConverterUInt64.write(value.sequenceNumber, into: &buf)
-        FfiConverterBool.write(value.isOwn, into: &buf)
-        FfiConverterOptionTypeFFIDeliveryStatus.write(value.deliveryStatus, into: &buf)
-        FfiConverterOptionString.write(value.payloadJson, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMessage_lift(_ buf: RustBuffer) throws -> FfiMessage {
-    return try FfiConverterTypeFFIMessage.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMessage_lower(_ value: FfiMessage) -> RustBuffer {
-    return FfiConverterTypeFFIMessage.lower(value)
-}
-
-public struct FfiMessageProcessingResult {
-    public var message: FfiMessage?
-    public var events: [FfiEngineEvent]
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(message: FfiMessage?, events: [FfiEngineEvent]) {
-        self.message = message
-        self.events = events
-    }
-}
-
-extension FfiMessageProcessingResult: Equatable, Hashable {
-    public static func == (lhs: FfiMessageProcessingResult, rhs: FfiMessageProcessingResult) -> Bool {
-        if lhs.message != rhs.message {
-            return false
-        }
-        if lhs.events != rhs.events {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(message)
-        hasher.combine(events)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIMessageProcessingResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMessageProcessingResult {
-        return
-            try FfiMessageProcessingResult(
-                message: FfiConverterOptionTypeFFIMessage.read(from: &buf),
-                events: FfiConverterSequenceTypeFFIEngineEvent.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiMessageProcessingResult, into buf: inout [UInt8]) {
-        FfiConverterOptionTypeFFIMessage.write(value.message, into: &buf)
-        FfiConverterSequenceTypeFFIEngineEvent.write(value.events, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMessageProcessingResult_lift(_ buf: RustBuffer) throws -> FfiMessageProcessingResult {
-    return try FfiConverterTypeFFIMessageProcessingResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMessageProcessingResult_lower(_ value: FfiMessageProcessingResult) -> RustBuffer {
-    return FfiConverterTypeFFIMessageProcessingResult.lower(value)
-}
-
-public struct FfiMessagesPage {
-    public var envelopes: [FfiIncomingEnvelope]
-    public var cursor: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(envelopes: [FfiIncomingEnvelope], cursor: String?) {
-        self.envelopes = envelopes
-        self.cursor = cursor
-    }
-}
-
-extension FfiMessagesPage: Equatable, Hashable {
-    public static func == (lhs: FfiMessagesPage, rhs: FfiMessagesPage) -> Bool {
-        if lhs.envelopes != rhs.envelopes {
-            return false
-        }
-        if lhs.cursor != rhs.cursor {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(envelopes)
-        hasher.combine(cursor)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIMessagesPage: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMessagesPage {
-        return
-            try FfiMessagesPage(
-                envelopes: FfiConverterSequenceTypeFFIIncomingEnvelope.read(from: &buf),
-                cursor: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiMessagesPage, into buf: inout [UInt8]) {
-        FfiConverterSequenceTypeFFIIncomingEnvelope.write(value.envelopes, into: &buf)
-        FfiConverterOptionString.write(value.cursor, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMessagesPage_lift(_ buf: RustBuffer) throws -> FfiMessagesPage {
-    return try FfiConverterTypeFFIMessagesPage.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIMessagesPage_lower(_ value: FfiMessagesPage) -> RustBuffer {
-    return FfiConverterTypeFFIMessagesPage.lower(value)
-}
-
-public struct FfiOrchestratorConfig {
-    public var maxDevices: UInt32
-    public var targetKeyPackageCount: UInt32
-    public var keyPackageReplenishThreshold: UInt32
-    public var syncCooldownSeconds: UInt64
-    public var maxConsecutiveSyncFailures: UInt32
-    public var syncPauseDurationSeconds: UInt64
-    public var rejoinCooldownSeconds: UInt64
-    public var maxRejoinAttempts: UInt32
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(maxDevices: UInt32, targetKeyPackageCount: UInt32, keyPackageReplenishThreshold: UInt32, syncCooldownSeconds: UInt64, maxConsecutiveSyncFailures: UInt32, syncPauseDurationSeconds: UInt64, rejoinCooldownSeconds: UInt64, maxRejoinAttempts: UInt32) {
-        self.maxDevices = maxDevices
-        self.targetKeyPackageCount = targetKeyPackageCount
-        self.keyPackageReplenishThreshold = keyPackageReplenishThreshold
-        self.syncCooldownSeconds = syncCooldownSeconds
-        self.maxConsecutiveSyncFailures = maxConsecutiveSyncFailures
-        self.syncPauseDurationSeconds = syncPauseDurationSeconds
-        self.rejoinCooldownSeconds = rejoinCooldownSeconds
-        self.maxRejoinAttempts = maxRejoinAttempts
-    }
-}
-
-extension FfiOrchestratorConfig: Equatable, Hashable {
-    public static func == (lhs: FfiOrchestratorConfig, rhs: FfiOrchestratorConfig) -> Bool {
-        if lhs.maxDevices != rhs.maxDevices {
-            return false
-        }
-        if lhs.targetKeyPackageCount != rhs.targetKeyPackageCount {
-            return false
-        }
-        if lhs.keyPackageReplenishThreshold != rhs.keyPackageReplenishThreshold {
-            return false
-        }
-        if lhs.syncCooldownSeconds != rhs.syncCooldownSeconds {
-            return false
-        }
-        if lhs.maxConsecutiveSyncFailures != rhs.maxConsecutiveSyncFailures {
-            return false
-        }
-        if lhs.syncPauseDurationSeconds != rhs.syncPauseDurationSeconds {
-            return false
-        }
-        if lhs.rejoinCooldownSeconds != rhs.rejoinCooldownSeconds {
-            return false
-        }
-        if lhs.maxRejoinAttempts != rhs.maxRejoinAttempts {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(maxDevices)
-        hasher.combine(targetKeyPackageCount)
-        hasher.combine(keyPackageReplenishThreshold)
-        hasher.combine(syncCooldownSeconds)
-        hasher.combine(maxConsecutiveSyncFailures)
-        hasher.combine(syncPauseDurationSeconds)
-        hasher.combine(rejoinCooldownSeconds)
-        hasher.combine(maxRejoinAttempts)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIOrchestratorConfig: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiOrchestratorConfig {
-        return
-            try FfiOrchestratorConfig(
-                maxDevices: FfiConverterUInt32.read(from: &buf),
-                targetKeyPackageCount: FfiConverterUInt32.read(from: &buf),
-                keyPackageReplenishThreshold: FfiConverterUInt32.read(from: &buf),
-                syncCooldownSeconds: FfiConverterUInt64.read(from: &buf),
-                maxConsecutiveSyncFailures: FfiConverterUInt32.read(from: &buf),
-                syncPauseDurationSeconds: FfiConverterUInt64.read(from: &buf),
-                rejoinCooldownSeconds: FfiConverterUInt64.read(from: &buf),
-                maxRejoinAttempts: FfiConverterUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiOrchestratorConfig, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.maxDevices, into: &buf)
-        FfiConverterUInt32.write(value.targetKeyPackageCount, into: &buf)
-        FfiConverterUInt32.write(value.keyPackageReplenishThreshold, into: &buf)
-        FfiConverterUInt64.write(value.syncCooldownSeconds, into: &buf)
-        FfiConverterUInt32.write(value.maxConsecutiveSyncFailures, into: &buf)
-        FfiConverterUInt64.write(value.syncPauseDurationSeconds, into: &buf)
-        FfiConverterUInt64.write(value.rejoinCooldownSeconds, into: &buf)
-        FfiConverterUInt32.write(value.maxRejoinAttempts, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIOrchestratorConfig_lift(_ buf: RustBuffer) throws -> FfiOrchestratorConfig {
-    return try FfiConverterTypeFFIOrchestratorConfig.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIOrchestratorConfig_lower(_ value: FfiOrchestratorConfig) -> RustBuffer {
-    return FfiConverterTypeFFIOrchestratorConfig.lower(value)
-}
-
-/**
- * FFI mirror of `PendingLocalDelete` — a persisted intent row for an
- * in-progress `force_delete_local` (WS-5.3 crash safety).
- */
-public struct FfiPendingLocalDelete {
-    public var conversationId: String
-    /**
-     * Hex group id bound to the conversation when the delete started.
-     */
-    public var groupIdHex: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String,
-                /* 
-                    * Hex group id bound to the conversation when the delete started.
-                    */ groupIdHex: String?)
-    {
-        self.conversationId = conversationId
-        self.groupIdHex = groupIdHex
-    }
-}
-
-extension FfiPendingLocalDelete: Equatable, Hashable {
-    public static func == (lhs: FfiPendingLocalDelete, rhs: FfiPendingLocalDelete) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.groupIdHex != rhs.groupIdHex {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(groupIdHex)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIPendingLocalDelete: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPendingLocalDelete {
-        return
-            try FfiPendingLocalDelete(
-                conversationId: FfiConverterString.read(from: &buf),
-                groupIdHex: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiPendingLocalDelete, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterOptionString.write(value.groupIdHex, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIPendingLocalDelete_lift(_ buf: RustBuffer) throws -> FfiPendingLocalDelete {
-    return try FfiConverterTypeFFIPendingLocalDelete.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIPendingLocalDelete_lower(_ value: FfiPendingLocalDelete) -> RustBuffer {
-    return FfiConverterTypeFFIPendingLocalDelete.lower(value)
-}
-
-/**
- * FFI mirror of `PersistedRecoveryBackoff` (WS-5.4 / invariant E7). All
- * timestamps are Unix epoch milliseconds; the schema matches the Swift twin
- * (WS-6.4) so restart cannot reset backoff on any platform.
- */
-public struct FfiPersistedRecoveryBackoff {
-    public var conversationId: String
-    /**
-     * Consecutive failed rejoin attempts.
-     */
-    public var failedRejoinCount: UInt32
-    /**
-     * When the most recent rejoin attempt happened (epoch ms).
-     */
-    public var lastAttemptAtMs: Int64
-    /**
-     * When the maxed-out rejoin lockout expires (epoch ms). `None` when the
-     * conversation has not exhausted MAX_REJOIN_ATTEMPTS.
-     */
-    public var quarantinedUntilMs: Int64?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String,
-                /* 
-                    * Consecutive failed rejoin attempts.
-                    */ failedRejoinCount: UInt32,
-                /* 
-                    * When the most recent rejoin attempt happened (epoch ms).
-                    */ lastAttemptAtMs: Int64,
-                /* 
-                    * When the maxed-out rejoin lockout expires (epoch ms). `None` when the
-                    * conversation has not exhausted MAX_REJOIN_ATTEMPTS.
-                    */ quarantinedUntilMs: Int64?)
-    {
-        self.conversationId = conversationId
-        self.failedRejoinCount = failedRejoinCount
-        self.lastAttemptAtMs = lastAttemptAtMs
-        self.quarantinedUntilMs = quarantinedUntilMs
-    }
-}
-
-extension FfiPersistedRecoveryBackoff: Equatable, Hashable {
-    public static func == (lhs: FfiPersistedRecoveryBackoff, rhs: FfiPersistedRecoveryBackoff) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.failedRejoinCount != rhs.failedRejoinCount {
-            return false
-        }
-        if lhs.lastAttemptAtMs != rhs.lastAttemptAtMs {
-            return false
-        }
-        if lhs.quarantinedUntilMs != rhs.quarantinedUntilMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(failedRejoinCount)
-        hasher.combine(lastAttemptAtMs)
-        hasher.combine(quarantinedUntilMs)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIPersistedRecoveryBackoff: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPersistedRecoveryBackoff {
-        return
-            try FfiPersistedRecoveryBackoff(
-                conversationId: FfiConverterString.read(from: &buf),
-                failedRejoinCount: FfiConverterUInt32.read(from: &buf),
-                lastAttemptAtMs: FfiConverterInt64.read(from: &buf),
-                quarantinedUntilMs: FfiConverterOptionInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiPersistedRecoveryBackoff, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterUInt32.write(value.failedRejoinCount, into: &buf)
-        FfiConverterInt64.write(value.lastAttemptAtMs, into: &buf)
-        FfiConverterOptionInt64.write(value.quarantinedUntilMs, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIPersistedRecoveryBackoff_lift(_ buf: RustBuffer) throws -> FfiPersistedRecoveryBackoff {
-    return try FfiConverterTypeFFIPersistedRecoveryBackoff.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIPersistedRecoveryBackoff_lower(_ value: FfiPersistedRecoveryBackoff) -> RustBuffer {
-    return FfiConverterTypeFFIPersistedRecoveryBackoff.lower(value)
-}
-
-/**
- * FFI mirror of `PersistedRecoveryState` returned by
- * `OrchestratorStorageCallback::get_recovery_state` on startup (WS-5.4).
- */
-public struct FfiPersistedRecoveryState {
-    public var entries: [FfiPersistedRecoveryBackoff]
-    /**
-     * Last rejoin attempt on ANY conversation (epoch ms).
-     */
-    public var lastGlobalRejoinAttemptAtMs: Int64?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(entries: [FfiPersistedRecoveryBackoff],
-                /* 
-                    * Last rejoin attempt on ANY conversation (epoch ms).
-                    */ lastGlobalRejoinAttemptAtMs: Int64?)
-    {
-        self.entries = entries
-        self.lastGlobalRejoinAttemptAtMs = lastGlobalRejoinAttemptAtMs
-    }
-}
-
-extension FfiPersistedRecoveryState: Equatable, Hashable {
-    public static func == (lhs: FfiPersistedRecoveryState, rhs: FfiPersistedRecoveryState) -> Bool {
-        if lhs.entries != rhs.entries {
-            return false
-        }
-        if lhs.lastGlobalRejoinAttemptAtMs != rhs.lastGlobalRejoinAttemptAtMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(entries)
-        hasher.combine(lastGlobalRejoinAttemptAtMs)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIPersistedRecoveryState: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPersistedRecoveryState {
-        return
-            try FfiPersistedRecoveryState(
-                entries: FfiConverterSequenceTypeFFIPersistedRecoveryBackoff.read(from: &buf),
-                lastGlobalRejoinAttemptAtMs: FfiConverterOptionInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiPersistedRecoveryState, into buf: inout [UInt8]) {
-        FfiConverterSequenceTypeFFIPersistedRecoveryBackoff.write(value.entries, into: &buf)
-        FfiConverterOptionInt64.write(value.lastGlobalRejoinAttemptAtMs, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIPersistedRecoveryState_lift(_ buf: RustBuffer) throws -> FfiPersistedRecoveryState {
-    return try FfiConverterTypeFFIPersistedRecoveryState.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIPersistedRecoveryState_lower(_ value: FfiPersistedRecoveryState) -> RustBuffer {
-    return FfiConverterTypeFFIPersistedRecoveryState.lower(value)
-}
-
-public struct FfiProcessExternalCommitResult {
-    public var epoch: UInt64
-    public var rejoinedAt: String
-    public var receipt: FfiSequencerReceipt?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(epoch: UInt64, rejoinedAt: String, receipt: FfiSequencerReceipt?) {
-        self.epoch = epoch
-        self.rejoinedAt = rejoinedAt
-        self.receipt = receipt
-    }
-}
-
-extension FfiProcessExternalCommitResult: Equatable, Hashable {
-    public static func == (lhs: FfiProcessExternalCommitResult, rhs: FfiProcessExternalCommitResult) -> Bool {
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.rejoinedAt != rhs.rejoinedAt {
-            return false
-        }
-        if lhs.receipt != rhs.receipt {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(epoch)
-        hasher.combine(rejoinedAt)
-        hasher.combine(receipt)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIProcessExternalCommitResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiProcessExternalCommitResult {
-        return
-            try FfiProcessExternalCommitResult(
-                epoch: FfiConverterUInt64.read(from: &buf),
-                rejoinedAt: FfiConverterString.read(from: &buf),
-                receipt: FfiConverterOptionTypeFFISequencerReceipt.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiProcessExternalCommitResult, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.epoch, into: &buf)
-        FfiConverterString.write(value.rejoinedAt, into: &buf)
-        FfiConverterOptionTypeFFISequencerReceipt.write(value.receipt, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIProcessExternalCommitResult_lift(_ buf: RustBuffer) throws -> FfiProcessExternalCommitResult {
-    return try FfiConverterTypeFFIProcessExternalCommitResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIProcessExternalCommitResult_lower(_ value: FfiProcessExternalCommitResult) -> RustBuffer {
-    return FfiConverterTypeFFIProcessExternalCommitResult.lower(value)
-}
-
-public struct FfiQuarantineState {
-    public var reason: FfiQuarantineReason
-    public var sinceMs: Int64
-    public var suspectedDids: [String]
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(reason: FfiQuarantineReason, sinceMs: Int64, suspectedDids: [String]) {
-        self.reason = reason
-        self.sinceMs = sinceMs
-        self.suspectedDids = suspectedDids
-    }
-}
-
-extension FfiQuarantineState: Equatable, Hashable {
-    public static func == (lhs: FfiQuarantineState, rhs: FfiQuarantineState) -> Bool {
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        if lhs.sinceMs != rhs.sinceMs {
-            return false
-        }
-        if lhs.suspectedDids != rhs.suspectedDids {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(reason)
-        hasher.combine(sinceMs)
-        hasher.combine(suspectedDids)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIQuarantineState: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiQuarantineState {
-        return
-            try FfiQuarantineState(
-                reason: FfiConverterTypeFFIQuarantineReason.read(from: &buf),
-                sinceMs: FfiConverterInt64.read(from: &buf),
-                suspectedDids: FfiConverterSequenceString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiQuarantineState, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIQuarantineReason.write(value.reason, into: &buf)
-        FfiConverterInt64.write(value.sinceMs, into: &buf)
-        FfiConverterSequenceString.write(value.suspectedDids, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIQuarantineState_lift(_ buf: RustBuffer) throws -> FfiQuarantineState {
-    return try FfiConverterTypeFFIQuarantineState.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIQuarantineState_lower(_ value: FfiQuarantineState) -> RustBuffer {
-    return FfiConverterTypeFFIQuarantineState.lower(value)
-}
-
-/**
- * Server acknowledgment for a sent message. `seq` is the server-assigned
- * conversation-global sequence number — the sole message-ordering authority.
- */
-public struct FfiSendMessageResponse {
-    public var messageId: String
-    public var seq: UInt64
-    public var epoch: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(messageId: String, seq: UInt64, epoch: UInt64) {
-        self.messageId = messageId
+    public init(entryId: String, seq: Int64, epoch: Int64, entryKind: String, senderDid: String, mlsBytes: Data) {
+        self.entryId = entryId
         self.seq = seq
         self.epoch = epoch
+        self.entryKind = entryKind
+        self.senderDid = senderDid
+        self.mlsBytes = mlsBytes
     }
 }
 
-extension FfiSendMessageResponse: Equatable, Hashable {
-    public static func == (lhs: FfiSendMessageResponse, rhs: FfiSendMessageResponse) -> Bool {
-        if lhs.messageId != rhs.messageId {
+extension FetchedPushEntry: Equatable, Hashable {
+    public static func == (lhs: FetchedPushEntry, rhs: FetchedPushEntry) -> Bool {
+        if lhs.entryId != rhs.entryId {
             return false
         }
         if lhs.seq != rhs.seq {
@@ -9838,1755 +4576,66 @@ extension FfiSendMessageResponse: Equatable, Hashable {
         if lhs.epoch != rhs.epoch {
             return false
         }
+        if lhs.entryKind != rhs.entryKind {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.mlsBytes != rhs.mlsBytes {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(messageId)
+        hasher.combine(entryId)
         hasher.combine(seq)
         hasher.combine(epoch)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFISendMessageResponse: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSendMessageResponse {
-        return
-            try FfiSendMessageResponse(
-                messageId: FfiConverterString.read(from: &buf),
-                seq: FfiConverterUInt64.read(from: &buf),
-                epoch: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiSendMessageResponse, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.messageId, into: &buf)
-        FfiConverterUInt64.write(value.seq, into: &buf)
-        FfiConverterUInt64.write(value.epoch, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISendMessageResponse_lift(_ buf: RustBuffer) throws -> FfiSendMessageResponse {
-    return try FfiConverterTypeFFISendMessageResponse.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISendMessageResponse_lower(_ value: FfiSendMessageResponse) -> RustBuffer {
-    return FfiConverterTypeFFISendMessageResponse.lower(value)
-}
-
-public struct FfiSendResult {
-    public var message: FfiMessage
-    public var events: [FfiEngineEvent]
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(message: FfiMessage, events: [FfiEngineEvent]) {
-        self.message = message
-        self.events = events
-    }
-}
-
-extension FfiSendResult: Equatable, Hashable {
-    public static func == (lhs: FfiSendResult, rhs: FfiSendResult) -> Bool {
-        if lhs.message != rhs.message {
-            return false
-        }
-        if lhs.events != rhs.events {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(message)
-        hasher.combine(events)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFISendResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSendResult {
-        return
-            try FfiSendResult(
-                message: FfiConverterTypeFFIMessage.read(from: &buf),
-                events: FfiConverterSequenceTypeFFIEngineEvent.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiSendResult, into buf: inout [UInt8]) {
-        FfiConverterTypeFFIMessage.write(value.message, into: &buf)
-        FfiConverterSequenceTypeFFIEngineEvent.write(value.events, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISendResult_lift(_ buf: RustBuffer) throws -> FfiSendResult {
-    return try FfiConverterTypeFFISendResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISendResult_lower(_ value: FfiSendResult) -> RustBuffer {
-    return FfiConverterTypeFFISendResult.lower(value)
-}
-
-public struct FfiSequencerReceipt {
-    public var convoId: String
-    public var epoch: Int32
-    public var sequencerTerm: UInt64
-    public var commitHash: Data
-    public var sequencerDid: String
-    public var issuedAt: Int64
-    public var signature: Data
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(convoId: String, epoch: Int32, sequencerTerm: UInt64, commitHash: Data, sequencerDid: String, issuedAt: Int64, signature: Data) {
-        self.convoId = convoId
-        self.epoch = epoch
-        self.sequencerTerm = sequencerTerm
-        self.commitHash = commitHash
-        self.sequencerDid = sequencerDid
-        self.issuedAt = issuedAt
-        self.signature = signature
-    }
-}
-
-extension FfiSequencerReceipt: Equatable, Hashable {
-    public static func == (lhs: FfiSequencerReceipt, rhs: FfiSequencerReceipt) -> Bool {
-        if lhs.convoId != rhs.convoId {
-            return false
-        }
-        if lhs.epoch != rhs.epoch {
-            return false
-        }
-        if lhs.sequencerTerm != rhs.sequencerTerm {
-            return false
-        }
-        if lhs.commitHash != rhs.commitHash {
-            return false
-        }
-        if lhs.sequencerDid != rhs.sequencerDid {
-            return false
-        }
-        if lhs.issuedAt != rhs.issuedAt {
-            return false
-        }
-        if lhs.signature != rhs.signature {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(convoId)
-        hasher.combine(epoch)
-        hasher.combine(sequencerTerm)
-        hasher.combine(commitHash)
-        hasher.combine(sequencerDid)
-        hasher.combine(issuedAt)
-        hasher.combine(signature)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFISequencerReceipt: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSequencerReceipt {
-        return
-            try FfiSequencerReceipt(
-                convoId: FfiConverterString.read(from: &buf),
-                epoch: FfiConverterInt32.read(from: &buf),
-                sequencerTerm: FfiConverterUInt64.read(from: &buf),
-                commitHash: FfiConverterData.read(from: &buf),
-                sequencerDid: FfiConverterString.read(from: &buf),
-                issuedAt: FfiConverterInt64.read(from: &buf),
-                signature: FfiConverterData.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiSequencerReceipt, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.convoId, into: &buf)
-        FfiConverterInt32.write(value.epoch, into: &buf)
-        FfiConverterUInt64.write(value.sequencerTerm, into: &buf)
-        FfiConverterData.write(value.commitHash, into: &buf)
-        FfiConverterString.write(value.sequencerDid, into: &buf)
-        FfiConverterInt64.write(value.issuedAt, into: &buf)
-        FfiConverterData.write(value.signature, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISequencerReceipt_lift(_ buf: RustBuffer) throws -> FfiSequencerReceipt {
-    return try FfiConverterTypeFFISequencerReceipt.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISequencerReceipt_lower(_ value: FfiSequencerReceipt) -> RustBuffer {
-    return FfiConverterTypeFFISequencerReceipt.lower(value)
-}
-
-/**
- * Opaque handle returned by `stage_commit`. Carries the group id and a
- * per-orchestrator monotonic nonce so stale handles are rejected cleanly.
- */
-public struct FfiStagedCommitHandle {
-    public var groupId: String
-    public var nonce: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(groupId: String, nonce: UInt64) {
-        self.groupId = groupId
-        self.nonce = nonce
-    }
-}
-
-extension FfiStagedCommitHandle: Equatable, Hashable {
-    public static func == (lhs: FfiStagedCommitHandle, rhs: FfiStagedCommitHandle) -> Bool {
-        if lhs.groupId != rhs.groupId {
-            return false
-        }
-        if lhs.nonce != rhs.nonce {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(groupId)
-        hasher.combine(nonce)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIStagedCommitHandle: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStagedCommitHandle {
-        return
-            try FfiStagedCommitHandle(
-                groupId: FfiConverterString.read(from: &buf),
-                nonce: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiStagedCommitHandle, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.groupId, into: &buf)
-        FfiConverterUInt64.write(value.nonce, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIStagedCommitHandle_lift(_ buf: RustBuffer) throws -> FfiStagedCommitHandle {
-    return try FfiConverterTypeFFIStagedCommitHandle.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIStagedCommitHandle_lower(_ value: FfiStagedCommitHandle) -> RustBuffer {
-    return FfiConverterTypeFFIStagedCommitHandle.lower(value)
-}
-
-public struct FfiStartupReconcileReport {
-    public var scanned: UInt32
-    public var healthy: UInt32
-    public var needsRejoin: UInt32
-    public var resetPending: UInt32
-    public var unrecoverableLocal: UInt32
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(scanned: UInt32, healthy: UInt32, needsRejoin: UInt32, resetPending: UInt32, unrecoverableLocal: UInt32) {
-        self.scanned = scanned
-        self.healthy = healthy
-        self.needsRejoin = needsRejoin
-        self.resetPending = resetPending
-        self.unrecoverableLocal = unrecoverableLocal
-    }
-}
-
-extension FfiStartupReconcileReport: Equatable, Hashable {
-    public static func == (lhs: FfiStartupReconcileReport, rhs: FfiStartupReconcileReport) -> Bool {
-        if lhs.scanned != rhs.scanned {
-            return false
-        }
-        if lhs.healthy != rhs.healthy {
-            return false
-        }
-        if lhs.needsRejoin != rhs.needsRejoin {
-            return false
-        }
-        if lhs.resetPending != rhs.resetPending {
-            return false
-        }
-        if lhs.unrecoverableLocal != rhs.unrecoverableLocal {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(scanned)
-        hasher.combine(healthy)
-        hasher.combine(needsRejoin)
-        hasher.combine(resetPending)
-        hasher.combine(unrecoverableLocal)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIStartupReconcileReport: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiStartupReconcileReport {
-        return
-            try FfiStartupReconcileReport(
-                scanned: FfiConverterUInt32.read(from: &buf),
-                healthy: FfiConverterUInt32.read(from: &buf),
-                needsRejoin: FfiConverterUInt32.read(from: &buf),
-                resetPending: FfiConverterUInt32.read(from: &buf),
-                unrecoverableLocal: FfiConverterUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiStartupReconcileReport, into buf: inout [UInt8]) {
-        FfiConverterUInt32.write(value.scanned, into: &buf)
-        FfiConverterUInt32.write(value.healthy, into: &buf)
-        FfiConverterUInt32.write(value.needsRejoin, into: &buf)
-        FfiConverterUInt32.write(value.resetPending, into: &buf)
-        FfiConverterUInt32.write(value.unrecoverableLocal, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIStartupReconcileReport_lift(_ buf: RustBuffer) throws -> FfiStartupReconcileReport {
-    return try FfiConverterTypeFFIStartupReconcileReport.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIStartupReconcileReport_lower(_ value: FfiStartupReconcileReport) -> RustBuffer {
-    return FfiConverterTypeFFIStartupReconcileReport.lower(value)
-}
-
-public struct FfiSuspendResult {
-    public var acceptingNewWork: Bool
-    public var interruptedContexts: UInt32
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(acceptingNewWork: Bool, interruptedContexts: UInt32) {
-        self.acceptingNewWork = acceptingNewWork
-        self.interruptedContexts = interruptedContexts
-    }
-}
-
-extension FfiSuspendResult: Equatable, Hashable {
-    public static func == (lhs: FfiSuspendResult, rhs: FfiSuspendResult) -> Bool {
-        if lhs.acceptingNewWork != rhs.acceptingNewWork {
-            return false
-        }
-        if lhs.interruptedContexts != rhs.interruptedContexts {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(acceptingNewWork)
-        hasher.combine(interruptedContexts)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFISuspendResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSuspendResult {
-        return
-            try FfiSuspendResult(
-                acceptingNewWork: FfiConverterBool.read(from: &buf),
-                interruptedContexts: FfiConverterUInt32.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiSuspendResult, into buf: inout [UInt8]) {
-        FfiConverterBool.write(value.acceptingNewWork, into: &buf)
-        FfiConverterUInt32.write(value.interruptedContexts, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISuspendResult_lift(_ buf: RustBuffer) throws -> FfiSuspendResult {
-    return try FfiConverterTypeFFISuspendResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISuspendResult_lower(_ value: FfiSuspendResult) -> RustBuffer {
-    return FfiConverterTypeFFISuspendResult.lower(value)
-}
-
-public struct FfiSyncCursor {
-    public var conversationsCursor: String?
-    public var messagesCursor: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationsCursor: String?, messagesCursor: String?) {
-        self.conversationsCursor = conversationsCursor
-        self.messagesCursor = messagesCursor
-    }
-}
-
-extension FfiSyncCursor: Equatable, Hashable {
-    public static func == (lhs: FfiSyncCursor, rhs: FfiSyncCursor) -> Bool {
-        if lhs.conversationsCursor != rhs.conversationsCursor {
-            return false
-        }
-        if lhs.messagesCursor != rhs.messagesCursor {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationsCursor)
-        hasher.combine(messagesCursor)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFISyncCursor: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiSyncCursor {
-        return
-            try FfiSyncCursor(
-                conversationsCursor: FfiConverterOptionString.read(from: &buf),
-                messagesCursor: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiSyncCursor, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.conversationsCursor, into: &buf)
-        FfiConverterOptionString.write(value.messagesCursor, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISyncCursor_lift(_ buf: RustBuffer) throws -> FfiSyncCursor {
-    return try FfiConverterTypeFFISyncCursor.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFISyncCursor_lower(_ value: FfiSyncCursor) -> RustBuffer {
-    return FfiConverterTypeFFISyncCursor.lower(value)
-}
-
-/**
- * Result of preparing a voice message via the Rust Opus encoder.
- */
-public struct FfiVoicePrepareResult {
-    public var opusData: Data
-    public var encryptedBlob: Data
-    public var key: Data
-    public var iv: Data
-    public var sha256: String
-    public var durationMs: UInt64
-    public var waveform: [Float]
-    public var size: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(opusData: Data, encryptedBlob: Data, key: Data, iv: Data, sha256: String, durationMs: UInt64, waveform: [Float], size: UInt64) {
-        self.opusData = opusData
-        self.encryptedBlob = encryptedBlob
-        self.key = key
-        self.iv = iv
-        self.sha256 = sha256
-        self.durationMs = durationMs
-        self.waveform = waveform
-        self.size = size
-    }
-}
-
-extension FfiVoicePrepareResult: Equatable, Hashable {
-    public static func == (lhs: FfiVoicePrepareResult, rhs: FfiVoicePrepareResult) -> Bool {
-        if lhs.opusData != rhs.opusData {
-            return false
-        }
-        if lhs.encryptedBlob != rhs.encryptedBlob {
-            return false
-        }
-        if lhs.key != rhs.key {
-            return false
-        }
-        if lhs.iv != rhs.iv {
-            return false
-        }
-        if lhs.sha256 != rhs.sha256 {
-            return false
-        }
-        if lhs.durationMs != rhs.durationMs {
-            return false
-        }
-        if lhs.waveform != rhs.waveform {
-            return false
-        }
-        if lhs.size != rhs.size {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(opusData)
-        hasher.combine(encryptedBlob)
-        hasher.combine(key)
-        hasher.combine(iv)
-        hasher.combine(sha256)
-        hasher.combine(durationMs)
-        hasher.combine(waveform)
-        hasher.combine(size)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIVoicePrepareResult: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiVoicePrepareResult {
-        return
-            try FfiVoicePrepareResult(
-                opusData: FfiConverterData.read(from: &buf),
-                encryptedBlob: FfiConverterData.read(from: &buf),
-                key: FfiConverterData.read(from: &buf),
-                iv: FfiConverterData.read(from: &buf),
-                sha256: FfiConverterString.read(from: &buf),
-                durationMs: FfiConverterUInt64.read(from: &buf),
-                waveform: FfiConverterSequenceFloat.read(from: &buf),
-                size: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiVoicePrepareResult, into buf: inout [UInt8]) {
-        FfiConverterData.write(value.opusData, into: &buf)
-        FfiConverterData.write(value.encryptedBlob, into: &buf)
-        FfiConverterData.write(value.key, into: &buf)
-        FfiConverterData.write(value.iv, into: &buf)
-        FfiConverterString.write(value.sha256, into: &buf)
-        FfiConverterUInt64.write(value.durationMs, into: &buf)
-        FfiConverterSequenceFloat.write(value.waveform, into: &buf)
-        FfiConverterUInt64.write(value.size, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIVoicePrepareResult_lift(_ buf: RustBuffer) throws -> FfiVoicePrepareResult {
-    return try FfiConverterTypeFFIVoicePrepareResult.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIVoicePrepareResult_lower(_ value: FfiVoicePrepareResult) -> RustBuffer {
-    return FfiConverterTypeFFIVoicePrepareResult.lower(value)
-}
-
-public struct FfiKeyPackageBindingClassification {
-    public var status: FfiKeyPackageBindingStatus
-    public var identityMatches: Bool
-    public var signingKeyMatches: Bool?
-    public var expectedRootDid: String
-    public var claimedIdentity: String?
-    public var claimedRootDid: String?
-    public var signaturePublicKey: Data?
-    public var signatureAlgorithm: String?
-    public var reason: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(status: FfiKeyPackageBindingStatus, identityMatches: Bool, signingKeyMatches: Bool?, expectedRootDid: String, claimedIdentity: String?, claimedRootDid: String?, signaturePublicKey: Data?, signatureAlgorithm: String?, reason: String?) {
-        self.status = status
-        self.identityMatches = identityMatches
-        self.signingKeyMatches = signingKeyMatches
-        self.expectedRootDid = expectedRootDid
-        self.claimedIdentity = claimedIdentity
-        self.claimedRootDid = claimedRootDid
-        self.signaturePublicKey = signaturePublicKey
-        self.signatureAlgorithm = signatureAlgorithm
-        self.reason = reason
-    }
-}
-
-extension FfiKeyPackageBindingClassification: Equatable, Hashable {
-    public static func == (lhs: FfiKeyPackageBindingClassification, rhs: FfiKeyPackageBindingClassification) -> Bool {
-        if lhs.status != rhs.status {
-            return false
-        }
-        if lhs.identityMatches != rhs.identityMatches {
-            return false
-        }
-        if lhs.signingKeyMatches != rhs.signingKeyMatches {
-            return false
-        }
-        if lhs.expectedRootDid != rhs.expectedRootDid {
-            return false
-        }
-        if lhs.claimedIdentity != rhs.claimedIdentity {
-            return false
-        }
-        if lhs.claimedRootDid != rhs.claimedRootDid {
-            return false
-        }
-        if lhs.signaturePublicKey != rhs.signaturePublicKey {
-            return false
-        }
-        if lhs.signatureAlgorithm != rhs.signatureAlgorithm {
-            return false
-        }
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(status)
-        hasher.combine(identityMatches)
-        hasher.combine(signingKeyMatches)
-        hasher.combine(expectedRootDid)
-        hasher.combine(claimedIdentity)
-        hasher.combine(claimedRootDid)
-        hasher.combine(signaturePublicKey)
-        hasher.combine(signatureAlgorithm)
-        hasher.combine(reason)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiKeyPackageBindingClassification: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageBindingClassification {
-        return
-            try FfiKeyPackageBindingClassification(
-                status: FfiConverterTypeFfiKeyPackageBindingStatus.read(from: &buf),
-                identityMatches: FfiConverterBool.read(from: &buf),
-                signingKeyMatches: FfiConverterOptionBool.read(from: &buf),
-                expectedRootDid: FfiConverterString.read(from: &buf),
-                claimedIdentity: FfiConverterOptionString.read(from: &buf),
-                claimedRootDid: FfiConverterOptionString.read(from: &buf),
-                signaturePublicKey: FfiConverterOptionData.read(from: &buf),
-                signatureAlgorithm: FfiConverterOptionString.read(from: &buf),
-                reason: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiKeyPackageBindingClassification, into buf: inout [UInt8]) {
-        FfiConverterTypeFfiKeyPackageBindingStatus.write(value.status, into: &buf)
-        FfiConverterBool.write(value.identityMatches, into: &buf)
-        FfiConverterOptionBool.write(value.signingKeyMatches, into: &buf)
-        FfiConverterString.write(value.expectedRootDid, into: &buf)
-        FfiConverterOptionString.write(value.claimedIdentity, into: &buf)
-        FfiConverterOptionString.write(value.claimedRootDid, into: &buf)
-        FfiConverterOptionData.write(value.signaturePublicKey, into: &buf)
-        FfiConverterOptionString.write(value.signatureAlgorithm, into: &buf)
-        FfiConverterOptionString.write(value.reason, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiKeyPackageBindingClassification_lift(_ buf: RustBuffer) throws -> FfiKeyPackageBindingClassification {
-    return try FfiConverterTypeFfiKeyPackageBindingClassification.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiKeyPackageBindingClassification_lower(_ value: FfiKeyPackageBindingClassification) -> RustBuffer {
-    return FfiConverterTypeFfiKeyPackageBindingClassification.lower(value)
-}
-
-/**
- * What background Labyrinth work could not do.
- */
-public struct FfiLabyrinthArchiveStatus {
-    public var pending: UInt64
-    public var quarantined: [FfiLabyrinthQuarantined]
-    public var excludedMembers: [FfiLabyrinthExcludedMember]
-    public var dropped: [FfiLabyrinthDropped]
-    /**
-     * The last error of an account deletion whose remote half is pending.
-     */
-    public var remoteDeletionPending: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(pending: UInt64, quarantined: [FfiLabyrinthQuarantined], excludedMembers: [FfiLabyrinthExcludedMember], dropped: [FfiLabyrinthDropped],
-                /* 
-                    * The last error of an account deletion whose remote half is pending.
-                    */ remoteDeletionPending: String?)
-    {
-        self.pending = pending
-        self.quarantined = quarantined
-        self.excludedMembers = excludedMembers
-        self.dropped = dropped
-        self.remoteDeletionPending = remoteDeletionPending
-    }
-}
-
-extension FfiLabyrinthArchiveStatus: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthArchiveStatus, rhs: FfiLabyrinthArchiveStatus) -> Bool {
-        if lhs.pending != rhs.pending {
-            return false
-        }
-        if lhs.quarantined != rhs.quarantined {
-            return false
-        }
-        if lhs.excludedMembers != rhs.excludedMembers {
-            return false
-        }
-        if lhs.dropped != rhs.dropped {
-            return false
-        }
-        if lhs.remoteDeletionPending != rhs.remoteDeletionPending {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(pending)
-        hasher.combine(quarantined)
-        hasher.combine(excludedMembers)
-        hasher.combine(dropped)
-        hasher.combine(remoteDeletionPending)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthArchiveStatus: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthArchiveStatus {
-        return
-            try FfiLabyrinthArchiveStatus(
-                pending: FfiConverterUInt64.read(from: &buf),
-                quarantined: FfiConverterSequenceTypeFfiLabyrinthQuarantined.read(from: &buf),
-                excludedMembers: FfiConverterSequenceTypeFfiLabyrinthExcludedMember.read(from: &buf),
-                dropped: FfiConverterSequenceTypeFfiLabyrinthDropped.read(from: &buf),
-                remoteDeletionPending: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthArchiveStatus, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.pending, into: &buf)
-        FfiConverterSequenceTypeFfiLabyrinthQuarantined.write(value.quarantined, into: &buf)
-        FfiConverterSequenceTypeFfiLabyrinthExcludedMember.write(value.excludedMembers, into: &buf)
-        FfiConverterSequenceTypeFfiLabyrinthDropped.write(value.dropped, into: &buf)
-        FfiConverterOptionString.write(value.remoteDeletionPending, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthArchiveStatus_lift(_ buf: RustBuffer) throws -> FfiLabyrinthArchiveStatus {
-    return try FfiConverterTypeFfiLabyrinthArchiveStatus.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthArchiveStatus_lower(_ value: FfiLabyrinthArchiveStatus) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthArchiveStatus.lower(value)
-}
-
-/**
- * What account deletion did.
- */
-public struct FfiLabyrinthDeletion {
-    /**
-     * Publishers that could not retract their records.
-     */
-    public var publishersNotRetracted: UInt64
-    /**
-     * The remote half failed with this error and is retried in the
-     * background; this device's state is erased regardless.
-     */
-    public var remotePending: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(
-        /* 
-         * Publishers that could not retract their records.
-         */ publishersNotRetracted: UInt64,
-        /* 
-            * The remote half failed with this error and is retried in the
-            * background; this device's state is erased regardless.
-            */ remotePending: String?
-    ) {
-        self.publishersNotRetracted = publishersNotRetracted
-        self.remotePending = remotePending
-    }
-}
-
-extension FfiLabyrinthDeletion: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthDeletion, rhs: FfiLabyrinthDeletion) -> Bool {
-        if lhs.publishersNotRetracted != rhs.publishersNotRetracted {
-            return false
-        }
-        if lhs.remotePending != rhs.remotePending {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(publishersNotRetracted)
-        hasher.combine(remotePending)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthDeletion: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthDeletion {
-        return
-            try FfiLabyrinthDeletion(
-                publishersNotRetracted: FfiConverterUInt64.read(from: &buf),
-                remotePending: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthDeletion, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.publishersNotRetracted, into: &buf)
-        FfiConverterOptionString.write(value.remotePending, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthDeletion_lift(_ buf: RustBuffer) throws -> FfiLabyrinthDeletion {
-    return try FfiConverterTypeFfiLabyrinthDeletion.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthDeletion_lower(_ value: FfiLabyrinthDeletion) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthDeletion.lower(value)
-}
-
-/**
- * A queued message dropped unarchived.
- */
-public struct FfiLabyrinthDropped {
-    public var conversationId: String
-    public var messageId: String
-    public var reason: String
-    public var atMs: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String, messageId: String, reason: String, atMs: UInt64) {
-        self.conversationId = conversationId
-        self.messageId = messageId
-        self.reason = reason
-        self.atMs = atMs
-    }
-}
-
-extension FfiLabyrinthDropped: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthDropped, rhs: FfiLabyrinthDropped) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.messageId != rhs.messageId {
-            return false
-        }
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        if lhs.atMs != rhs.atMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(messageId)
-        hasher.combine(reason)
-        hasher.combine(atMs)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthDropped: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthDropped {
-        return
-            try FfiLabyrinthDropped(
-                conversationId: FfiConverterString.read(from: &buf),
-                messageId: FfiConverterString.read(from: &buf),
-                reason: FfiConverterString.read(from: &buf),
-                atMs: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthDropped, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterString.write(value.messageId, into: &buf)
-        FfiConverterString.write(value.reason, into: &buf)
-        FfiConverterUInt64.write(value.atMs, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthDropped_lift(_ buf: RustBuffer) throws -> FfiLabyrinthDropped {
-    return try FfiConverterTypeFfiLabyrinthDropped.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthDropped_lower(_ value: FfiLabyrinthDropped) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthDropped.lower(value)
-}
-
-/**
- * A member left out of a conversation's archive (it cannot read the
- * messages archived meanwhile).
- */
-public struct FfiLabyrinthExcludedMember {
-    public var conversationId: String
-    public var did: String
-    public var reason: String
-    /**
-     * A pin conflict: offer `labyrinth_propose_repin(did)`.
-     */
-    public var needsRepin: Bool
-    public var atMs: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String, did: String, reason: String,
-                /* 
-                    * A pin conflict: offer `labyrinth_propose_repin(did)`.
-                    */ needsRepin: Bool, atMs: UInt64)
-    {
-        self.conversationId = conversationId
-        self.did = did
-        self.reason = reason
-        self.needsRepin = needsRepin
-        self.atMs = atMs
-    }
-}
-
-extension FfiLabyrinthExcludedMember: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthExcludedMember, rhs: FfiLabyrinthExcludedMember) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.did != rhs.did {
-            return false
-        }
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        if lhs.needsRepin != rhs.needsRepin {
-            return false
-        }
-        if lhs.atMs != rhs.atMs {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(did)
-        hasher.combine(reason)
-        hasher.combine(needsRepin)
-        hasher.combine(atMs)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthExcludedMember: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthExcludedMember {
-        return
-            try FfiLabyrinthExcludedMember(
-                conversationId: FfiConverterString.read(from: &buf),
-                did: FfiConverterString.read(from: &buf),
-                reason: FfiConverterString.read(from: &buf),
-                needsRepin: FfiConverterBool.read(from: &buf),
-                atMs: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthExcludedMember, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterString.write(value.did, into: &buf)
-        FfiConverterString.write(value.reason, into: &buf)
-        FfiConverterBool.write(value.needsRepin, into: &buf)
-        FfiConverterUInt64.write(value.atMs, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthExcludedMember_lift(_ buf: RustBuffer) throws -> FfiLabyrinthExcludedMember {
-    return try FfiConverterTypeFfiLabyrinthExcludedMember.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthExcludedMember_lower(_ value: FfiLabyrinthExcludedMember) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthExcludedMember.lower(value)
-}
-
-/**
- * One page of decrypted history.
- */
-public struct FfiLabyrinthHistory {
-    public var messages: [FfiLabyrinthMessage]
-    public var undecryptableCount: UInt64
-    public var spaceReadable: Bool
-    public var redacted: [FfiLabyrinthRedacted]
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(messages: [FfiLabyrinthMessage], undecryptableCount: UInt64, spaceReadable: Bool, redacted: [FfiLabyrinthRedacted]) {
-        self.messages = messages
-        self.undecryptableCount = undecryptableCount
-        self.spaceReadable = spaceReadable
-        self.redacted = redacted
-    }
-}
-
-extension FfiLabyrinthHistory: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthHistory, rhs: FfiLabyrinthHistory) -> Bool {
-        if lhs.messages != rhs.messages {
-            return false
-        }
-        if lhs.undecryptableCount != rhs.undecryptableCount {
-            return false
-        }
-        if lhs.spaceReadable != rhs.spaceReadable {
-            return false
-        }
-        if lhs.redacted != rhs.redacted {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(messages)
-        hasher.combine(undecryptableCount)
-        hasher.combine(spaceReadable)
-        hasher.combine(redacted)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthHistory: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthHistory {
-        return
-            try FfiLabyrinthHistory(
-                messages: FfiConverterSequenceTypeFfiLabyrinthMessage.read(from: &buf),
-                undecryptableCount: FfiConverterUInt64.read(from: &buf),
-                spaceReadable: FfiConverterBool.read(from: &buf),
-                redacted: FfiConverterSequenceTypeFfiLabyrinthRedacted.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthHistory, into buf: inout [UInt8]) {
-        FfiConverterSequenceTypeFfiLabyrinthMessage.write(value.messages, into: &buf)
-        FfiConverterUInt64.write(value.undecryptableCount, into: &buf)
-        FfiConverterBool.write(value.spaceReadable, into: &buf)
-        FfiConverterSequenceTypeFfiLabyrinthRedacted.write(value.redacted, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthHistory_lift(_ buf: RustBuffer) throws -> FfiLabyrinthHistory {
-    return try FfiConverterTypeFfiLabyrinthHistory.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthHistory_lower(_ value: FfiLabyrinthHistory) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthHistory.lower(value)
-}
-
-/**
- * What importing a conversation's history stored.
- */
-public struct FfiLabyrinthImport {
-    public var imported: UInt64
-    public var alreadyPresent: UInt64
-    public var skipped: UInt64
-    public var undecryptable: UInt64
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(imported: UInt64, alreadyPresent: UInt64, skipped: UInt64, undecryptable: UInt64) {
-        self.imported = imported
-        self.alreadyPresent = alreadyPresent
-        self.skipped = skipped
-        self.undecryptable = undecryptable
-    }
-}
-
-extension FfiLabyrinthImport: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthImport, rhs: FfiLabyrinthImport) -> Bool {
-        if lhs.imported != rhs.imported {
-            return false
-        }
-        if lhs.alreadyPresent != rhs.alreadyPresent {
-            return false
-        }
-        if lhs.skipped != rhs.skipped {
-            return false
-        }
-        if lhs.undecryptable != rhs.undecryptable {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(imported)
-        hasher.combine(alreadyPresent)
-        hasher.combine(skipped)
-        hasher.combine(undecryptable)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthImport: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthImport {
-        return
-            try FfiLabyrinthImport(
-                imported: FfiConverterUInt64.read(from: &buf),
-                alreadyPresent: FfiConverterUInt64.read(from: &buf),
-                skipped: FfiConverterUInt64.read(from: &buf),
-                undecryptable: FfiConverterUInt64.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthImport, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.imported, into: &buf)
-        FfiConverterUInt64.write(value.alreadyPresent, into: &buf)
-        FfiConverterUInt64.write(value.skipped, into: &buf)
-        FfiConverterUInt64.write(value.undecryptable, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthImport_lift(_ buf: RustBuffer) throws -> FfiLabyrinthImport {
-    return try FfiConverterTypeFfiLabyrinthImport.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthImport_lower(_ value: FfiLabyrinthImport) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthImport.lower(value)
-}
-
-/**
- * One decrypted history message.
- */
-public struct FfiLabyrinthMessage {
-    public var messageId: String
-    /**
-     * Absent for owner-archive copies, which carry no sender.
-     */
-    public var senderDid: String?
-    public var timestampMs: UInt64
-    /**
-     * The archived frame: the sent `MLSMessagePayload` JSON.
-     */
-    public var frame: Data
-    /**
-     * True for a copy from this account's own re-archive.
-     */
-    public var fromOwnerArchive: Bool
-    /**
-     * Another copy shares this message id ([CB-31]); show both.
-     */
-    public var conflict: Bool
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(messageId: String,
-                /* 
-                    * Absent for owner-archive copies, which carry no sender.
-                    */ senderDid: String?, timestampMs: UInt64,
-                /* 
-                    * The archived frame: the sent `MLSMessagePayload` JSON.
-                    */ frame: Data,
-                /* 
-                    * True for a copy from this account's own re-archive.
-                    */ fromOwnerArchive: Bool,
-                /* 
-                    * Another copy shares this message id ([CB-31]); show both.
-                    */ conflict: Bool)
-    {
-        self.messageId = messageId
-        self.senderDid = senderDid
-        self.timestampMs = timestampMs
-        self.frame = frame
-        self.fromOwnerArchive = fromOwnerArchive
-        self.conflict = conflict
-    }
-}
-
-extension FfiLabyrinthMessage: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthMessage, rhs: FfiLabyrinthMessage) -> Bool {
-        if lhs.messageId != rhs.messageId {
-            return false
-        }
-        if lhs.senderDid != rhs.senderDid {
-            return false
-        }
-        if lhs.timestampMs != rhs.timestampMs {
-            return false
-        }
-        if lhs.frame != rhs.frame {
-            return false
-        }
-        if lhs.fromOwnerArchive != rhs.fromOwnerArchive {
-            return false
-        }
-        if lhs.conflict != rhs.conflict {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(messageId)
+        hasher.combine(entryKind)
         hasher.combine(senderDid)
-        hasher.combine(timestampMs)
-        hasher.combine(frame)
-        hasher.combine(fromOwnerArchive)
-        hasher.combine(conflict)
+        hasher.combine(mlsBytes)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeFfiLabyrinthMessage: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthMessage {
+public struct FfiConverterTypeFetchedPushEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FetchedPushEntry {
         return
-            try FfiLabyrinthMessage(
-                messageId: FfiConverterString.read(from: &buf),
-                senderDid: FfiConverterOptionString.read(from: &buf),
-                timestampMs: FfiConverterUInt64.read(from: &buf),
-                frame: FfiConverterData.read(from: &buf),
-                fromOwnerArchive: FfiConverterBool.read(from: &buf),
-                conflict: FfiConverterBool.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthMessage, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.messageId, into: &buf)
-        FfiConverterOptionString.write(value.senderDid, into: &buf)
-        FfiConverterUInt64.write(value.timestampMs, into: &buf)
-        FfiConverterData.write(value.frame, into: &buf)
-        FfiConverterBool.write(value.fromOwnerArchive, into: &buf)
-        FfiConverterBool.write(value.conflict, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthMessage_lift(_ buf: RustBuffer) throws -> FfiLabyrinthMessage {
-    return try FfiConverterTypeFfiLabyrinthMessage.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthMessage_lower(_ value: FfiLabyrinthMessage) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthMessage.lower(value)
-}
-
-/**
- * A queued message the archive skips until retried.
- */
-public struct FfiLabyrinthQuarantined {
-    public var conversationId: String
-    public var messageId: String
-    public var failures: UInt32
-    public var lastError: String?
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationId: String, messageId: String, failures: UInt32, lastError: String?) {
-        self.conversationId = conversationId
-        self.messageId = messageId
-        self.failures = failures
-        self.lastError = lastError
-    }
-}
-
-extension FfiLabyrinthQuarantined: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthQuarantined, rhs: FfiLabyrinthQuarantined) -> Bool {
-        if lhs.conversationId != rhs.conversationId {
-            return false
-        }
-        if lhs.messageId != rhs.messageId {
-            return false
-        }
-        if lhs.failures != rhs.failures {
-            return false
-        }
-        if lhs.lastError != rhs.lastError {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationId)
-        hasher.combine(messageId)
-        hasher.combine(failures)
-        hasher.combine(lastError)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthQuarantined: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthQuarantined {
-        return
-            try FfiLabyrinthQuarantined(
-                conversationId: FfiConverterString.read(from: &buf),
-                messageId: FfiConverterString.read(from: &buf),
-                failures: FfiConverterUInt32.read(from: &buf),
-                lastError: FfiConverterOptionString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthQuarantined, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.conversationId, into: &buf)
-        FfiConverterString.write(value.messageId, into: &buf)
-        FfiConverterUInt32.write(value.failures, into: &buf)
-        FfiConverterOptionString.write(value.lastError, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthQuarantined_lift(_ buf: RustBuffer) throws -> FfiLabyrinthQuarantined {
-    return try FfiConverterTypeFfiLabyrinthQuarantined.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthQuarantined_lower(_ value: FfiLabyrinthQuarantined) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthQuarantined.lower(value)
-}
-
-/**
- * One redacted history message.
- */
-public struct FfiLabyrinthRedacted {
-    public var messageId: String
-    public var senderDid: String
-    public var timestampMs: UInt64
-    public var label: FfiLabyrinthRedactionLabel
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(messageId: String, senderDid: String, timestampMs: UInt64, label: FfiLabyrinthRedactionLabel) {
-        self.messageId = messageId
-        self.senderDid = senderDid
-        self.timestampMs = timestampMs
-        self.label = label
-    }
-}
-
-extension FfiLabyrinthRedacted: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthRedacted, rhs: FfiLabyrinthRedacted) -> Bool {
-        if lhs.messageId != rhs.messageId {
-            return false
-        }
-        if lhs.senderDid != rhs.senderDid {
-            return false
-        }
-        if lhs.timestampMs != rhs.timestampMs {
-            return false
-        }
-        if lhs.label != rhs.label {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(messageId)
-        hasher.combine(senderDid)
-        hasher.combine(timestampMs)
-        hasher.combine(label)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthRedacted: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRedacted {
-        return
-            try FfiLabyrinthRedacted(
-                messageId: FfiConverterString.read(from: &buf),
+            try FetchedPushEntry(
+                entryId: FfiConverterString.read(from: &buf),
+                seq: FfiConverterInt64.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf),
+                entryKind: FfiConverterString.read(from: &buf),
                 senderDid: FfiConverterString.read(from: &buf),
-                timestampMs: FfiConverterUInt64.read(from: &buf),
-                label: FfiConverterTypeFfiLabyrinthRedactionLabel.read(from: &buf)
+                mlsBytes: FfiConverterData.read(from: &buf)
             )
     }
 
-    public static func write(_ value: FfiLabyrinthRedacted, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.messageId, into: &buf)
+    public static func write(_ value: FetchedPushEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.entryId, into: &buf)
+        FfiConverterInt64.write(value.seq, into: &buf)
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterString.write(value.entryKind, into: &buf)
         FfiConverterString.write(value.senderDid, into: &buf)
-        FfiConverterUInt64.write(value.timestampMs, into: &buf)
-        FfiConverterTypeFfiLabyrinthRedactionLabel.write(value.label, into: &buf)
+        FfiConverterData.write(value.mlsBytes, into: &buf)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiLabyrinthRedacted_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRedacted {
-    return try FfiConverterTypeFfiLabyrinthRedacted.lift(buf)
+public func FfiConverterTypeFetchedPushEntry_lift(_ buf: RustBuffer) throws -> FetchedPushEntry {
+    return try FfiConverterTypeFetchedPushEntry.lift(buf)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeFfiLabyrinthRedacted_lower(_ value: FfiLabyrinthRedacted) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthRedacted.lower(value)
-}
-
-/**
- * A safety-number change to confirm before re-pinning a peer.
- */
-public struct FfiLabyrinthRepinProposal {
-    public var did: String
-    public var pinnedEpoch: UInt64?
-    public var oldSafetyNumber: String?
-    public var newEpoch: UInt64
-    /**
-     * Pass back to `labyrinth_repin_peer` once the user accepts.
-     */
-    public var newHeadHex: String
-    public var newSafetyNumber: String
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(did: String, pinnedEpoch: UInt64?, oldSafetyNumber: String?, newEpoch: UInt64,
-                /* 
-                    * Pass back to `labyrinth_repin_peer` once the user accepts.
-                    */ newHeadHex: String, newSafetyNumber: String)
-    {
-        self.did = did
-        self.pinnedEpoch = pinnedEpoch
-        self.oldSafetyNumber = oldSafetyNumber
-        self.newEpoch = newEpoch
-        self.newHeadHex = newHeadHex
-        self.newSafetyNumber = newSafetyNumber
-    }
-}
-
-extension FfiLabyrinthRepinProposal: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthRepinProposal, rhs: FfiLabyrinthRepinProposal) -> Bool {
-        if lhs.did != rhs.did {
-            return false
-        }
-        if lhs.pinnedEpoch != rhs.pinnedEpoch {
-            return false
-        }
-        if lhs.oldSafetyNumber != rhs.oldSafetyNumber {
-            return false
-        }
-        if lhs.newEpoch != rhs.newEpoch {
-            return false
-        }
-        if lhs.newHeadHex != rhs.newHeadHex {
-            return false
-        }
-        if lhs.newSafetyNumber != rhs.newSafetyNumber {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(did)
-        hasher.combine(pinnedEpoch)
-        hasher.combine(oldSafetyNumber)
-        hasher.combine(newEpoch)
-        hasher.combine(newHeadHex)
-        hasher.combine(newSafetyNumber)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthRepinProposal: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRepinProposal {
-        return
-            try FfiLabyrinthRepinProposal(
-                did: FfiConverterString.read(from: &buf),
-                pinnedEpoch: FfiConverterOptionUInt64.read(from: &buf),
-                oldSafetyNumber: FfiConverterOptionString.read(from: &buf),
-                newEpoch: FfiConverterUInt64.read(from: &buf),
-                newHeadHex: FfiConverterString.read(from: &buf),
-                newSafetyNumber: FfiConverterString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthRepinProposal, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.did, into: &buf)
-        FfiConverterOptionUInt64.write(value.pinnedEpoch, into: &buf)
-        FfiConverterOptionString.write(value.oldSafetyNumber, into: &buf)
-        FfiConverterUInt64.write(value.newEpoch, into: &buf)
-        FfiConverterString.write(value.newHeadHex, into: &buf)
-        FfiConverterString.write(value.newSafetyNumber, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthRepinProposal_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRepinProposal {
-    return try FfiConverterTypeFfiLabyrinthRepinProposal.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthRepinProposal_lower(_ value: FfiLabyrinthRepinProposal) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthRepinProposal.lower(value)
-}
-
-/**
- * The conversations this account has history in.
- */
-public struct FfiLabyrinthThreads {
-    public var conversationIds: [String]
-    /**
-     * Sequencer DSes mls-ds could not reach: the list may miss their
-     * conversations.
-     */
-    public var incompleteSequencers: [String]
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(conversationIds: [String],
-                /* 
-                    * Sequencer DSes mls-ds could not reach: the list may miss their
-                    * conversations.
-                    */ incompleteSequencers: [String])
-    {
-        self.conversationIds = conversationIds
-        self.incompleteSequencers = incompleteSequencers
-    }
-}
-
-extension FfiLabyrinthThreads: Equatable, Hashable {
-    public static func == (lhs: FfiLabyrinthThreads, rhs: FfiLabyrinthThreads) -> Bool {
-        if lhs.conversationIds != rhs.conversationIds {
-            return false
-        }
-        if lhs.incompleteSequencers != rhs.incompleteSequencers {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(conversationIds)
-        hasher.combine(incompleteSequencers)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthThreads: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthThreads {
-        return
-            try FfiLabyrinthThreads(
-                conversationIds: FfiConverterSequenceString.read(from: &buf),
-                incompleteSequencers: FfiConverterSequenceString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiLabyrinthThreads, into buf: inout [UInt8]) {
-        FfiConverterSequenceString.write(value.conversationIds, into: &buf)
-        FfiConverterSequenceString.write(value.incompleteSequencers, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthThreads_lift(_ buf: RustBuffer) throws -> FfiLabyrinthThreads {
-    return try FfiConverterTypeFfiLabyrinthThreads.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthThreads_lower(_ value: FfiLabyrinthThreads) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthThreads.lower(value)
-}
-
-public struct FfiPeerBadErrorClassification {
-    public var peerBad: Bool
-    public var quarantineTriggerEligible: Bool
-    public var wrongEpoch: Bool
-    public var reason: String
-
-    /// Default memberwise initializers are never public by default, so we
-    /// declare one manually.
-    public init(peerBad: Bool, quarantineTriggerEligible: Bool, wrongEpoch: Bool, reason: String) {
-        self.peerBad = peerBad
-        self.quarantineTriggerEligible = quarantineTriggerEligible
-        self.wrongEpoch = wrongEpoch
-        self.reason = reason
-    }
-}
-
-extension FfiPeerBadErrorClassification: Equatable, Hashable {
-    public static func == (lhs: FfiPeerBadErrorClassification, rhs: FfiPeerBadErrorClassification) -> Bool {
-        if lhs.peerBad != rhs.peerBad {
-            return false
-        }
-        if lhs.quarantineTriggerEligible != rhs.quarantineTriggerEligible {
-            return false
-        }
-        if lhs.wrongEpoch != rhs.wrongEpoch {
-            return false
-        }
-        if lhs.reason != rhs.reason {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(peerBad)
-        hasher.combine(quarantineTriggerEligible)
-        hasher.combine(wrongEpoch)
-        hasher.combine(reason)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiPeerBadErrorClassification: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPeerBadErrorClassification {
-        return
-            try FfiPeerBadErrorClassification(
-                peerBad: FfiConverterBool.read(from: &buf),
-                quarantineTriggerEligible: FfiConverterBool.read(from: &buf),
-                wrongEpoch: FfiConverterBool.read(from: &buf),
-                reason: FfiConverterString.read(from: &buf)
-            )
-    }
-
-    public static func write(_ value: FfiPeerBadErrorClassification, into buf: inout [UInt8]) {
-        FfiConverterBool.write(value.peerBad, into: &buf)
-        FfiConverterBool.write(value.quarantineTriggerEligible, into: &buf)
-        FfiConverterBool.write(value.wrongEpoch, into: &buf)
-        FfiConverterString.write(value.reason, into: &buf)
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiPeerBadErrorClassification_lift(_ buf: RustBuffer) throws -> FfiPeerBadErrorClassification {
-    return try FfiConverterTypeFfiPeerBadErrorClassification.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiPeerBadErrorClassification_lower(_ value: FfiPeerBadErrorClassification) -> RustBuffer {
-    return FfiConverterTypeFfiPeerBadErrorClassification.lower(value)
+public func FfiConverterTypeFetchedPushEntry_lower(_ value: FetchedPushEntry) -> RustBuffer {
+    return FfiConverterTypeFetchedPushEntry.lower(value)
 }
 
 public struct GroupConfig {
@@ -12046,6 +5095,147 @@ public func FfiConverterTypeGroupMemberDebugInfo_lower(_ value: GroupMemberDebug
     return FfiConverterTypeGroupMemberDebugInfo.lower(value)
 }
 
+public struct GroupMetadataRow {
+    public var conversationId: String
+    public var metadataVersion: Int64
+    public var epoch: Int64
+    public var title: String?
+    public var description: String?
+    public var avatarSetterDid: String?
+    public var avatarBlobCid: String?
+    public var avatarSymKey: Data?
+    public var avatarSha256: Data?
+    public var avatarMimeType: String?
+    public var metadataJson: String
+    public var updatedAtMs: Int64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, metadataVersion: Int64, epoch: Int64, title: String?, description: String?, avatarSetterDid: String?, avatarBlobCid: String?, avatarSymKey: Data?, avatarSha256: Data?, avatarMimeType: String?, metadataJson: String, updatedAtMs: Int64) {
+        self.conversationId = conversationId
+        self.metadataVersion = metadataVersion
+        self.epoch = epoch
+        self.title = title
+        self.description = description
+        self.avatarSetterDid = avatarSetterDid
+        self.avatarBlobCid = avatarBlobCid
+        self.avatarSymKey = avatarSymKey
+        self.avatarSha256 = avatarSha256
+        self.avatarMimeType = avatarMimeType
+        self.metadataJson = metadataJson
+        self.updatedAtMs = updatedAtMs
+    }
+}
+
+extension GroupMetadataRow: Equatable, Hashable {
+    public static func == (lhs: GroupMetadataRow, rhs: GroupMetadataRow) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.metadataVersion != rhs.metadataVersion {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.title != rhs.title {
+            return false
+        }
+        if lhs.description != rhs.description {
+            return false
+        }
+        if lhs.avatarSetterDid != rhs.avatarSetterDid {
+            return false
+        }
+        if lhs.avatarBlobCid != rhs.avatarBlobCid {
+            return false
+        }
+        if lhs.avatarSymKey != rhs.avatarSymKey {
+            return false
+        }
+        if lhs.avatarSha256 != rhs.avatarSha256 {
+            return false
+        }
+        if lhs.avatarMimeType != rhs.avatarMimeType {
+            return false
+        }
+        if lhs.metadataJson != rhs.metadataJson {
+            return false
+        }
+        if lhs.updatedAtMs != rhs.updatedAtMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(metadataVersion)
+        hasher.combine(epoch)
+        hasher.combine(title)
+        hasher.combine(description)
+        hasher.combine(avatarSetterDid)
+        hasher.combine(avatarBlobCid)
+        hasher.combine(avatarSymKey)
+        hasher.combine(avatarSha256)
+        hasher.combine(avatarMimeType)
+        hasher.combine(metadataJson)
+        hasher.combine(updatedAtMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGroupMetadataRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GroupMetadataRow {
+        return
+            try GroupMetadataRow(
+                conversationId: FfiConverterString.read(from: &buf),
+                metadataVersion: FfiConverterInt64.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf),
+                title: FfiConverterOptionString.read(from: &buf),
+                description: FfiConverterOptionString.read(from: &buf),
+                avatarSetterDid: FfiConverterOptionString.read(from: &buf),
+                avatarBlobCid: FfiConverterOptionString.read(from: &buf),
+                avatarSymKey: FfiConverterOptionData.read(from: &buf),
+                avatarSha256: FfiConverterOptionData.read(from: &buf),
+                avatarMimeType: FfiConverterOptionString.read(from: &buf),
+                metadataJson: FfiConverterString.read(from: &buf),
+                updatedAtMs: FfiConverterInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: GroupMetadataRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterInt64.write(value.metadataVersion, into: &buf)
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterOptionString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.avatarSetterDid, into: &buf)
+        FfiConverterOptionString.write(value.avatarBlobCid, into: &buf)
+        FfiConverterOptionData.write(value.avatarSymKey, into: &buf)
+        FfiConverterOptionData.write(value.avatarSha256, into: &buf)
+        FfiConverterOptionString.write(value.avatarMimeType, into: &buf)
+        FfiConverterString.write(value.metadataJson, into: &buf)
+        FfiConverterInt64.write(value.updatedAtMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGroupMetadataRow_lift(_ buf: RustBuffer) throws -> GroupMetadataRow {
+    return try FfiConverterTypeGroupMetadataRow.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGroupMetadataRow_lower(_ value: GroupMetadataRow) -> RustBuffer {
+    return FfiConverterTypeGroupMetadataRow.lower(value)
+}
+
 public struct KeyPackageData {
     public var data: Data
 
@@ -12166,6 +5356,102 @@ public func FfiConverterTypeKeyPackageResult_lift(_ buf: RustBuffer) throws -> K
 #endif
 public func FfiConverterTypeKeyPackageResult_lower(_ value: KeyPackageResult) -> RustBuffer {
     return FfiConverterTypeKeyPackageResult.lower(value)
+}
+
+/**
+ * Labyrinth 1.1 backup & recovery status (`D4`, `Spec §6.7`).
+ */
+public struct LabyrinthBackupStatus {
+    public var backupEnabled: Bool
+    public var mailboxSpaceUri: String
+    public var hasRecoveryCode: Bool
+    public var hasPasskeyPrf: Bool
+    public var epochSeq: UInt64
+    public var activeDeviceIds: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(backupEnabled: Bool, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool, epochSeq: UInt64, activeDeviceIds: [String]) {
+        self.backupEnabled = backupEnabled
+        self.mailboxSpaceUri = mailboxSpaceUri
+        self.hasRecoveryCode = hasRecoveryCode
+        self.hasPasskeyPrf = hasPasskeyPrf
+        self.epochSeq = epochSeq
+        self.activeDeviceIds = activeDeviceIds
+    }
+}
+
+extension LabyrinthBackupStatus: Equatable, Hashable {
+    public static func == (lhs: LabyrinthBackupStatus, rhs: LabyrinthBackupStatus) -> Bool {
+        if lhs.backupEnabled != rhs.backupEnabled {
+            return false
+        }
+        if lhs.mailboxSpaceUri != rhs.mailboxSpaceUri {
+            return false
+        }
+        if lhs.hasRecoveryCode != rhs.hasRecoveryCode {
+            return false
+        }
+        if lhs.hasPasskeyPrf != rhs.hasPasskeyPrf {
+            return false
+        }
+        if lhs.epochSeq != rhs.epochSeq {
+            return false
+        }
+        if lhs.activeDeviceIds != rhs.activeDeviceIds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(backupEnabled)
+        hasher.combine(mailboxSpaceUri)
+        hasher.combine(hasRecoveryCode)
+        hasher.combine(hasPasskeyPrf)
+        hasher.combine(epochSeq)
+        hasher.combine(activeDeviceIds)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LabyrinthBackupStatus {
+        return
+            try LabyrinthBackupStatus(
+                backupEnabled: FfiConverterBool.read(from: &buf),
+                mailboxSpaceUri: FfiConverterString.read(from: &buf),
+                hasRecoveryCode: FfiConverterBool.read(from: &buf),
+                hasPasskeyPrf: FfiConverterBool.read(from: &buf),
+                epochSeq: FfiConverterUInt64.read(from: &buf),
+                activeDeviceIds: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: LabyrinthBackupStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.backupEnabled, into: &buf)
+        FfiConverterString.write(value.mailboxSpaceUri, into: &buf)
+        FfiConverterBool.write(value.hasRecoveryCode, into: &buf)
+        FfiConverterBool.write(value.hasPasskeyPrf, into: &buf)
+        FfiConverterUInt64.write(value.epochSeq, into: &buf)
+        FfiConverterSequenceString.write(value.activeDeviceIds, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthBackupStatus_lift(_ buf: RustBuffer) throws -> LabyrinthBackupStatus {
+    return try FfiConverterTypeLabyrinthBackupStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthBackupStatus_lower(_ value: LabyrinthBackupStatus) -> RustBuffer {
+    return FfiConverterTypeLabyrinthBackupStatus.lower(value)
 }
 
 public struct MemberCredential {
@@ -12304,91 +5590,409 @@ public func FfiConverterTypeMergePendingCommitResult_lower(_ value: MergePending
     return FfiConverterTypeMergePendingCommitResult.lower(value)
 }
 
-/**
- * A participant in a conversation.
- */
-public struct Participant {
-    public var did: String
-    public var handle: String?
-    public var displayName: String?
-    /**
-     * "member", "admin", or "moderator"
-     */
-    public var role: String
+public struct MessageRow {
+    public var messageId: String
+    public var conversationId: String
+    public var groupId: Data
+    public var epoch: Int64
+    public var seq: Int64
+    public var senderDid: String
+    public var senderDeviceId: String
+    public var plaintextJson: String
+    public var createdAtMs: Int64
+    public var isOwn: Bool
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(did: String, handle: String?, displayName: String?,
-                /* 
-                    * "member", "admin", or "moderator"
-                    */ role: String)
-    {
-        self.did = did
-        self.handle = handle
-        self.displayName = displayName
-        self.role = role
+    public init(messageId: String, conversationId: String, groupId: Data, epoch: Int64, seq: Int64, senderDid: String, senderDeviceId: String, plaintextJson: String, createdAtMs: Int64, isOwn: Bool) {
+        self.messageId = messageId
+        self.conversationId = conversationId
+        self.groupId = groupId
+        self.epoch = epoch
+        self.seq = seq
+        self.senderDid = senderDid
+        self.senderDeviceId = senderDeviceId
+        self.plaintextJson = plaintextJson
+        self.createdAtMs = createdAtMs
+        self.isOwn = isOwn
     }
 }
 
-extension Participant: Equatable, Hashable {
-    public static func == (lhs: Participant, rhs: Participant) -> Bool {
-        if lhs.did != rhs.did {
+extension MessageRow: Equatable, Hashable {
+    public static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
+        if lhs.messageId != rhs.messageId {
             return false
         }
-        if lhs.handle != rhs.handle {
+        if lhs.conversationId != rhs.conversationId {
             return false
         }
-        if lhs.displayName != rhs.displayName {
+        if lhs.groupId != rhs.groupId {
             return false
         }
-        if lhs.role != rhs.role {
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.seq != rhs.seq {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.senderDeviceId != rhs.senderDeviceId {
+            return false
+        }
+        if lhs.plaintextJson != rhs.plaintextJson {
+            return false
+        }
+        if lhs.createdAtMs != rhs.createdAtMs {
+            return false
+        }
+        if lhs.isOwn != rhs.isOwn {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(did)
-        hasher.combine(handle)
-        hasher.combine(displayName)
-        hasher.combine(role)
+        hasher.combine(messageId)
+        hasher.combine(conversationId)
+        hasher.combine(groupId)
+        hasher.combine(epoch)
+        hasher.combine(seq)
+        hasher.combine(senderDid)
+        hasher.combine(senderDeviceId)
+        hasher.combine(plaintextJson)
+        hasher.combine(createdAtMs)
+        hasher.combine(isOwn)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeParticipant: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Participant {
+public struct FfiConverterTypeMessageRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MessageRow {
         return
-            try Participant(
-                did: FfiConverterString.read(from: &buf),
-                handle: FfiConverterOptionString.read(from: &buf),
-                displayName: FfiConverterOptionString.read(from: &buf),
-                role: FfiConverterString.read(from: &buf)
+            try MessageRow(
+                messageId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                groupId: FfiConverterData.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf),
+                seq: FfiConverterInt64.read(from: &buf),
+                senderDid: FfiConverterString.read(from: &buf),
+                senderDeviceId: FfiConverterString.read(from: &buf),
+                plaintextJson: FfiConverterString.read(from: &buf),
+                createdAtMs: FfiConverterInt64.read(from: &buf),
+                isOwn: FfiConverterBool.read(from: &buf)
             )
     }
 
-    public static func write(_ value: Participant, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.did, into: &buf)
-        FfiConverterOptionString.write(value.handle, into: &buf)
-        FfiConverterOptionString.write(value.displayName, into: &buf)
-        FfiConverterString.write(value.role, into: &buf)
+    public static func write(_ value: MessageRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterData.write(value.groupId, into: &buf)
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterInt64.write(value.seq, into: &buf)
+        FfiConverterString.write(value.senderDid, into: &buf)
+        FfiConverterString.write(value.senderDeviceId, into: &buf)
+        FfiConverterString.write(value.plaintextJson, into: &buf)
+        FfiConverterInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterBool.write(value.isOwn, into: &buf)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeParticipant_lift(_ buf: RustBuffer) throws -> Participant {
-    return try FfiConverterTypeParticipant.lift(buf)
+public func FfiConverterTypeMessageRow_lift(_ buf: RustBuffer) throws -> MessageRow {
+    return try FfiConverterTypeMessageRow.lift(buf)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeParticipant_lower(_ value: Participant) -> RustBuffer {
-    return FfiConverterTypeParticipant.lower(value)
+public func FfiConverterTypeMessageRow_lower(_ value: MessageRow) -> RustBuffer {
+    return FfiConverterTypeMessageRow.lower(value)
+}
+
+/**
+ * Decrypted `INSendMessageIntent` / Android FCM notification fields (`Spec §6.2`).
+ */
+public struct NotificationPreview {
+    public var messageId: String
+    public var conversationId: String
+    public var senderDid: String
+    public var senderDisplayName: String?
+    public var groupTitle: String?
+    public var body: String
+    public var epoch: Int64
+    public var seq: Int64
+    public var fromCache: Bool
+    public var fallbackGeneric: Bool
+    public var darwinNotificationName: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(messageId: String, conversationId: String, senderDid: String, senderDisplayName: String?, groupTitle: String?, body: String, epoch: Int64, seq: Int64, fromCache: Bool, fallbackGeneric: Bool, darwinNotificationName: String) {
+        self.messageId = messageId
+        self.conversationId = conversationId
+        self.senderDid = senderDid
+        self.senderDisplayName = senderDisplayName
+        self.groupTitle = groupTitle
+        self.body = body
+        self.epoch = epoch
+        self.seq = seq
+        self.fromCache = fromCache
+        self.fallbackGeneric = fallbackGeneric
+        self.darwinNotificationName = darwinNotificationName
+    }
+}
+
+extension NotificationPreview: Equatable, Hashable {
+    public static func == (lhs: NotificationPreview, rhs: NotificationPreview) -> Bool {
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.senderDisplayName != rhs.senderDisplayName {
+            return false
+        }
+        if lhs.groupTitle != rhs.groupTitle {
+            return false
+        }
+        if lhs.body != rhs.body {
+            return false
+        }
+        if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.seq != rhs.seq {
+            return false
+        }
+        if lhs.fromCache != rhs.fromCache {
+            return false
+        }
+        if lhs.fallbackGeneric != rhs.fallbackGeneric {
+            return false
+        }
+        if lhs.darwinNotificationName != rhs.darwinNotificationName {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(messageId)
+        hasher.combine(conversationId)
+        hasher.combine(senderDid)
+        hasher.combine(senderDisplayName)
+        hasher.combine(groupTitle)
+        hasher.combine(body)
+        hasher.combine(epoch)
+        hasher.combine(seq)
+        hasher.combine(fromCache)
+        hasher.combine(fallbackGeneric)
+        hasher.combine(darwinNotificationName)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNotificationPreview: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NotificationPreview {
+        return
+            try NotificationPreview(
+                messageId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                senderDid: FfiConverterString.read(from: &buf),
+                senderDisplayName: FfiConverterOptionString.read(from: &buf),
+                groupTitle: FfiConverterOptionString.read(from: &buf),
+                body: FfiConverterString.read(from: &buf),
+                epoch: FfiConverterInt64.read(from: &buf),
+                seq: FfiConverterInt64.read(from: &buf),
+                fromCache: FfiConverterBool.read(from: &buf),
+                fallbackGeneric: FfiConverterBool.read(from: &buf),
+                darwinNotificationName: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: NotificationPreview, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.senderDid, into: &buf)
+        FfiConverterOptionString.write(value.senderDisplayName, into: &buf)
+        FfiConverterOptionString.write(value.groupTitle, into: &buf)
+        FfiConverterString.write(value.body, into: &buf)
+        FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterInt64.write(value.seq, into: &buf)
+        FfiConverterBool.write(value.fromCache, into: &buf)
+        FfiConverterBool.write(value.fallbackGeneric, into: &buf)
+        FfiConverterString.write(value.darwinNotificationName, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotificationPreview_lift(_ buf: RustBuffer) throws -> NotificationPreview {
+    return try FfiConverterTypeNotificationPreview.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNotificationPreview_lower(_ value: NotificationPreview) -> RustBuffer {
+    return FfiConverterTypeNotificationPreview.lower(value)
+}
+
+/**
+ * Completed hybrid PQ `CPace + ML-KEM-768` OTC handshake transcript (`I16`).
+ */
+public struct OtcPairingCompletion {
+    public var sessionId: Data
+    public var initiatorMlkem768EkLen: UInt32
+    public var responderMlkem768CtLen: UInt32
+    public var newEpochSeq: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(sessionId: Data, initiatorMlkem768EkLen: UInt32, responderMlkem768CtLen: UInt32, newEpochSeq: UInt64) {
+        self.sessionId = sessionId
+        self.initiatorMlkem768EkLen = initiatorMlkem768EkLen
+        self.responderMlkem768CtLen = responderMlkem768CtLen
+        self.newEpochSeq = newEpochSeq
+    }
+}
+
+extension OtcPairingCompletion: Equatable, Hashable {
+    public static func == (lhs: OtcPairingCompletion, rhs: OtcPairingCompletion) -> Bool {
+        if lhs.sessionId != rhs.sessionId {
+            return false
+        }
+        if lhs.initiatorMlkem768EkLen != rhs.initiatorMlkem768EkLen {
+            return false
+        }
+        if lhs.responderMlkem768CtLen != rhs.responderMlkem768CtLen {
+            return false
+        }
+        if lhs.newEpochSeq != rhs.newEpochSeq {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(sessionId)
+        hasher.combine(initiatorMlkem768EkLen)
+        hasher.combine(responderMlkem768CtLen)
+        hasher.combine(newEpochSeq)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOtcPairingCompletion: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OtcPairingCompletion {
+        return
+            try OtcPairingCompletion(
+                sessionId: FfiConverterData.read(from: &buf),
+                initiatorMlkem768EkLen: FfiConverterUInt32.read(from: &buf),
+                responderMlkem768CtLen: FfiConverterUInt32.read(from: &buf),
+                newEpochSeq: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: OtcPairingCompletion, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.sessionId, into: &buf)
+        FfiConverterUInt32.write(value.initiatorMlkem768EkLen, into: &buf)
+        FfiConverterUInt32.write(value.responderMlkem768CtLen, into: &buf)
+        FfiConverterUInt64.write(value.newEpochSeq, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOtcPairingCompletion_lift(_ buf: RustBuffer) throws -> OtcPairingCompletion {
+    return try FfiConverterTypeOtcPairingCompletion.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOtcPairingCompletion_lower(_ value: OtcPairingCompletion) -> RustBuffer {
+    return FfiConverterTypeOtcPairingCompletion.lower(value)
+}
+
+/**
+ * Enrolled-device offer for 6-digit hybrid PQ `CPace + ML-KEM-768` device pairing (`I16`).
+ */
+public struct OtcPairingOffer {
+    public var sixDigitCode: String
+    public var formattedCode: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(sixDigitCode: String, formattedCode: String) {
+        self.sixDigitCode = sixDigitCode
+        self.formattedCode = formattedCode
+    }
+}
+
+extension OtcPairingOffer: Equatable, Hashable {
+    public static func == (lhs: OtcPairingOffer, rhs: OtcPairingOffer) -> Bool {
+        if lhs.sixDigitCode != rhs.sixDigitCode {
+            return false
+        }
+        if lhs.formattedCode != rhs.formattedCode {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(sixDigitCode)
+        hasher.combine(formattedCode)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOtcPairingOffer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OtcPairingOffer {
+        return
+            try OtcPairingOffer(
+                sixDigitCode: FfiConverterString.read(from: &buf),
+                formattedCode: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: OtcPairingOffer, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sixDigitCode, into: &buf)
+        FfiConverterString.write(value.formattedCode, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOtcPairingOffer_lift(_ buf: RustBuffer) throws -> OtcPairingOffer {
+    return try FfiConverterTypeOtcPairingOffer.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOtcPairingOffer_lower(_ value: OtcPairingOffer) -> RustBuffer {
+    return FfiConverterTypeOtcPairingOffer.lower(value)
 }
 
 public struct PendingProposalDetail {
@@ -12533,6 +6137,278 @@ public func FfiConverterTypePendingProposalDetail_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypePendingProposalDetail_lower(_ value: PendingProposalDetail) -> RustBuffer {
     return FfiConverterTypePendingProposalDetail.lower(value)
+}
+
+/**
+ * HTTP header pair preserved across FFI (critically including `Atproto-Space-Mac` and `Atproto-Space-Credential`).
+ */
+public struct PlatformHttpHeader {
+    public var name: String
+    public var value: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(name: String, value: String) {
+        self.name = name
+        self.value = value
+    }
+}
+
+extension PlatformHttpHeader: Equatable, Hashable {
+    public static func == (lhs: PlatformHttpHeader, rhs: PlatformHttpHeader) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(value)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformHttpHeader: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformHttpHeader {
+        return
+            try PlatformHttpHeader(
+                name: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PlatformHttpHeader, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformHttpHeader_lift(_ buf: RustBuffer) throws -> PlatformHttpHeader {
+    return try FfiConverterTypePlatformHttpHeader.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformHttpHeader_lower(_ value: PlatformHttpHeader) -> RustBuffer {
+    return FfiConverterTypePlatformHttpHeader.lower(value)
+}
+
+/**
+ * Outbound HTTP request dispatched through the host platform's HTTP stack.
+ */
+public struct PlatformHttpRequest {
+    public var method: String
+    public var url: String
+    public var headers: [PlatformHttpHeader]
+    public var body: Data?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(method: String, url: String, headers: [PlatformHttpHeader], body: Data?) {
+        self.method = method
+        self.url = url
+        self.headers = headers
+        self.body = body
+    }
+}
+
+extension PlatformHttpRequest: Equatable, Hashable {
+    public static func == (lhs: PlatformHttpRequest, rhs: PlatformHttpRequest) -> Bool {
+        if lhs.method != rhs.method {
+            return false
+        }
+        if lhs.url != rhs.url {
+            return false
+        }
+        if lhs.headers != rhs.headers {
+            return false
+        }
+        if lhs.body != rhs.body {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(method)
+        hasher.combine(url)
+        hasher.combine(headers)
+        hasher.combine(body)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformHttpRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformHttpRequest {
+        return
+            try PlatformHttpRequest(
+                method: FfiConverterString.read(from: &buf),
+                url: FfiConverterString.read(from: &buf),
+                headers: FfiConverterSequenceTypePlatformHttpHeader.read(from: &buf),
+                body: FfiConverterOptionData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PlatformHttpRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.method, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterSequenceTypePlatformHttpHeader.write(value.headers, into: &buf)
+        FfiConverterOptionData.write(value.body, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformHttpRequest_lift(_ buf: RustBuffer) throws -> PlatformHttpRequest {
+    return try FfiConverterTypePlatformHttpRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformHttpRequest_lower(_ value: PlatformHttpRequest) -> RustBuffer {
+    return FfiConverterTypePlatformHttpRequest.lower(value)
+}
+
+/**
+ * Inbound HTTP response preserving status code, headers (e.g. `Atproto-Space-Mac`), and body bytes.
+ */
+public struct PlatformHttpResponse {
+    public var status: UInt16
+    public var headers: [PlatformHttpHeader]
+    public var body: Data
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(status: UInt16, headers: [PlatformHttpHeader], body: Data) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+    }
+}
+
+extension PlatformHttpResponse: Equatable, Hashable {
+    public static func == (lhs: PlatformHttpResponse, rhs: PlatformHttpResponse) -> Bool {
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.headers != rhs.headers {
+            return false
+        }
+        if lhs.body != rhs.body {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(status)
+        hasher.combine(headers)
+        hasher.combine(body)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformHttpResponse: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformHttpResponse {
+        return
+            try PlatformHttpResponse(
+                status: FfiConverterUInt16.read(from: &buf),
+                headers: FfiConverterSequenceTypePlatformHttpHeader.read(from: &buf),
+                body: FfiConverterData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PlatformHttpResponse, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.status, into: &buf)
+        FfiConverterSequenceTypePlatformHttpHeader.write(value.headers, into: &buf)
+        FfiConverterData.write(value.body, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformHttpResponse_lift(_ buf: RustBuffer) throws -> PlatformHttpResponse {
+    return try FfiConverterTypePlatformHttpResponse.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformHttpResponse_lower(_ value: PlatformHttpResponse) -> RustBuffer {
+    return FfiConverterTypePlatformHttpResponse.lower(value)
+}
+
+/**
+ * Summary of pre-cutover files removed from `<storage_root>` on launch (`Spec §9 Step 5`, `I8`).
+ */
+public struct PreCutoverWipeReport {
+    public var removedFiles: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(removedFiles: [String]) {
+        self.removedFiles = removedFiles
+    }
+}
+
+extension PreCutoverWipeReport: Equatable, Hashable {
+    public static func == (lhs: PreCutoverWipeReport, rhs: PreCutoverWipeReport) -> Bool {
+        if lhs.removedFiles != rhs.removedFiles {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(removedFiles)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePreCutoverWipeReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PreCutoverWipeReport {
+        return
+            try PreCutoverWipeReport(
+                removedFiles: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PreCutoverWipeReport, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.removedFiles, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreCutoverWipeReport_lift(_ buf: RustBuffer) throws -> PreCutoverWipeReport {
+    return try FfiConverterTypePreCutoverWipeReport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePreCutoverWipeReport_lower(_ value: PreCutoverWipeReport) -> RustBuffer {
+    return FfiConverterTypePreCutoverWipeReport.lower(value)
 }
 
 public struct ProcessCommitResult {
@@ -12758,6 +6634,198 @@ public func FfiConverterTypeProposeResult_lift(_ buf: RustBuffer) throws -> Prop
 #endif
 public func FfiConverterTypeProposeResult_lower(_ value: ProposeResult) -> RustBuffer {
     return FfiConverterTypeProposeResult.lower(value)
+}
+
+/**
+ * Response bundle returned by [`PushFetchTransport::fetch_missing_entries`].
+ */
+public struct PushFetchBundle {
+    public var entries: [FetchedPushEntry]
+    public var metadataSnapshot: FetchedMetadataSnapshot?
+    public var authorizedDeviceKeys: [AuthorizedPeerDeviceKey]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(entries: [FetchedPushEntry], metadataSnapshot: FetchedMetadataSnapshot?, authorizedDeviceKeys: [AuthorizedPeerDeviceKey]) {
+        self.entries = entries
+        self.metadataSnapshot = metadataSnapshot
+        self.authorizedDeviceKeys = authorizedDeviceKeys
+    }
+}
+
+extension PushFetchBundle: Equatable, Hashable {
+    public static func == (lhs: PushFetchBundle, rhs: PushFetchBundle) -> Bool {
+        if lhs.entries != rhs.entries {
+            return false
+        }
+        if lhs.metadataSnapshot != rhs.metadataSnapshot {
+            return false
+        }
+        if lhs.authorizedDeviceKeys != rhs.authorizedDeviceKeys {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(entries)
+        hasher.combine(metadataSnapshot)
+        hasher.combine(authorizedDeviceKeys)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushFetchBundle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushFetchBundle {
+        return
+            try PushFetchBundle(
+                entries: FfiConverterSequenceTypeFetchedPushEntry.read(from: &buf),
+                metadataSnapshot: FfiConverterOptionTypeFetchedMetadataSnapshot.read(from: &buf),
+                authorizedDeviceKeys: FfiConverterSequenceTypeAuthorizedPeerDeviceKey.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PushFetchBundle, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeFetchedPushEntry.write(value.entries, into: &buf)
+        FfiConverterOptionTypeFetchedMetadataSnapshot.write(value.metadataSnapshot, into: &buf)
+        FfiConverterSequenceTypeAuthorizedPeerDeviceKey.write(value.authorizedDeviceKeys, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushFetchBundle_lift(_ buf: RustBuffer) throws -> PushFetchBundle {
+    return try FfiConverterTypePushFetchBundle.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushFetchBundle_lower(_ value: PushFetchBundle) -> RustBuffer {
+    return FfiConverterTypePushFetchBundle.lower(value)
+}
+
+/**
+ * Structured metadata-only push wake delivered via `nest` (`Spec §6.2`).
+ */
+public struct PushWakePayload {
+    public var kind: String
+    public var conversationId: String
+    public var generation: Int64
+    public var entrySeq: Int64
+    public var messageId: String
+    public var recipientAccountHash: String
+    public var fetchRequired: Bool
+    public var senderDid: String?
+    public var inlineCiphertext: Data?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(kind: String, conversationId: String, generation: Int64, entrySeq: Int64, messageId: String, recipientAccountHash: String, fetchRequired: Bool, senderDid: String?, inlineCiphertext: Data?) {
+        self.kind = kind
+        self.conversationId = conversationId
+        self.generation = generation
+        self.entrySeq = entrySeq
+        self.messageId = messageId
+        self.recipientAccountHash = recipientAccountHash
+        self.fetchRequired = fetchRequired
+        self.senderDid = senderDid
+        self.inlineCiphertext = inlineCiphertext
+    }
+}
+
+extension PushWakePayload: Equatable, Hashable {
+    public static func == (lhs: PushWakePayload, rhs: PushWakePayload) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.generation != rhs.generation {
+            return false
+        }
+        if lhs.entrySeq != rhs.entrySeq {
+            return false
+        }
+        if lhs.messageId != rhs.messageId {
+            return false
+        }
+        if lhs.recipientAccountHash != rhs.recipientAccountHash {
+            return false
+        }
+        if lhs.fetchRequired != rhs.fetchRequired {
+            return false
+        }
+        if lhs.senderDid != rhs.senderDid {
+            return false
+        }
+        if lhs.inlineCiphertext != rhs.inlineCiphertext {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(conversationId)
+        hasher.combine(generation)
+        hasher.combine(entrySeq)
+        hasher.combine(messageId)
+        hasher.combine(recipientAccountHash)
+        hasher.combine(fetchRequired)
+        hasher.combine(senderDid)
+        hasher.combine(inlineCiphertext)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePushWakePayload: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PushWakePayload {
+        return
+            try PushWakePayload(
+                kind: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                generation: FfiConverterInt64.read(from: &buf),
+                entrySeq: FfiConverterInt64.read(from: &buf),
+                messageId: FfiConverterString.read(from: &buf),
+                recipientAccountHash: FfiConverterString.read(from: &buf),
+                fetchRequired: FfiConverterBool.read(from: &buf),
+                senderDid: FfiConverterOptionString.read(from: &buf),
+                inlineCiphertext: FfiConverterOptionData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PushWakePayload, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterInt64.write(value.generation, into: &buf)
+        FfiConverterInt64.write(value.entrySeq, into: &buf)
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.recipientAccountHash, into: &buf)
+        FfiConverterBool.write(value.fetchRequired, into: &buf)
+        FfiConverterOptionString.write(value.senderDid, into: &buf)
+        FfiConverterOptionData.write(value.inlineCiphertext, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushWakePayload_lift(_ buf: RustBuffer) throws -> PushWakePayload {
+    return try FfiConverterTypePushWakePayload.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePushWakePayload_lower(_ value: PushWakePayload) -> RustBuffer {
+    return FfiConverterTypePushWakePayload.lower(value)
 }
 
 public struct RemoveMembersResult {
@@ -13064,118 +7132,385 @@ public func FfiConverterTypeRequestIntroductionMetadata_lower(_ value: RequestIn
     return FfiConverterTypeRequestIntroductionMetadata.lower(value)
 }
 
-/**
- * Versioned declaration of security-bearing persistence and credential
- * operations enabled for a bridge instance. Construction validates this
- * record before creating any orchestrator state.
- */
-public struct SecurityStorageCapabilities {
-    public var version: UInt16
-    public var resetState: Bool
-    public var quarantine: Bool
-    public var pendingMessageProtection: Bool
-    public var sequencerReceipts: Bool
-    public var recoveryBackoff: Bool
-    public var pendingDeletion: Bool
-    public var authorizedDeviceResolution: Bool
+public struct RequestRow {
+    public var requestId: String
+    public var conversationId: String
+    public var senderDid: String
+    public var recipientDid: String
+    public var consent: String
+    public var firstMessageId: String?
+    public var firstMessageArchived: Bool
+    public var payloadJson: String
+    public var expiresAtMs: Int64
+    public var updatedAtMs: Int64
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(version: UInt16, resetState: Bool, quarantine: Bool, pendingMessageProtection: Bool, sequencerReceipts: Bool, recoveryBackoff: Bool, pendingDeletion: Bool, authorizedDeviceResolution: Bool) {
-        self.version = version
-        self.resetState = resetState
-        self.quarantine = quarantine
-        self.pendingMessageProtection = pendingMessageProtection
-        self.sequencerReceipts = sequencerReceipts
-        self.recoveryBackoff = recoveryBackoff
-        self.pendingDeletion = pendingDeletion
-        self.authorizedDeviceResolution = authorizedDeviceResolution
+    public init(requestId: String, conversationId: String, senderDid: String, recipientDid: String, consent: String, firstMessageId: String?, firstMessageArchived: Bool, payloadJson: String, expiresAtMs: Int64, updatedAtMs: Int64) {
+        self.requestId = requestId
+        self.conversationId = conversationId
+        self.senderDid = senderDid
+        self.recipientDid = recipientDid
+        self.consent = consent
+        self.firstMessageId = firstMessageId
+        self.firstMessageArchived = firstMessageArchived
+        self.payloadJson = payloadJson
+        self.expiresAtMs = expiresAtMs
+        self.updatedAtMs = updatedAtMs
     }
 }
 
-extension SecurityStorageCapabilities: Equatable, Hashable {
-    public static func == (lhs: SecurityStorageCapabilities, rhs: SecurityStorageCapabilities) -> Bool {
-        if lhs.version != rhs.version {
+extension RequestRow: Equatable, Hashable {
+    public static func == (lhs: RequestRow, rhs: RequestRow) -> Bool {
+        if lhs.requestId != rhs.requestId {
             return false
         }
-        if lhs.resetState != rhs.resetState {
+        if lhs.conversationId != rhs.conversationId {
             return false
         }
-        if lhs.quarantine != rhs.quarantine {
+        if lhs.senderDid != rhs.senderDid {
             return false
         }
-        if lhs.pendingMessageProtection != rhs.pendingMessageProtection {
+        if lhs.recipientDid != rhs.recipientDid {
             return false
         }
-        if lhs.sequencerReceipts != rhs.sequencerReceipts {
+        if lhs.consent != rhs.consent {
             return false
         }
-        if lhs.recoveryBackoff != rhs.recoveryBackoff {
+        if lhs.firstMessageId != rhs.firstMessageId {
             return false
         }
-        if lhs.pendingDeletion != rhs.pendingDeletion {
+        if lhs.firstMessageArchived != rhs.firstMessageArchived {
             return false
         }
-        if lhs.authorizedDeviceResolution != rhs.authorizedDeviceResolution {
+        if lhs.payloadJson != rhs.payloadJson {
+            return false
+        }
+        if lhs.expiresAtMs != rhs.expiresAtMs {
+            return false
+        }
+        if lhs.updatedAtMs != rhs.updatedAtMs {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(version)
-        hasher.combine(resetState)
-        hasher.combine(quarantine)
-        hasher.combine(pendingMessageProtection)
-        hasher.combine(sequencerReceipts)
-        hasher.combine(recoveryBackoff)
-        hasher.combine(pendingDeletion)
-        hasher.combine(authorizedDeviceResolution)
+        hasher.combine(requestId)
+        hasher.combine(conversationId)
+        hasher.combine(senderDid)
+        hasher.combine(recipientDid)
+        hasher.combine(consent)
+        hasher.combine(firstMessageId)
+        hasher.combine(firstMessageArchived)
+        hasher.combine(payloadJson)
+        hasher.combine(expiresAtMs)
+        hasher.combine(updatedAtMs)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeSecurityStorageCapabilities: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SecurityStorageCapabilities {
+public struct FfiConverterTypeRequestRow: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RequestRow {
         return
-            try SecurityStorageCapabilities(
-                version: FfiConverterUInt16.read(from: &buf),
-                resetState: FfiConverterBool.read(from: &buf),
-                quarantine: FfiConverterBool.read(from: &buf),
-                pendingMessageProtection: FfiConverterBool.read(from: &buf),
-                sequencerReceipts: FfiConverterBool.read(from: &buf),
-                recoveryBackoff: FfiConverterBool.read(from: &buf),
-                pendingDeletion: FfiConverterBool.read(from: &buf),
-                authorizedDeviceResolution: FfiConverterBool.read(from: &buf)
+            try RequestRow(
+                requestId: FfiConverterString.read(from: &buf),
+                conversationId: FfiConverterString.read(from: &buf),
+                senderDid: FfiConverterString.read(from: &buf),
+                recipientDid: FfiConverterString.read(from: &buf),
+                consent: FfiConverterString.read(from: &buf),
+                firstMessageId: FfiConverterOptionString.read(from: &buf),
+                firstMessageArchived: FfiConverterBool.read(from: &buf),
+                payloadJson: FfiConverterString.read(from: &buf),
+                expiresAtMs: FfiConverterInt64.read(from: &buf),
+                updatedAtMs: FfiConverterInt64.read(from: &buf)
             )
     }
 
-    public static func write(_ value: SecurityStorageCapabilities, into buf: inout [UInt8]) {
-        FfiConverterUInt16.write(value.version, into: &buf)
-        FfiConverterBool.write(value.resetState, into: &buf)
-        FfiConverterBool.write(value.quarantine, into: &buf)
-        FfiConverterBool.write(value.pendingMessageProtection, into: &buf)
-        FfiConverterBool.write(value.sequencerReceipts, into: &buf)
-        FfiConverterBool.write(value.recoveryBackoff, into: &buf)
-        FfiConverterBool.write(value.pendingDeletion, into: &buf)
-        FfiConverterBool.write(value.authorizedDeviceResolution, into: &buf)
+    public static func write(_ value: RequestRow, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterString.write(value.senderDid, into: &buf)
+        FfiConverterString.write(value.recipientDid, into: &buf)
+        FfiConverterString.write(value.consent, into: &buf)
+        FfiConverterOptionString.write(value.firstMessageId, into: &buf)
+        FfiConverterBool.write(value.firstMessageArchived, into: &buf)
+        FfiConverterString.write(value.payloadJson, into: &buf)
+        FfiConverterInt64.write(value.expiresAtMs, into: &buf)
+        FfiConverterInt64.write(value.updatedAtMs, into: &buf)
     }
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSecurityStorageCapabilities_lift(_ buf: RustBuffer) throws -> SecurityStorageCapabilities {
-    return try FfiConverterTypeSecurityStorageCapabilities.lift(buf)
+public func FfiConverterTypeRequestRow_lift(_ buf: RustBuffer) throws -> RequestRow {
+    return try FfiConverterTypeRequestRow.lift(buf)
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeSecurityStorageCapabilities_lower(_ value: SecurityStorageCapabilities) -> RustBuffer {
-    return FfiConverterTypeSecurityStorageCapabilities.lower(value)
+public func FfiConverterTypeRequestRow_lower(_ value: RequestRow) -> RustBuffer {
+    return FfiConverterTypeRequestRow.lower(value)
+}
+
+/**
+ * Pointer inside `GroupMetadataV1` to an encrypted group avatar blob stored in
+ * `setter_did`'s repo inside the conversation's ATProto Space (`1A`, zero `mls-ds` blobs).
+ */
+public struct SpaceAvatarPointer {
+    public var setterDid: String
+    public var spaceBlobCid: String
+    public var symKey: Data
+    public var sha256: Data
+    public var mimeType: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(setterDid: String, spaceBlobCid: String, symKey: Data, sha256: Data, mimeType: String?) {
+        self.setterDid = setterDid
+        self.spaceBlobCid = spaceBlobCid
+        self.symKey = symKey
+        self.sha256 = sha256
+        self.mimeType = mimeType
+    }
+}
+
+extension SpaceAvatarPointer: Equatable, Hashable {
+    public static func == (lhs: SpaceAvatarPointer, rhs: SpaceAvatarPointer) -> Bool {
+        if lhs.setterDid != rhs.setterDid {
+            return false
+        }
+        if lhs.spaceBlobCid != rhs.spaceBlobCid {
+            return false
+        }
+        if lhs.symKey != rhs.symKey {
+            return false
+        }
+        if lhs.sha256 != rhs.sha256 {
+            return false
+        }
+        if lhs.mimeType != rhs.mimeType {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(setterDid)
+        hasher.combine(spaceBlobCid)
+        hasher.combine(symKey)
+        hasher.combine(sha256)
+        hasher.combine(mimeType)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSpaceAvatarPointer: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SpaceAvatarPointer {
+        return
+            try SpaceAvatarPointer(
+                setterDid: FfiConverterString.read(from: &buf),
+                spaceBlobCid: FfiConverterString.read(from: &buf),
+                symKey: FfiConverterData.read(from: &buf),
+                sha256: FfiConverterData.read(from: &buf),
+                mimeType: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: SpaceAvatarPointer, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.setterDid, into: &buf)
+        FfiConverterString.write(value.spaceBlobCid, into: &buf)
+        FfiConverterData.write(value.symKey, into: &buf)
+        FfiConverterData.write(value.sha256, into: &buf)
+        FfiConverterOptionString.write(value.mimeType, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpaceAvatarPointer_lift(_ buf: RustBuffer) throws -> SpaceAvatarPointer {
+    return try FfiConverterTypeSpaceAvatarPointer.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpaceAvatarPointer_lower(_ value: SpaceAvatarPointer) -> RustBuffer {
+    return FfiConverterTypeSpaceAvatarPointer.lower(value)
+}
+
+/**
+ * Input parameters for evaluating `I15` Spaces eligibility.
+ */
+public struct SpacesEligibilityInput {
+    public var accountDid: String
+    public var pdsEndpoint: String
+    public var pdsSupportsSpaces: Bool
+    public var grantedOauthScopes: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(accountDid: String, pdsEndpoint: String, pdsSupportsSpaces: Bool, grantedOauthScopes: [String]) {
+        self.accountDid = accountDid
+        self.pdsEndpoint = pdsEndpoint
+        self.pdsSupportsSpaces = pdsSupportsSpaces
+        self.grantedOauthScopes = grantedOauthScopes
+    }
+}
+
+extension SpacesEligibilityInput: Equatable, Hashable {
+    public static func == (lhs: SpacesEligibilityInput, rhs: SpacesEligibilityInput) -> Bool {
+        if lhs.accountDid != rhs.accountDid {
+            return false
+        }
+        if lhs.pdsEndpoint != rhs.pdsEndpoint {
+            return false
+        }
+        if lhs.pdsSupportsSpaces != rhs.pdsSupportsSpaces {
+            return false
+        }
+        if lhs.grantedOauthScopes != rhs.grantedOauthScopes {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(accountDid)
+        hasher.combine(pdsEndpoint)
+        hasher.combine(pdsSupportsSpaces)
+        hasher.combine(grantedOauthScopes)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSpacesEligibilityInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SpacesEligibilityInput {
+        return
+            try SpacesEligibilityInput(
+                accountDid: FfiConverterString.read(from: &buf),
+                pdsEndpoint: FfiConverterString.read(from: &buf),
+                pdsSupportsSpaces: FfiConverterBool.read(from: &buf),
+                grantedOauthScopes: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: SpacesEligibilityInput, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountDid, into: &buf)
+        FfiConverterString.write(value.pdsEndpoint, into: &buf)
+        FfiConverterBool.write(value.pdsSupportsSpaces, into: &buf)
+        FfiConverterSequenceString.write(value.grantedOauthScopes, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpacesEligibilityInput_lift(_ buf: RustBuffer) throws -> SpacesEligibilityInput {
+    return try FfiConverterTypeSpacesEligibilityInput.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpacesEligibilityInput_lower(_ value: SpacesEligibilityInput) -> RustBuffer {
+    return FfiConverterTypeSpacesEligibilityInput.lower(value)
+}
+
+/**
+ * Output of `I15` Spaces eligibility verification.
+ */
+public struct SpacesEligibilityStatus {
+    public var eligible: Bool
+    public var reason: SpacesUnavailableReason
+    /**
+     * Standard Bluesky DMs remain active even when MLS Spaces chat is unavailable (`Spec §2`).
+     */
+    public var blueskyDmsAvailable: Bool
+    public var userMessage: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(eligible: Bool, reason: SpacesUnavailableReason,
+                /* 
+                    * Standard Bluesky DMs remain active even when MLS Spaces chat is unavailable (`Spec §2`).
+                    */ blueskyDmsAvailable: Bool, userMessage: String)
+    {
+        self.eligible = eligible
+        self.reason = reason
+        self.blueskyDmsAvailable = blueskyDmsAvailable
+        self.userMessage = userMessage
+    }
+}
+
+extension SpacesEligibilityStatus: Equatable, Hashable {
+    public static func == (lhs: SpacesEligibilityStatus, rhs: SpacesEligibilityStatus) -> Bool {
+        if lhs.eligible != rhs.eligible {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.blueskyDmsAvailable != rhs.blueskyDmsAvailable {
+            return false
+        }
+        if lhs.userMessage != rhs.userMessage {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(eligible)
+        hasher.combine(reason)
+        hasher.combine(blueskyDmsAvailable)
+        hasher.combine(userMessage)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSpacesEligibilityStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SpacesEligibilityStatus {
+        return
+            try SpacesEligibilityStatus(
+                eligible: FfiConverterBool.read(from: &buf),
+                reason: FfiConverterTypeSpacesUnavailableReason.read(from: &buf),
+                blueskyDmsAvailable: FfiConverterBool.read(from: &buf),
+                userMessage: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: SpacesEligibilityStatus, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.eligible, into: &buf)
+        FfiConverterTypeSpacesUnavailableReason.write(value.reason, into: &buf)
+        FfiConverterBool.write(value.blueskyDmsAvailable, into: &buf)
+        FfiConverterString.write(value.userMessage, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpacesEligibilityStatus_lift(_ buf: RustBuffer) throws -> SpacesEligibilityStatus {
+    return try FfiConverterTypeSpacesEligibilityStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpacesEligibilityStatus_lower(_ value: SpacesEligibilityStatus) -> RustBuffer {
+    return FfiConverterTypeSpacesEligibilityStatus.lower(value)
 }
 
 public struct StagedCommitInfo {
@@ -14269,6 +8604,7 @@ public enum CleanChatOperationFfi {
     case getDirectRequestOutcome
     case publishDirectRequestKeys
     case acceptConversation
+    case acknowledgeEntries
     case acknowledgeWelcome
     case activateReset
     case cancelLeafRecovery
@@ -14276,10 +8612,7 @@ public enum CleanChatOperationFfi {
     case closeConversation
     case getConversations
     case createConversation
-    case deleteBlob
     case sendMessage
-    case getBlob
-    case getBlobUsage
     case getConversationState
     case getDevices
     case getDeviceKey
@@ -14288,9 +8621,11 @@ public enum CleanChatOperationFfi {
     case getOwnDevices
     case getPendingWelcomes
     case getSubscriptionTicket
-    case prepareBlobUpload
     case publishTyping
+    case registerPushGateway
     case rejectWelcome
+    case relaySpaceCredential
+    case relaySpaceRead
     case replenishKeyPackages
     case requestLeafRecovery
     case enrollDevice
@@ -14299,7 +8634,6 @@ public enum CleanChatOperationFfi {
     case revokeDevice
     case submitTransition
     case subscribeEvents
-    case uploadBlob
 }
 
 #if swift(>=5.8)
@@ -14323,49 +8657,49 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
 
         case 6: return .acceptConversation
 
-        case 7: return .acknowledgeWelcome
+        case 7: return .acknowledgeEntries
 
-        case 8: return .activateReset
+        case 8: return .acknowledgeWelcome
 
-        case 9: return .cancelLeafRecovery
+        case 9: return .activateReset
 
-        case 10: return .cancelLeave
+        case 10: return .cancelLeafRecovery
 
-        case 11: return .closeConversation
+        case 11: return .cancelLeave
 
-        case 12: return .getConversations
+        case 12: return .closeConversation
 
-        case 13: return .createConversation
+        case 13: return .getConversations
 
-        case 14: return .deleteBlob
+        case 14: return .createConversation
 
         case 15: return .sendMessage
 
-        case 16: return .getBlob
+        case 16: return .getConversationState
 
-        case 17: return .getBlobUsage
+        case 17: return .getDevices
 
-        case 18: return .getConversationState
+        case 18: return .getDeviceKey
 
-        case 19: return .getDevices
+        case 19: return .getEntries
 
-        case 20: return .getDeviceKey
+        case 20: return .getLeafRecoveryInbox
 
-        case 21: return .getEntries
+        case 21: return .getOwnDevices
 
-        case 22: return .getLeafRecoveryInbox
+        case 22: return .getPendingWelcomes
 
-        case 23: return .getOwnDevices
+        case 23: return .getSubscriptionTicket
 
-        case 24: return .getPendingWelcomes
+        case 24: return .publishTyping
 
-        case 25: return .getSubscriptionTicket
+        case 25: return .registerPushGateway
 
-        case 26: return .prepareBlobUpload
+        case 26: return .rejectWelcome
 
-        case 27: return .publishTyping
+        case 27: return .relaySpaceCredential
 
-        case 28: return .rejectWelcome
+        case 28: return .relaySpaceRead
 
         case 29: return .replenishKeyPackages
 
@@ -14382,8 +8716,6 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
         case 35: return .submitTransition
 
         case 36: return .subscribeEvents
-
-        case 37: return .uploadBlob
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -14409,70 +8741,70 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
         case .acceptConversation:
             writeInt(&buf, Int32(6))
 
-        case .acknowledgeWelcome:
+        case .acknowledgeEntries:
             writeInt(&buf, Int32(7))
 
-        case .activateReset:
+        case .acknowledgeWelcome:
             writeInt(&buf, Int32(8))
 
-        case .cancelLeafRecovery:
+        case .activateReset:
             writeInt(&buf, Int32(9))
 
-        case .cancelLeave:
+        case .cancelLeafRecovery:
             writeInt(&buf, Int32(10))
 
-        case .closeConversation:
+        case .cancelLeave:
             writeInt(&buf, Int32(11))
 
-        case .getConversations:
+        case .closeConversation:
             writeInt(&buf, Int32(12))
 
-        case .createConversation:
+        case .getConversations:
             writeInt(&buf, Int32(13))
 
-        case .deleteBlob:
+        case .createConversation:
             writeInt(&buf, Int32(14))
 
         case .sendMessage:
             writeInt(&buf, Int32(15))
 
-        case .getBlob:
+        case .getConversationState:
             writeInt(&buf, Int32(16))
 
-        case .getBlobUsage:
+        case .getDevices:
             writeInt(&buf, Int32(17))
 
-        case .getConversationState:
+        case .getDeviceKey:
             writeInt(&buf, Int32(18))
 
-        case .getDevices:
+        case .getEntries:
             writeInt(&buf, Int32(19))
 
-        case .getDeviceKey:
+        case .getLeafRecoveryInbox:
             writeInt(&buf, Int32(20))
 
-        case .getEntries:
+        case .getOwnDevices:
             writeInt(&buf, Int32(21))
 
-        case .getLeafRecoveryInbox:
+        case .getPendingWelcomes:
             writeInt(&buf, Int32(22))
 
-        case .getOwnDevices:
+        case .getSubscriptionTicket:
             writeInt(&buf, Int32(23))
 
-        case .getPendingWelcomes:
+        case .publishTyping:
             writeInt(&buf, Int32(24))
 
-        case .getSubscriptionTicket:
+        case .registerPushGateway:
             writeInt(&buf, Int32(25))
 
-        case .prepareBlobUpload:
+        case .rejectWelcome:
             writeInt(&buf, Int32(26))
 
-        case .publishTyping:
+        case .relaySpaceCredential:
             writeInt(&buf, Int32(27))
 
-        case .rejectWelcome:
+        case .relaySpaceRead:
             writeInt(&buf, Int32(28))
 
         case .replenishKeyPackages:
@@ -14498,9 +8830,6 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
 
         case .subscribeEvents:
             writeInt(&buf, Int32(36))
-
-        case .uploadBlob:
-            writeInt(&buf, Int32(37))
         }
     }
 }
@@ -14522,7 +8851,7 @@ public func FfiConverterTypeCleanChatOperationFfi_lower(_ value: CleanChatOperat
 extension CleanChatOperationFfi: Equatable, Hashable {}
 
 public enum CleanChatTransportFfiError {
-    case InvalidRequest(message: String)
+    case InvalidRequest(detail: String)
 }
 
 #if swift(>=5.8)
@@ -14535,7 +8864,7 @@ public struct FfiConverterTypeCleanChatTransportFfiError: FfiConverterRustBuffer
         let variant: Int32 = try readInt(&buf)
         switch variant {
         case 1: return try .InvalidRequest(
-                message: FfiConverterString.read(from: &buf)
+                detail: FfiConverterString.read(from: &buf)
             )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -14544,9 +8873,9 @@ public struct FfiConverterTypeCleanChatTransportFfiError: FfiConverterRustBuffer
 
     public static func write(_ value: CleanChatTransportFfiError, into buf: inout [UInt8]) {
         switch value {
-        case let .InvalidRequest(message):
+        case let .InvalidRequest(detail):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(detail, into: &buf)
         }
     }
 }
@@ -14701,717 +9030,6 @@ public func FfiConverterTypeDirectRequestOutcome_lower(_ value: DirectRequestOut
 }
 
 extension DirectRequestOutcome: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/* 
- * The kind of commit to stage. Each variant corresponds to an existing
- * atomic method on `OrchestratorBridge`.
- */
-
-public enum FfiCommitKind {
-    /**
-     * Add new members. `key_packages` are the serialized key-package bytes
-     * the platform has already fetched from the DS for the given DIDs.
-     */
-    case addMembers(memberDids: [String], keyPackages: [Data])
-    /**
-     * Remove members by DID (converted to identity bytes internally).
-     */
-    case removeMembers(memberDids: [String])
-    /**
-     * Atomically swap membership: remove the listed DIDs and add new
-     * members from key packages, in a single commit.
-     */
-    case swapMembers(removeDids: [String], addDids: [String], addKeyPackages: [Data])
-    /**
-     * GroupContextExtensions commit that updates the encrypted metadata
-     * blob. `group_info_extension` is the serialized `GroupMetadata` JSON.
-     */
-    case updateMetadata(groupInfoExtension: Data)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFICommitKind: FfiConverterRustBuffer {
-    typealias SwiftType = FfiCommitKind
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiCommitKind {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return try .addMembers(memberDids: FfiConverterSequenceString.read(from: &buf), keyPackages: FfiConverterSequenceData.read(from: &buf))
-
-        case 2: return try .removeMembers(memberDids: FfiConverterSequenceString.read(from: &buf))
-
-        case 3: return try .swapMembers(removeDids: FfiConverterSequenceString.read(from: &buf), addDids: FfiConverterSequenceString.read(from: &buf), addKeyPackages: FfiConverterSequenceData.read(from: &buf))
-
-        case 4: return try .updateMetadata(groupInfoExtension: FfiConverterData.read(from: &buf))
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiCommitKind, into buf: inout [UInt8]) {
-        switch value {
-        case let .addMembers(memberDids, keyPackages):
-            writeInt(&buf, Int32(1))
-            FfiConverterSequenceString.write(memberDids, into: &buf)
-            FfiConverterSequenceData.write(keyPackages, into: &buf)
-
-        case let .removeMembers(memberDids):
-            writeInt(&buf, Int32(2))
-            FfiConverterSequenceString.write(memberDids, into: &buf)
-
-        case let .swapMembers(removeDids, addDids, addKeyPackages):
-            writeInt(&buf, Int32(3))
-            FfiConverterSequenceString.write(removeDids, into: &buf)
-            FfiConverterSequenceString.write(addDids, into: &buf)
-            FfiConverterSequenceData.write(addKeyPackages, into: &buf)
-
-        case let .updateMetadata(groupInfoExtension):
-            writeInt(&buf, Int32(4))
-            FfiConverterData.write(groupInfoExtension, into: &buf)
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFICommitKind_lift(_ buf: RustBuffer) throws -> FfiCommitKind {
-    return try FfiConverterTypeFFICommitKind.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFICommitKind_lower(_ value: FfiCommitKind) -> RustBuffer {
-    return FfiConverterTypeFFICommitKind.lower(value)
-}
-
-extension FfiCommitKind: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiConversationRecoveryState {
-    case healthy
-    case epochBehind
-    case groupMissing
-    case needsRejoin
-    case recovering
-    case unrecoverableLocal
-    case resetPending
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIConversationRecoveryState: FfiConverterRustBuffer {
-    typealias SwiftType = FfiConversationRecoveryState
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConversationRecoveryState {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .healthy
-
-        case 2: return .epochBehind
-
-        case 3: return .groupMissing
-
-        case 4: return .needsRejoin
-
-        case 5: return .recovering
-
-        case 6: return .unrecoverableLocal
-
-        case 7: return .resetPending
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiConversationRecoveryState, into buf: inout [UInt8]) {
-        switch value {
-        case .healthy:
-            writeInt(&buf, Int32(1))
-
-        case .epochBehind:
-            writeInt(&buf, Int32(2))
-
-        case .groupMissing:
-            writeInt(&buf, Int32(3))
-
-        case .needsRejoin:
-            writeInt(&buf, Int32(4))
-
-        case .recovering:
-            writeInt(&buf, Int32(5))
-
-        case .unrecoverableLocal:
-            writeInt(&buf, Int32(6))
-
-        case .resetPending:
-            writeInt(&buf, Int32(7))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationRecoveryState_lift(_ buf: RustBuffer) throws -> FfiConversationRecoveryState {
-    return try FfiConverterTypeFFIConversationRecoveryState.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIConversationRecoveryState_lower(_ value: FfiConversationRecoveryState) -> RustBuffer {
-    return FfiConverterTypeFFIConversationRecoveryState.lower(value)
-}
-
-extension FfiConversationRecoveryState: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiDeliveryStatus {
-    case deliveredToAll
-    case partial(ackedCount: Int32, totalCount: Int32)
-    case pending
-    case localOnly
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIDeliveryStatus: FfiConverterRustBuffer {
-    typealias SwiftType = FfiDeliveryStatus
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiDeliveryStatus {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .deliveredToAll
-
-        case 2: return try .partial(ackedCount: FfiConverterInt32.read(from: &buf), totalCount: FfiConverterInt32.read(from: &buf))
-
-        case 3: return .pending
-
-        case 4: return .localOnly
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiDeliveryStatus, into buf: inout [UInt8]) {
-        switch value {
-        case .deliveredToAll:
-            writeInt(&buf, Int32(1))
-
-        case let .partial(ackedCount, totalCount):
-            writeInt(&buf, Int32(2))
-            FfiConverterInt32.write(ackedCount, into: &buf)
-            FfiConverterInt32.write(totalCount, into: &buf)
-
-        case .pending:
-            writeInt(&buf, Int32(3))
-
-        case .localOnly:
-            writeInt(&buf, Int32(4))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeliveryStatus_lift(_ buf: RustBuffer) throws -> FfiDeliveryStatus {
-    return try FfiConverterTypeFFIDeliveryStatus.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIDeliveryStatus_lower(_ value: FfiDeliveryStatus) -> RustBuffer {
-    return FfiConverterTypeFFIDeliveryStatus.lower(value)
-}
-
-extension FfiDeliveryStatus: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiEngineEventKind {
-    case requestReceived
-    case conversationUpdated
-    case messageInserted
-    case recoveryStateChanged
-    case needsUiRefresh
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIEngineEventKind: FfiConverterRustBuffer {
-    typealias SwiftType = FfiEngineEventKind
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEngineEventKind {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .requestReceived
-
-        case 2: return .conversationUpdated
-
-        case 3: return .messageInserted
-
-        case 4: return .recoveryStateChanged
-
-        case 5: return .needsUiRefresh
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiEngineEventKind, into buf: inout [UInt8]) {
-        switch value {
-        case .requestReceived:
-            writeInt(&buf, Int32(1))
-
-        case .conversationUpdated:
-            writeInt(&buf, Int32(2))
-
-        case .messageInserted:
-            writeInt(&buf, Int32(3))
-
-        case .recoveryStateChanged:
-            writeInt(&buf, Int32(4))
-
-        case .needsUiRefresh:
-            writeInt(&buf, Int32(5))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIEngineEventKind_lift(_ buf: RustBuffer) throws -> FfiEngineEventKind {
-    return try FfiConverterTypeFFIEngineEventKind.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIEngineEventKind_lower(_ value: FfiEngineEventKind) -> RustBuffer {
-    return FfiConverterTypeFFIEngineEventKind.lower(value)
-}
-
-extension FfiEngineEventKind: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiQuarantineExitReason {
-    case peerCommitSucceeded
-    case serverReset
-    case userConfirmedReset
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIQuarantineExitReason: FfiConverterRustBuffer {
-    typealias SwiftType = FfiQuarantineExitReason
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiQuarantineExitReason {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .peerCommitSucceeded
-
-        case 2: return .serverReset
-
-        case 3: return .userConfirmedReset
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiQuarantineExitReason, into buf: inout [UInt8]) {
-        switch value {
-        case .peerCommitSucceeded:
-            writeInt(&buf, Int32(1))
-
-        case .serverReset:
-            writeInt(&buf, Int32(2))
-
-        case .userConfirmedReset:
-            writeInt(&buf, Int32(3))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIQuarantineExitReason_lift(_ buf: RustBuffer) throws -> FfiQuarantineExitReason {
-    return try FfiConverterTypeFFIQuarantineExitReason.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIQuarantineExitReason_lower(_ value: FfiQuarantineExitReason) -> RustBuffer {
-    return FfiConverterTypeFFIQuarantineExitReason.lower(value)
-}
-
-extension FfiQuarantineExitReason: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiQuarantineReason {
-    case peerBadCommit
-    case multiPeerBadCommits
-    case repeatedFramingFailures
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIQuarantineReason: FfiConverterRustBuffer {
-    typealias SwiftType = FfiQuarantineReason
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiQuarantineReason {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .peerBadCommit
-
-        case 2: return .multiPeerBadCommits
-
-        case 3: return .repeatedFramingFailures
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiQuarantineReason, into buf: inout [UInt8]) {
-        switch value {
-        case .peerBadCommit:
-            writeInt(&buf, Int32(1))
-
-        case .multiPeerBadCommits:
-            writeInt(&buf, Int32(2))
-
-        case .repeatedFramingFailures:
-            writeInt(&buf, Int32(3))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIQuarantineReason_lift(_ buf: RustBuffer) throws -> FfiQuarantineReason {
-    return try FfiConverterTypeFFIQuarantineReason.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIQuarantineReason_lower(_ value: FfiQuarantineReason) -> RustBuffer {
-    return FfiConverterTypeFFIQuarantineReason.lower(value)
-}
-
-extension FfiQuarantineReason: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiResetRecordOutcome {
-    case recorded
-    case staleOrDuplicate
-    case selfEchoNoOp
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFFIResetRecordOutcome: FfiConverterRustBuffer {
-    typealias SwiftType = FfiResetRecordOutcome
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiResetRecordOutcome {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .recorded
-
-        case 2: return .staleOrDuplicate
-
-        case 3: return .selfEchoNoOp
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiResetRecordOutcome, into buf: inout [UInt8]) {
-        switch value {
-        case .recorded:
-            writeInt(&buf, Int32(1))
-
-        case .staleOrDuplicate:
-            writeInt(&buf, Int32(2))
-
-        case .selfEchoNoOp:
-            writeInt(&buf, Int32(3))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIResetRecordOutcome_lift(_ buf: RustBuffer) throws -> FfiResetRecordOutcome {
-    return try FfiConverterTypeFFIResetRecordOutcome.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFFIResetRecordOutcome_lower(_ value: FfiResetRecordOutcome) -> RustBuffer {
-    return FfiConverterTypeFFIResetRecordOutcome.lower(value)
-}
-
-extension FfiResetRecordOutcome: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiKeyPackageBindingStatus {
-    case verified
-    case identityMismatch
-    case signingKeyMismatch
-    case signingKeyUnavailable
-    case unverifiable
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiKeyPackageBindingStatus: FfiConverterRustBuffer {
-    typealias SwiftType = FfiKeyPackageBindingStatus
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiKeyPackageBindingStatus {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .verified
-
-        case 2: return .identityMismatch
-
-        case 3: return .signingKeyMismatch
-
-        case 4: return .signingKeyUnavailable
-
-        case 5: return .unverifiable
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiKeyPackageBindingStatus, into buf: inout [UInt8]) {
-        switch value {
-        case .verified:
-            writeInt(&buf, Int32(1))
-
-        case .identityMismatch:
-            writeInt(&buf, Int32(2))
-
-        case .signingKeyMismatch:
-            writeInt(&buf, Int32(3))
-
-        case .signingKeyUnavailable:
-            writeInt(&buf, Int32(4))
-
-        case .unverifiable:
-            writeInt(&buf, Int32(5))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiKeyPackageBindingStatus_lift(_ buf: RustBuffer) throws -> FfiKeyPackageBindingStatus {
-    return try FfiConverterTypeFfiKeyPackageBindingStatus.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiKeyPackageBindingStatus_lower(_ value: FfiKeyPackageBindingStatus) -> RustBuffer {
-    return FfiConverterTypeFfiKeyPackageBindingStatus.lower(value)
-}
-
-extension FfiKeyPackageBindingStatus: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/* 
- * How a redacted history message must be labelled.
- */
-
-public enum FfiLabyrinthRedactionLabel {
-    /**
-     * Signed by one of the author's chat devices: "unsent".
-     */
-    case unsent
-    /**
-     * Signed by the conversation's sequencer DS: "deleted (account
-     * removed)".
-     */
-    case accountDeleted
-    /**
-     * Nothing proves why: "removed by server".
-     */
-    case removedByServer
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiLabyrinthRedactionLabel: FfiConverterRustBuffer {
-    typealias SwiftType = FfiLabyrinthRedactionLabel
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLabyrinthRedactionLabel {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .unsent
-
-        case 2: return .accountDeleted
-
-        case 3: return .removedByServer
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiLabyrinthRedactionLabel, into buf: inout [UInt8]) {
-        switch value {
-        case .unsent:
-            writeInt(&buf, Int32(1))
-
-        case .accountDeleted:
-            writeInt(&buf, Int32(2))
-
-        case .removedByServer:
-            writeInt(&buf, Int32(3))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthRedactionLabel_lift(_ buf: RustBuffer) throws -> FfiLabyrinthRedactionLabel {
-    return try FfiConverterTypeFfiLabyrinthRedactionLabel.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiLabyrinthRedactionLabel_lower(_ value: FfiLabyrinthRedactionLabel) -> RustBuffer {
-    return FfiConverterTypeFfiLabyrinthRedactionLabel.lower(value)
-}
-
-extension FfiLabyrinthRedactionLabel: Equatable, Hashable {}
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
-public enum FfiMlsErrorKind {
-    case invalidCommit
-    case wireFormatPolicyViolation
-    case invalidProposalRef
-    case tlsCodec
-    case commitProcessingFailed
-    case openMls
-    case decryptionFailed
-    case other
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeFfiMlsErrorKind: FfiConverterRustBuffer {
-    typealias SwiftType = FfiMlsErrorKind
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiMlsErrorKind {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .invalidCommit
-
-        case 2: return .wireFormatPolicyViolation
-
-        case 3: return .invalidProposalRef
-
-        case 4: return .tlsCodec
-
-        case 5: return .commitProcessingFailed
-
-        case 6: return .openMls
-
-        case 7: return .decryptionFailed
-
-        case 8: return .other
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: FfiMlsErrorKind, into buf: inout [UInt8]) {
-        switch value {
-        case .invalidCommit:
-            writeInt(&buf, Int32(1))
-
-        case .wireFormatPolicyViolation:
-            writeInt(&buf, Int32(2))
-
-        case .invalidProposalRef:
-            writeInt(&buf, Int32(3))
-
-        case .tlsCodec:
-            writeInt(&buf, Int32(4))
-
-        case .commitProcessingFailed:
-            writeInt(&buf, Int32(5))
-
-        case .openMls:
-            writeInt(&buf, Int32(6))
-
-        case .decryptionFailed:
-            writeInt(&buf, Int32(7))
-
-        case .other:
-            writeInt(&buf, Int32(8))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiMlsErrorKind_lift(_ buf: RustBuffer) throws -> FfiMlsErrorKind {
-    return try FfiConverterTypeFfiMlsErrorKind.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeFfiMlsErrorKind_lower(_ value: FfiMlsErrorKind) -> RustBuffer {
-    return FfiConverterTypeFfiMlsErrorKind.lower(value)
-}
-
-extension FfiMlsErrorKind: Equatable, Hashable {}
 
 /**
  * Dedicated error type for the sender-side three-phase commit surface on
@@ -15913,6 +9531,61 @@ extension MlsError: Foundation.LocalizedError {
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /* 
+ * Conversation membership role (`Spec §3.1 D3`).
+ */
+
+public enum MemberRole {
+    case admin
+    case member
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMemberRole: FfiConverterRustBuffer {
+    typealias SwiftType = MemberRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MemberRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .admin
+
+        case 2: return .member
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MemberRole, into buf: inout [UInt8]) {
+        switch value {
+        case .admin:
+            writeInt(&buf, Int32(1))
+
+        case .member:
+            writeInt(&buf, Int32(2))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMemberRole_lift(_ buf: RustBuffer) throws -> MemberRole {
+    return try FfiConverterTypeMemberRole.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMemberRole_lower(_ value: MemberRole) -> RustBuffer {
+    return FfiConverterTypeMemberRole.lower(value)
+}
+
+extension MemberRole: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
  * Operation type for credential validation context
  */
 
@@ -15983,167 +9656,100 @@ public func FfiConverterTypeOperationType_lower(_ value: OperationType) -> RustB
 
 extension OperationType: Equatable, Hashable {}
 
-public enum OrchestratorBridgeError {
-    case Storage(message: String)
-    case Api(message: String)
-    case Credential(message: String)
-    case Mls(message: String)
-    case NotAuthenticated
-    case ShuttingDown
-    case ConversationNotFound(id: String)
-    case EpochMismatch(local: UInt64, remote: UInt64)
-    case DeviceLimitReached
-    case RecoveryFailed(message: String)
-    case InvalidInput(message: String)
-    case Voice(message: String)
-    /**
-     * Server returned a structured HTTP error. Used by Welcome / GroupInfo
-     * fetch paths so the orchestrator can distinguish 404/410 ("no data
-     * available for this device") from transport-level failures.
-     */
-    case ServerError(status: UInt16, body: String)
-    case MissingSecurityCapability(capability: String, requiredVersion: UInt16, declaredVersion: UInt16)
-    /**
-     * Layer 3 quarantine: send/encrypt or auto-rejoin was refused because the
-     * conversation is in Quarantined state. Platforms should surface this to
-     * the UI (banner + disabled composer) and only clear via
-     * user_confirmed_manual_reset, server-pushed groupResetEvent, or a healthy
-     * peer commit.
-     */
-    case ConversationQuarantined(convoId: String, reason: String)
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * Reactive state-change event emitted to UI layers (`SwiftUI`, `Compose`, `Svelte`, `TUI`).
+ */
+
+public enum PlatformChangeEvent {
+    case conversationsUpdated
+    case messagesUpdated(conversationId: String)
+    case requestsUpdated
+    case groupMetadataUpdated(conversationId: String)
+    case spacesEligibilityChanged(eligible: Bool)
+    case labyrinthStatusChanged(epochSeq: UInt64)
+    case backgrounded
+    case resumed
 }
 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeOrchestratorBridgeError: FfiConverterRustBuffer {
-    typealias SwiftType = OrchestratorBridgeError
+public struct FfiConverterTypePlatformChangeEvent: FfiConverterRustBuffer {
+    typealias SwiftType = PlatformChangeEvent
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OrchestratorBridgeError {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformChangeEvent {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        case 1: return try .Storage(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 2: return try .Api(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 3: return try .Credential(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 4: return try .Mls(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 5: return .NotAuthenticated
-        case 6: return .ShuttingDown
-        case 7: return try .ConversationNotFound(
-                id: FfiConverterString.read(from: &buf)
-            )
-        case 8: return try .EpochMismatch(
-                local: FfiConverterUInt64.read(from: &buf),
-                remote: FfiConverterUInt64.read(from: &buf)
-            )
-        case 9: return .DeviceLimitReached
-        case 10: return try .RecoveryFailed(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 11: return try .InvalidInput(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 12: return try .Voice(
-                message: FfiConverterString.read(from: &buf)
-            )
-        case 13: return try .ServerError(
-                status: FfiConverterUInt16.read(from: &buf),
-                body: FfiConverterString.read(from: &buf)
-            )
-        case 14: return try .MissingSecurityCapability(
-                capability: FfiConverterString.read(from: &buf),
-                requiredVersion: FfiConverterUInt16.read(from: &buf),
-                declaredVersion: FfiConverterUInt16.read(from: &buf)
-            )
-        case 15: return try .ConversationQuarantined(
-                convoId: FfiConverterString.read(from: &buf),
-                reason: FfiConverterString.read(from: &buf)
-            )
+        case 1: return .conversationsUpdated
+
+        case 2: return try .messagesUpdated(conversationId: FfiConverterString.read(from: &buf))
+
+        case 3: return .requestsUpdated
+
+        case 4: return try .groupMetadataUpdated(conversationId: FfiConverterString.read(from: &buf))
+
+        case 5: return try .spacesEligibilityChanged(eligible: FfiConverterBool.read(from: &buf))
+
+        case 6: return try .labyrinthStatusChanged(epochSeq: FfiConverterUInt64.read(from: &buf))
+
+        case 7: return .backgrounded
+
+        case 8: return .resumed
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
-    public static func write(_ value: OrchestratorBridgeError, into buf: inout [UInt8]) {
+    public static func write(_ value: PlatformChangeEvent, into buf: inout [UInt8]) {
         switch value {
-        case let .Storage(message):
+        case .conversationsUpdated:
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(message, into: &buf)
 
-        case let .Api(message):
+        case let .messagesUpdated(conversationId):
             writeInt(&buf, Int32(2))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(conversationId, into: &buf)
 
-        case let .Credential(message):
+        case .requestsUpdated:
             writeInt(&buf, Int32(3))
-            FfiConverterString.write(message, into: &buf)
 
-        case let .Mls(message):
+        case let .groupMetadataUpdated(conversationId):
             writeInt(&buf, Int32(4))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(conversationId, into: &buf)
 
-        case .NotAuthenticated:
+        case let .spacesEligibilityChanged(eligible):
             writeInt(&buf, Int32(5))
+            FfiConverterBool.write(eligible, into: &buf)
 
-        case .ShuttingDown:
+        case let .labyrinthStatusChanged(epochSeq):
             writeInt(&buf, Int32(6))
+            FfiConverterUInt64.write(epochSeq, into: &buf)
 
-        case let .ConversationNotFound(id):
+        case .backgrounded:
             writeInt(&buf, Int32(7))
-            FfiConverterString.write(id, into: &buf)
 
-        case let .EpochMismatch(local, remote):
+        case .resumed:
             writeInt(&buf, Int32(8))
-            FfiConverterUInt64.write(local, into: &buf)
-            FfiConverterUInt64.write(remote, into: &buf)
-
-        case .DeviceLimitReached:
-            writeInt(&buf, Int32(9))
-
-        case let .RecoveryFailed(message):
-            writeInt(&buf, Int32(10))
-            FfiConverterString.write(message, into: &buf)
-
-        case let .InvalidInput(message):
-            writeInt(&buf, Int32(11))
-            FfiConverterString.write(message, into: &buf)
-
-        case let .Voice(message):
-            writeInt(&buf, Int32(12))
-            FfiConverterString.write(message, into: &buf)
-
-        case let .ServerError(status, body):
-            writeInt(&buf, Int32(13))
-            FfiConverterUInt16.write(status, into: &buf)
-            FfiConverterString.write(body, into: &buf)
-
-        case let .MissingSecurityCapability(capability, requiredVersion, declaredVersion):
-            writeInt(&buf, Int32(14))
-            FfiConverterString.write(capability, into: &buf)
-            FfiConverterUInt16.write(requiredVersion, into: &buf)
-            FfiConverterUInt16.write(declaredVersion, into: &buf)
-
-        case let .ConversationQuarantined(convoId, reason):
-            writeInt(&buf, Int32(15))
-            FfiConverterString.write(convoId, into: &buf)
-            FfiConverterString.write(reason, into: &buf)
         }
     }
 }
 
-extension OrchestratorBridgeError: Equatable, Hashable {}
-
-extension OrchestratorBridgeError: Foundation.LocalizedError {
-    public var errorDescription: String? {
-        String(reflecting: self)
-    }
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformChangeEvent_lift(_ buf: RustBuffer) throws -> PlatformChangeEvent {
+    return try FfiConverterTypePlatformChangeEvent.lift(buf)
 }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformChangeEvent_lower(_ value: PlatformChangeEvent) -> RustBuffer {
+    return FfiConverterTypePlatformChangeEvent.lower(value)
+}
+
+extension PlatformChangeEvent: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -16459,6 +10065,68 @@ extension RequestPreview: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * Reason why MLS chat over ATProto Spaces is available or unavailable (`I15`).
+ */
+
+public enum SpacesUnavailableReason {
+    case available
+    case pdsDoesNotSupportSpaces
+    case missingOAuthScopes(missingScopes: [String])
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSpacesUnavailableReason: FfiConverterRustBuffer {
+    typealias SwiftType = SpacesUnavailableReason
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SpacesUnavailableReason {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .available
+
+        case 2: return .pdsDoesNotSupportSpaces
+
+        case 3: return try .missingOAuthScopes(missingScopes: FfiConverterSequenceString.read(from: &buf))
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SpacesUnavailableReason, into buf: inout [UInt8]) {
+        switch value {
+        case .available:
+            writeInt(&buf, Int32(1))
+
+        case .pdsDoesNotSupportSpaces:
+            writeInt(&buf, Int32(2))
+
+        case let .missingOAuthScopes(missingScopes):
+            writeInt(&buf, Int32(3))
+            FfiConverterSequenceString.write(missingScopes, into: &buf)
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpacesUnavailableReason_lift(_ buf: RustBuffer) throws -> SpacesUnavailableReason {
+    return try FfiConverterTypeSpacesUnavailableReason.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSpacesUnavailableReason_lower(_ value: SpacesUnavailableReason) -> RustBuffer {
+    return FfiConverterTypeSpacesUnavailableReason.lower(value)
+}
+
+extension SpacesUnavailableReason: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum StorageLifecycleState {
     case open
@@ -16527,14 +10195,6 @@ public protocol CredentialValidator: AnyObject {
      */
     func validateCredential(credential: CredentialData, context: ValidationContext) async -> Bool
 }
-
-/// Magic number for the Rust proxy to call using the same mechanism as every other method,
-/// to free the callback once it's dropped by Rust.
-private let IDX_CALLBACK_FREE: Int32 = 0
-// Callback return codes
-private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
-private let UNIFFI_CALLBACK_ERROR: Int32 = 1
-private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 /// Put the implementation in a struct so we don't pollute the top-level namespace
 private enum UniffiCallbackInterfaceCredentialValidator {
@@ -17342,2542 +11002,6 @@ extension FfiConverterCallbackInterfaceMlsLogger: FfiConverter {
     }
 }
 
-/**
- * API client callback interface for Swift/Kotlin.
- */
-public protocol OrchestratorApiCallback: AnyObject {
-    func isAuthenticatedAs(did: String) -> Bool
-
-    func currentDid() -> String?
-
-    func submitPreparedRequest(method: String, nsid: String, body: Data?, query: Data?) throws -> FfiGatewayResponse
-
-    func getConversations(limit: UInt32, cursor: String?) throws -> FfiConversationListPage
-
-    func getMessages(convoId: String, cursor: String?, limit: UInt32, messageType: String?, fromEpoch: UInt32?, toEpoch: UInt32?) throws -> FfiMessagesPage
-
-    func getKeyPackages(actorDeviceId: String, dids: [String]) throws -> [FfiKeyPackageRef]
-
-    func getKeyPackageStats() throws -> FfiKeyPackageStats
-
-    func syncKeyPackages(localHashes: [String], deviceId: String) throws -> FfiKeyPackageSyncResult
-
-    func listDevices(actorDeviceId: String) throws -> [FfiDeviceInfo]
-
-    func getGroupInfo(convoId: String) throws -> Data
-
-    func getWelcome(convoId: String) throws -> Data
-
-    func getDeliveryStatus(convoId: String, messageIds: [String]) throws -> [FfiDeliveryStatusPair]
-
-    func getGroupMetadataBlob(convoId: String, groupIdHex: String, blobLocator: String) throws -> Data
-
-    /**
-     * Send one `blue.catbird.labyrinth.*` XRPC to the account's mls-ds.
-     *
-     * Attach an atproto service-auth JWT whose `lxm` is `nsid` and whose
-     * `aud` is the delivery service, exactly as for
-     * `submit_prepared_request`. `path` is `/xrpc/{nsid}` plus the
-     * already-encoded query string (it carries `actorDeviceId`); send it
-     * verbatim. Send every `headers` entry unchanged: on procedures they
-     * are `catbird-labyrinth-write` and `catbird-labyrinth-write-signature`,
-     * the device-signed write body mls-ds verifies. `body` is the JSON
-     * body of a procedure (`method` = `POST`), absent on queries (`GET`).
-     * Return the raw response, including non-2xx statuses with their
-     * atproto error body: Rust maps the error names.
-     */
-    func submitLabyrinthRequest(method: String, nsid: String, path: String, body: Data?, headers: [FfiLabyrinthHeader]) throws -> FfiGatewayResponse
-
-    /**
-     * True once the platform implements the three `*_labyrinth_mailbox_keys`
-     * methods below. Rust then publishes every epoch to the PDS as well and
-     * cross-checks peers' PDS records against mls-ds ([CB-28], [CB-29]).
-     */
-    func labyrinthPdsEnabled() -> Bool
-
-    /**
-     * `com.atproto.repo.putRecord` of `record` (JSON, `$type` included) into
-     * the signed-in account's repo, collection
-     * `blue.catbird.labyrinth.mailboxKeys`, rkey `rkey` (`self` or a
-     * 12-digit epoch number). Create or replace.
-     */
-    func putLabyrinthMailboxKeys(rkey: String, record: Data) throws
-
-    /**
-     * `com.atproto.repo.getRecord` of `blue.catbird.labyrinth.mailboxKeys`
-     * / `rkey` from `did`'s repo (resolve its PDS). Return the record value
-     * JSON, or `None` when the record (or the repo) does not exist.
-     */
-    func getLabyrinthMailboxKeys(did: String, rkey: String) throws -> Data?
-
-    /**
-     * Delete every `blue.catbird.labyrinth.mailboxKeys` record in the
-     * signed-in account's repo (account deletion).
-     */
-    func deleteLabyrinthMailboxKeys() throws
-
-    /**
-     * True once the platform implements `submit_labyrinth_space_request`
-     * against a PDS that serves `com.atproto.space.*`. Together with
-     * `labyrinth_pds_enabled`, a new history mailbox then goes into the
-     * account's own Space instead of mls-ds. Report false for a PDS
-     * without Spaces (bsky.social today).
-     */
-    func labyrinthSpaceEnabled() -> Bool
-
-    /**
-     * Send one `com.atproto.space.*` XRPC to the signed-in account's own
-     * PDS with its OAuth (DPoP) session, the way `com.atproto.repo.*` calls
-     * go: no service auth and no extra headers. `nsid` always starts with
-     * `com.atproto.space.`; `path` is `/xrpc/{nsid}` plus the
-     * already-encoded query string, sent verbatim; `body` is the JSON body
-     * of a procedure (`method` = `POST`), absent on queries (`GET`).
-     * Return the raw response, including non-2xx statuses with their
-     * atproto error body.
-     */
-    func submitLabyrinthSpaceRequest(method: String, nsid: String, path: String, body: Data?) throws -> FfiGatewayResponse
-}
-
-/// Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceOrchestratorAPICallback {
-    /// Create the VTable using a series of closures.
-    /// Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceOrchestratorApiCallback = .init(
-        isAuthenticatedAs: { (
-            uniffiHandle: UInt64,
-            did: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.isAuthenticatedAs(
-                    did: FfiConverterString.lift(did)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        currentDid: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> String? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.currentDid(
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        submitPreparedRequest: { (
-            uniffiHandle: UInt64,
-            method: RustBuffer,
-            nsid: RustBuffer,
-            body: RustBuffer,
-            query: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiGatewayResponse in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.submitPreparedRequest(
-                    method: FfiConverterString.lift(method),
-                    nsid: FfiConverterString.lift(nsid),
-                    body: FfiConverterOptionData.lift(body),
-                    query: FfiConverterOptionData.lift(query)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getConversations: { (
-            uniffiHandle: UInt64,
-            limit: UInt32,
-            cursor: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiConversationListPage in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getConversations(
-                    limit: FfiConverterUInt32.lift(limit),
-                    cursor: FfiConverterOptionString.lift(cursor)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIConversationListPage.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getMessages: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            cursor: RustBuffer,
-            limit: UInt32,
-            messageType: RustBuffer,
-            fromEpoch: RustBuffer,
-            toEpoch: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiMessagesPage in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getMessages(
-                    convoId: FfiConverterString.lift(convoId),
-                    cursor: FfiConverterOptionString.lift(cursor),
-                    limit: FfiConverterUInt32.lift(limit),
-                    messageType: FfiConverterOptionString.lift(messageType),
-                    fromEpoch: FfiConverterOptionUInt32.lift(fromEpoch),
-                    toEpoch: FfiConverterOptionUInt32.lift(toEpoch)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIMessagesPage.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getKeyPackages: { (
-            uniffiHandle: UInt64,
-            actorDeviceId: RustBuffer,
-            dids: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiKeyPackageRef] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getKeyPackages(
-                    actorDeviceId: FfiConverterString.lift(actorDeviceId),
-                    dids: FfiConverterSequenceString.lift(dids)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIKeyPackageRef.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getKeyPackageStats: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiKeyPackageStats in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getKeyPackageStats(
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIKeyPackageStats.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        syncKeyPackages: { (
-            uniffiHandle: UInt64,
-            localHashes: RustBuffer,
-            deviceId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiKeyPackageSyncResult in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.syncKeyPackages(
-                    localHashes: FfiConverterSequenceString.lift(localHashes),
-                    deviceId: FfiConverterString.lift(deviceId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIKeyPackageSyncResult.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        listDevices: { (
-            uniffiHandle: UInt64,
-            actorDeviceId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiDeviceInfo] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.listDevices(
-                    actorDeviceId: FfiConverterString.lift(actorDeviceId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIDeviceInfo.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getGroupInfo: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Data in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getGroupInfo(
-                    convoId: FfiConverterString.lift(convoId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getWelcome: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Data in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getWelcome(
-                    convoId: FfiConverterString.lift(convoId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getDeliveryStatus: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            messageIds: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiDeliveryStatusPair] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getDeliveryStatus(
-                    convoId: FfiConverterString.lift(convoId),
-                    messageIds: FfiConverterSequenceString.lift(messageIds)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIDeliveryStatusPair.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getGroupMetadataBlob: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            groupIdHex: RustBuffer,
-            blobLocator: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Data in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getGroupMetadataBlob(
-                    convoId: FfiConverterString.lift(convoId),
-                    groupIdHex: FfiConverterString.lift(groupIdHex),
-                    blobLocator: FfiConverterString.lift(blobLocator)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        submitLabyrinthRequest: { (
-            uniffiHandle: UInt64,
-            method: RustBuffer,
-            nsid: RustBuffer,
-            path: RustBuffer,
-            body: RustBuffer,
-            headers: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiGatewayResponse in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.submitLabyrinthRequest(
-                    method: FfiConverterString.lift(method),
-                    nsid: FfiConverterString.lift(nsid),
-                    path: FfiConverterString.lift(path),
-                    body: FfiConverterOptionData.lift(body),
-                    headers: FfiConverterSequenceTypeFFILabyrinthHeader.lift(headers)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        labyrinthPdsEnabled: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.labyrinthPdsEnabled(
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        putLabyrinthMailboxKeys: { (
-            uniffiHandle: UInt64,
-            rkey: RustBuffer,
-            record: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.putLabyrinthMailboxKeys(
-                    rkey: FfiConverterString.lift(rkey),
-                    record: FfiConverterData.lift(record)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getLabyrinthMailboxKeys: { (
-            uniffiHandle: UInt64,
-            did: RustBuffer,
-            rkey: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Data? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getLabyrinthMailboxKeys(
-                    did: FfiConverterString.lift(did),
-                    rkey: FfiConverterString.lift(rkey)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        deleteLabyrinthMailboxKeys: { (
-            uniffiHandle: UInt64,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.deleteLabyrinthMailboxKeys(
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        labyrinthSpaceEnabled: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return uniffiObj.labyrinthSpaceEnabled(
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        submitLabyrinthSpaceRequest: { (
-            uniffiHandle: UInt64,
-            method: RustBuffer,
-            nsid: RustBuffer,
-            path: RustBuffer,
-            body: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiGatewayResponse in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.submitLabyrinthSpaceRequest(
-                    method: FfiConverterString.lift(method),
-                    nsid: FfiConverterString.lift(nsid),
-                    path: FfiConverterString.lift(path),
-                    body: FfiConverterOptionData.lift(body)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIGatewayResponse.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) in
-            let result = try? FfiConverterCallbackInterfaceOrchestratorApiCallback.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface OrchestratorAPICallback: handle missing in uniffiFree")
-            }
-        }
-    )
-}
-
-private func uniffiCallbackInitOrchestratorAPICallback() {
-    uniffi_catbird_mls_fn_init_callback_vtable_orchestratorapicallback(&UniffiCallbackInterfaceOrchestratorAPICallback.vtable)
-}
-
-// FfiConverter protocol for callback interfaces
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private enum FfiConverterCallbackInterfaceOrchestratorApiCallback {
-    fileprivate static var handleMap = UniffiHandleMap<OrchestratorApiCallback>()
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-extension FfiConverterCallbackInterfaceOrchestratorApiCallback: FfiConverter {
-    typealias SwiftType = OrchestratorApiCallback
-    typealias FfiType = UInt64
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lift(_ handle: UInt64) throws -> SwiftType {
-        try handleMap.get(handle: handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lower(_ v: SwiftType) -> UInt64 {
-        return handleMap.insert(obj: v)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(v))
-    }
-}
-
-/**
- * Credential store callback interface for Swift/Kotlin.
- */
-public protocol OrchestratorCredentialCallback: AnyObject {
-    /**
-     * Authenticated resolution of the expected authority DID document.
-     * Rust checks the receipt method and persists the trusted historical method.
-     */
-    func directRequestReceiptAuthorityDocument(expectedAuthorityDid: String) throws -> Data?
-
-    /**
-     * Resolve verified account-home chat declaration for an actor DID from authenticated PDS.
-     * Returns:
-     * - Ok(Some(did)) if verified blue.catbird.chat.declaration/self declares deliveryService: did
-     * - Ok(None) ONLY when verified getRecord returns 404 RecordNotFound
-     * - Err(Credential) if declaration resolution is unavailable or failed (FAIL-CLOSED)
-     */
-    func getChatDeclarationAuthority(userDid: String) throws -> String?
-
-    func storeSigningKey(userDid: String, keyData: Data) throws
-
-    func getSigningKey(userDid: String) throws -> Data?
-
-    /**
-     * Sign an exact clean-chat transcript inside platform-owned key custody.
-     * Only the public key, signature, and atomic binding snapshot return;
-     * private key bytes never cross this callback boundary. Binding fields
-     * are intentionally returned by the authority rather than supplied by
-     * the caller, preventing an echo of untrusted claims.
-     */
-    func signCleanChatTranscript(userDid: String, transcript: Data, keyId: String) throws -> CleanChatSigningAuthorityFfi?
-
-    func deleteSigningKey(userDid: String) throws
-
-    func storeMlsDid(userDid: String, mlsDid: String) throws
-
-    func getMlsDid(userDid: String) throws -> String?
-
-    func storeDeviceUuid(userDid: String, uuid: String) throws
-
-    func getDeviceUuid(userDid: String) throws -> String?
-
-    func hasCredentials(userDid: String) throws -> Bool
-
-    func clearAll(userDid: String) throws
-
-    func getAuthorizedDeviceKeys(userDid: String) throws -> [Data]?
-}
-
-/// Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceOrchestratorCredentialCallback {
-    /// Create the VTable using a series of closures.
-    /// Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceOrchestratorCredentialCallback = .init(
-        directRequestReceiptAuthorityDocument: { (
-            uniffiHandle: UInt64,
-            expectedAuthorityDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Data? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.directRequestReceiptAuthorityDocument(
-                    expectedAuthorityDid: FfiConverterString.lift(expectedAuthorityDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getChatDeclarationAuthority: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> String? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getChatDeclarationAuthority(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        storeSigningKey: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            keyData: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.storeSigningKey(
-                    userDid: FfiConverterString.lift(userDid),
-                    keyData: FfiConverterData.lift(keyData)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getSigningKey: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Data? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getSigningKey(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        signCleanChatTranscript: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            transcript: RustBuffer,
-            keyId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> CleanChatSigningAuthorityFfi? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.signCleanChatTranscript(
-                    userDid: FfiConverterString.lift(userDid),
-                    transcript: FfiConverterData.lift(transcript),
-                    keyId: FfiConverterString.lift(keyId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeCleanChatSigningAuthorityFfi.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        deleteSigningKey: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.deleteSigningKey(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        storeMlsDid: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            mlsDid: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.storeMlsDid(
-                    userDid: FfiConverterString.lift(userDid),
-                    mlsDid: FfiConverterString.lift(mlsDid)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getMlsDid: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> String? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getMlsDid(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        storeDeviceUuid: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uuid: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.storeDeviceUuid(
-                    userDid: FfiConverterString.lift(userDid),
-                    uuid: FfiConverterString.lift(uuid)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getDeviceUuid: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> String? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getDeviceUuid(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionString.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        hasCredentials: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.hasCredentials(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearAll: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearAll(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getAuthorizedDeviceKeys: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [Data]? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getAuthorizedDeviceKeys(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionSequenceData.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) in
-            let result = try? FfiConverterCallbackInterfaceOrchestratorCredentialCallback.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface OrchestratorCredentialCallback: handle missing in uniffiFree")
-            }
-        }
-    )
-}
-
-private func uniffiCallbackInitOrchestratorCredentialCallback() {
-    uniffi_catbird_mls_fn_init_callback_vtable_orchestratorcredentialcallback(&UniffiCallbackInterfaceOrchestratorCredentialCallback.vtable)
-}
-
-// FfiConverter protocol for callback interfaces
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private enum FfiConverterCallbackInterfaceOrchestratorCredentialCallback {
-    fileprivate static var handleMap = UniffiHandleMap<OrchestratorCredentialCallback>()
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-extension FfiConverterCallbackInterfaceOrchestratorCredentialCallback: FfiConverter {
-    typealias SwiftType = OrchestratorCredentialCallback
-    typealias FfiType = UInt64
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lift(_ handle: UInt64) throws -> SwiftType {
-        try handleMap.get(handle: handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lower(_ v: SwiftType) -> UInt64 {
-        return handleMap.insert(obj: v)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(v))
-    }
-}
-
-/**
- * UniFFI callback interface for orchestrator events (Layer 3 quarantine +
- * WS-5.2 recovery-storage escalation). Platforms (Android, catmos Tauri,
- * catmos-cli, web) implement this and register via
- * OrchestratorBridge::set_event_callback. Adding a method here requires a
- * binding regen on each platform before it compiles against the new
- * interface.
- */
-public protocol OrchestratorEventCallback: AnyObject {
-    func onConversationQuarantined(convoId: String, reason: FfiQuarantineReason, suspectedDids: [String])
-
-    func onConversationQuarantineCleared(convoId: String, via: FfiQuarantineExitReason)
-
-    /**
-     * A recovery-critical storage write failed (WS-5.2). `operation` is the
-     * storage-trait method name (e.g. `mark_needs_rejoin`). Losing such a
-     * write silently cancels deferred recovery across restart — platforms
-     * should surface it (diagnostics, error UI) rather than ignore it.
-     */
-    func onRecoveryStorageWriteFailed(conversationId: String, operation: String, error: String)
-
-    /**
-     * A credential-binding check failed in warn-and-allow mode (WS-3 stage 1,
-     * ADR-009 D5). The operation continued; platforms should surface this in
-     * diagnostics/telemetry — a clean week of field data gates the enforce
-     * flip. `operation` is the ADR-009 D5 operation tag (`fetch`, `message`,
-     * ...). `convo_id` is `"<none>"` when no conversation is in scope yet
-     * (e.g. key-package fetch during group creation).
-     */
-    func onCredentialBindingWarning(convoId: String, operation: String, expectedDid: String, claimedIdentity: String, reason: String)
-
-    /**
-     * Sequencer equivocation detected (WS-3 stage 1, ADR-009 D8 / E3): two
-     * receipts for the same `(conversation, epoch)` carry different commit
-     * hashes. Stage 1 is detection-only — the triggering operation
-     * continued. Hashes are hex-encoded.
-     */
-    func onSequencerEquivocation(convoId: String, epoch: Int32, storedCommitHashHex: String, newCommitHashHex: String, sequencerDid: String)
-}
-
-/// Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceOrchestratorEventCallback {
-    /// Create the VTable using a series of closures.
-    /// Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceOrchestratorEventCallback = .init(
-        onConversationQuarantined: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            reason: RustBuffer,
-            suspectedDids: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.onConversationQuarantined(
-                    convoId: FfiConverterString.lift(convoId),
-                    reason: FfiConverterTypeFFIQuarantineReason.lift(reason),
-                    suspectedDids: FfiConverterSequenceString.lift(suspectedDids)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onConversationQuarantineCleared: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            via: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.onConversationQuarantineCleared(
-                    convoId: FfiConverterString.lift(convoId),
-                    via: FfiConverterTypeFFIQuarantineExitReason.lift(via)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onRecoveryStorageWriteFailed: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            operation: RustBuffer,
-            error: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.onRecoveryStorageWriteFailed(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    operation: FfiConverterString.lift(operation),
-                    error: FfiConverterString.lift(error)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onCredentialBindingWarning: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            operation: RustBuffer,
-            expectedDid: RustBuffer,
-            claimedIdentity: RustBuffer,
-            reason: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.onCredentialBindingWarning(
-                    convoId: FfiConverterString.lift(convoId),
-                    operation: FfiConverterString.lift(operation),
-                    expectedDid: FfiConverterString.lift(expectedDid),
-                    claimedIdentity: FfiConverterString.lift(claimedIdentity),
-                    reason: FfiConverterString.lift(reason)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onSequencerEquivocation: { (
-            uniffiHandle: UInt64,
-            convoId: RustBuffer,
-            epoch: Int32,
-            storedCommitHashHex: RustBuffer,
-            newCommitHashHex: RustBuffer,
-            sequencerDid: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.onSequencerEquivocation(
-                    convoId: FfiConverterString.lift(convoId),
-                    epoch: FfiConverterInt32.lift(epoch),
-                    storedCommitHashHex: FfiConverterString.lift(storedCommitHashHex),
-                    newCommitHashHex: FfiConverterString.lift(newCommitHashHex),
-                    sequencerDid: FfiConverterString.lift(sequencerDid)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) in
-            let result = try? FfiConverterCallbackInterfaceOrchestratorEventCallback.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface OrchestratorEventCallback: handle missing in uniffiFree")
-            }
-        }
-    )
-}
-
-private func uniffiCallbackInitOrchestratorEventCallback() {
-    uniffi_catbird_mls_fn_init_callback_vtable_orchestratoreventcallback(&UniffiCallbackInterfaceOrchestratorEventCallback.vtable)
-}
-
-// FfiConverter protocol for callback interfaces
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private enum FfiConverterCallbackInterfaceOrchestratorEventCallback {
-    fileprivate static var handleMap = UniffiHandleMap<OrchestratorEventCallback>()
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-extension FfiConverterCallbackInterfaceOrchestratorEventCallback: FfiConverter {
-    typealias SwiftType = OrchestratorEventCallback
-    typealias FfiType = UInt64
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lift(_ handle: UInt64) throws -> SwiftType {
-        try handleMap.get(handle: handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lower(_ v: SwiftType) -> UInt64 {
-        return handleMap.insert(obj: v)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(v))
-    }
-}
-
-/**
- * Storage backend callback interface for Swift/Kotlin.
- *
- * All methods are synchronous from UniFFI's perspective — the Swift side
- * can use actors/dispatch internally.
- */
-public protocol OrchestratorStorageCallback: AnyObject {
-    /**
-     * Commit an account-scoped canonical projection and exact alias retirement
-     * in one durable host transaction. See ConversationProjectionCommitRequest
-     * and ConversationProjectionCommitOutcome for the strict JSON contract.
-     */
-    func commitConversationProjectionJson(requestJson: String) throws -> String
-
-    func ensureConversationExists(userDid: String, conversationId: String, groupId: String) throws
-
-    func updateJoinInfo(conversationId: String, userDid: String, joinMethod: String, joinEpoch: UInt64) throws
-
-    func getConversation(userDid: String, conversationId: String) throws -> FfiConversationView?
-
-    func listConversations(userDid: String) throws -> [FfiConversationView]
-
-    func deleteConversations(userDid: String, ids: [String]) throws
-
-    func setConversationState(conversationId: String, state: String) throws
-
-    func completeAccountExit(conversationId: String, expectedGroupIdHex: String, expectedResetGeneration: Int32?, terminalEpoch: UInt64, terminalState: String) throws -> Bool
-
-    func getConversationState(conversationId: String) throws -> FfiConversationState?
-
-    /**
-     * Persist the `RESET_PENDING` payload for a server-initiated group reset.
-     *
-     * Called from `MLSOrchestrator::record_group_reset` before any local MLS
-     * state mutation, so the platform can recover the pending-reset target on
-     * restart (spec §8.5 Phase 1 / ADR-001 level 3).
-     *
-     * - `conversation_id`: stable conversation id.
-     * - `new_group_id_hex`: hex-encoded new MLS group id advertised by the DS.
-     * - `reset_generation`: monotonic reset counter from the DS.
-     * - `notified_at_ms`: Unix millis when the notification was observed.
-     *
-     * This callback is mandatory. It is the sole authority-publication commit
-     * point and must atomically persist the state tag, complete tuple, and
-     * `needs_rejoin = true`, rejecting stale generations while preserving the
-     * old durable group mapping for restart-safe predecessor cleanup. Missing
-     * support fails closed.
-     *
-     * That same commit must also clear any persisted quarantine for the
-     * conversation: a server reset is a documented quarantine exit (ruling 2a,
-     * 2026-08-15), so tag, payload, rejoin route, and quarantine clear land
-     * together. Deferring the clear to the separate `clear_quarantine`
-     * callback leaves a window in which the platform can persist a row that
-     * is both reset-pending and quarantined, which rehydrates quarantined
-     * forever because the replayed reset dedupes before reaching the clear.
-     */
-    func markResetPending(conversationId: String, newGroupIdHex: String, resetGeneration: Int32, notifiedAtMs: Int64) throws
-
-    /**
-     * Atomically adopt the server-verified winner of a reset race while
-     * preserving the exact committed ResetPending generation and payload.
-     */
-    func adoptResetPendingTarget(conversationId: String, expectedGeneration: Int32, expectedOldTarget: String, authoritativeNewTarget: String) throws -> Bool
-
-    /**
-     * Atomically complete an exact reset generation and target: project the
-     * durable group mapping to that target, clear its payload, project durable
-     * Active, and clear the durable rejoin flag.
-     */
-    func completeResetPending(conversationId: String, expectedGeneration: Int32, expectedNewGroupIdHex: String, landedEpoch: UInt64) throws -> Bool
-
-    /**
-     * Clear an exact reset generation for local deletion without projecting
-     * Active.
-     */
-    func clearResetPendingForDelete(conversationId: String, expectedGeneration: Int32) throws -> Bool
-
-    func markQuarantined(conversationId: String, reasonTag: String, sinceMs: Int64) throws
-
-    func clearQuarantine(conversationId: String) throws
-
-    func markNeedsRejoin(conversationId: String) throws
-
-    func needsRejoin(conversationId: String) throws -> Bool
-
-    func clearRejoinFlag(conversationId: String) throws
-
-    func storeMessage(message: FfiMessage) throws
-
-    func getMessages(conversationId: String, limit: UInt32, beforeSequence: UInt64?) throws -> [FfiMessage]
-
-    func messageExists(messageId: String) throws -> Bool
-
-    func storePendingMessage(conversationId: String, messageId: String) throws
-
-    func removePendingMessage(messageId: String) throws -> Bool
-
-    func storeSequencerReceipt(receipt: FfiSequencerReceipt) throws
-
-    func getSequencerReceipts(conversationId: String, sinceEpoch: Int32?) throws -> [FfiSequencerReceipt]
-
-    func clearSequencerReceipts(conversationId: String) throws
-
-    func getSyncCursor(userDid: String) throws -> FfiSyncCursor
-
-    func setSyncCursor(userDid: String, cursor: FfiSyncCursor) throws
-
-    func setGroupState(state: FfiGroupState) throws
-
-    func getGroupState(groupId: String) throws -> FfiGroupState?
-
-    func deleteGroupState(groupId: String) throws
-
-    /**
-     * Read the persisted RecoveryTracker state for startup hydration.
-     * Return an empty state if the platform has not written any entries yet.
-     */
-    func getRecoveryState() throws -> FfiPersistedRecoveryState
-
-    /**
-     * Write-through one conversation's rejoin-backoff snapshot. Called on
-     * every failed rejoin attempt (and on quarantine-lockout entry/expiry).
-     */
-    func setRecoveryBackoff(entry: FfiPersistedRecoveryBackoff) throws
-
-    /**
-     * Remove a conversation's persisted backoff entry (successful rejoin,
-     * server reset, quarantine entry, stale-flag housekeeping, local delete).
-     */
-    func clearRecoveryBackoff(conversationId: String) throws
-
-    /**
-     * Persist the global last-rejoin-attempt timestamp (epoch ms), which
-     * backs `MIN_REJOIN_INTERVAL` across restarts.
-     */
-    func setLastGlobalRejoinAttemptAt(atMs: Int64) throws
-
-    /**
-     * Record the intent to locally delete a conversation BEFORE the
-     * MLS-layer and storage deletes run. Idempotent.
-     */
-    func markPendingLocalDelete(conversationId: String, groupIdHex: String?) throws
-
-    /**
-     * Clear a pending local-delete intent after all delete steps succeeded.
-     */
-    func clearPendingLocalDelete(conversationId: String) throws
-
-    /**
-     * List local deletes that were started but never completed (crash
-     * between intent and completion). Consumed by the startup reconcile
-     * sweep.
-     */
-    func listPendingLocalDeletes() throws -> [FfiPendingLocalDelete]
-}
-
-/// Put the implementation in a struct so we don't pollute the top-level namespace
-private enum UniffiCallbackInterfaceOrchestratorStorageCallback {
-    /// Create the VTable using a series of closures.
-    /// Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceOrchestratorStorageCallback = .init(
-        commitConversationProjectionJson: { (
-            uniffiHandle: UInt64,
-            requestJson: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> String in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.commitConversationProjectionJson(
-                    requestJson: FfiConverterString.lift(requestJson)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        ensureConversationExists: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            conversationId: RustBuffer,
-            groupId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.ensureConversationExists(
-                    userDid: FfiConverterString.lift(userDid),
-                    conversationId: FfiConverterString.lift(conversationId),
-                    groupId: FfiConverterString.lift(groupId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        updateJoinInfo: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            userDid: RustBuffer,
-            joinMethod: RustBuffer,
-            joinEpoch: UInt64,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.updateJoinInfo(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    userDid: FfiConverterString.lift(userDid),
-                    joinMethod: FfiConverterString.lift(joinMethod),
-                    joinEpoch: FfiConverterUInt64.lift(joinEpoch)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getConversation: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            conversationId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiConversationView? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getConversation(
-                    userDid: FfiConverterString.lift(userDid),
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFFIConversationView.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        listConversations: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiConversationView] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.listConversations(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIConversationView.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        deleteConversations: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            ids: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.deleteConversations(
-                    userDid: FfiConverterString.lift(userDid),
-                    ids: FfiConverterSequenceString.lift(ids)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        setConversationState: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            state: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.setConversationState(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    state: FfiConverterString.lift(state)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        completeAccountExit: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            expectedGroupIdHex: RustBuffer,
-            expectedResetGeneration: RustBuffer,
-            terminalEpoch: UInt64,
-            terminalState: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.completeAccountExit(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    expectedGroupIdHex: FfiConverterString.lift(expectedGroupIdHex),
-                    expectedResetGeneration: FfiConverterOptionInt32.lift(expectedResetGeneration),
-                    terminalEpoch: FfiConverterUInt64.lift(terminalEpoch),
-                    terminalState: FfiConverterString.lift(terminalState)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getConversationState: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiConversationState? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getConversationState(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFFIConversationState.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        markResetPending: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            newGroupIdHex: RustBuffer,
-            resetGeneration: Int32,
-            notifiedAtMs: Int64,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.markResetPending(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    newGroupIdHex: FfiConverterString.lift(newGroupIdHex),
-                    resetGeneration: FfiConverterInt32.lift(resetGeneration),
-                    notifiedAtMs: FfiConverterInt64.lift(notifiedAtMs)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        adoptResetPendingTarget: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            expectedGeneration: Int32,
-            expectedOldTarget: RustBuffer,
-            authoritativeNewTarget: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.adoptResetPendingTarget(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    expectedGeneration: FfiConverterInt32.lift(expectedGeneration),
-                    expectedOldTarget: FfiConverterString.lift(expectedOldTarget),
-                    authoritativeNewTarget: FfiConverterString.lift(authoritativeNewTarget)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        completeResetPending: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            expectedGeneration: Int32,
-            expectedNewGroupIdHex: RustBuffer,
-            landedEpoch: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.completeResetPending(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    expectedGeneration: FfiConverterInt32.lift(expectedGeneration),
-                    expectedNewGroupIdHex: FfiConverterString.lift(expectedNewGroupIdHex),
-                    landedEpoch: FfiConverterUInt64.lift(landedEpoch)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearResetPendingForDelete: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            expectedGeneration: Int32,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearResetPendingForDelete(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    expectedGeneration: FfiConverterInt32.lift(expectedGeneration)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        markQuarantined: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            reasonTag: RustBuffer,
-            sinceMs: Int64,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.markQuarantined(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    reasonTag: FfiConverterString.lift(reasonTag),
-                    sinceMs: FfiConverterInt64.lift(sinceMs)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearQuarantine: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearQuarantine(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        markNeedsRejoin: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.markNeedsRejoin(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        needsRejoin: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.needsRejoin(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearRejoinFlag: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearRejoinFlag(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        storeMessage: { (
-            uniffiHandle: UInt64,
-            message: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.storeMessage(
-                    message: FfiConverterTypeFFIMessage.lift(message)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getMessages: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            limit: UInt32,
-            beforeSequence: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiMessage] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getMessages(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    limit: FfiConverterUInt32.lift(limit),
-                    beforeSequence: FfiConverterOptionUInt64.lift(beforeSequence)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIMessage.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        messageExists: { (
-            uniffiHandle: UInt64,
-            messageId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.messageExists(
-                    messageId: FfiConverterString.lift(messageId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        storePendingMessage: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            messageId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.storePendingMessage(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    messageId: FfiConverterString.lift(messageId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        removePendingMessage: { (
-            uniffiHandle: UInt64,
-            messageId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<Int8>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> Bool in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.removePendingMessage(
-                    messageId: FfiConverterString.lift(messageId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterBool.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        storeSequencerReceipt: { (
-            uniffiHandle: UInt64,
-            receipt: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.storeSequencerReceipt(
-                    receipt: FfiConverterTypeFFISequencerReceipt.lift(receipt)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getSequencerReceipts: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            sinceEpoch: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiSequencerReceipt] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getSequencerReceipts(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    sinceEpoch: FfiConverterOptionInt32.lift(sinceEpoch)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFISequencerReceipt.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearSequencerReceipts: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearSequencerReceipts(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getSyncCursor: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiSyncCursor in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getSyncCursor(
-                    userDid: FfiConverterString.lift(userDid)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFISyncCursor.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        setSyncCursor: { (
-            uniffiHandle: UInt64,
-            userDid: RustBuffer,
-            cursor: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.setSyncCursor(
-                    userDid: FfiConverterString.lift(userDid),
-                    cursor: FfiConverterTypeFFISyncCursor.lift(cursor)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        setGroupState: { (
-            uniffiHandle: UInt64,
-            state: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.setGroupState(
-                    state: FfiConverterTypeFFIGroupState.lift(state)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getGroupState: { (
-            uniffiHandle: UInt64,
-            groupId: RustBuffer,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiGroupState? in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getGroupState(
-                    groupId: FfiConverterString.lift(groupId)
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFFIGroupState.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        deleteGroupState: { (
-            uniffiHandle: UInt64,
-            groupId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.deleteGroupState(
-                    groupId: FfiConverterString.lift(groupId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        getRecoveryState: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> FfiPersistedRecoveryState in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.getRecoveryState(
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterTypeFFIPersistedRecoveryState.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        setRecoveryBackoff: { (
-            uniffiHandle: UInt64,
-            entry: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.setRecoveryBackoff(
-                    entry: FfiConverterTypeFFIPersistedRecoveryBackoff.lift(entry)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearRecoveryBackoff: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearRecoveryBackoff(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        setLastGlobalRejoinAttemptAt: { (
-            uniffiHandle: UInt64,
-            atMs: Int64,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.setLastGlobalRejoinAttemptAt(
-                    atMs: FfiConverterInt64.lift(atMs)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        markPendingLocalDelete: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            groupIdHex: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.markPendingLocalDelete(
-                    conversationId: FfiConverterString.lift(conversationId),
-                    groupIdHex: FfiConverterOptionString.lift(groupIdHex)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        clearPendingLocalDelete: { (
-            uniffiHandle: UInt64,
-            conversationId: RustBuffer,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.clearPendingLocalDelete(
-                    conversationId: FfiConverterString.lift(conversationId)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        listPendingLocalDeletes: { (
-            uniffiHandle: UInt64,
-            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws -> [FfiPendingLocalDelete] in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.listPendingLocalDeletes(
-                )
-            }
-
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceTypeFFIPendingLocalDelete.lower($0) }
-            uniffiTraitInterfaceCallWithError(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn,
-                lowerError: FfiConverterTypeOrchestratorBridgeError.lower
-            )
-        },
-        uniffiFree: { (uniffiHandle: UInt64) in
-            let result = try? FfiConverterCallbackInterfaceOrchestratorStorageCallback.handleMap.remove(handle: uniffiHandle)
-            if result == nil {
-                print("Uniffi callback interface OrchestratorStorageCallback: handle missing in uniffiFree")
-            }
-        }
-    )
-}
-
-private func uniffiCallbackInitOrchestratorStorageCallback() {
-    uniffi_catbird_mls_fn_init_callback_vtable_orchestratorstoragecallback(&UniffiCallbackInterfaceOrchestratorStorageCallback.vtable)
-}
-
-// FfiConverter protocol for callback interfaces
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private enum FfiConverterCallbackInterfaceOrchestratorStorageCallback {
-    fileprivate static var handleMap = UniffiHandleMap<OrchestratorStorageCallback>()
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-extension FfiConverterCallbackInterfaceOrchestratorStorageCallback: FfiConverter {
-    typealias SwiftType = OrchestratorStorageCallback
-    typealias FfiType = UInt64
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lift(_ handle: UInt64) throws -> SwiftType {
-        try handleMap.get(handle: handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func lower(_ v: SwiftType) -> UInt64 {
-        return handleMap.insert(obj: v)
-    }
-
-    #if swift(>=5.8)
-        @_documentation(visibility: private)
-    #endif
-    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(v))
-    }
-}
-
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
@@ -19897,30 +11021,6 @@ private struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt32.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionInt32: FfiConverterRustBuffer {
-    typealias SwiftType = Int32?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterInt32.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterInt32.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -19977,30 +11077,6 @@ private struct FfiConverterOptionInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionBool: FfiConverterRustBuffer {
-    typealias SwiftType = Bool?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterBool.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterBool.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
 private struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -20049,8 +11125,8 @@ private struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeChatMessage: FfiConverterRustBuffer {
-    typealias SwiftType = ChatMessage?
+private struct FfiConverterOptionTypePlatformChangeObserver: FfiConverterRustBuffer {
+    typealias SwiftType = PlatformChangeObserver?
 
     static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -20058,13 +11134,13 @@ private struct FfiConverterOptionTypeChatMessage: FfiConverterRustBuffer {
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterTypeChatMessage.write(value, into: &buf)
+        FfiConverterTypePlatformChangeObserver.write(value, into: &buf)
     }
 
     static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterTypeChatMessage.read(from: &buf)
+        case 1: return try FfiConverterTypePlatformChangeObserver.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -20073,8 +11149,8 @@ private struct FfiConverterOptionTypeChatMessage: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeCleanChatSigningAuthorityFfi: FfiConverterRustBuffer {
-    typealias SwiftType = CleanChatSigningAuthorityFfi?
+private struct FfiConverterOptionTypePushFetchTransport: FfiConverterRustBuffer {
+    typealias SwiftType = PushFetchTransport?
 
     static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -20082,13 +11158,13 @@ private struct FfiConverterOptionTypeCleanChatSigningAuthorityFfi: FfiConverterR
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterTypeCleanChatSigningAuthorityFfi.write(value, into: &buf)
+        FfiConverterTypePushFetchTransport.write(value, into: &buf)
     }
 
     static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterTypeCleanChatSigningAuthorityFfi.read(from: &buf)
+        case 1: return try FfiConverterTypePushFetchTransport.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -20121,8 +11197,8 @@ private struct FfiConverterOptionTypeCommitMetadataInfo: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeCurrentMetadataInfo: FfiConverterRustBuffer {
-    typealias SwiftType = CurrentMetadataInfo?
+private struct FfiConverterOptionTypeFetchedMetadataSnapshot: FfiConverterRustBuffer {
+    typealias SwiftType = FetchedMetadataSnapshot?
 
     static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -20130,181 +11206,13 @@ private struct FfiConverterOptionTypeCurrentMetadataInfo: FfiConverterRustBuffer
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterTypeCurrentMetadataInfo.write(value, into: &buf)
+        FfiConverterTypeFetchedMetadataSnapshot.write(value, into: &buf)
     }
 
     static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterTypeCurrentMetadataInfo.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFIConversationState: FfiConverterRustBuffer {
-    typealias SwiftType = FfiConversationState?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIConversationState.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIConversationState.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFIConversationView: FfiConverterRustBuffer {
-    typealias SwiftType = FfiConversationView?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIConversationView.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIConversationView.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFIGroupState: FfiConverterRustBuffer {
-    typealias SwiftType = FfiGroupState?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIGroupState.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIGroupState.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFIMessage: FfiConverterRustBuffer {
-    typealias SwiftType = FfiMessage?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIMessage.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIMessage.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFIQuarantineState: FfiConverterRustBuffer {
-    typealias SwiftType = FfiQuarantineState?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIQuarantineState.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIQuarantineState.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFISequencerReceipt: FfiConverterRustBuffer {
-    typealias SwiftType = FfiSequencerReceipt?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFISequencerReceipt.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFISequencerReceipt.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeGroupConfig: FfiConverterRustBuffer {
-    typealias SwiftType = GroupConfig?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeGroupConfig.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeGroupConfig.read(from: &buf)
+        case 1: return try FfiConverterTypeFetchedMetadataSnapshot.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -20337,6 +11245,30 @@ private struct FfiConverterOptionTypeGroupInvitationReference: FfiConverterRustB
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeGroupMetadataRow: FfiConverterRustBuffer {
+    typealias SwiftType = GroupMetadataRow?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeGroupMetadataRow.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeGroupMetadataRow.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeRequestIntroductionMetadata: FfiConverterRustBuffer {
     typealias SwiftType = RequestIntroductionMetadata?
 
@@ -20353,6 +11285,30 @@ private struct FfiConverterOptionTypeRequestIntroductionMetadata: FfiConverterRu
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeRequestIntroductionMetadata.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeSpaceAvatarPointer: FfiConverterRustBuffer {
+    typealias SwiftType = SpaceAvatarPointer?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSpaceAvatarPointer.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSpaceAvatarPointer.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -20385,54 +11341,6 @@ private struct FfiConverterOptionTypeChatV2RecoveryRung: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionTypeFFIConversationRecoveryState: FfiConverterRustBuffer {
-    typealias SwiftType = FfiConversationRecoveryState?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIConversationRecoveryState.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIConversationRecoveryState.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionTypeFFIDeliveryStatus: FfiConverterRustBuffer {
-    typealias SwiftType = FfiDeliveryStatus?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeFFIDeliveryStatus.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeFFIDeliveryStatus.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
 private struct FfiConverterOptionTypeRequestPreview: FfiConverterRustBuffer {
     typealias SwiftType = RequestPreview?
 
@@ -20457,103 +11365,6 @@ private struct FfiConverterOptionTypeRequestPreview: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterOptionCallbackInterfaceOrchestratorEventCallback: FfiConverterRustBuffer {
-    typealias SwiftType = OrchestratorEventCallback?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterCallbackInterfaceOrchestratorEventCallback.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterCallbackInterfaceOrchestratorEventCallback.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
-    typealias SwiftType = [String]?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterSequenceString.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterSequenceString.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterOptionSequenceData: FfiConverterRustBuffer {
-    typealias SwiftType = [Data]?
-
-    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterSequenceData.write(value, into: &buf)
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterSequenceData.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
-    typealias SwiftType = [Float]
-
-    static func write(_ value: [Float], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterFloat.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Float] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [Float]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterFloat.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
 private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -20571,31 +11382,6 @@ private struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterString.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceData: FfiConverterRustBuffer {
-    typealias SwiftType = [Data]
-
-    static func write(_ value: [Data], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterData.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Data] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [Data]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterData.read(from: &buf))
         }
         return seq
     }
@@ -20629,23 +11415,23 @@ private struct FfiConverterSequenceTypeAddProposalInfo: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeChatMessage: FfiConverterRustBuffer {
-    typealias SwiftType = [ChatMessage]
+private struct FfiConverterSequenceTypeAuthorizedPeerDeviceKey: FfiConverterRustBuffer {
+    typealias SwiftType = [AuthorizedPeerDeviceKey]
 
-    static func write(_ value: [ChatMessage], into buf: inout [UInt8]) {
+    static func write(_ value: [AuthorizedPeerDeviceKey], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeChatMessage.write(item, into: &buf)
+            FfiConverterTypeAuthorizedPeerDeviceKey.write(item, into: &buf)
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ChatMessage] {
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AuthorizedPeerDeviceKey] {
         let len: Int32 = try readInt(&buf)
-        var seq = [ChatMessage]()
+        var seq = [AuthorizedPeerDeviceKey]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeChatMessage.read(from: &buf))
+            try seq.append(FfiConverterTypeAuthorizedPeerDeviceKey.read(from: &buf))
         }
         return seq
     }
@@ -20679,23 +11465,23 @@ private struct FfiConverterSequenceTypeChatV2Capability: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeConversation: FfiConverterRustBuffer {
-    typealias SwiftType = [Conversation]
+private struct FfiConverterSequenceTypeConversationRow: FfiConverterRustBuffer {
+    typealias SwiftType = [ConversationRow]
 
-    static func write(_ value: [Conversation], into buf: inout [UInt8]) {
+    static func write(_ value: [ConversationRow], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeConversation.write(item, into: &buf)
+            FfiConverterTypeConversationRow.write(item, into: &buf)
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Conversation] {
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ConversationRow] {
         let len: Int32 = try readInt(&buf)
-        var seq = [Conversation]()
+        var seq = [ConversationRow]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeConversation.read(from: &buf))
+            try seq.append(FfiConverterTypeConversationRow.read(from: &buf))
         }
         return seq
     }
@@ -20704,448 +11490,23 @@ private struct FfiConverterSequenceTypeConversation: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeDirectRequestView: FfiConverterRustBuffer {
-    typealias SwiftType = [DirectRequestView]
+private struct FfiConverterSequenceTypeFetchedPushEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [FetchedPushEntry]
 
-    static func write(_ value: [DirectRequestView], into buf: inout [UInt8]) {
+    static func write(_ value: [FetchedPushEntry], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeDirectRequestView.write(item, into: &buf)
+            FfiConverterTypeFetchedPushEntry.write(item, into: &buf)
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DirectRequestView] {
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FetchedPushEntry] {
         let len: Int32 = try readInt(&buf)
-        var seq = [DirectRequestView]()
+        var seq = [FetchedPushEntry]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeDirectRequestView.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIConversationView: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiConversationView]
-
-    static func write(_ value: [FfiConversationView], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIConversationView.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiConversationView] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiConversationView]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIConversationView.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIDeliveryStatusPair: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiDeliveryStatusPair]
-
-    static func write(_ value: [FfiDeliveryStatusPair], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIDeliveryStatusPair.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiDeliveryStatusPair] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiDeliveryStatusPair]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIDeliveryStatusPair.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIDeviceInfo: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiDeviceInfo]
-
-    static func write(_ value: [FfiDeviceInfo], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIDeviceInfo.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiDeviceInfo] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiDeviceInfo]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIDeviceInfo.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIEngineEvent: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiEngineEvent]
-
-    static func write(_ value: [FfiEngineEvent], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIEngineEvent.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiEngineEvent] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiEngineEvent]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIEngineEvent.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIIncomingEnvelope: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiIncomingEnvelope]
-
-    static func write(_ value: [FfiIncomingEnvelope], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIIncomingEnvelope.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiIncomingEnvelope] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiIncomingEnvelope]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIIncomingEnvelope.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIKeyPackageRef: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiKeyPackageRef]
-
-    static func write(_ value: [FfiKeyPackageRef], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIKeyPackageRef.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiKeyPackageRef] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiKeyPackageRef]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIKeyPackageRef.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFILabyrinthHeader: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiLabyrinthHeader]
-
-    static func write(_ value: [FfiLabyrinthHeader], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFILabyrinthHeader.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthHeader] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiLabyrinthHeader]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFILabyrinthHeader.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIMemberView: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiMemberView]
-
-    static func write(_ value: [FfiMemberView], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIMemberView.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiMemberView] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiMemberView]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIMemberView.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIMessage: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiMessage]
-
-    static func write(_ value: [FfiMessage], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIMessage.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiMessage] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiMessage]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIMessage.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIPendingLocalDelete: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiPendingLocalDelete]
-
-    static func write(_ value: [FfiPendingLocalDelete], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIPendingLocalDelete.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPendingLocalDelete] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiPendingLocalDelete]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIPendingLocalDelete.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFIPersistedRecoveryBackoff: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiPersistedRecoveryBackoff]
-
-    static func write(_ value: [FfiPersistedRecoveryBackoff], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFIPersistedRecoveryBackoff.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiPersistedRecoveryBackoff] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiPersistedRecoveryBackoff]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFIPersistedRecoveryBackoff.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFFISequencerReceipt: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiSequencerReceipt]
-
-    static func write(_ value: [FfiSequencerReceipt], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFFISequencerReceipt.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiSequencerReceipt] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiSequencerReceipt]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFFISequencerReceipt.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFfiLabyrinthDropped: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiLabyrinthDropped]
-
-    static func write(_ value: [FfiLabyrinthDropped], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiLabyrinthDropped.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthDropped] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiLabyrinthDropped]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFfiLabyrinthDropped.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFfiLabyrinthExcludedMember: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiLabyrinthExcludedMember]
-
-    static func write(_ value: [FfiLabyrinthExcludedMember], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiLabyrinthExcludedMember.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthExcludedMember] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiLabyrinthExcludedMember]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFfiLabyrinthExcludedMember.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFfiLabyrinthMessage: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiLabyrinthMessage]
-
-    static func write(_ value: [FfiLabyrinthMessage], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiLabyrinthMessage.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthMessage] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiLabyrinthMessage]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFfiLabyrinthMessage.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFfiLabyrinthQuarantined: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiLabyrinthQuarantined]
-
-    static func write(_ value: [FfiLabyrinthQuarantined], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiLabyrinthQuarantined.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthQuarantined] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiLabyrinthQuarantined]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFfiLabyrinthQuarantined.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeFfiLabyrinthRedacted: FfiConverterRustBuffer {
-    typealias SwiftType = [FfiLabyrinthRedacted]
-
-    static func write(_ value: [FfiLabyrinthRedacted], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeFfiLabyrinthRedacted.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiLabyrinthRedacted] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [FfiLabyrinthRedacted]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeFfiLabyrinthRedacted.read(from: &buf))
+            try seq.append(FfiConverterTypeFetchedPushEntry.read(from: &buf))
         }
         return seq
     }
@@ -21179,56 +11540,6 @@ private struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuf
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeKeyPackageData: FfiConverterRustBuffer {
-    typealias SwiftType = [KeyPackageData]
-
-    static func write(_ value: [KeyPackageData], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeKeyPackageData.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [KeyPackageData] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [KeyPackageData]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeKeyPackageData.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeKeyPackageResult: FfiConverterRustBuffer {
-    typealias SwiftType = [KeyPackageResult]
-
-    static func write(_ value: [KeyPackageResult], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeKeyPackageResult.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [KeyPackageResult] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [KeyPackageResult]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeKeyPackageResult.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
 private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer {
     typealias SwiftType = [MemberCredential]
 
@@ -21254,23 +11565,23 @@ private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypeParticipant: FfiConverterRustBuffer {
-    typealias SwiftType = [Participant]
+private struct FfiConverterSequenceTypeMessageRow: FfiConverterRustBuffer {
+    typealias SwiftType = [MessageRow]
 
-    static func write(_ value: [Participant], into buf: inout [UInt8]) {
+    static func write(_ value: [MessageRow], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypeParticipant.write(item, into: &buf)
+            FfiConverterTypeMessageRow.write(item, into: &buf)
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Participant] {
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MessageRow] {
         let len: Int32 = try readInt(&buf)
-        var seq = [Participant]()
+        var seq = [MessageRow]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeParticipant.read(from: &buf))
+            try seq.append(FfiConverterTypeMessageRow.read(from: &buf))
         }
         return seq
     }
@@ -21279,48 +11590,23 @@ private struct FfiConverterSequenceTypeParticipant: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
-private struct FfiConverterSequenceTypePendingProposalDetail: FfiConverterRustBuffer {
-    typealias SwiftType = [PendingProposalDetail]
+private struct FfiConverterSequenceTypePlatformHttpHeader: FfiConverterRustBuffer {
+    typealias SwiftType = [PlatformHttpHeader]
 
-    static func write(_ value: [PendingProposalDetail], into buf: inout [UInt8]) {
+    static func write(_ value: [PlatformHttpHeader], into buf: inout [UInt8]) {
         let len = Int32(value.count)
         writeInt(&buf, len)
         for item in value {
-            FfiConverterTypePendingProposalDetail.write(item, into: &buf)
+            FfiConverterTypePlatformHttpHeader.write(item, into: &buf)
         }
     }
 
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PendingProposalDetail] {
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PlatformHttpHeader] {
         let len: Int32 = try readInt(&buf)
-        var seq = [PendingProposalDetail]()
+        var seq = [PlatformHttpHeader]()
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
-            try seq.append(FfiConverterTypePendingProposalDetail.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-private struct FfiConverterSequenceTypeProposalRef: FfiConverterRustBuffer {
-    typealias SwiftType = [ProposalRef]
-
-    static func write(_ value: [ProposalRef], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterTypeProposalRef.write(item, into: &buf)
-        }
-    }
-
-    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProposalRef] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [ProposalRef]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            try seq.append(FfiConverterTypeProposalRef.read(from: &buf))
+            try seq.append(FfiConverterTypePlatformHttpHeader.read(from: &buf))
         }
         return seq
     }
@@ -21346,6 +11632,31 @@ private struct FfiConverterSequenceTypeRemoveProposalInfo: FfiConverterRustBuffe
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeRemoveProposalInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeRequestRow: FfiConverterRustBuffer {
+    typealias SwiftType = [RequestRow]
+
+    static func write(_ value: [RequestRow], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRequestRow.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RequestRow] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RequestRow]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeRequestRow.read(from: &buf))
         }
         return seq
     }
@@ -21490,6 +11801,17 @@ public func uniffiForeignFutureHandleCountCatbirdMls() -> Int {
 }
 
 /**
+ * Compute `sha256(normalized_did)` (64 lowercase hex chars) for `<did_hash>.db` and Keychain keys (`I8`).
+ */
+public func accountDidHashHex(accountDid: String) throws -> String {
+    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_catbird_mls_fn_func_account_did_hash_hex(
+            FfiConverterString.lower(accountDid), $0
+        )
+    })
+}
+
+/**
  * Builds the exact MLS BasicCredential identity for a DID and device.
  *
  * Exposed so no platform hand-concatenates it. The identity is compared
@@ -21579,14 +11901,6 @@ public func chatV2ValidateIdentifier(kind: ChatV2IdentifierKind, value: String) 
     }
 }
 
-public func decodeCleanChatBlob(responseBytes: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeCleanChatTransportFfiError.lift) {
-        uniffi_catbird_mls_fn_func_decode_clean_chat_blob(
-            FfiConverterData.lower(responseBytes), $0
-        )
-    })
-}
-
 /**
  * Strictly decode one generated clean-chat XRPC error body and return its
  * canonical generated JSON for the platform adapter.
@@ -21614,36 +11928,18 @@ public func decodeCleanChatResponse(operation: CleanChatOperationFfi, responseJs
 }
 
 /**
- * Decode Opus-in-OGG back to 16-bit LE mono PCM at 48kHz.
- * iOS can't play OGG natively, so this decodes for AVAudioPlayer.
- * This is a pure function — no bridge or MLS context needed.
+ * Pure deterministic check of `I15` Spaces capability + OAuth scopes.
  */
-public func ffiDecodeOpusToPcm(opusData: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-        uniffi_catbird_mls_fn_func_ffi_decode_opus_to_pcm(
-            FfiConverterData.lower(opusData), $0
-        )
-    })
-}
-
-/**
- * Encode PCM audio to Opus, extract waveform, encrypt blob.
- * This is a pure function — no bridge or MLS context needed.
- */
-public func ffiPrepareVoiceMessage(pcmPath: String, sampleRate: UInt32) throws -> FfiVoicePrepareResult {
-    return try FfiConverterTypeFFIVoicePrepareResult.lift(rustCallWithError(FfiConverterTypeOrchestratorBridgeError.lift) {
-        uniffi_catbird_mls_fn_func_ffi_prepare_voice_message(
-            FfiConverterString.lower(pcmPath),
-            FfiConverterUInt32.lower(sampleRate), $0
+public func evaluateSpacesEligibility(input: SpacesEligibilityInput) -> SpacesEligibilityStatus {
+    return try! FfiConverterTypeSpacesEligibilityStatus.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_evaluate_spaces_eligibility(
+            FfiConverterTypeSpacesEligibilityInput.lower(input), $0
         )
     })
 }
 
 /**
  * Returns the build identifier for this FFI version.
- *
- * Call this at app startup in both main app and NSE to verify both processes
- * are using the same FFI binary. Log mismatches as errors.
  *
  * Format: "mls-ffi-{version}-{build_timestamp}"
  */
@@ -21655,225 +11951,10 @@ public func getFfiBuildId() -> String {
 
 /**
  * Returns detailed build information for diagnostics.
- *
- * Includes:
- * - Version from Cargo.toml
- * - Build timestamp (if set during build)
- * - SQLCipher pragma settings (for verification)
  */
 public func getFfiBuildInfo() -> String {
     return try! FfiConverterString.lift(try! rustCall {
         uniffi_catbird_mls_fn_func_get_ffi_build_info($0)
-    })
-}
-
-/**
- * Classify a serialized KeyPackage against an expected DID and, when
- * available, the DID-resolved set of authorized MLS signing keys.
- */
-public func mlsClassifyKeyPackageBinding(expectedDid: String, keyPackageBytes: Data, authorizedSignatureKeys: [Data]?) -> FfiKeyPackageBindingClassification {
-    return try! FfiConverterTypeFfiKeyPackageBindingClassification.lift(try! rustCall {
-        uniffi_catbird_mls_fn_func_mls_classify_key_package_binding(
-            FfiConverterString.lower(expectedDid),
-            FfiConverterData.lower(keyPackageBytes),
-            FfiConverterOptionSequenceData.lower(authorizedSignatureKeys), $0
-        )
-    })
-}
-
-/**
- * Classify an MLS processing error using the same Layer-3 peer-bad rules the
- * orchestrator applies before it increments quarantine-trigger counters.
- */
-public func mlsClassifyPeerBadError(errorKind: FfiMlsErrorKind, errorMessage: String, localEpoch: UInt64?, messageEpoch: UInt64) -> FfiPeerBadErrorClassification {
-    return try! FfiConverterTypeFfiPeerBadErrorClassification.lift(try! rustCall {
-        uniffi_catbird_mls_fn_func_mls_classify_peer_bad_error(
-            FfiConverterTypeFfiMlsErrorKind.lower(errorKind),
-            FfiConverterString.lower(errorMessage),
-            FfiConverterOptionUInt64.lower(localEpoch),
-            FfiConverterUInt64.lower(messageEpoch), $0
-        )
-    })
-}
-
-/**
- * Compute the hash reference for a serialized KeyPackage
- * Accepts either an MlsMessage-wrapped KeyPackage or raw KeyPackage bytes
- * This is useful when you need to compute a hash from KeyPackage bytes received from the server
- */
-public func mlsComputeKeyPackageHash(keyPackageBytes: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_compute_key_package_hash(
-            FfiConverterData.lower(keyPackageBytes), $0
-        )
-    })
-}
-
-/**
- * Decrypt an avatar blob back into raw image bytes.
- *
- * Uses domain-separated AAD (appends `b"avatar"`).
- */
-public func mlsDecryptAvatarBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, ciphertext: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_decrypt_avatar_blob(
-            FfiConverterData.lower(key),
-            FfiConverterString.lower(groupIdHex),
-            FfiConverterUInt64.lower(epoch),
-            FfiConverterUInt64.lower(metadataVersion),
-            FfiConverterData.lower(ciphertext), $0
-        )
-    })
-}
-
-/**
- * Decrypt a group metadata blob back into JSON.
- *
- * - `key`: 32-byte symmetric key derived from the MLS epoch exporter.
- * - `group_id_hex`: Hex-encoded MLS group ID (used in AAD construction).
- * - `epoch`: MLS epoch number (used in AAD construction).
- * - `metadata_version`: Monotonic metadata version counter (used in AAD).
- * - `ciphertext`: Encrypted blob: `nonce (12) || ciphertext || tag (16)`.
- *
- * Returns JSON-encoded `GroupMetadataV1`.
- */
-public func mlsDecryptMetadataBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, ciphertext: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_decrypt_metadata_blob(
-            FfiConverterData.lower(key),
-            FfiConverterString.lower(groupIdHex),
-            FfiConverterUInt64.lower(epoch),
-            FfiConverterUInt64.lower(metadataVersion),
-            FfiConverterData.lower(ciphertext), $0
-        )
-    })
-}
-
-/**
- * Encrypt raw avatar image bytes using ChaCha20-Poly1305.
- *
- * Uses domain-separated AAD (appends `b"avatar"`) to prevent confusion
- * with metadata blobs encrypted under the same key.
- */
-public func mlsEncryptAvatarBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, avatarBytes: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_encrypt_avatar_blob(
-            FfiConverterData.lower(key),
-            FfiConverterString.lower(groupIdHex),
-            FfiConverterUInt64.lower(epoch),
-            FfiConverterUInt64.lower(metadataVersion),
-            FfiConverterData.lower(avatarBytes), $0
-        )
-    })
-}
-
-/**
- * Encrypt a group metadata JSON blob using ChaCha20-Poly1305.
- *
- * - `key`: 32-byte symmetric key derived from the MLS epoch exporter.
- * - `group_id_hex`: Hex-encoded MLS group ID (used in AAD construction).
- * - `epoch`: MLS epoch number (used in AAD construction).
- * - `metadata_version`: Monotonic metadata version counter (used in AAD).
- * - `metadata_json`: JSON-encoded `GroupMetadataV1` payload.
- *
- * Returns the encrypted blob: `nonce (12) || ciphertext || tag (16)`.
- */
-public func mlsEncryptMetadataBlob(key: Data, groupIdHex: String, epoch: UInt64, metadataVersion: UInt64, metadataJson: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_encrypt_metadata_blob(
-            FfiConverterData.lower(key),
-            FfiConverterString.lower(groupIdHex),
-            FfiConverterUInt64.lower(epoch),
-            FfiConverterUInt64.lower(metadataVersion),
-            FfiConverterData.lower(metadataJson), $0
-        )
-    })
-}
-
-/**
- * Extract the credential identity from a serialized KeyPackage
- * This returns the identity string (e.g., "did:plc:xxx" or "did:plc:xxx#deviceUUID")
- * embedded in the key package's leaf node credential.
- *
- * This is useful for deduplicating key packages by device on the client side.
- */
-public func mlsExtractKeyPackageIdentity(keyPackageBytes: Data) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_extract_key_package_identity(
-            FfiConverterData.lower(keyPackageBytes), $0
-        )
-    })
-}
-
-/**
- * Extract the MLS leaf signature algorithm from a serialized KeyPackage.
- *
- * Returns a normalized lowercase algorithm label (e.g. "ed25519", "p256").
- */
-public func mlsExtractKeyPackageSignatureAlgorithm(keyPackageBytes: Data) throws -> String {
-    return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_extract_key_package_signature_algorithm(
-            FfiConverterData.lower(keyPackageBytes), $0
-        )
-    })
-}
-
-/**
- * Extract the MLS leaf signature public key from a serialized KeyPackage.
- *
- * The returned key is the device key used to sign MLS leaf nodes/commits.
- */
-public func mlsExtractKeyPackageSignaturePublicKey(keyPackageBytes: Data) throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_extract_key_package_signature_public_key(
-            FfiConverterData.lower(keyPackageBytes), $0
-        )
-    })
-}
-
-/**
- * Generate a random Pre-Shared Key (PSK) for external commit authentication
- * Returns 32 random bytes (256 bits) suitable for use as a PSK
- */
-public func mlsGeneratePsk() throws -> Data {
-    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
-        uniffi_catbird_mls_fn_func_mls_generate_psk($0)
-    })
-}
-
-/**
- * Hash a Pre-Shared Key (PSK) using SHA256
- * Returns a hex-encoded string (64 characters) that can be used as a PSK identifier
- */
-public func mlsHashPsk(psk: Data) -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_catbird_mls_fn_func_mls_hash_psk(
-            FfiConverterData.lower(psk), $0
-        )
-    })
-}
-
-/**
- * Set the global MLS logger to receive Rust logs in Swift
- * This allows forwarding internal MLS logs to OSLog or other Swift logging systems
- */
-public func mlsSetLogger(logger: MlsLogger) {
-    try! rustCall {
-        uniffi_catbird_mls_fn_func_mls_set_logger(
-            FfiConverterCallbackInterfaceMlsLogger.lower(logger), $0
-        )
-    }
-}
-
-/**
- * Sentinel the caller passes when it has no meaningful server epoch to
- * fence against (mirror of `SKIP_SERVER_EPOCH_FENCE` on the orchestrator
- * side). When `server_epoch == SKIP_SERVER_EPOCH_FENCE`, `confirm_commit`
- * skips the fence check.
- */
-public func mlsSkipServerEpochFence() -> UInt64 {
-    return try! FfiConverterUInt64.lift(try! rustCall {
-        uniffi_catbird_mls_fn_func_mls_skip_server_epoch_fence($0)
     })
 }
 
@@ -21892,25 +11973,39 @@ public func prepareCleanChatRequest(auth: CleanChatAuthContextFfi, operation: Cl
 }
 
 /**
- * The `SecurityStorageCapabilities.version` this build's bridge constructor
- * requires, exposed so platform test suites can pin their hand-declared value
- * against the library they actually ship.
- *
- * TEST-TIME USE ONLY. Production platform code MUST keep declaring a literal
- * version: the declaration is an attestation of which contract the platform
- * has actually implemented, so echoing this value back into
- * `SecurityStorageCapabilities` would make the check compare the library to
- * itself and defeat the gate entirely. The whole point of
- * `validate_security_capabilities` is to refuse a platform whose
- * implementation predates the contract it is being handed.
- *
- * Without this, the constant is `pub(crate)` and absent from the UniFFI
- * surface, so a stale platform literal compiles and unit-tests clean and only
- * fails when the real library rejects bridge construction at app runtime.
+ * Shared synchronous push notification processor (`<= 15 MB`, zero Tokio) for iOS NSE and Android FCM (`Spec §6.2`).
  */
-public func securityStorageCapabilitiesVersion() -> UInt16 {
-    return try! FfiConverterUInt16.lift(try! rustCall {
-        uniffi_catbird_mls_fn_func_security_storage_capabilities_version($0)
+public func processPushNotification(storageRoot: String, accountDidHash: String, keystore: PushKeystore, transport: PushFetchTransport?, wake: PushWakePayload) throws -> NotificationPreview {
+    return try FfiConverterTypeNotificationPreview.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_catbird_mls_fn_func_process_push_notification(
+            FfiConverterString.lower(storageRoot),
+            FfiConverterString.lower(accountDidHash),
+            FfiConverterTypePushKeystore.lower(keystore),
+            FfiConverterOptionTypePushFetchTransport.lower(transport),
+            FfiConverterTypePushWakePayload.lower(wake), $0
+        )
+    })
+}
+
+/**
+ * Returns `true` iff `ciphertext` fits within the 2,200-byte inline push ceiling (`I12`).
+ */
+public func shouldInlinePushCiphertext(ciphertext: Data) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_catbird_mls_fn_func_should_inline_push_ciphertext(
+            FfiConverterData.lower(ciphertext), $0
+        )
+    })
+}
+
+/**
+ * Remove pre-cutover `.sqlite`, `.lease`, and `accounts.json` artifacts from `<storage_root>` (`I8`, `Spec §9 Step 5`).
+ */
+public func wipePreCutoverLocalArtifacts(storageRoot: String) throws -> PreCutoverWipeReport {
+    return try FfiConverterTypePreCutoverWipeReport.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_catbird_mls_fn_func_wipe_pre_cutover_local_artifacts(
+            FfiConverterString.lower(storageRoot), $0
+        )
     })
 }
 
@@ -21930,6 +12025,9 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if uniffi_catbird_mls_checksum_func_account_did_hash_hex() != 1805 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_func_chat_v2_basic_credential() != 19557 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -21945,706 +12043,166 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_func_chat_v2_validate_identifier() != 21313 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_func_decode_clean_chat_blob() != 40562 {
-        return InitializationResult.apiChecksumMismatch
-    }
     if uniffi_catbird_mls_checksum_func_decode_clean_chat_error() != 3689 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_func_decode_clean_chat_response() != 24580 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_func_ffi_decode_opus_to_pcm() != 476 {
+    if uniffi_catbird_mls_checksum_func_evaluate_spaces_eligibility() != 54944 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_func_ffi_prepare_voice_message() != 58454 {
+    if uniffi_catbird_mls_checksum_func_get_ffi_build_id() != 34995 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_func_get_ffi_build_id() != 45475 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_get_ffi_build_info() != 65091 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_classify_key_package_binding() != 11276 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_classify_peer_bad_error() != 55084 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_compute_key_package_hash() != 2576 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_decrypt_avatar_blob() != 5383 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_decrypt_metadata_blob() != 40912 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_encrypt_avatar_blob() != 59185 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_encrypt_metadata_blob() != 58546 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_extract_key_package_identity() != 50674 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_extract_key_package_signature_algorithm() != 7934 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_extract_key_package_signature_public_key() != 51775 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_generate_psk() != 14204 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_hash_psk() != 47817 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_set_logger() != 46705 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_func_mls_skip_server_epoch_fence() != 10918 {
+    if uniffi_catbird_mls_checksum_func_get_ffi_build_info() != 43684 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_func_prepare_clean_chat_request() != 38872 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_func_security_storage_capabilities_version() != 19278 {
+    if uniffi_catbird_mls_checksum_func_process_push_notification() != 21863 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_add_participants() != 9190 {
+    if uniffi_catbird_mls_checksum_func_should_inline_push_ciphertext() != 15743 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_cancel_direct_request() != 17369 {
+    if uniffi_catbird_mls_checksum_func_wipe_pre_cutover_local_artifacts() != 17245 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_close_direct_request() != 36774 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_accept_direct_request() != 37426 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_conversations() != 35993 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_account_did() != 57176 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_create_conversation() != 63879 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_account_did_hash() != 6643 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_fetch_new_messages() != 30751 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_entries_up_to() != 42076 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_get_direct_request_delivery_enabled() != 19105 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_check_spaces_eligibility() != 37495 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_get_group_invitation_reference() != 60283 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_complete_otc_pairing() != 3518 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_leave_conversation() != 6136 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_create_group() != 7620 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_list_direct_request_views() != 8634 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_decline_direct_request() != 39167 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_messages() != 46800 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_enroll_device() != 1871 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_refresh_request_preview() != 16960 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_get_group_metadata() != 6138 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_remove_participants() != 39550 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_handle_darwin_push_wakeup() != 14622 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_resume_direct_request() != 1547 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_import_conversation_history() != 55518 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_send_message() != 32396 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_initiate_otc_pairing() != 26079 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_set_direct_request_delivery_enabled() != 4333 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_is_handle_closed() != 20885 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_shutdown() != 22360 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_labyrinth_status() != 9390 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_start_direct_request() != 51078 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_conversations() != 13709 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_sync() != 61177 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_messages() != 5959 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_update_cursor() != 30182 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_requests() != 27470 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdclientbridge_user_did() != 20723 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_pre_cutover_wipe_report() != 62956 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_add_members() != 1237 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_prepare_for_background() != 8843 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_add_members_async() != 21247 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_register_passkey_prf() != 59933 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_add_members_with_aad() != 1815 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_remove_group_member() != 53894 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_add_members_with_metadata() != 60117 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_restore_with_recovery_code() != 46957 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_check_suspended() != 40714 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_resume_from_background() != 10481 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_clear_content_root_key() != 23113 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_labyrinth_device() != 44837 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_clear_pending_commit() != 5572 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_send_message() != 55190 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_commit_pending_proposals() != 22234 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_setup_recovery_code() != 11225 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_compute_key_package_hash() != 45775 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sign_out_and_wipe() != 8292 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_compute_message_hmac() != 11875 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_update_group_metadata() != 6891 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_confirm_commit() != 55382 {
+    if uniffi_catbird_mls_checksum_method_platformchangeobserver_on_change() != 43954 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_external_commit() != 33296 {
+    if uniffi_catbird_mls_checksum_method_platformkeystore_load_or_create_db_key() != 10141 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_external_commit_with_psk() != 40677 {
+    if uniffi_catbird_mls_checksum_method_platformkeystore_load_signature_keypair() != 4326 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_group() != 18612 {
+    if uniffi_catbird_mls_checksum_method_platformkeystore_store_signature_keypair() != 14950 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_group_async() != 52754 {
+    if uniffi_catbird_mls_checksum_method_platformkeystore_delete_account_keys() != 6547 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_group_dispatch() != 36893 {
+    if uniffi_catbird_mls_checksum_method_platformkeystore_load_cached_chat_dpop_token() != 24756 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_group_with_id() != 58182 {
+    if uniffi_catbird_mls_checksum_method_platformkeystore_store_cached_chat_dpop_token() != 11934 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_key_package() != 32143 {
+    if uniffi_catbird_mls_checksum_method_platformtransport_execute_http() != 20501 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_key_packages() != 2522 {
+    if uniffi_catbird_mls_checksum_method_platformtransport_connect_realtime_stream() != 26453 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_create_last_resort_key_package() != 2939 {
+    if uniffi_catbird_mls_checksum_method_platformtransport_disconnect_realtime_stream() != 46630 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_debug_check_key_package_hash() != 40218 {
+    if uniffi_catbird_mls_checksum_method_pushfetchtransport_fetch_missing_entries() != 49059 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_debug_group_members() != 56919 {
+    if uniffi_catbird_mls_checksum_method_pushfetchtransport_get_authorized_device_keys() != 40674 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_debug_list_key_package_hashes() != 43604 {
+    if uniffi_catbird_mls_checksum_method_pushkeystore_load_db_key() != 20734 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message() != 56393 {
+    if uniffi_catbird_mls_checksum_method_pushkeystore_load_signature_keypair() != 20856 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message_async() != 34380 {
+    if uniffi_catbird_mls_checksum_method_pushkeystore_load_cached_chat_dpop_token() != 11225 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_mlscontext_decrypt_message_payload() != 61226 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_delete_group() != 8672 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_delete_key_package_bundles() != 40433 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_discard_incoming_commit() != 9518 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_discard_pending() != 7539 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_discard_pending_external_join() != 45091 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_encrypt_message() != 42586 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_encrypt_message_async() != 27448 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_encrypt_message_payload() != 19530 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_epoch_authenticator() != 21054 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_epoch_secret() != 49788 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_group_info() != 7698 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_group_state() != 25462 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_identity_key() != 30521 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_metadata_key() != 3232 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_metadata_key_from_pending() != 65171 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_export_secret() != 18925 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_finalize_epoch_transition() != 35444 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_flush_and_prepare_close() != 26050 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_flush_storage() != 42921 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_confirmation_tag() != 27123 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_current_metadata() != 5665 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_epoch() != 51406 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_group_context_hash() != 63454 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_group_debug_state() != 3494 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_group_member_count() != 41317 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_key_package_bundle_count() != 28432 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_pending_proposal_details() != 747 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_get_tree_hash() != 29005 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_group_exists() != 48856 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_identity_public_key() != 46126 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_import_group_state() != 59918 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_import_identity_key() != 50229 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_interrupt() != 36452 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_is_closed() != 32703 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_launch_checkpoint() != 44708 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_list_pending_proposals() != 22913 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_merge_incoming_commit() != 61702 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_merge_pending_commit() != 30340 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_merge_staged_commit() != 13981 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_process_commit() != 62863 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_process_message() != 40761 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_process_message_async() != 53249 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_process_message_legacy_automerge() != 44615 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_process_welcome() != 6393 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_propose_add_member() != 51512 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_propose_remove_member() != 49065 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_propose_self_remove() != 43383 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_propose_self_update() != 48329 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_remove_members() != 30219 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_remove_members_with_aad() != 52054 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_remove_proposal() != 3317 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_safe_export_secret() != 60710 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_safe_export_secret_from_pending() != 40735 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_self_update() != 39880 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_set_content_root_key() != 29672 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_set_credential_validator() != 10750 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_set_epoch_secret_storage() != 15472 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_set_external_join_authorizer() != 61890 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_set_logger() != 31982 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_set_suspended() != 60875 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_sign_with_identity_key() != 63625 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_stage_commit() != 12424 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_storage_lifecycle_status() != 61806 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_store_proposal() != 50154 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_swap_members() != 32132 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_sync_database() != 29289 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata() != 19771 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata_encrypted() != 40933 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_update_group_metadata_encrypted_with_aad() != 39520 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_validate_group_info_format() != 57471 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_mlscontext_verify_message_hmac() != 32676 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_accept_conversation() != 42256 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members() != 30814 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_add_members_result() != 22800 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_cancel_direct_request() != 39578 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_close_direct_request() != 62385 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_confirm_commit() != 2386 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_create_conversation() != 1210 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_create_group() != 46751 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_debug_wipe_local_group_for_recovery() != 2551 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_decode_opus_to_pcm() != 46696 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_discard_pending() != 1943 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_emergency_close() != 38033 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_conversation_ready() != 3867 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_ensure_device_registered() != 54125 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_epoch_authenticator() != 52890 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_fetch_messages() != 30152 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_fulfill_leaf_recovery() != 30615 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_quarantine_state() != 47830 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_conversation_recovery_state() != 48248 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_direct_request_delivery_enabled() != 21233 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_group_invitation_reference() != 1128 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_get_key_package_stats() != 14268 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_handle_group_reset() != 52429 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_initialize() != 22546 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_initialize_engine() != 25853 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_interrupt_storage() != 40115 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_group() != 10530 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_join_or_rejoin() != 36176 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_archive_status() != 48156 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_clear_archive_reports() != 53397 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_create_recovery_code() != 55022 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_delete_account() != 53128 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_enable_backup() != 48619 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_flush_archive() != 35191 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_import_history() != 50211 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_list_threads() != 27839 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_load_history_page() != 29804 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_propose_repin() != 328 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_repin_peer() != 16050 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_restore_with_recovery_code() != 46432 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_retry_quarantined() != 35706 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_retry_remote_deletion() != 46636 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_revoke_device() != 15568 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_labyrinth_sign_out() != 46632 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_conversation() != 20896 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_leave_group() != 23679 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_conversations() != 53327 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_devices() != 16449 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_list_direct_request_views() != 60350 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_perform_silent_recovery() != 48593 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_clean_chat_signed_request() != 50998 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_for_suspend() != 11343 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_prepare_voice_message() != 64276 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_process_incoming() != 39528 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_process_incoming_message() != 60856 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_process_server_event() != 20677 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_publish_key_package() != 29237 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_reattach_after_suspend() != 41039 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset() != 53737 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_group_reset_outcome() != 53891 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_reset_requested() != 65518 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_record_reset_requested_outcome() != 25351 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_refresh_request_preview() != 5134 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_device() != 60366 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_members() != 36326 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_remove_members_result() != 31740 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_replenish_key_packages_if_needed() != 14347 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_report_unrecoverable_local() != 63696 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_respond_to_welcome_reissue() != 40031 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_resume_direct_request() != 27421 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_resume_from_suspend() != 171 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_run_deferred_recovery() != 32669 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_message() != 21757 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_payload_json() != 24377 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_payload_result_json() != 11680 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_reaction() != 38649 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_send_voice_message() != 34733 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_direct_request_delivery_enabled() != 3122 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_event_callback() != 27441 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_set_store_control_messages() != 51733 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_shutdown() != 64932 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_sign_device_auth_challenge() != 36742 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_stage_commit() != 32523 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_start_direct_request() != 60850 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_startup_reconcile() != 62080 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_storage_lifecycle_status() != 28866 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_swap_members() != 36054 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_sync_with_server() != 17558 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_update_group_metadata_encrypted() != 53135 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorbridge_user_confirmed_manual_reset() != 5441 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_constructor_catbirdclientbridge_new() != 17879 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_constructor_mlscontext_new() != 26721 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_constructor_orchestratorbridge_new() != 39213 {
+    if uniffi_catbird_mls_checksum_constructor_catbirdmlsclient_open() != 52762 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_credentialvalidator_validate_credential() != 26399 {
@@ -22677,244 +12235,17 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_mlslogger_log() != 35731 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_is_authenticated_as() != 27951 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_current_did() != 11398 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_prepared_request() != 22918 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_conversations() != 37768 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_messages() != 12028 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_packages() != 63192 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_key_package_stats() != 52584 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_sync_key_packages() != 7286 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_list_devices() != 48626 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_info() != 7897 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_welcome() != 9001 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_delivery_status() != 62201 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_group_metadata_blob() != 51954 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_labyrinth_request() != 28172 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_labyrinth_pds_enabled() != 55486 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_put_labyrinth_mailbox_keys() != 29703 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_get_labyrinth_mailbox_keys() != 20714 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_delete_labyrinth_mailbox_keys() != 7392 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_labyrinth_space_enabled() != 4102 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorapicallback_submit_labyrinth_space_request() != 39964 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_direct_request_receipt_authority_document() != 45119 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_chat_declaration_authority() != 5598 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_signing_key() != 56185 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_signing_key() != 46305 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_sign_clean_chat_transcript() != 47109 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_delete_signing_key() != 37606 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_mls_did() != 16244 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_mls_did() != 44480 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_store_device_uuid() != 50333 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_device_uuid() != 38649 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_has_credentials() != 46254 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_clear_all() != 21594 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorcredentialcallback_get_authorized_device_keys() != 10106 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantined() != 58743 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_conversation_quarantine_cleared() != 22324 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_recovery_storage_write_failed() != 3158 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_credential_binding_warning() != 36251 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratoreventcallback_on_sequencer_equivocation() != 33784 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_commit_conversation_projection_json() != 17244 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_ensure_conversation_exists() != 24774 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_update_join_info() != 42059 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation() != 53428 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_conversations() != 58388 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_conversations() != 5927 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_conversation_state() != 41822 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_account_exit() != 43369 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_conversation_state() != 10063 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_reset_pending() != 29082 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_adopt_reset_pending_target() != 22899 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_complete_reset_pending() != 24442 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_reset_pending_for_delete() != 59341 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_quarantined() != 11463 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_quarantine() != 5422 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_needs_rejoin() != 38193 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_needs_rejoin() != 49281 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_rejoin_flag() != 33710 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_message() != 41796 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_messages() != 4276 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_message_exists() != 4993 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_pending_message() != 23879 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_remove_pending_message() != 50265 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_store_sequencer_receipt() != 18570 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sequencer_receipts() != 64969 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_sequencer_receipts() != 38235 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_sync_cursor() != 9654 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_sync_cursor() != 31307 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_group_state() != 53691 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_group_state() != 42244 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_delete_group_state() != 19689 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_get_recovery_state() != 25003 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_recovery_backoff() != 17248 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_recovery_backoff() != 42352 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_set_last_global_rejoin_attempt_at() != 36495 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_mark_pending_local_delete() != 59622 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_clear_pending_local_delete() != 58750 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_catbird_mls_checksum_method_orchestratorstoragecallback_list_pending_local_deletes() != 40264 {
-        return InitializationResult.apiChecksumMismatch
-    }
 
+    uniffiCallbackInitPlatformChangeObserver()
+    uniffiCallbackInitPlatformKeyStore()
+    uniffiCallbackInitPlatformTransport()
+    uniffiCallbackInitPushFetchTransport()
+    uniffiCallbackInitPushKeystore()
     uniffiCallbackInitCredentialValidator()
     uniffiCallbackInitEpochSecretStorage()
     uniffiCallbackInitExternalJoinAuthorizer()
     uniffiCallbackInitKeychainAccess()
     uniffiCallbackInitMLSLogger()
-    uniffiCallbackInitOrchestratorAPICallback()
-    uniffiCallbackInitOrchestratorCredentialCallback()
-    uniffiCallbackInitOrchestratorEventCallback()
-    uniffiCallbackInitOrchestratorStorageCallback()
     return InitializationResult.ok
 }()
 
