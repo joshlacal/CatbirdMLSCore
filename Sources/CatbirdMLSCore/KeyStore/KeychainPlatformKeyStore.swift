@@ -201,22 +201,28 @@ public final class KeychainPlatformKeyStore: PlatformKeyStore, PushKeystore, @un
     }
     let account = Self.sigKeyAccount(for: keyId)
     try upsertData(account: account, data: keypairBytes)
-    if let prefixHash = keyId.split(separator: ":").first.map(String.init),
-       prefixHash.count == 64
-    {
-      lock.lock()
-      knownSignatureKeyIdsByAccount[prefixHash, default: []].insert(keyId)
-      lock.unlock()
+    for segment in keyId.split(separator: ":") {
+      let candidate = String(segment).lowercased()
+      if candidate.count == 64 && candidate.allSatisfy(\.isHexDigit) {
+        lock.lock()
+        knownSignatureKeyIdsByAccount[candidate, default: []].insert(keyId)
+        lock.unlock()
+      }
     }
   }
 
   public func deleteAccountKeys(accountDidHash: String) throws {
     try Self.validateDidHash(accountDidHash)
-    deleteAccountItem(account: Self.dbKeyAccount(for: accountDidHash))
-    deleteAccountItem(account: Self.chatDpopAccount(for: accountDidHash))
+    let normalized = accountDidHash.lowercased()
+    deleteAccountItem(account: Self.dbKeyAccount(for: normalized))
+    deleteAccountItem(account: Self.chatDpopAccount(for: normalized))
+    // Deterministic cleanup across cold app restarts where in-memory tracking is empty (`I8`).
+    deleteAccountItem(account: Self.sigKeyAccount(for: "mls-signer:\(normalized)"))
+    deleteAccountItem(account: Self.sigKeyAccount(for: "mls-push-gw-signer:\(normalized)"))
+    deleteAccountItem(account: Self.sigKeyAccount(for: "\(normalized):sig"))
 
     lock.lock()
-    let trackedSigKeys = knownSignatureKeyIdsByAccount.removeValue(forKey: accountDidHash) ?? []
+    let trackedSigKeys = knownSignatureKeyIdsByAccount.removeValue(forKey: normalized) ?? []
     lock.unlock()
     for sigKeyId in trackedSigKeys {
       deleteAccountItem(account: Self.sigKeyAccount(for: sigKeyId))

@@ -570,6 +570,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func acknowledgeEntriesUpTo(conversationId: String, upToSeq: Int64) throws
 
+    func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration
+
     func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus
 
     func completeOtcPairing(sixDigitCode: String) throws -> OtcPairingCompletion
@@ -717,6 +719,16 @@ open class CatbirdMlsClient:
                                                                                     FfiConverterString.lower(conversationId),
                                                                                     FfiConverterInt64.lower(upToSeq), $0)
         }
+    }
+
+    open func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration {
+        return try FfiConverterTypeSignedPushGatewayRegistration.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_build_signed_push_gateway_registration(self.uniffiClonePointer(),
+                                                                                                 FfiConverterString.lower(gatewayUrl),
+                                                                                                 FfiConverterString.lower(appId),
+                                                                                                 FfiConverterString.lower(pushKey),
+                                                                                                 FfiConverterBool.lower(enabled), $0)
+        })
     }
 
     open func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus {
@@ -7479,6 +7491,135 @@ public func FfiConverterTypeRequestRow_lower(_ value: RequestRow) -> RustBuffer 
 }
 
 /**
+ * Signed `blue.catbird.chat.registerPushGateway` payload minted with the enrolled Ed25519
+ * device key (`CATBIRD-CHAT-PUSH-GATEWAY\0 || DAG-CBOR(...)`, `D2`, `M-F06`).
+ */
+public struct SignedPushGatewayRegistration {
+    public var deviceId: String
+    public var keyId: String
+    public var authGeneration: Int64
+    public var gatewayUrl: String
+    public var appId: String
+    public var pushKey: String
+    public var enabled: Bool
+    public var signedAt: String
+    public var signatureBytes: Data
+    public var requestJson: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(deviceId: String, keyId: String, authGeneration: Int64, gatewayUrl: String, appId: String, pushKey: String, enabled: Bool, signedAt: String, signatureBytes: Data, requestJson: String) {
+        self.deviceId = deviceId
+        self.keyId = keyId
+        self.authGeneration = authGeneration
+        self.gatewayUrl = gatewayUrl
+        self.appId = appId
+        self.pushKey = pushKey
+        self.enabled = enabled
+        self.signedAt = signedAt
+        self.signatureBytes = signatureBytes
+        self.requestJson = requestJson
+    }
+}
+
+extension SignedPushGatewayRegistration: Equatable, Hashable {
+    public static func == (lhs: SignedPushGatewayRegistration, rhs: SignedPushGatewayRegistration) -> Bool {
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.keyId != rhs.keyId {
+            return false
+        }
+        if lhs.authGeneration != rhs.authGeneration {
+            return false
+        }
+        if lhs.gatewayUrl != rhs.gatewayUrl {
+            return false
+        }
+        if lhs.appId != rhs.appId {
+            return false
+        }
+        if lhs.pushKey != rhs.pushKey {
+            return false
+        }
+        if lhs.enabled != rhs.enabled {
+            return false
+        }
+        if lhs.signedAt != rhs.signedAt {
+            return false
+        }
+        if lhs.signatureBytes != rhs.signatureBytes {
+            return false
+        }
+        if lhs.requestJson != rhs.requestJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(deviceId)
+        hasher.combine(keyId)
+        hasher.combine(authGeneration)
+        hasher.combine(gatewayUrl)
+        hasher.combine(appId)
+        hasher.combine(pushKey)
+        hasher.combine(enabled)
+        hasher.combine(signedAt)
+        hasher.combine(signatureBytes)
+        hasher.combine(requestJson)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSignedPushGatewayRegistration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SignedPushGatewayRegistration {
+        return
+            try SignedPushGatewayRegistration(
+                deviceId: FfiConverterString.read(from: &buf),
+                keyId: FfiConverterString.read(from: &buf),
+                authGeneration: FfiConverterInt64.read(from: &buf),
+                gatewayUrl: FfiConverterString.read(from: &buf),
+                appId: FfiConverterString.read(from: &buf),
+                pushKey: FfiConverterString.read(from: &buf),
+                enabled: FfiConverterBool.read(from: &buf),
+                signedAt: FfiConverterString.read(from: &buf),
+                signatureBytes: FfiConverterData.read(from: &buf),
+                requestJson: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: SignedPushGatewayRegistration, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterString.write(value.keyId, into: &buf)
+        FfiConverterInt64.write(value.authGeneration, into: &buf)
+        FfiConverterString.write(value.gatewayUrl, into: &buf)
+        FfiConverterString.write(value.appId, into: &buf)
+        FfiConverterString.write(value.pushKey, into: &buf)
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterString.write(value.signedAt, into: &buf)
+        FfiConverterData.write(value.signatureBytes, into: &buf)
+        FfiConverterString.write(value.requestJson, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSignedPushGatewayRegistration_lift(_ buf: RustBuffer) throws -> SignedPushGatewayRegistration {
+    return try FfiConverterTypeSignedPushGatewayRegistration.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSignedPushGatewayRegistration_lower(_ value: SignedPushGatewayRegistration) -> RustBuffer {
+    return FfiConverterTypeSignedPushGatewayRegistration.lower(value)
+}
+
+/**
  * Pointer inside `GroupMetadataV1` to an encrypted group avatar blob stored in
  * `setter_did`'s repo inside the conversation's ATProto Space (`1A`, zero `mls-ds` blobs).
  */
@@ -12326,6 +12467,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_entries_up_to() != 42076 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_build_signed_push_gateway_registration() != 29444 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_check_spaces_eligibility() != 37495 {

@@ -220,6 +220,28 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     XCTAssertThrowsError(try keystore.loadDbKey(accountDidHash: didHash))
   }
 
+  func testColdRestartDeleteAccountKeysWipesEnrolledMlsSignerKeypair() throws {
+    let backend = RecordingKeychainBackend()
+    let serviceName = "blue.catbird.mls.test.coldrestart.\(UUID().uuidString)"
+    let didHash = try MLSAppGroupStorage.accountDidHash(for: "did:plc:coldrestartwipeuser")
+
+    // Process launch #1: Rust CatbirdMlsClient.enroll_device stores mls-signer:<didHash>
+    let keystoreLaunch1 = KeychainPlatformKeyStore(service: serviceName, backend: backend)
+    let signerBytes = Data("{\"public\":[1,2,3],\"private\":[4,5,6]}".utf8)
+    try keystoreLaunch1.storeSignatureKeypair(keyId: "mls-signer:\(didHash)", keypairBytes: signerBytes)
+    _ = try keystoreLaunch1.loadOrCreateDbKey(accountDidHash: didHash)
+    XCTAssertEqual(try keystoreLaunch1.loadSignatureKeypair(keyId: "mls-signer:\(didHash)"), signerBytes)
+
+    // Process launch #2 (cold restart -> empty in-memory knownKeyIdsByAccountHash): sign-out wipe!
+    let keystoreLaunch2 = KeychainPlatformKeyStore(service: serviceName, backend: backend)
+    try keystoreLaunch2.deleteAccountKeys(accountDidHash: didHash)
+    XCTAssertNil(
+      try keystoreLaunch2.loadSignatureKeypair(keyId: "mls-signer:\(didHash)"),
+      "Cold-restart deleteAccountKeys must deterministically wipe mls-signer:<didHash> from Keychain"
+    )
+    XCTAssertThrowsError(try keystoreLaunch2.loadDbKey(accountDidHash: didHash))
+  }
+
   func testI9PrepareForBackgroundClosesSqliteHandleAndResumesCleanly() async throws {
     let backend = RecordingKeychainBackend()
     let keystore = KeychainPlatformKeyStore(

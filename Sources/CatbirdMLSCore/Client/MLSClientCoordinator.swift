@@ -32,6 +32,7 @@ extension EnrollmentReceipt: @unchecked Sendable {}
 extension MemberRole: @unchecked Sendable {}
 extension PlatformChangeEvent: @unchecked Sendable {}
 extension QueuedLabyrinthArchivePayload: @unchecked Sendable {}
+extension SignedPushGatewayRegistration: @unchecked Sendable {}
 
 public enum MLSAppGroupStorage {
   public static let appGroupIdentifier = "group.blue.catbird.shared"
@@ -150,6 +151,112 @@ public enum MLSPushExtensionProcessor {
     qos: .userInitiated,
     attributes: .concurrent
   )
+
+  /// Decodes a canonical `nest` APNs `{"aps": ..., "catbird": {...}}` wake envelope
+  /// (as well as legacy `"payload"` or flat `userInfo` dictionaries) into a `PushWakePayload`.
+  public static func decodePushWakePayload(from userInfo: [AnyHashable: Any]) -> PushWakePayload? {
+    let dict: [String: Any]
+    if let nested = unwrapDictionary(userInfo["catbird"]) {
+      dict = nested
+    } else if let nested = unwrapDictionary(userInfo["payload"]) {
+      dict = nested
+    } else {
+      dict = Dictionary(uniqueKeysWithValues: userInfo.compactMap { k, v in
+        (k as? String).map { ($0, v) }
+      })
+    }
+
+    guard let rawConvo = (dict["conversationId"] as? String)
+            ?? (dict["conversation_id"] as? String)
+            ?? (dict["convo_id"] as? String),
+          let rawHash = (dict["recipientAccountHash"] as? String)
+            ?? (dict["recipient_account_hash"] as? String)
+            ?? (dict["recipient_account"] as? String),
+          !rawConvo.isEmpty,
+          !rawHash.isEmpty
+    else { return nil }
+
+    let kind = (dict["wakeKind"] as? String)
+      ?? (dict["wake_kind"] as? String)
+      ?? (dict["kind"] as? String)
+      ?? (dict["type"] as? String)
+      ?? "application"
+    let generation = parseFlexibleInt64(dict["generation"]) ?? 0
+    let entrySeq = parseFlexibleInt64(dict["entrySeq"])
+      ?? parseFlexibleInt64(dict["entry_seq"])
+      ?? parseFlexibleInt64(dict["seq"])
+      ?? 0
+    let messageId = (dict["messageId"] as? String)
+      ?? (dict["message_id"] as? String)
+      ?? "msg-\(entrySeq)"
+    let senderDid = (dict["senderDid"] as? String) ?? (dict["sender_did"] as? String)
+    let rawCiphertext = (dict["ciphertext"] as? String)
+      ?? (dict["inlineCiphertext"] as? String)
+      ?? (dict["inline_ciphertext"] as? String)
+    let inlineCiphertext = rawCiphertext.flatMap(decodeFlexibleBase64)
+    let fetchRequired: Bool = if let b = dict["fetchRequired"] as? Bool {
+      b
+    } else if let b = dict["fetch_required"] as? Bool {
+      b
+    } else if let s = (dict["fetchRequired"] as? String) ?? (dict["fetch_required"] as? String),
+              let parsed = Bool(s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    {
+      parsed
+    } else {
+      inlineCiphertext == nil
+    }
+
+    return PushWakePayload(
+      kind: kind,
+      conversationId: rawConvo,
+      generation: generation,
+      entrySeq: entrySeq,
+      messageId: messageId,
+      recipientAccountHash: rawHash.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+      fetchRequired: fetchRequired,
+      senderDid: senderDid,
+      inlineCiphertext: inlineCiphertext
+    )
+  }
+
+  private static func unwrapDictionary(_ value: Any?) -> [String: Any]? {
+    if let typed = value as? [String: Any] {
+      return typed
+    }
+    if let anyHashable = value as? [AnyHashable: Any] {
+      return Dictionary(uniqueKeysWithValues: anyHashable.compactMap { k, v in
+        (k as? String).map { ($0, v) }
+      })
+    }
+    if let jsonStr = value as? String,
+       let data = jsonStr.data(using: .utf8),
+       let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    {
+      return parsed
+    }
+    return nil
+  }
+
+  private static func parseFlexibleInt64(_ value: Any?) -> Int64? {
+    if let i64 = value as? Int64 { return i64 }
+    if let i = value as? Int { return Int64(i) }
+    if let num = value as? NSNumber { return num.int64Value }
+    if let str = value as? String { return Int64(str.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    return nil
+  }
+
+  private static func decodeFlexibleBase64(_ raw: String) -> Data? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    if let direct = Data(base64Encoded: trimmed) {
+      return direct
+    }
+    let standard = trimmed
+      .replacingOccurrences(of: "-", with: "+")
+      .replacingOccurrences(of: "_", with: "/")
+    let padded = standard + String(repeating: "=", count: (4 - standard.utf8.count % 4) % 4)
+    return Data(base64Encoded: padded)
+  }
 
   /// Asynchronous entry point for Swift Concurrency callers inside the Notification Service
   /// Extension (`Fault Line 4`, `I10`): hops off Swift's cooperative thread pool onto a dedicated
@@ -475,6 +582,23 @@ public final class MLSClientCoordinator {
     let c = client
     try await runOffMain {
       try c.acknowledgeEntriesUpTo(conversationId: conversationId, upToSeq: upToSeq)
+    }
+  }
+
+  public func buildSignedPushGatewayRegistration(
+    gatewayUrl: String,
+    appId: String,
+    pushKey: String,
+    enabled: Bool
+  ) async throws -> SignedPushGatewayRegistration {
+    let c = client
+    return try await runOffMain {
+      try c.buildSignedPushGatewayRegistration(
+        gatewayUrl: gatewayUrl,
+        appId: appId,
+        pushKey: pushKey,
+        enabled: enabled
+      )
     }
   }
 

@@ -172,4 +172,87 @@ final class PushExtensionIntegrationTests: XCTestCase {
 
     await coordinator.close()
   }
+
+  func testDecodeNestApnsPushWakeEnvelope() throws {
+    let didHash = String(repeating: "a", count: 64)
+    let ciphertext = Data([0x10, 0x20, 0x30, 0x40])
+    // Exact JSON structure produced by nest/catbird/src/services/push/gateway.rs apns_envelope:
+    let apnsUserInfo: [AnyHashable: Any] = [
+      "aps": [
+        "alert": ["body": "New message"],
+        "mutable-content": 1,
+      ],
+      "catbird": [
+        "recipientAccountHash": didHash,
+        "wakeKind": "application",
+        "conversationId": "11111111-2222-4333-8444-555555555555",
+        "generation": 2,
+        "seq": 17,
+        "epoch": 4,
+        "fetchRequired": false,
+        "ciphertext": ciphertext.base64EncodedString(),
+      ] as [String: Any],
+    ]
+
+    let decoded = try XCTUnwrap(MLSPushExtensionProcessor.decodePushWakePayload(from: apnsUserInfo))
+    XCTAssertEqual(decoded.kind, "application")
+    XCTAssertEqual(decoded.conversationId, "11111111-2222-4333-8444-555555555555")
+    XCTAssertEqual(decoded.recipientAccountHash, didHash)
+    XCTAssertEqual(decoded.generation, 2)
+    XCTAssertEqual(decoded.entrySeq, 17)
+    XCTAssertFalse(decoded.fetchRequired)
+    XCTAssertEqual(decoded.inlineCiphertext, ciphertext)
+  }
+
+  func testDecodeCanonicalMlsDsGetEntriesWithPrunedEntry() throws {
+    let rawMls = Data([0xDE, 0xAD, 0xBE, 0xEF])
+    let wireJson = """
+    {
+      "entries": [
+        {
+          "$type": "blue.catbird.chat.defs#applicationEntry",
+          "conversationId": "11111111-2222-4333-8444-555555555555",
+          "entryId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "payloadPruned": true,
+          "receivedAt": "2026-10-31T12:00:00.000Z",
+          "seq": 4
+        },
+        {
+          "$type": "blue.catbird.chat.defs#applicationEntry",
+          "conversationId": "11111111-2222-4333-8444-555555555555",
+          "entryId": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+          "receivedAt": "2026-10-31T12:00:01.000Z",
+          "seq": 5,
+          "signedRequest": {
+            "body": {
+              "actorDid": "did:plc:alice123",
+              "messageId": "cccccccc-dddd-4eee-8fff-000000000000",
+              "prior": { "epoch": 3 },
+              "applicationMessage": {
+                "bytes": { "$bytes": "\(rawMls.base64EncodedString())" },
+                "contentType": "application/mls",
+                "framing": "private"
+              }
+            }
+          }
+        }
+      ],
+      "hasMore": false,
+      "nextAfterSeq": 5
+    }
+    """
+    let bundle = try PetrelPlatformTransport.decodePushGetEntriesBundle(from: Data(wireJson.utf8))
+    XCTAssertEqual(bundle.entries.count, 2)
+
+    XCTAssertEqual(bundle.entries[0].seq, 4)
+    XCTAssertEqual(bundle.entries[0].entryKind, "application")
+    XCTAssertTrue(bundle.entries[0].mlsBytes.isEmpty, "I14 pruned entry must decode to empty mlsBytes")
+
+    XCTAssertEqual(bundle.entries[1].seq, 5)
+    XCTAssertEqual(bundle.entries[1].epoch, 3)
+    XCTAssertEqual(bundle.entries[1].entryKind, "application")
+    XCTAssertEqual(bundle.entries[1].entryId, "cccccccc-dddd-4eee-8fff-000000000000")
+    XCTAssertEqual(bundle.entries[1].senderDid, "did:plc:alice123")
+    XCTAssertEqual(bundle.entries[1].mlsBytes, rawMls)
+  }
 }
