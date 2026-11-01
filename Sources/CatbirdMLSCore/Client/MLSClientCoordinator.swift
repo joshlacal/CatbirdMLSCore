@@ -1,8 +1,9 @@
-@_exported import CatbirdMLS
+@preconcurrency @_exported import CatbirdMLS
 import CoreFoundation
 import Foundation
 import Observation
 
+extension CatbirdMlsClient: @unchecked Sendable {}
 extension ConversationRow: @unchecked Sendable {}
 extension MessageRow: @unchecked Sendable {}
 extension RequestRow: @unchecked Sendable {}
@@ -142,6 +143,38 @@ public enum MLSAppGroupStorage {
 
 public enum MLSPushExtensionProcessor {
   public static let genericFallbackBody = "New encrypted message"
+
+  private static let pushDispatchQueue = DispatchQueue(
+    label: "blue.catbird.mls.nse.ffi",
+    qos: .userInitiated,
+    attributes: .concurrent
+  )
+
+  /// Asynchronous entry point for Swift Concurrency callers inside the Notification Service
+  /// Extension (`Fault Line 4`, `I10`): hops off Swift's cooperative thread pool onto a dedicated
+  /// GCD queue before invoking synchronous Rust FFI + `PushFetchTransport`.
+  public static func processAsync(
+    storageRoot: URL,
+    accountDidHash: String,
+    keystore: PushKeystore,
+    transport: PushFetchTransport?,
+    wake: PushWakePayload,
+    postDarwinNotification: Bool = true
+  ) async -> NotificationPreview {
+    await withCheckedContinuation { continuation in
+      pushDispatchQueue.async {
+        let preview = process(
+          storageRoot: storageRoot,
+          accountDidHash: accountDidHash,
+          keystore: keystore,
+          transport: transport,
+          wake: wake,
+          postDarwinNotification: postDarwinNotification
+        )
+        continuation.resume(returning: preview)
+      }
+    }
+  }
 
   public static func process(
     storageRoot: URL,
@@ -577,6 +610,12 @@ public final class MLSClientCoordinator {
 
   // MARK: - Internal Observers
 
+  nonisolated private static let ffiDispatchQueue = DispatchQueue(
+    label: "blue.catbird.mls.coordinator.ffi",
+    qos: .userInitiated,
+    attributes: .concurrent
+  )
+
   fileprivate func recordPlatformChange(_ event: PlatformChangeEvent) {
     changeRevision &+= 1
     lastChangeEvent = event
@@ -587,7 +626,7 @@ public final class MLSClientCoordinator {
     darwinWakeupCount += 1
     guard !isHandleClosed else { return }
     let c = client
-    Task.detached {
+    Self.ffiDispatchQueue.async {
       try? c.handleDarwinPushWakeup()
     }
   }
@@ -595,9 +634,11 @@ public final class MLSClientCoordinator {
   private func runOffMain<T: Sendable>(
     _ operation: @escaping @Sendable () throws -> T
   ) async throws -> T {
-    try await Task.detached(priority: .userInitiated) {
-      try operation()
-    }.value
+    try await withCheckedThrowingContinuation { continuation in
+      Self.ffiDispatchQueue.async {
+        continuation.resume(with: Result { try operation() })
+      }
+    }
   }
 }
 

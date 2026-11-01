@@ -55,7 +55,22 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     self.httpOverride = httpOverride
   }
 
+  init(
+    atProtoClient: ATProtoClient? = nil,
+    homeDsEndpoint: URL? = URL(string: "https://chat.catbird.blue"),
+    boundedSession: MLSBoundedURLSession,
+    allowLoopbackForTesting: Bool = false,
+    httpOverride: (@Sendable (PlatformHttpRequest) throws -> PlatformHttpResponse)? = nil
+  ) {
+    self.atProtoClient = atProtoClient
+    self.homeDsEndpoint = homeDsEndpoint
+    self.boundedSession = boundedSession
+    self.allowLoopbackForTesting = allowLoopbackForTesting
+    self.httpOverride = httpOverride
+  }
+
   public func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
+    precondition(!Thread.isMainThread, "PetrelPlatformTransport.executeHttp must never block the main thread")
     if let httpOverride {
       return try httpOverride(request)
     }
@@ -73,37 +88,31 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       urlRequest.setValue(header.value, forHTTPHeaderField: header.name)
     }
 
-    let box = ResultBox<PlatformHttpResponse>()
-    let semaphore = DispatchSemaphore(value: 0)
-    let session = self.boundedSession
-
-    Task.detached {
-      do {
-        let (data, http) = try await session.data(
-          for: urlRequest,
-          maxBytes: Self.maxHttpResponseBytes
-        )
-        var headers: [PlatformHttpHeader] = []
-        for (rawKey, rawVal) in http.allHeaderFields {
-          if let name = rawKey as? String, let value = rawVal as? String {
-            headers.append(PlatformHttpHeader(name: name, value: value))
-          }
+    do {
+      let (data, http) = try self.boundedSession.performSync(
+        for: urlRequest,
+        maxBytes: Self.maxHttpResponseBytes,
+        timeoutSeconds: 25.0
+      )
+      var headers: [PlatformHttpHeader] = []
+      for (rawKey, rawVal) in http.allHeaderFields {
+        if let name = rawKey as? String, let value = rawVal as? String {
+          headers.append(PlatformHttpHeader(name: name, value: value))
         }
-        box.store(.success(PlatformHttpResponse(
-          status: UInt16(clamping: http.statusCode),
-          headers: headers,
-          body: data
-        )))
-      } catch {
-        box.store(.failure(CatbirdMLS.MlsError.Internal(message: error.localizedDescription)))
       }
-      semaphore.signal()
+      return PlatformHttpResponse(
+        status: UInt16(clamping: http.statusCode),
+        headers: headers,
+        body: data
+      )
+    } catch let err as MLSBoundedURLSession.BoundedFetchError {
+      if case .timedOut = err {
+        throw CatbirdMLS.MlsError.Internal(message: "HTTP request timed out")
+      }
+      throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
+    } catch {
+      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
     }
-
-    if semaphore.wait(timeout: .now() + .seconds(25)) == .timedOut {
-      throw CatbirdMLS.MlsError.Internal(message: "HTTP request timed out")
-    }
-    return try box.take()
   }
 
   public func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws {
@@ -158,6 +167,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     afterSeq: Int64,
     chatDpopToken: String
   ) throws -> PushFetchBundle {
+    precondition(!Thread.isMainThread, "PetrelPlatformTransport.fetchMissingEntries must never block the main thread")
     guard !chatDpopToken.isEmpty else {
       throw CatbirdMLS.MlsError.InvalidInput(message: "Missing cached chat-dpop token")
     }
@@ -183,91 +193,78 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     req.timeoutInterval = 1.5
     req.setValue("Bearer \(chatDpopToken)", forHTTPHeaderField: "Authorization")
 
-    let box = ResultBox<PushFetchBundle>()
-    let semaphore = DispatchSemaphore(value: 0)
-    let session = self.boundedSession
-
-    Task.detached {
-      do {
-        let (data, http) = try await session.data(
-          for: req,
-          maxBytes: MLSBoundedURLSession.labyrinthMaxBytes
-        )
-        guard (200..<300).contains(http.statusCode) else {
-          throw CatbirdMLS.MlsError.Internal(message: "Push getEntries returned HTTP \(http.statusCode)")
-        }
-        let decoded = try JSONDecoder().decode(PushGetEntriesWireResponse.self, from: data)
-        let entries = decoded.entries.map {
-          FetchedPushEntry(
-            entryId: $0.entryId ?? $0.messageId ?? "entry-\($0.seq)",
-            seq: $0.seq,
-            epoch: $0.epoch,
-            entryKind: $0.entryKind,
-            senderDid: $0.senderDid ?? "",
-            mlsBytes: $0.mlsBytes ?? $0.ciphertext ?? Data()
-          )
-        }
-        let snapshot = decoded.metadataSnapshot.map {
-          FetchedMetadataSnapshot(
-            epoch: $0.epoch,
-            metadataVersion: $0.metadataVersion,
-            nonce: $0.nonce ?? Data(repeating: 0, count: 12),
-            ciphertext: $0.ciphertext
-          )
-        }
-        box.store(.success(PushFetchBundle(
-          entries: entries,
-          metadataSnapshot: snapshot,
-          authorizedDeviceKeys: []
-        )))
-      } catch let mlsErr as CatbirdMLS.MlsError {
-        box.store(.failure(mlsErr))
-      } catch {
-        box.store(.failure(CatbirdMLS.MlsError.Internal(message: error.localizedDescription)))
+    do {
+      let (data, http) = try self.boundedSession.performSync(
+        for: req,
+        maxBytes: MLSBoundedURLSession.labyrinthMaxBytes,
+        timeoutSeconds: 1.6
+      )
+      guard (200..<300).contains(http.statusCode) else {
+        throw CatbirdMLS.MlsError.Internal(message: "Push getEntries returned HTTP \(http.statusCode)")
       }
-      semaphore.signal()
+      let decoded = try JSONDecoder().decode(PushGetEntriesWireResponse.self, from: data)
+      let entries = decoded.entries.map {
+        FetchedPushEntry(
+          entryId: $0.entryId ?? $0.messageId ?? "entry-\($0.seq)",
+          seq: $0.seq,
+          epoch: $0.epoch,
+          entryKind: $0.entryKind,
+          senderDid: $0.senderDid ?? "",
+          mlsBytes: $0.mlsBytes ?? $0.ciphertext ?? Data()
+        )
+      }
+      let snapshot = decoded.metadataSnapshot.map {
+        FetchedMetadataSnapshot(
+          epoch: $0.epoch,
+          metadataVersion: $0.metadataVersion,
+          nonce: $0.nonce ?? Data(repeating: 0, count: 12),
+          ciphertext: $0.ciphertext
+        )
+      }
+      return PushFetchBundle(
+        entries: entries,
+        metadataSnapshot: snapshot,
+        authorizedDeviceKeys: []
+      )
+    } catch let mlsErr as CatbirdMLS.MlsError {
+      throw mlsErr
+    } catch let err as MLSBoundedURLSession.BoundedFetchError {
+      if case .timedOut = err {
+        throw CatbirdMLS.MlsError.Internal(message: "Push catch-up timed out (I10 < 2s budget)")
+      }
+      throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
+    } catch {
+      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
     }
-
-    if semaphore.wait(timeout: .now() + .milliseconds(1600)) == .timedOut {
-      throw CatbirdMLS.MlsError.Internal(message: "Push catch-up timed out (I10 < 2s budget)")
-    }
-    return try box.take()
   }
 
   public func getAuthorizedDeviceKeys(
     did: String,
     chatDpopToken _: String?
   ) throws -> [AuthorizedPeerDeviceKey] {
-    let box = ResultBox<[AuthorizedPeerDeviceKey]>()
-    let semaphore = DispatchSemaphore(value: 0)
-
-    Task.detached {
-      do {
-        let records = try await MLSPublicPDSReader.fetchAuthorizedDeviceRecords(
+    precondition(!Thread.isMainThread, "PetrelPlatformTransport.getAuthorizedDeviceKeys must never block the main thread")
+    do {
+      let records = try MLSPublicPDSReader.fetchAuthorizedDeviceRecordsSync(
+        did: did,
+        boundedSession: self.boundedSession,
+        timeoutSeconds: 1.5
+      )
+      return records.map { record in
+        let deviceId = record.uri.split(separator: "/").last.map(String.init) ?? record.uri
+        return AuthorizedPeerDeviceKey(
           did: did,
-          resolvePDS: { targetDid in
-            try await MLSPublicPDSReader.resolveCurrentPDS(did: targetDid)
-          }
+          deviceId: deviceId,
+          signaturePublicKey: record.publicKey
         )
-        let mapped = records.map { record in
-          let deviceId = record.uri.split(separator: "/").last.map(String.init) ?? record.uri
-          return AuthorizedPeerDeviceKey(
-            did: did,
-            deviceId: deviceId,
-            signaturePublicKey: record.publicKey
-          )
-        }
-        box.store(.success(mapped))
-      } catch {
-        box.store(.failure(CatbirdMLS.MlsError.Internal(message: error.localizedDescription)))
       }
-      semaphore.signal()
+    } catch let err as MLSBoundedURLSession.BoundedFetchError {
+      if case .timedOut = err {
+        throw CatbirdMLS.MlsError.Internal(message: "Authorized device key fetch timed out")
+      }
+      throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
+    } catch {
+      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
     }
-
-    if semaphore.wait(timeout: .now() + .milliseconds(1500)) == .timedOut {
-      throw CatbirdMLS.MlsError.Internal(message: "Authorized device key fetch timed out")
-    }
-    return try box.take()
   }
 
   private func validateOutboundURLAndNSID(_ url: URL) throws {
@@ -283,26 +280,6 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
         try MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)
       }
     }
-  }
-}
-
-private final class ResultBox<T>: @unchecked Sendable {
-  private let lock = NSLock()
-  private var result: Result<T, Error>?
-
-  func store(_ value: Result<T, Error>) {
-    lock.lock()
-    result = value
-    lock.unlock()
-  }
-
-  func take() throws -> T {
-    lock.lock()
-    defer { lock.unlock() }
-    guard let result else {
-      throw CatbirdMLS.MlsError.Internal(message: "Missing async bridge result")
-    }
-    return try result.get()
   }
 }
 

@@ -362,6 +362,7 @@ final class MLSBoundedURLSession: @unchecked Sendable {
   enum BoundedFetchError: Error, LocalizedError, Equatable {
     case responseTooLarge(limit: Int)
     case nonHTTPResponse
+    case timedOut(seconds: TimeInterval)
 
     var errorDescription: String? {
       switch self {
@@ -369,6 +370,8 @@ final class MLSBoundedURLSession: @unchecked Sendable {
         return "HTTP response exceeded maximum size limit of \(limit) bytes"
       case .nonHTTPResponse:
         return "URL response was not an HTTPURLResponse"
+      case .timedOut(let seconds):
+        return "HTTP request timed out after \(seconds) seconds"
       }
     }
   }
@@ -376,10 +379,21 @@ final class MLSBoundedURLSession: @unchecked Sendable {
   static let shared = MLSBoundedURLSession()
 
   private let sessionDelegate: Delegate
+  private let delegateQueue: OperationQueue
   let underlyingSession: URLSession
 
   init(protocolClasses: [AnyClass]? = nil) {
     let delegate = Delegate()
+    let underlyingQueue = DispatchQueue(
+      label: "blue.catbird.mls.bounded-url-session",
+      qos: .userInitiated,
+      attributes: .concurrent
+    )
+    let queue = OperationQueue()
+    queue.name = "blue.catbird.mls.bounded-url-session"
+    queue.qualityOfService = .userInitiated
+    queue.underlyingQueue = underlyingQueue
+
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
@@ -389,10 +403,11 @@ final class MLSBoundedURLSession: @unchecked Sendable {
       configuration.protocolClasses = protocolClasses
     }
     self.sessionDelegate = delegate
+    self.delegateQueue = queue
     self.underlyingSession = URLSession(
       configuration: configuration,
       delegate: delegate,
-      delegateQueue: nil
+      delegateQueue: queue
     )
   }
 
@@ -408,13 +423,42 @@ final class MLSBoundedURLSession: @unchecked Sendable {
         sessionDelegate.register(
           taskIdentifier: task.taskIdentifier,
           maxBytes: maxBytes,
-          continuation: continuation
+          target: .async(continuation)
         )
         task.resume()
       }
     } onCancel: {
       task.cancel()
     }
+  }
+
+  /// Synchronously executes a bounded, redirect-free HTTP request directly via `URLSession`'s
+  /// dedicated `OperationQueue` (`delegateQueue`), without spawning any `Task` or `Task.detached`
+  /// onto Swift's bounded cooperative thread pool (`Fault Line 4`).
+  func performSync(
+    for request: URLRequest,
+    maxBytes: Int,
+    timeoutSeconds: TimeInterval
+  ) throws -> (Data, HTTPURLResponse) {
+    precondition(!Thread.isMainThread, "MLSBoundedURLSession.performSync must never block the main thread")
+    precondition(maxBytes > 0, "maxBytes must be positive")
+    precondition(timeoutSeconds > 0, "timeoutSeconds must be positive")
+
+    let waiter = SyncWaiter()
+    let task = underlyingSession.dataTask(with: request)
+    sessionDelegate.register(
+      taskIdentifier: task.taskIdentifier,
+      maxBytes: maxBytes,
+      target: .sync(waiter)
+    )
+    task.resume()
+
+    guard let outcome = waiter.wait(timeoutSeconds: timeoutSeconds) else {
+      sessionDelegate.remove(taskIdentifier: task.taskIdentifier)
+      task.cancel()
+      throw BoundedFetchError.timedOut(seconds: timeoutSeconds)
+    }
+    return try outcome.get()
   }
 
   /// Performs a bounded, redirect-free fetch using `MLSBoundedURLSession.shared` by default,
@@ -455,10 +499,69 @@ final class MLSBoundedURLSession: @unchecked Sendable {
     }
   }
 
+  fileprivate final class SyncWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var completed = false
+    private var result: Result<(Data, HTTPURLResponse), Error>?
+
+    func finish(_ outcome: Result<(Data, HTTPURLResponse), Error>) {
+      lock.lock()
+      guard !completed else {
+        lock.unlock()
+        return
+      }
+      completed = true
+      result = outcome
+      lock.unlock()
+      semaphore.signal()
+    }
+
+    func wait(timeoutSeconds: TimeInterval) -> Result<(Data, HTTPURLResponse), Error>? {
+      let nanos = Int64(max(1.0, timeoutSeconds * 1_000_000_000.0))
+      if semaphore.wait(timeout: .now() + .nanoseconds(Int(clamping: nanos))) == .timedOut {
+        lock.lock()
+        if completed, let result {
+          lock.unlock()
+          return result
+        }
+        completed = true
+        lock.unlock()
+        return nil
+      }
+      lock.lock()
+      defer { lock.unlock() }
+      return result
+    }
+  }
+
   private final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    enum CompletionTarget {
+      case async(CheckedContinuation<(Data, HTTPURLResponse), Error>)
+      case sync(SyncWaiter)
+
+      func succeed(_ value: (Data, HTTPURLResponse)) {
+        switch self {
+        case let .async(continuation):
+          continuation.resume(returning: value)
+        case let .sync(waiter):
+          waiter.finish(.success(value))
+        }
+      }
+
+      func fail(_ error: Error) {
+        switch self {
+        case let .async(continuation):
+          continuation.resume(throwing: error)
+        case let .sync(waiter):
+          waiter.finish(.failure(error))
+        }
+      }
+    }
+
     private struct TaskState {
       let maxBytes: Int
-      let continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>
+      let target: CompletionTarget
       var response: URLResponse?
       var buffer: Data = Data()
       var exceededLimit: Int?
@@ -470,10 +573,16 @@ final class MLSBoundedURLSession: @unchecked Sendable {
     func register(
       taskIdentifier: Int,
       maxBytes: Int,
-      continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>
+      target: CompletionTarget
     ) {
       lock.lock()
-      tasks[taskIdentifier] = TaskState(maxBytes: maxBytes, continuation: continuation)
+      tasks[taskIdentifier] = TaskState(maxBytes: maxBytes, target: target)
+      lock.unlock()
+    }
+
+    func remove(taskIdentifier: Int) {
+      lock.lock()
+      _ = tasks.removeValue(forKey: taskIdentifier)
       lock.unlock()
     }
 
@@ -553,18 +662,18 @@ final class MLSBoundedURLSession: @unchecked Sendable {
 
       guard let state else { return }
       if let limit = state.exceededLimit {
-        state.continuation.resume(throwing: BoundedFetchError.responseTooLarge(limit: limit))
+        state.target.fail(BoundedFetchError.responseTooLarge(limit: limit))
         return
       }
       if let error {
-        state.continuation.resume(throwing: error)
+        state.target.fail(error)
         return
       }
       guard let http = (state.response ?? task.response) as? HTTPURLResponse else {
-        state.continuation.resume(throwing: BoundedFetchError.nonHTTPResponse)
+        state.target.fail(BoundedFetchError.nonHTTPResponse)
         return
       }
-      state.continuation.resume(returning: (state.buffer, http))
+      state.target.succeed((state.buffer, http))
     }
   }
 }

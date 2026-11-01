@@ -262,4 +262,121 @@ extension MLSPublicPDSReader {
     var seen = Set<Data>()
     return records.map(\.publicKey).filter { seen.insert($0).inserted }
   }
+
+  /// Cooperative-pool-free synchronous fetch of `did`'s authorized chat device records (`Fault Line 4`, `ADR-009`).
+  /// Uses `MLSBoundedURLSession.performSync` on a dedicated `OperationQueue` rather than `Task.detached`,
+  /// enforcing redirect blocking, SSRF validation, byte limits, and a strict overall deadline.
+  static func fetchAuthorizedDeviceRecordsSync(
+    did: String,
+    boundedSession: MLSBoundedURLSession = .shared,
+    timeoutSeconds: TimeInterval = 1.5
+  ) throws -> [AuthorizedDeviceRecord] {
+    precondition(!Thread.isMainThread, "fetchAuthorizedDeviceRecordsSync must never block the main thread")
+    guard !did.contains("#"), (try? DID(didString: did)) != nil else {
+      throw ReaderError.invalidResponse
+    }
+
+    let started = ContinuousClock.now
+    func remainingBudgetSeconds() throws -> TimeInterval {
+      let elapsed = started.duration(to: ContinuousClock.now)
+      let elapsedSeconds = Double(elapsed.components.seconds)
+        + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000_000.0
+      let remaining = timeoutSeconds - elapsedSeconds
+      if remaining <= 0.01 {
+        throw MLSBoundedURLSession.BoundedFetchError.timedOut(seconds: timeoutSeconds)
+      }
+      return remaining
+    }
+
+    let docURL = try SpaceHostResolver.didDocumentURL(for: did)
+    var fixturePermits = false
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current, fixture.permits(docURL) {
+      fixturePermits = true
+    }
+    #endif
+    if !fixturePermits {
+      guard MLSOutboundHTTPValidator.isValidPublicHTTPSServiceEndpoint(docURL) else {
+        throw ReaderError.invalidEndpoint
+      }
+    }
+
+    var docRequest = URLRequest(url: docURL, cachePolicy: .reloadIgnoringLocalCacheData)
+    docRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+    docRequest.timeoutInterval = try remainingBudgetSeconds()
+
+    let (docData, docHTTP): (Data, HTTPURLResponse)
+    do {
+      (docData, docHTTP) = try boundedSession.performSync(
+        for: docRequest,
+        maxBytes: MLSBoundedURLSession.pdsRecordMaxBytes,
+        timeoutSeconds: try remainingBudgetSeconds()
+      )
+    } catch let err as MLSBoundedURLSession.BoundedFetchError {
+      if case .timedOut = err { throw err }
+      throw ReaderError.invalidResponse
+    }
+    guard docHTTP.statusCode == 200,
+          isMatchingEndpoint(docHTTP.url, expected: docURL),
+          docData.count <= 1_048_576
+    else {
+      throw ReaderError.invalidResponse
+    }
+    let document = try JSONDecoder().decode(DIDDocument.self, from: docData)
+    let pds = try currentPDS(in: document, did: did)
+
+    guard let baseURL = deviceRecordsListURL(pds: pds, did: did, limit: 100),
+          pds.user == nil, pds.password == nil
+    else {
+      throw ReaderError.invalidEndpoint
+    }
+
+    var records: [AuthorizedDeviceRecord] = []
+    var seenURIs = Set<String>()
+    var seenCursors = Set<String>()
+    var cursor: String?
+    for _ in 0..<100 {
+      var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+      if let cursor {
+        components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor))
+      }
+      var request = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      let budget = try remainingBudgetSeconds()
+      request.timeoutInterval = budget
+      let (data, http): (Data, HTTPURLResponse)
+      do {
+        (data, http) = try boundedSession.performSync(
+          for: request,
+          maxBytes: MLSBoundedURLSession.pdsRecordMaxBytes,
+          timeoutSeconds: budget
+        )
+      } catch let err as MLSBoundedURLSession.BoundedFetchError {
+        if case .timedOut = err { throw err }
+        throw ReaderError.invalidResponse
+      }
+      guard http.url?.scheme == baseURL.scheme,
+            http.url?.host == baseURL.host,
+            http.url?.port == baseURL.port
+      else {
+        throw ReaderError.invalidResponse
+      }
+      guard (200...299).contains(http.statusCode) else {
+        throw ReaderError.httpStatus(http.statusCode)
+      }
+      let page = try decodeAuthorizedDevicePage(data, did: did)
+      for record in page.records {
+        guard seenURIs.insert(record.uri).inserted else {
+          throw ReaderError.invalidResponse
+        }
+        records.append(record)
+      }
+      guard let next = page.cursor else { return records }
+      guard seenCursors.insert(next).inserted else {
+        throw ReaderError.invalidResponse
+      }
+      cursor = next
+    }
+    throw ReaderError.invalidResponse
+  }
 }
