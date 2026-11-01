@@ -375,9 +375,13 @@ public final class MLSClientCoordinator {
 
   public func checkSpacesEligibility(grantedScopes: [String]) async throws -> SpacesEligibilityStatus {
     let c = client
-    return try await runOffMain {
+    let status = try await runOffMain {
       try c.checkSpacesEligibility(grantedOauthScopes: grantedScopes)
     }
+    if status.eligible {
+      scheduleBackgroundOutboxDrain()
+    }
+    return status
   }
 
   public func enrollDevice(grantedScopes: [String]) async throws -> EnrollmentReceipt {
@@ -677,16 +681,17 @@ public final class MLSClientCoordinator {
   private func scheduleBackgroundOutboxDrain() {
     guard !isHandleClosed else { return }
     let coalescer = outboxDrainCoalescer
-    guard coalescer.requestDrain() else { return }
     let c = client
+    guard coalescer.requestDrain(isHandleClosed: { c.isHandleClosed() }) else { return }
     Self.ffiDispatchQueue.async {
-      guard coalescer.beginIteration(isHandleClosed: c.isHandleClosed()) else {
+      guard coalescer.beginFirstIteration(isHandleClosed: { c.isHandleClosed() }) else {
         return
       }
       repeat {
-        _ = try? c.flushLabyrinthQueue()
-      } while coalescer.completeIteration(isHandleClosed: c.isHandleClosed())
-        && coalescer.beginIteration(isHandleClosed: c.isHandleClosed())
+        if !c.isHandleClosed() {
+          _ = try? c.flushLabyrinthQueue()
+        }
+      } while coalescer.completeAndShouldRepeat(isHandleClosed: { c.isHandleClosed() })
     }
   }
 
@@ -716,7 +721,7 @@ public final class MLSClientCoordinator {
   }
 }
 
-private final class OutboxDrainCoalescer: @unchecked Sendable {
+final class OutboxDrainCoalescer: @unchecked Sendable {
   private let lock = NSLock()
   private var isDraining = false
   private var needsAnotherPass = false
@@ -731,10 +736,10 @@ private final class OutboxDrainCoalescer: @unchecked Sendable {
     lock.unlock()
   }
 
-  func requestDrain() -> Bool {
+  func requestDrain(isHandleClosed: () -> Bool) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    guard !isSuspended else {
+    guard !isSuspended, !isHandleClosed() else {
       return false
     }
     if isDraining {
@@ -746,10 +751,10 @@ private final class OutboxDrainCoalescer: @unchecked Sendable {
     return true
   }
 
-  func beginIteration(isHandleClosed: Bool) -> Bool {
+  func beginFirstIteration(isHandleClosed: () -> Bool) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    if isSuspended || isHandleClosed {
+    if isSuspended || isHandleClosed() {
       isDraining = false
       needsAnotherPass = false
       return false
@@ -758,14 +763,15 @@ private final class OutboxDrainCoalescer: @unchecked Sendable {
     return true
   }
 
-  func completeIteration(isHandleClosed: Bool) -> Bool {
+  func completeAndShouldRepeat(isHandleClosed: () -> Bool) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    if isSuspended || isHandleClosed || !needsAnotherPass {
+    if isSuspended || isHandleClosed() || !needsAnotherPass {
       isDraining = false
       needsAnotherPass = false
       return false
     }
+    needsAnotherPass = false
     return true
   }
 }

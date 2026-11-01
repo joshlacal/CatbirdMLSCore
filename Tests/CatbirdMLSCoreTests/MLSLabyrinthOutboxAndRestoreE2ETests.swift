@@ -847,6 +847,345 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     await coordinator2.close()
   }
 
+  func testColdLaunchCheckSpacesEligibilityAutomaticallyDrainsWithoutReEnroll() async throws {
+    let aliceDid = "did:plc:alicecoldelig00000000000"
+    let dsDid = "did:web:chat.catbird.blue"
+    let conversationId = "convo-cold-eligibility-drain"
+    let convoSpaceURI = "at://\(dsDid)/space/blue.catbird.labyrinth.conversation/\(conversationId)-0"
+
+    let backend = RecordingKeychainBackend()
+    let keystore = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.e2e.coldelig.\(UUID().uuidString)",
+      backend: backend
+    )
+    let transport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      boundedSession: boundedSession
+    )
+    let config = CatbirdMlsClientConfig(
+      storageRoot: device1Root.path,
+      accountDid: aliceDid,
+      deviceId: "dev-cold-elig-1",
+      homeDsDid: dsDid,
+      homeDsEndpoint: "https://chat.catbird.blue",
+      pdsEndpoint: "https://swan.catbird.blue"
+    )
+
+    let coordinator1 = try await MainActor.run {
+      try MLSClientCoordinator(config: config, keystore: keystore, transport: transport)
+    }
+    _ = try await coordinator1.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await coordinator1.createGroup(
+      conversationId: conversationId,
+      sequencerDid: dsDid,
+      title: "Cold Eligibility Drain",
+      description: nil
+    )
+
+    MockLabyrinthSpaceServer.shared.setStatusOverride(503, forSpace: convoSpaceURI)
+    _ = try await coordinator1.sendMessage(
+      conversationId: conversationId,
+      messageId: "msg-cold-elig-1",
+      text: "queued before app termination on already-enrolled device"
+    )
+    try await Task.sleep(nanoseconds: 50_000_000)
+    await coordinator1.close()
+
+    // Cold reopen of already-enrolled account: calling checkSpacesEligibility(grantedScopes:)
+    // WITHOUT calling enrollDevice or flushLabyrinthQueue must automatically drain the outbox!
+    MockLabyrinthSpaceServer.shared.setStatusOverride(nil, forSpace: convoSpaceURI)
+    let coordinator2 = try await MainActor.run {
+      try MLSClientCoordinator(config: config, keystore: keystore, transport: transport)
+    }
+    let pendingOnOpen = try await coordinator2.listPendingLabyrinthQueue(conversationId: conversationId)
+    XCTAssertEqual(pendingOnOpen.map(\.messageId), ["msg-cold-elig-1"])
+
+    let eligibility = try await coordinator2.checkSpacesEligibility(
+      grantedScopes: MLSAppGroupStorage.requiredSpacesScopes
+    )
+    XCTAssertTrue(eligibility.eligible)
+
+    try await waitUntil(timeoutSeconds: 3.0) {
+      let pending = try await coordinator2.listPendingLabyrinthQueue(conversationId: conversationId)
+      return pending.isEmpty
+    }
+    XCTAssertEqual(
+      MockLabyrinthSpaceServer.shared.recordCount(
+        space: convoSpaceURI,
+        repo: aliceDid,
+        collection: "blue.catbird.labyrinth.batch"
+      ),
+      1,
+      "Cold-launch checkSpacesEligibility must automatically drain queued outbox rows"
+    )
+
+    await coordinator2.close()
+  }
+
+  func testOutboxDrainCoalescerPreservesPostResumeWakeupUnderPreBackgroundRace() {
+    let coalescer = OutboxDrainCoalescer()
+    var handleClosed = false
+
+    // 1. Pre-background drain pass starts.
+    XCTAssertTrue(coalescer.requestDrain(isHandleClosed: { handleClosed }))
+    XCTAssertTrue(coalescer.beginFirstIteration(isHandleClosed: { handleClosed }))
+
+    // 2. App enters background while pass 1 is finishing, then immediately resumes and requests drain.
+    coalescer.setSuspended(true)
+    handleClosed = true
+    handleClosed = false
+    coalescer.setSuspended(false)
+    XCTAssertFalse(
+      coalescer.requestDrain(isHandleClosed: { handleClosed }),
+      "In-flight drain pass should coalesce the post-resume wakeup via needsAnotherPass"
+    )
+
+    // 3. Pass 1 finishes AFTER resumeFromBackground reopened the handle: must NOT drop needsAnotherPass!
+    XCTAssertTrue(
+      coalescer.completeAndShouldRepeat(isHandleClosed: { handleClosed }),
+      "Atomic completeAndShouldRepeat must observe reopened handle and run the coalesced post-resume pass"
+    )
+    XCTAssertFalse(
+      coalescer.completeAndShouldRepeat(isHandleClosed: { handleClosed }),
+      "After post-resume pass completes with no further requests, coalescer must go idle"
+    )
+  }
+
+  func testMultiConversationHeadOfLineIsolationAndThreeDeviceMultiEpochRecoveryEndToEnd() async throws {
+    let aliceDid = "did:plc:alicemultie2e00000000000"
+    let bobDid = "did:plc:bobmultie2e0000000000000"
+    let dsDid = "did:web:chat.catbird.blue"
+    let stalledConvo = "convo-hol-stalled-e2e"
+    let healthyConvo = "convo-hol-healthy-e2e"
+    let stalledSpaceURI = "at://\(dsDid)/space/blue.catbird.labyrinth.conversation/\(stalledConvo)-0"
+    let healthySpaceURI = "at://\(dsDid)/space/blue.catbird.labyrinth.conversation/\(healthyConvo)-0"
+
+    let fm = FileManager.default
+    let device3Root = fm.temporaryDirectory
+      .appendingPathComponent("CatbirdLabyrinthE2E-Dev3-\(UUID().uuidString)", isDirectory: true)
+    try fm.createDirectory(at: device3Root, withIntermediateDirectories: true)
+    defer {
+      let trashRoot = fm.temporaryDirectory
+        .appendingPathComponent("_trash-CatbirdLabyrinthE2E", isDirectory: true)
+      try? fm.createDirectory(at: trashRoot, withIntermediateDirectories: true)
+      try? fm.moveItem(at: device3Root, to: trashRoot.appendingPathComponent(device3Root.lastPathComponent))
+    }
+
+    let keystore1 = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.e2e.multi.dev1.\(UUID().uuidString)",
+      backend: RecordingKeychainBackend()
+    )
+    let transport1 = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      boundedSession: boundedSession
+    )
+    let config1 = CatbirdMlsClientConfig(
+      storageRoot: device1Root.path,
+      accountDid: aliceDid,
+      deviceId: "dev-multi-1",
+      homeDsDid: dsDid,
+      homeDsEndpoint: "https://chat.catbird.blue",
+      pdsEndpoint: "https://swan.catbird.blue"
+    )
+
+    let device1 = try await MainActor.run {
+      try MLSClientCoordinator(config: config1, keystore: keystore1, transport: transport1)
+    }
+    _ = try await device1.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+
+    // --- Part A: Per-conversation head-of-line 503 isolation ---
+    _ = try await device1.createGroup(
+      conversationId: stalledConvo,
+      sequencerDid: dsDid,
+      title: "Stalled Convo",
+      description: nil
+    )
+    _ = try await device1.createGroup(
+      conversationId: healthyConvo,
+      sequencerDid: dsDid,
+      title: "Healthy Convo",
+      description: nil
+    )
+    MockLabyrinthSpaceServer.shared.setStatusOverride(503, forSpace: stalledSpaceURI)
+
+    _ = try await device1.sendMessage(
+      conversationId: stalledConvo,
+      messageId: "msg-stalled-1",
+      text: "stalled behind 503"
+    )
+    _ = try await device1.sendMessage(
+      conversationId: healthyConvo,
+      messageId: "msg-healthy-1",
+      text: "must drain despite earlier stalled conversation"
+    )
+
+    try await waitUntil(timeoutSeconds: 3.0) {
+      let healthyPending = try await device1.listPendingLabyrinthQueue(conversationId: healthyConvo)
+      return healthyPending.isEmpty
+    }
+    XCTAssertEqual(
+      MockLabyrinthSpaceServer.shared.recordCount(
+        space: healthySpaceURI,
+        repo: aliceDid,
+        collection: "blue.catbird.labyrinth.batch"
+      ),
+      1
+    )
+    let stillStalled = try await device1.listPendingLabyrinthQueue(conversationId: stalledConvo)
+    XCTAssertEqual(stillStalled.map(\.messageId), ["msg-stalled-1"])
+    MockLabyrinthSpaceServer.shared.setStatusOverride(nil, forSpace: stalledSpaceURI)
+    _ = try await device1.flushLabyrinthQueue()
+
+    // --- Part B: Multi-epoch & 3-device recovery chain ---
+    // Epoch 1 rescue (before OTC & before setupRecoveryCode)
+    let ep1Row = try await device1.createGroup(
+      conversationId: "convo-swift-ep1",
+      sequencerDid: dsDid,
+      title: "Epoch 1",
+      description: nil
+    )
+    _ = try await device1.importConversationHistory(
+      conversationId: "convo-swift-ep1",
+      messages: [
+        MessageRow(
+          messageId: "ep1-bob",
+          conversationId: "convo-swift-ep1",
+          groupId: ep1Row.groupId,
+          epoch: 0,
+          seq: 1,
+          senderDid: bobDid,
+          senderDeviceId: "dev-bob",
+          plaintextJson: #"{"text":"Bob message at epoch 1"}"#,
+          createdAtMs: 1_700_400_000_001,
+          isOwn: false
+        )
+      ]
+    )
+    let r1 = try await device1.rescueConversationOnKick(conversationId: "convo-swift-ep1")
+    XCTAssertEqual(r1, 1)
+
+    // Rotate 1 -> 2 via OTC pairing, rescue Epoch 2, setup recovery code at Epoch 2
+    let otcOffer = try await device1.initiateOtcPairing()
+    let otcDone = try await device1.completeOtcPairing(sixDigitCode: otcOffer.sixDigitCode)
+    XCTAssertEqual(otcDone.newEpochSeq, 2)
+
+    _ = try await device1.createGroup(
+      conversationId: "convo-swift-ep2",
+      sequencerDid: dsDid,
+      title: "Epoch 2",
+      description: nil
+    )
+    _ = try await device1.sendMessage(
+      conversationId: "convo-swift-ep2",
+      messageId: "ep2-alice",
+      text: "Alice message at epoch 2"
+    )
+    let r2 = try await device1.rescueConversationOnKick(conversationId: "convo-swift-ep2")
+    XCTAssertEqual(r2, 1)
+
+    let recoveryCode = try await device1.setupRecoveryCode()
+
+    // Rotate 2 -> 3 via device revocation after setupRecoveryCode, rescue Epoch 3, wipe Device 1
+    let revStatus = try await device1.revokeLabyrinthDevice(targetDeviceId: "old-ipad")
+    XCTAssertEqual(revStatus.epochSeq, 3)
+
+    _ = try await device1.createGroup(
+      conversationId: "convo-swift-ep3",
+      sequencerDid: dsDid,
+      title: "Epoch 3",
+      description: nil
+    )
+    _ = try await device1.sendMessage(
+      conversationId: "convo-swift-ep3",
+      messageId: "ep3-alice",
+      text: "Alice message at epoch 3"
+    )
+    let r3 = try await device1.rescueConversationOnKick(conversationId: "convo-swift-ep3")
+    XCTAssertEqual(r3, 1)
+    try await device1.signOutAndWipe()
+
+    // Device 2 restores (backward 2->1->0, forward 2->3, rotates 3->4), rescues Epoch 4, wipes Device 2
+    let config2 = CatbirdMlsClientConfig(
+      storageRoot: device2Root.path,
+      accountDid: aliceDid,
+      deviceId: "dev-multi-2",
+      homeDsDid: dsDid,
+      homeDsEndpoint: "https://chat.catbird.blue",
+      pdsEndpoint: "https://swan.catbird.blue"
+    )
+    let keystore2 = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.e2e.multi.dev2.\(UUID().uuidString)",
+      backend: RecordingKeychainBackend()
+    )
+    let transport2 = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      boundedSession: boundedSession
+    )
+    let device2 = try await MainActor.run {
+      try MLSClientCoordinator(config: config2, keystore: keystore2, transport: transport2)
+    }
+    _ = try await device2.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    let st2 = try await device2.restoreWithRecoveryCode(recoveryCode)
+    XCTAssertEqual(st2.epochSeq, 4)
+
+    for cid in ["convo-swift-ep1", "convo-swift-ep2", "convo-swift-ep3"] {
+      let count = try await device2.restoreConversationFromOwnerMailbox(conversationId: cid)
+      XCTAssertEqual(count, 1, "Device 2 must restore \(cid)")
+    }
+    let ep1MsgsDev2 = try await device2.listMessages(conversationId: "convo-swift-ep1", limit: 10)
+    XCTAssertEqual(ep1MsgsDev2.first?.senderDid, bobDid)
+    XCTAssertEqual(ep1MsgsDev2.first?.isOwn, false)
+
+    _ = try await device2.createGroup(
+      conversationId: "convo-swift-ep4",
+      sequencerDid: dsDid,
+      title: "Epoch 4",
+      description: nil
+    )
+    _ = try await device2.sendMessage(
+      conversationId: "convo-swift-ep4",
+      messageId: "ep4-dev2",
+      text: "Device 2 message at epoch 4"
+    )
+    let r4 = try await device2.rescueConversationOnKick(conversationId: "convo-swift-ep4")
+    XCTAssertEqual(r4, 1)
+    try await device2.signOutAndWipe()
+
+    // Device 3 restores with the SAME 40-char recoveryCode from Device 1 (rotates 4->5) and recovers all 4 epochs!
+    let config3 = CatbirdMlsClientConfig(
+      storageRoot: device3Root.path,
+      accountDid: aliceDid,
+      deviceId: "dev-multi-3",
+      homeDsDid: dsDid,
+      homeDsEndpoint: "https://chat.catbird.blue",
+      pdsEndpoint: "https://swan.catbird.blue"
+    )
+    let keystore3 = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.e2e.multi.dev3.\(UUID().uuidString)",
+      backend: RecordingKeychainBackend()
+    )
+    let transport3 = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      boundedSession: boundedSession
+    )
+    let device3 = try await MainActor.run {
+      try MLSClientCoordinator(config: config3, keystore: keystore3, transport: transport3)
+    }
+    _ = try await device3.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    let st3 = try await device3.restoreWithRecoveryCode(recoveryCode)
+    XCTAssertEqual(st3.epochSeq, 5)
+
+    for cid in ["convo-swift-ep1", "convo-swift-ep2", "convo-swift-ep3", "convo-swift-ep4"] {
+      let count = try await device3.restoreConversationFromOwnerMailbox(conversationId: cid)
+      XCTAssertEqual(count, 1, "Device 3 must restore \(cid) using original recovery code")
+    }
+    let ep4MsgsDev3 = try await device3.listMessages(conversationId: "convo-swift-ep4", limit: 10)
+    XCTAssertEqual(ep4MsgsDev3.first?.senderDid, aliceDid)
+    XCTAssertTrue(ep4MsgsDev3.first?.plaintextJson.contains("Device 2 message at epoch 4") ?? false)
+
+    await device3.close()
+  }
+
   private func waitUntil(
     timeoutSeconds: TimeInterval,
     condition: () async throws -> Bool
