@@ -330,11 +330,24 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     XCTAssertNoThrow(
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("blue.catbird.push.registerKey")
     )
+    for allowedRepoNSID in [
+      "com.atproto.repo.uploadBlob",
+      "com.atproto.repo.putRecord",
+      "com.atproto.repo.getRecord",
+      "com.atproto.repo.listRecords",
+    ] {
+      XCTAssertNoThrow(
+        try MLSOutboundHTTPValidator.validatePreparedRequestNSID(allowedRepoNSID)
+      )
+    }
     XCTAssertThrowsError(
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("com.atproto.server.createAppPassword")
     )
     XCTAssertThrowsError(
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("com.atproto.repo.deleteRecord")
+    )
+    XCTAssertThrowsError(
+      try MLSOutboundHTTPValidator.validatePreparedRequestNSID("com.atproto.repo.applyWrites")
     )
   }
 

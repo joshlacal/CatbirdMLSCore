@@ -49,6 +49,17 @@ enum MLSOutboundHTTPValidator {
     "com.atproto.space.",
   ]
 
+  /// Exact `com.atproto.repo.*` procedures/queries required for ATProto Space attachment
+  /// blob staging (`atproto#5187`) and public `blue.catbird.labyrinth.mailboxKeys` CAS/discovery.
+  /// Destructive/unrelated repo endpoints (`com.atproto.repo.deleteRecord`, `applyWrites`, etc.)
+  /// remain blocked.
+  static let allowedPreparedRequestExactNSIDs: Set<String> = [
+    "com.atproto.repo.uploadBlob",
+    "com.atproto.repo.putRecord",
+    "com.atproto.repo.getRecord",
+    "com.atproto.repo.listRecords",
+  ]
+
   /// Validates a DID-derived `#catbird_labyrinth` or `#atproto_pds` service endpoint against SSRF,
   /// scheme downgrade, non-default ports, fragments, userinfo, and local/private IP ranges.
   static func validatePublicHTTPSServiceEndpoint(_ url: URL) throws {
@@ -257,6 +268,7 @@ enum MLSOutboundHTTPValidator {
               || $0 == UInt8(ascii: "?")
           }),
           allowedPreparedRequestNamespacePrefixes.contains(where: { nsid.hasPrefix($0) })
+            || allowedPreparedRequestExactNSIDs.contains(nsid)
     else {
       throw ValidationError.disallowedNSID(nsid)
     }

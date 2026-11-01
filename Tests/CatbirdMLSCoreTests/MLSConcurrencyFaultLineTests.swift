@@ -382,7 +382,9 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
       var worstHop: Duration = .zero
       for _ in 0..<8 {
         let t0 = ContinuousClock.now
+        XCTAssertFalse(coordinator.isHandleClosed)
         try? await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertFalse(coordinator.isHandleClosed)
         let hop = t0.duration(to: ContinuousClock.now)
         if hop > worstHop {
           worstHop = hop
