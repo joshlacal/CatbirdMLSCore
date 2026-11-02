@@ -41,7 +41,7 @@ public enum MLSAppGroupStorage {
     "atproto",
     "blob:*/*",
     "repo:blue.catbird.labyrinth.mailboxKeys",
-    "repo:blue.catbird.mlsChat.device",
+    "repo:blue.catbird.chat.device",
     "space:blue.catbird.labyrinth.mailbox?manage=create&manage=delete",
     "space:blue.catbird.labyrinth.conversation?authority=*",
   ]
@@ -506,21 +506,73 @@ public final class MLSClientCoordinator {
   public func createGroup(
     conversationId: String,
     sequencerDid: String,
+    memberDids: [String] = [],
     title: String?,
     description: String?
   ) async throws -> ConversationRow {
     let c = client
     let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
-    return try await runOffMain {
+    let row = try await runOffMain {
       let row = try c.createGroup(
         conversationId: conversationId,
         sequencerDid: sequencerDid,
+        memberDids: memberDids,
         title: title,
         description: description
       )
       try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
       return row
     }
+    scheduleBackgroundOutboxDrain()
+    return row
+  }
+
+  public func addGroupMembers(
+    conversationId: String,
+    memberDids: [String]
+  ) async throws -> ConversationRow {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    return try await runOffMain {
+      let row = try c.addGroupMembers(
+        conversationId: conversationId,
+        memberDids: memberDids
+      )
+      try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      return row
+    }
+  }
+
+  public func listMembers(conversationId: String) async throws -> [String] {
+    let c = client
+    return try await runOffMain {
+      try c.listMembers(conversationId: conversationId)
+    }
+  }
+
+  @discardableResult
+  public func replenishKeyPackages(count: UInt32 = 10) async throws -> UInt32 {
+    let c = client
+    return try await runOffMain {
+      try c.replenishKeyPackages(count: count)
+    }
+  }
+
+  @discardableResult
+  public func sync() async throws -> UInt32 {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    let synced = try await runOffMain {
+      let count = try c.sync()
+      if count > 0 {
+        try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      }
+      return count
+    }
+    if synced > 0 {
+      scheduleBackgroundOutboxDrain()
+    }
+    return synced
   }
 
   public func listConversations(
@@ -569,6 +621,7 @@ public final class MLSClientCoordinator {
     try await runOffMain {
       try c.acceptDirectRequest(requestId: requestId)
     }
+    scheduleBackgroundOutboxDrain()
   }
 
   public func declineDirectRequest(requestId: String) async throws {

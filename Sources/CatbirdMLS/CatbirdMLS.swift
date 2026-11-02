@@ -570,13 +570,15 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func acknowledgeEntriesUpTo(conversationId: String, upToSeq: Int64) throws
 
+    func addGroupMembers(conversationId: String, memberDids: [String]) throws -> ConversationRow
+
     func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration
 
     func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus
 
     func completeOtcPairing(sixDigitCode: String) throws -> OtcPairingCompletion
 
-    func createGroup(conversationId: String, sequencerDid: String, title: String?, description: String?) throws -> ConversationRow
+    func createGroup(conversationId: String, sequencerDid: String, memberDids: [String], title: String?, description: String?) throws -> ConversationRow
 
     func declineDirectRequest(requestId: String) throws
 
@@ -598,6 +600,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func listConversations(beforeUpdatedMs: Int64?, limit: UInt32) throws -> [ConversationRow]
 
+    func listMembers(conversationId: String) throws -> [String]
+
     func listMessages(conversationId: String, beforeSeq: Int64?, limit: UInt32) throws -> [MessageRow]
 
     func listPendingLabyrinthQueue(conversationId: String?, limit: UInt32) throws -> [QueuedLabyrinthArchivePayload]
@@ -611,6 +615,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
     func registerPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus
 
     func removeGroupMember(actorRole: MemberRole, conversationId: String, targetDid: String) throws
+
+    func replenishKeyPackages(count: UInt32) throws -> UInt32
 
     func rescueConversationOnKick(conversationId: String) throws -> UInt32
 
@@ -627,6 +633,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
     func setupRecoveryCode() throws -> String
 
     func signOutAndWipe() throws
+
+    func sync() throws -> UInt32
 
     func updateGroupMetadata(conversationId: String, title: String, description: String, spaceAvatar: SpaceAvatarPointer?) throws -> GroupMetadataRow
 }
@@ -721,6 +729,14 @@ open class CatbirdMlsClient:
         }
     }
 
+    open func addGroupMembers(conversationId: String, memberDids: [String]) throws -> ConversationRow {
+        return try FfiConverterTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_add_group_members(self.uniffiClonePointer(),
+                                                                            FfiConverterString.lower(conversationId),
+                                                                            FfiConverterSequenceString.lower(memberDids), $0)
+        })
+    }
+
     open func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration {
         return try FfiConverterTypeSignedPushGatewayRegistration.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_build_signed_push_gateway_registration(self.uniffiClonePointer(),
@@ -745,11 +761,12 @@ open class CatbirdMlsClient:
         })
     }
 
-    open func createGroup(conversationId: String, sequencerDid: String, title: String?, description: String?) throws -> ConversationRow {
+    open func createGroup(conversationId: String, sequencerDid: String, memberDids: [String], title: String?, description: String?) throws -> ConversationRow {
         return try FfiConverterTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_create_group(self.uniffiClonePointer(),
                                                                        FfiConverterString.lower(conversationId),
                                                                        FfiConverterString.lower(sequencerDid),
+                                                                       FfiConverterSequenceString.lower(memberDids),
                                                                        FfiConverterOptionString.lower(title),
                                                                        FfiConverterOptionString.lower(description), $0)
         })
@@ -822,6 +839,13 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func listMembers(conversationId: String) throws -> [String] {
+        return try FfiConverterSequenceString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_members(self.uniffiClonePointer(),
+                                                                       FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
     open func listMessages(conversationId: String, beforeSeq: Int64?, limit: UInt32) throws -> [MessageRow] {
         return try FfiConverterSequenceTypeMessageRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_list_messages(self.uniffiClonePointer(),
@@ -873,6 +897,13 @@ open class CatbirdMlsClient:
                                                                               FfiConverterString.lower(conversationId),
                                                                               FfiConverterString.lower(targetDid), $0)
         }
+    }
+
+    open func replenishKeyPackages(count: UInt32) throws -> UInt32 {
+        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_replenish_key_packages(self.uniffiClonePointer(),
+                                                                                 FfiConverterUInt32.lower(count), $0)
+        })
     }
 
     open func rescueConversationOnKick(conversationId: String) throws -> UInt32 {
@@ -928,6 +959,12 @@ open class CatbirdMlsClient:
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_sign_out_and_wipe(self.uniffiClonePointer(), $0)
         }
+    }
+
+    open func sync() throws -> UInt32 {
+        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_sync(self.uniffiClonePointer(), $0)
+        })
     }
 
     open func updateGroupMetadata(conversationId: String, title: String, description: String, spaceAvatar: SpaceAvatarPointer?) throws -> GroupMetadataRow {
@@ -6911,11 +6948,12 @@ public struct QueuedLabyrinthArchivePayload {
     public var labyrinthFrameJson: String
     public var mlsCiphertextB64: String
     public var frameNonceB64: String?
+    public var sequencerReceiptJson: String?
     public var createdAtMs: Int64
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(version: UInt8, messageId: String, conversationId: String, groupIdHex: String, epoch: Int64, seq: Int64, senderDid: String, senderDeviceId: String, sequencerDid: String, spaceUri: String?, plaintextJson: String, labyrinthFrameJson: String, mlsCiphertextB64: String, frameNonceB64: String?, createdAtMs: Int64) {
+    public init(version: UInt8, messageId: String, conversationId: String, groupIdHex: String, epoch: Int64, seq: Int64, senderDid: String, senderDeviceId: String, sequencerDid: String, spaceUri: String?, plaintextJson: String, labyrinthFrameJson: String, mlsCiphertextB64: String, frameNonceB64: String?, sequencerReceiptJson: String?, createdAtMs: Int64) {
         self.version = version
         self.messageId = messageId
         self.conversationId = conversationId
@@ -6930,6 +6968,7 @@ public struct QueuedLabyrinthArchivePayload {
         self.labyrinthFrameJson = labyrinthFrameJson
         self.mlsCiphertextB64 = mlsCiphertextB64
         self.frameNonceB64 = frameNonceB64
+        self.sequencerReceiptJson = sequencerReceiptJson
         self.createdAtMs = createdAtMs
     }
 }
@@ -6978,6 +7017,9 @@ extension QueuedLabyrinthArchivePayload: Equatable, Hashable {
         if lhs.frameNonceB64 != rhs.frameNonceB64 {
             return false
         }
+        if lhs.sequencerReceiptJson != rhs.sequencerReceiptJson {
+            return false
+        }
         if lhs.createdAtMs != rhs.createdAtMs {
             return false
         }
@@ -6999,6 +7041,7 @@ extension QueuedLabyrinthArchivePayload: Equatable, Hashable {
         hasher.combine(labyrinthFrameJson)
         hasher.combine(mlsCiphertextB64)
         hasher.combine(frameNonceB64)
+        hasher.combine(sequencerReceiptJson)
         hasher.combine(createdAtMs)
     }
 }
@@ -7024,6 +7067,7 @@ public struct FfiConverterTypeQueuedLabyrinthArchivePayload: FfiConverterRustBuf
                 labyrinthFrameJson: FfiConverterString.read(from: &buf),
                 mlsCiphertextB64: FfiConverterString.read(from: &buf),
                 frameNonceB64: FfiConverterOptionString.read(from: &buf),
+                sequencerReceiptJson: FfiConverterOptionString.read(from: &buf),
                 createdAtMs: FfiConverterInt64.read(from: &buf)
             )
     }
@@ -7043,6 +7087,7 @@ public struct FfiConverterTypeQueuedLabyrinthArchivePayload: FfiConverterRustBuf
         FfiConverterString.write(value.labyrinthFrameJson, into: &buf)
         FfiConverterString.write(value.mlsCiphertextB64, into: &buf)
         FfiConverterOptionString.write(value.frameNonceB64, into: &buf)
+        FfiConverterOptionString.write(value.sequencerReceiptJson, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
     }
 }
@@ -12469,6 +12514,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_entries_up_to() != 42076 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_add_group_members() != 60833 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_build_signed_push_gateway_registration() != 29444 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12478,7 +12526,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_complete_otc_pairing() != 3518 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_create_group() != 7620 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_create_group() != 47677 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_decline_direct_request() != 39167 {
@@ -12511,6 +12559,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_conversations() != 13709 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_members() != 35716 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_messages() != 5959 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12530,6 +12581,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_remove_group_member() != 53894 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_replenish_key_packages() != 58152 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_rescue_conversation_on_kick() != 59676 {
@@ -12554,6 +12608,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sign_out_and_wipe() != 8292 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sync() != 27939 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_update_group_metadata() != 6891 {
