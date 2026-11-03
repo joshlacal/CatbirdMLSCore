@@ -115,7 +115,7 @@ private final class SlowMockURLProtocol: URLProtocol, @unchecked Sendable {
         {
           "records": [
             {
-              "uri": "at://\(repo)/blue.catbird.chat.device/dev1",
+              "uri": "at://\(repo)/blue.catbird.chat.device/7c2f3e4a-5d6b-4c8f-a091-b2c3d4e5f6a1",
               "cid": "bafyreiabc",
               "value": {
                 "$type": "blue.catbird.chat.device",
@@ -266,7 +266,7 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
                     chatDpopToken: nil
                   )
                   XCTAssertEqual(keys.count, 1)
-                  XCTAssertEqual(keys.first?.deviceId, "dev1")
+                  XCTAssertEqual(keys.first?.deviceId, "7c2f3e4a-5d6b-4c8f-a091-b2c3d4e5f6a1")
                   continuation.resume(returning: keys.count)
                 }
               } catch {
@@ -321,6 +321,8 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
   /// Verifies that `MLSClientCoordinator` dispatches blocking UniFFI calls onto its dedicated
   /// concurrent GCD queue (`ffiDispatchQueue`), keeping `@MainActor` responsive and avoiding
   /// SQLCipher <-> HTTP lock inversion (`I6`) across 48 concurrent coordinator operations.
+  /// Live path (no offline create/send fallback): bare `did:plc`, UUIDv4 ids, an enrolled device,
+  /// and DS-signed `NativeArchiveMockNetwork` responses behind a 15 ms main-thread-recording transport.
   func testFaultLine4CoordinatorConcurrentOperationsKeepMainActorResponsiveAndAvoidLockInversion() async throws {
     let boundedSession = MLSBoundedURLSession(protocolClasses: [SlowMockURLProtocol.self])
     defer { boundedSession.invalidateAndCancel() }
@@ -328,10 +330,11 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
     let recordedOnMain = NSLock()
     nonisolated(unsafe) var sawMainInTransport = false
 
+    let network = NativeArchiveMockNetwork.shared
+    network.reset()
     let transport = PetrelPlatformTransport(
-      homeDsEndpoint: URL(string: "http://127.0.0.1:9999"),
+      homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
       boundedSession: boundedSession,
-      allowLoopbackForTesting: true,
       httpOverride: { req in
         if Thread.isMainThread {
           recordedOnMain.lock()
@@ -339,11 +342,7 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
           recordedOnMain.unlock()
         }
         Thread.sleep(forTimeInterval: 0.015)
-        return PlatformHttpResponse(
-          status: 200,
-          headers: [PlatformHttpHeader(name: "content-type", value: "application/json")],
-          body: Data("{}".utf8)
-        )
+        return network.handle(req)
       }
     )
 
@@ -352,7 +351,8 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
       service: "blue.catbird.mls.fl4.\(UUID().uuidString)",
       backend: backend
     )
-    let accountDid = "did:plc:fl4coordinatoruser000000"
+    let accountDid = "did:plc:fl4coordinatoruseraaaaaa"
+    let conversationId = "7c2f3e4a-5d6b-4c8f-a091-b2c3d4e5f6b0"
     let storageRootPath = tempRoot.path
 
     let coordinator = try await MainActor.run {
@@ -360,23 +360,24 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
         config: CatbirdMlsClientConfig(
           storageRoot: storageRootPath,
           accountDid: accountDid,
-          deviceId: "dev-fl4",
-          homeDsDid: "did:web:chat.catbird.blue",
-          homeDsEndpoint: "http://127.0.0.1:9999",
-          pdsEndpoint: "http://127.0.0.1:9999"
+          deviceId: "7c2f3e4a-5d6b-4c8f-a091-b2c3d4e5f6a2",
+          homeDsDid: NativeArchiveMockNetwork.dsDid,
+          homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+          pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: accountDid)
         ),
         keystore: keystore,
         transport: transport
       )
     }
 
+    _ = try await coordinator.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
     let groupRow = try await coordinator.createGroup(
-      conversationId: "conv-fl4-stress",
-      sequencerDid: "did:web:chat.catbird.blue",
+      conversationId: conversationId,
+      sequencerDid: NativeArchiveMockNetwork.dsDid,
       title: "FL4 Stress",
       description: nil
     )
-    XCTAssertEqual(groupRow.conversationId, "conv-fl4-stress")
+    XCTAssertEqual(groupRow.conversationId, conversationId)
 
     let heartbeatTask = Task { @MainActor () -> Duration in
       var worstHop: Duration = .zero
@@ -399,13 +400,13 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
           switch idx % 3 {
           case 0:
             _ = try await coordinator.sendMessage(
-              conversationId: "conv-fl4-stress",
-              messageId: "msg-fl4-\(idx)",
+              conversationId: conversationId,
+              messageId: String(format: "7c2f3e4a-5d6b-4c8f-a091-%012x", idx),
               text: "stress message \(idx)"
             )
           case 1:
             _ = try await coordinator.listMessages(
-              conversationId: "conv-fl4-stress",
+              conversationId: conversationId,
               beforeSeq: nil,
               limit: 50
             )
@@ -422,7 +423,7 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
     XCTAssertFalse(sawMainInTransport, "Transport callbacks must never execute on MainActor/main thread")
 
     let finalMessages = try await coordinator.listMessages(
-      conversationId: "conv-fl4-stress",
+      conversationId: conversationId,
       beforeSeq: nil,
       limit: 100
     )

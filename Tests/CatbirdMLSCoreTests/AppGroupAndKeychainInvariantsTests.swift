@@ -131,7 +131,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     let config = CatbirdMlsClientConfig(
       storageRoot: storageRootPath,
       accountDid: accountDid,
-      deviceId: "dev-1",
+      deviceId: "5a0f1c2e-3b4d-4e6f-8a7b-9c0d1e2f3a41",
       homeDsDid: "did:web:chat.catbird.blue",
       homeDsEndpoint: "https://chat.catbird.blue",
       pdsEndpoint: "https://pds.catbird.blue"
@@ -242,36 +242,47 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     XCTAssertThrowsError(try keystoreLaunch2.loadDbKey(accountDidHash: didHash))
   }
 
+  /// Live path (no offline create fallback): bare `did:plc`, UUIDv4 ids, an enrolled device, and
+  /// DS-signed responses from `NativeArchiveMockNetwork`.
   func testI9PrepareForBackgroundClosesSqliteHandleAndResumesCleanly() async throws {
+    NativeArchiveMockNetwork.shared.reset()
+    let boundedSession = MLSBoundedURLSession(protocolClasses: [NativeArchiveMockURLProtocol.self])
+    defer { boundedSession.invalidateAndCancel() }
     let backend = RecordingKeychainBackend()
     let keystore = KeychainPlatformKeyStore(
       service: "blue.catbird.mls.test.\(UUID().uuidString)",
       backend: backend
     )
-    let accountDid = "did:plc:backgroundtest"
+    let accountDid = "did:plc:backgroundtestaaaaaaaaaa"
+    let conversationId = "5a0f1c2e-3b4d-4e6f-8a7b-9c0d1e2f3b01"
     let storageRootPath = tempRoot.path
     let config = CatbirdMlsClientConfig(
       storageRoot: storageRootPath,
       accountDid: accountDid,
-      deviceId: "dev-bg",
-      homeDsDid: "did:web:chat.catbird.blue",
-      homeDsEndpoint: "https://chat.catbird.blue",
-      pdsEndpoint: "https://pds.catbird.blue"
+      deviceId: "5a0f1c2e-3b4d-4e6f-8a7b-9c0d1e2f3a42",
+      homeDsDid: NativeArchiveMockNetwork.dsDid,
+      homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+      pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: accountDid)
+    )
+    let transport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      boundedSession: boundedSession
     )
 
     let coordinator = try await MainActor.run {
       try MLSClientCoordinator(
         config: config,
         keystore: keystore,
-        transport: StubPlatformTransport()
+        transport: transport
       )
     }
 
     let dbPath = try MLSAppGroupStorage.databaseURL(storageRoot: tempRoot, accountDid: accountDid)
       .standardizedFileURL.path
+    _ = try await coordinator.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
     _ = try await coordinator.createGroup(
-      conversationId: "convo-bg-1",
-      sequencerDid: "did:web:chat.catbird.blue",
+      conversationId: conversationId,
+      sequencerDid: NativeArchiveMockNetwork.dsDid,
       title: "Background Safe Group",
       description: nil
     )
@@ -289,7 +300,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     let reopenedFlag = await MainActor.run { coordinator.isHandleClosed }
     XCTAssertFalse(reopenedFlag)
     let convos = try await coordinator.listConversations(limit: 10)
-    XCTAssertEqual(convos.map(\.conversationId), ["convo-bg-1"])
+    XCTAssertEqual(convos.map(\.conversationId), [conversationId])
 
     await coordinator.close()
   }
@@ -313,8 +324,21 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     XCTAssertTrue(missingSpaceScope.blueskyDmsAvailable)
     XCTAssertEqual(
       missingSpaceScope.reason,
-      .missingOAuthScopes(missingScopes: ["space:blue.catbird.labyrinth.conversation?authority=*"])
+      .missingOAuthScopes(missingScopes: [
+        "space:blue.catbird.labyrinth.conversation?action=create&action=delete&action=read&action=update&authority=*&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.batch&collection=blue.catbird.labyrinth.mek",
+      ])
     )
+
+    // A session granted only the retired Labyrinth Space scopes must re-authorize.
+    let oldScopeSession = MLSClientCoordinator.evaluateEligibility(
+      pdsSupportsSpaces: true,
+      grantedScopes: Array(allScopes.prefix(4)) + [
+        "space:blue.catbird.labyrinth.mailbox?manage=create&manage=delete",
+        "space:blue.catbird.labyrinth.conversation?authority=*",
+      ]
+    )
+    XCTAssertFalse(oldScopeSession.eligible)
+    XCTAssertEqual(oldScopeSession.reason, .missingOAuthScopes(missingScopes: Array(allScopes.suffix(2))))
 
     let ready = MLSClientCoordinator.evaluateEligibility(
       pdsSupportsSpaces: true,
@@ -353,6 +377,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("blue.catbird.push.registerKey")
     )
     for allowedRepoNSID in [
+      "com.atproto.identity.resolveDid",
       "com.atproto.repo.uploadBlob",
       "com.atproto.repo.putRecord",
       "com.atproto.repo.getRecord",
@@ -371,6 +396,58 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     XCTAssertThrowsError(
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("com.atproto.repo.applyWrites")
     )
+
+    // deleteRecord passes only as the native Labyrinth mailboxKeys purge shape.
+    let repo = "did:plc:alicecleanuseraaaaaaaaaa"
+    func deletion(_ fields: [String: Any], method: String = "POST") throws -> String {
+      try MLSOutboundHTTPValidator.mailboxKeysDeletionRepo(
+        method: method,
+        body: try JSONSerialization.data(withJSONObject: fields)
+      )
+    }
+    let purge: [String: Any] = [
+      "repo": repo, "collection": "blue.catbird.labyrinth.mailboxKeys", "rkey": "self", "swapRecord": "bafyreiswap",
+    ]
+    XCTAssertEqual(try deletion(purge), repo)
+    XCTAssertEqual(try deletion(purge.merging(["rkey": "000000000003"]) { $1 }), repo)
+    for rejected: [String: Any] in [
+      purge.merging(["collection": "app.bsky.feed.post"]) { $1 },
+      purge.merging(["rkey": "3l2hx5kz7ab2c"]) { $1 },
+      purge.merging(["rkey": "00000000003"]) { $1 },
+      purge.merging(["swapRecord": ""]) { $1 },
+      purge.merging(["validate": false]) { $1 },
+      purge.filter { $0.key != "swapRecord" },
+      purge.merging(["repo": "self"]) { $1 },
+    ] {
+      XCTAssertThrowsError(try deletion(rejected), "\(rejected)")
+    }
+    XCTAssertThrowsError(try deletion(purge, method: "GET"))
+    XCTAssertThrowsError(try MLSOutboundHTTPValidator.mailboxKeysDeletionRepo(method: "POST", body: nil))
+  }
+
+  /// Even the exact purge shape needs the signed-in PDS session to bind `repo`.
+  func testMailboxKeysDeletionWithoutSignedInSessionIsRejected() async throws {
+    let transport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      boundedSession: MLSBoundedURLSession(protocolClasses: [])
+    )
+    let body = try JSONSerialization.data(withJSONObject: [
+      "repo": "did:plc:alicecleanuseraaaaaaaaaa", "collection": "blue.catbird.labyrinth.mailboxKeys",
+      "rkey": "self", "swapRecord": "bafyreiswap",
+    ])
+    let request = PlatformHttpRequest(
+      method: "POST",
+      url: "https://pds.catbird.blue/xrpc/com.atproto.repo.deleteRecord",
+      headers: [PlatformHttpHeader(name: "content-type", value: "application/json")],
+      body: body
+    )
+    let outcome = await Task.detached { Result { try transport.executeHttp(request: request) } }.value
+    XCTAssertThrowsError(try outcome.get()) { error in
+      XCTAssertEqual(
+        error as? MLSOutboundHTTPValidator.ValidationError,
+        .disallowedNSID("com.atproto.repo.deleteRecord")
+      )
+    }
   }
 
   private func openFileDescriptorPaths(matching targetPath: String) -> [String] {

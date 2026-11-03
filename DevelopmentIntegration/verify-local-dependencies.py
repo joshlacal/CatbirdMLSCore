@@ -258,11 +258,18 @@ def generated_binding_record(manifest, core=CORE):
     core = Path(core).resolve()
     ffi = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLSFFI")
     binding = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLS")
-    expected = "Sources/CatbirdMLSSpaces" if ffi.get("path") else "Sources/CatbirdMLS"
-    if binding.get("path") != expected:
-        raise RuntimeError("Generated binding target does not match the selected native artifact")
-    path = core / expected / "CatbirdMLS.swift"
-    return {"path": str(path), "sha256": hash_file(path)}
+    # One generated interface serves whichever framework is selected, so the
+    # pairing is proven by content: a local framework's rebuild marker names
+    # the exact interface it was generated with.
+    if binding.get("path") != "Sources/CatbirdMLS":
+        raise RuntimeError("Generated binding target does not match the unified Sources/CatbirdMLS interface")
+    path = core / "Sources/CatbirdMLS/CatbirdMLS.swift"
+    record = {"path": str(path), "sha256": hash_file(path)}
+    if ffi.get("path"):
+        marker = json.loads((core / ffi["path"] / "labyrinth-space-protocol.json").read_text())
+        if marker.get("generatedSwiftSHA256") != record["sha256"]:
+            raise RuntimeError("Generated binding does not match the selected native artifact")
+    return record
 
 
 def verify_local_ffi_manifest(framework, manifest_path=None):

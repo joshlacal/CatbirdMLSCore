@@ -80,7 +80,7 @@ final class PushExtensionIntegrationTests: XCTestCase {
         config: CatbirdMlsClientConfig(
           storageRoot: storageRootPath,
           accountDid: accountDid,
-          deviceId: "dev-nse",
+          deviceId: "6b1e2d3f-4c5a-4b7e-9f80-a1b2c3d4e5f1",
           homeDsDid: "did:web:chat.catbird.blue",
           homeDsEndpoint: "https://chat.catbird.blue",
           pdsEndpoint: "https://pds.catbird.blue"
@@ -144,7 +144,7 @@ final class PushExtensionIntegrationTests: XCTestCase {
         config: CatbirdMlsClientConfig(
           storageRoot: storageRootPath,
           accountDid: accountDid,
-          deviceId: "dev-darwin",
+          deviceId: "6b1e2d3f-4c5a-4b7e-9f80-a1b2c3d4e5f2",
           homeDsDid: "did:web:chat.catbird.blue",
           homeDsEndpoint: "https://chat.catbird.blue",
           pdsEndpoint: "https://pds.catbird.blue"

@@ -18,7 +18,7 @@ class RebuildPreservationTests(unittest.TestCase):
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
-            sources = core / "Sources" / "CatbirdMLSSpaces"
+            sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / framework_name
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native, atproto / "src", fake_bin):
@@ -43,9 +43,11 @@ class RebuildPreservationTests(unittest.TestCase):
             (framework / "old-binary").write_text("old framework")
             (sources / "CatbirdMLS.swift").write_text("old binding")
             (sources / "MLSFFI.swift").write_text("stale binding")
-            public_sources = core / "Sources" / "CatbirdMLS"
-            public_sources.mkdir(parents=True)
-            (public_sources / "CatbirdMLS.swift").write_text("public release binding")
+            # Leftover of the retired split layout: the rebuild must neither
+            # read nor replace it, because only Sources/CatbirdMLS is packaged.
+            legacy_sources = core / "Sources" / "CatbirdMLSSpaces"
+            legacy_sources.mkdir(parents=True)
+            (legacy_sources / "CatbirdMLS.swift").write_text("legacy split binding")
 
             other = core / "Sources" / "Unselected.xcframework"
             other.mkdir()
@@ -93,7 +95,7 @@ class RebuildPreservationTests(unittest.TestCase):
             self.assertEqual((core / "Sources" / framework_name / "new-binary").read_text(), "new framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "new binding")
             self.assertFalse((sources / "MLSFFI.swift").exists())
-            self.assertEqual((public_sources / "CatbirdMLS.swift").read_text(), "public release binding")
+            self.assertEqual((legacy_sources / "CatbirdMLS.swift").read_text(), "legacy split binding")
             self.assertEqual((other / "keep").read_text(), "unselected framework")
             import json
             marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
@@ -114,7 +116,7 @@ class RebuildPreservationTests(unittest.TestCase):
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
-            sources = core / "Sources" / "CatbirdMLSSpaces"
+            sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
@@ -173,7 +175,7 @@ class RebuildPreservationTests(unittest.TestCase):
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
             scripts = core / "Scripts"
-            sources = core / "Sources" / "CatbirdMLSSpaces"
+            sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
             for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):

@@ -51,7 +51,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.atproto / "Cargo.toml", "[package]\nname = 'catbird-atproto'\n")
         write(self.atproto / "src/lib.rs", "pub fn generated_contract() {}\n")
         write(self.core / "Package.swift", "// fixture\n")
-        write(self.core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift", "public struct Generated {}\n")
+        write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct Generated {}\n")
         schema = self.petrel_catbird / "lexicons/blue/catbird/chat/blue.catbird.chat.prepareDirectRequest.json"
         write(schema, '{"lexicon":1}\n')
         write(self.petrel_catbird / "lexicons/blue/catbird/labyrinth/blue.catbird.labyrinth.defs.json", '{"lexicon":1}\n')
@@ -95,7 +95,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             "protocolVersion": 20261023,
             "features": ["labyrinth"],
             "artifactScope": "apple-all-targets",
-            "generatedSwiftSHA256": self.module.sha256_file(self.core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift"),
+            "generatedSwiftSHA256": self.module.sha256_file(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift"),
             "sourceFingerprint": self.module.source_bundle_fingerprint(self.native, [self.atproto]),
         }))
 
@@ -287,7 +287,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             self.module.verify_manifest(path)
 
     def test_build_rejects_binding_replaced_before_manifest_creation(self):
-        write(self.core / "Sources/CatbirdMLSSpaces/CatbirdMLS.swift", "public struct DifferentNativeMetadata {}\n")
+        write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct DifferentNativeMetadata {}\n")
         with self.assertRaisesRegex(RuntimeError, "generated Swift binding"):
             self.build()
 

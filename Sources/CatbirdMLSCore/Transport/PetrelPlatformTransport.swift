@@ -65,7 +65,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     guard let url = URL(string: request.url) else {
       throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid request URL: \(request.url)")
     }
-    try validateOutboundURLAndNSID(url)
+    let mailboxKeysDeletionRepo: String? = try Self.extractXrpcNsid(url) == MLSOutboundHTTPValidator.deleteRecordNSID
+      ? MLSOutboundHTTPValidator.mailboxKeysDeletionRepo(method: request.method, body: request.body)
+      : nil
+    try validateOutboundURLAndNSID(url, permittingMailboxKeysDeletion: mailboxKeysDeletionRepo != nil)
 
     var urlRequest = URLRequest(url: url)
     urlRequest.httpMethod = request.method
@@ -86,6 +89,9 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       let bridged = Self.runAsyncAuthBridge(timeoutSeconds: 25.0) { () -> PlatformHttpResponse? in
         let clientBaseURL = await atProtoClient.networkService.baseURL
         if Self.sameOrigin(url, clientBaseURL) {
+          if let mailboxKeysDeletionRepo, try await atProtoClient.getDid() != mailboxKeysDeletionRepo {
+            throw MLSOutboundHTTPValidator.ValidationError.disallowedNSID(MLSOutboundHTTPValidator.deleteRecordNSID)
+          }
           let (data, http) = try await atProtoClient.networkService.performRequestReturningHTTPErrorResponses(
             immutableRequest,
             skipTokenRefresh: false
@@ -119,6 +125,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       if let directResponse = try bridged.get() {
         return directResponse
       }
+    }
+    // A mailboxKeys deletion only runs against the signed-in account's own PDS session.
+    if mailboxKeysDeletionRepo != nil {
+      throw MLSOutboundHTTPValidator.ValidationError.disallowedNSID(MLSOutboundHTTPValidator.deleteRecordNSID)
     }
 
     do {
@@ -488,7 +498,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     return box.readResult() ?? .failure(CatbirdMLS.MlsError.Internal(message: "Authenticated HTTP bridge missing result"))
   }
 
-  private func validateOutboundURLAndNSID(_ url: URL) throws {
+  private func validateOutboundURLAndNSID(_ url: URL, permittingMailboxKeysDeletion: Bool) throws {
     if !allowLoopbackForTesting {
       try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(url)
     }
@@ -498,7 +508,9 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       }
       if components.path.hasPrefix("/xrpc/") {
         let nsid = String(components.path.dropFirst("/xrpc/".count))
-        try MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)
+        if !(permittingMailboxKeysDeletion && nsid == MLSOutboundHTTPValidator.deleteRecordNSID) {
+          try MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)
+        }
       }
     }
   }

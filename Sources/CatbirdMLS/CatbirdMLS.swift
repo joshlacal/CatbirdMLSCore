@@ -576,6 +576,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus
 
+    func closeConversation(conversationId: String) throws
+
     func completeOtcPairing(sixDigitCode: String) throws -> OtcPairingCompletion
 
     func createGroup(conversationId: String, sequencerDid: String, memberDids: [String], title: String?, description: String?) throws -> ConversationRow
@@ -752,6 +754,13 @@ open class CatbirdMlsClient:
             uniffi_catbird_mls_fn_method_catbirdmlsclient_check_spaces_eligibility(self.uniffiClonePointer(),
                                                                                    FfiConverterSequenceString.lower(grantedOauthScopes), $0)
         })
+    }
+
+    open func closeConversation(conversationId: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_close_conversation(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(conversationId), $0)
+        }
     }
 
     open func completeOtcPairing(sixDigitCode: String) throws -> OtcPairingCompletion {
@@ -6939,6 +6948,10 @@ public struct QueuedLabyrinthArchivePayload {
     public var conversationId: String
     public var groupIdHex: String
     public var epoch: Int64
+    /**
+     * Authenticated MLS account roster at send time, never replaced by a flush-time roster.
+     */
+    public var expectedMemberDids: [String]
     public var seq: Int64
     public var senderDid: String
     public var senderDeviceId: String
@@ -6953,12 +6966,17 @@ public struct QueuedLabyrinthArchivePayload {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(version: UInt8, messageId: String, conversationId: String, groupIdHex: String, epoch: Int64, seq: Int64, senderDid: String, senderDeviceId: String, sequencerDid: String, spaceUri: String?, plaintextJson: String, labyrinthFrameJson: String, mlsCiphertextB64: String, frameNonceB64: String?, sequencerReceiptJson: String?, createdAtMs: Int64) {
+    public init(version: UInt8, messageId: String, conversationId: String, groupIdHex: String, epoch: Int64,
+                /* 
+                    * Authenticated MLS account roster at send time, never replaced by a flush-time roster.
+                    */ expectedMemberDids: [String], seq: Int64, senderDid: String, senderDeviceId: String, sequencerDid: String, spaceUri: String?, plaintextJson: String, labyrinthFrameJson: String, mlsCiphertextB64: String, frameNonceB64: String?, sequencerReceiptJson: String?, createdAtMs: Int64)
+    {
         self.version = version
         self.messageId = messageId
         self.conversationId = conversationId
         self.groupIdHex = groupIdHex
         self.epoch = epoch
+        self.expectedMemberDids = expectedMemberDids
         self.seq = seq
         self.senderDid = senderDid
         self.senderDeviceId = senderDeviceId
@@ -6988,6 +7006,9 @@ extension QueuedLabyrinthArchivePayload: Equatable, Hashable {
             return false
         }
         if lhs.epoch != rhs.epoch {
+            return false
+        }
+        if lhs.expectedMemberDids != rhs.expectedMemberDids {
             return false
         }
         if lhs.seq != rhs.seq {
@@ -7032,6 +7053,7 @@ extension QueuedLabyrinthArchivePayload: Equatable, Hashable {
         hasher.combine(conversationId)
         hasher.combine(groupIdHex)
         hasher.combine(epoch)
+        hasher.combine(expectedMemberDids)
         hasher.combine(seq)
         hasher.combine(senderDid)
         hasher.combine(senderDeviceId)
@@ -7058,6 +7080,7 @@ public struct FfiConverterTypeQueuedLabyrinthArchivePayload: FfiConverterRustBuf
                 conversationId: FfiConverterString.read(from: &buf),
                 groupIdHex: FfiConverterString.read(from: &buf),
                 epoch: FfiConverterInt64.read(from: &buf),
+                expectedMemberDids: FfiConverterSequenceString.read(from: &buf),
                 seq: FfiConverterInt64.read(from: &buf),
                 senderDid: FfiConverterString.read(from: &buf),
                 senderDeviceId: FfiConverterString.read(from: &buf),
@@ -7078,6 +7101,7 @@ public struct FfiConverterTypeQueuedLabyrinthArchivePayload: FfiConverterRustBuf
         FfiConverterString.write(value.conversationId, into: &buf)
         FfiConverterString.write(value.groupIdHex, into: &buf)
         FfiConverterInt64.write(value.epoch, into: &buf)
+        FfiConverterSequenceString.write(value.expectedMemberDids, into: &buf)
         FfiConverterInt64.write(value.seq, into: &buf)
         FfiConverterString.write(value.senderDid, into: &buf)
         FfiConverterString.write(value.senderDeviceId, into: &buf)
@@ -12521,6 +12545,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_check_spaces_eligibility() != 37495 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_close_conversation() != 13128 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_complete_otc_pairing() != 3518 {

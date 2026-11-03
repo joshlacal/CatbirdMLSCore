@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import os
@@ -102,8 +103,12 @@ class PackageSelectionTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 manifest = json.loads(result.stdout)
+                # One generated interface serves both selections, so the FFI
+                # target is what proves the verified local framework was chosen.
+                ffi = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLSFFI")
+                self.assertEqual(ffi["path"], f"Sources/{name}")
                 binding = next(target for target in manifest["targets"] if target["name"] == "CatbirdMLS")
-                self.assertEqual(binding["path"], "Sources/CatbirdMLSSpaces")
+                self.assertEqual(binding["path"], "Sources/CatbirdMLS")
 
     def test_manifest_rejects_ambiguous_local_selection_value(self):
         result, _ = dump_package(extra_environment={"CATBIRD_MLS_LOCAL_INTEGRATION": "yes"})
@@ -208,27 +213,34 @@ class ResolutionGuardTests(unittest.TestCase):
             self.assertEqual(len(retained), 1)
             self.assertIn("stale", retained[0].read_text())
 
-    def test_provenance_hashes_selected_binding_and_rejects_mixed_pair(self):
+    def test_provenance_hashes_unified_binding_and_rejects_mismatched_pair(self):
         with tempfile.TemporaryDirectory() as directory:
             core = Path(directory)
-            for name, value in (("CatbirdMLS", "public"), ("CatbirdMLSSpaces", "local")):
-                path = core / "Sources" / name / "CatbirdMLS.swift"
-                path.parent.mkdir(parents=True)
-                path.write_text(value)
+            binding = core / "Sources" / "CatbirdMLS" / "CatbirdMLS.swift"
+            binding.parent.mkdir(parents=True)
+            binding.write_text("local")
+            marker = core / "Sources" / "CatbirdMLSFFISimulator.xcframework" / "labyrinth-space-protocol.json"
+            marker.parent.mkdir(parents=True)
+            marker.write_text(json.dumps({"generatedSwiftSHA256": hashlib.sha256(b"local").hexdigest()}))
             public = {"targets": [
                 {"name": "CatbirdMLSFFI", "url": "https://example.test/public.zip"},
                 {"name": "CatbirdMLS", "path": "Sources/CatbirdMLS"},
             ]}
             local = {"targets": [
                 {"name": "CatbirdMLSFFI", "path": "Sources/CatbirdMLSFFISimulator.xcframework"},
-                {"name": "CatbirdMLS", "path": "Sources/CatbirdMLSSpaces"},
+                {"name": "CatbirdMLS", "path": "Sources/CatbirdMLS"},
             ]}
-            public_record = self.verifier.generated_binding_record(public, core)
             local_record = self.verifier.generated_binding_record(local, core)
-            self.assertNotEqual(public_record["sha256"], local_record["sha256"])
-            self.assertTrue(local_record["path"].endswith("Sources/CatbirdMLSSpaces/CatbirdMLS.swift"))
-            local["targets"][1]["path"] = "Sources/CatbirdMLS"
-            with self.assertRaisesRegex(RuntimeError, "does not match"):
+            self.assertEqual(local_record["sha256"], hashlib.sha256(b"local").hexdigest())
+            self.assertTrue(local_record["path"].endswith("Sources/CatbirdMLS/CatbirdMLS.swift"))
+            self.assertEqual(self.verifier.generated_binding_record(public, core), local_record)
+            for selection in (public, local):
+                split = json.loads(json.dumps(selection))
+                split["targets"][1]["path"] = "Sources/CatbirdMLSSpaces"
+                with self.assertRaisesRegex(RuntimeError, "unified Sources/CatbirdMLS"):
+                    self.verifier.generated_binding_record(split, core)
+            marker.write_text(json.dumps({"generatedSwiftSHA256": hashlib.sha256(b"other build").hexdigest()}))
+            with self.assertRaisesRegex(RuntimeError, "does not match the selected native artifact"):
                 self.verifier.generated_binding_record(local, core)
 
     def test_local_framework_requires_verified_artifact_manifest(self):

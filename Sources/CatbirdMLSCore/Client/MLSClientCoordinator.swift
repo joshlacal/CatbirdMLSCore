@@ -42,8 +42,8 @@ public enum MLSAppGroupStorage {
     "blob:*/*",
     "repo:blue.catbird.labyrinth.mailboxKeys",
     "repo:blue.catbird.chat.device",
-    "space:blue.catbird.labyrinth.mailbox?manage=create&manage=delete",
-    "space:blue.catbird.labyrinth.conversation?authority=*",
+    "space:blue.catbird.labyrinth.mailbox?action=create&action=delete&action=read&action=update&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.device&collection=blue.catbird.labyrinth.epoch&collection=blue.catbird.labyrinth.epochMember&collection=blue.catbird.labyrinth.otcSession&collection=blue.catbird.labyrinth.ownerBatch&collection=blue.catbird.labyrinth.virtualDevice&manage=create&manage=delete",
+    "space:blue.catbird.labyrinth.conversation?action=create&action=delete&action=read&action=update&authority=*&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.batch&collection=blue.catbird.labyrinth.mek",
   ]
 
   /// Canonicalize an ATProto DID (`did:plc:...` or `did:web:...`) before hashing (`I8`).

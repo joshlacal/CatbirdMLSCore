@@ -49,16 +49,40 @@ enum MLSOutboundHTTPValidator {
     "com.atproto.space.",
   ]
 
-  /// Exact `com.atproto.repo.*` procedures/queries required for ATProto Space attachment
-  /// blob staging (`atproto#5187`) and public `blue.catbird.labyrinth.mailboxKeys` CAS/discovery.
-  /// Destructive/unrelated repo endpoints (`com.atproto.repo.deleteRecord`, `applyWrites`, etc.)
-  /// remain blocked.
+  /// Exact `com.atproto.*` procedures/queries the native core sends: ATProto Space attachment
+  /// blob staging (`atproto#5187`), public `blue.catbird.labyrinth.mailboxKeys` CAS/discovery, and
+  /// DID resolution through the account PDS (native archive Space reads, `D1`). Destructive or
+  /// unrelated repo endpoints (`applyWrites`, etc.) remain blocked; `deleteRecord` passes only
+  /// in the shape `mailboxKeysDeletionRepo(method:body:)` accepts.
   static let allowedPreparedRequestExactNSIDs: Set<String> = [
+    "com.atproto.identity.resolveDid",
     "com.atproto.repo.uploadBlob",
     "com.atproto.repo.putRecord",
     "com.atproto.repo.getRecord",
     "com.atproto.repo.listRecords",
   ]
+
+  static let deleteRecordNSID = "com.atproto.repo.deleteRecord"
+
+  /// The only permitted `com.atproto.repo.deleteRecord`: native Labyrinth account deletion
+  /// (`delete_all_mailbox_keys`) removing one public `blue.catbird.labyrinth.mailboxKeys` record
+  /// (`self` or a 12-digit per-epoch copy) under `swapRecord` CAS. Returns the target repo DID,
+  /// which the caller must bind to the signed-in session before sending.
+  static func mailboxKeysDeletionRepo(method: String, body: Data?) throws -> String {
+    guard method == "POST",
+          let body,
+          let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+          Set(object.keys) == ["repo", "collection", "rkey", "swapRecord"],
+          object["collection"] as? String == "blue.catbird.labyrinth.mailboxKeys",
+          let rkey = object["rkey"] as? String,
+          rkey == "self" || (rkey.utf8.count == 12 && rkey.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }),
+          let swapRecord = object["swapRecord"] as? String, !swapRecord.isEmpty,
+          let repo = object["repo"] as? String, repo.hasPrefix("did:")
+    else {
+      throw ValidationError.disallowedNSID(deleteRecordNSID)
+    }
+    return repo
+  }
 
   /// Validates a DID-derived `#catbird_labyrinth` or `#atproto_pds` service endpoint against SSRF,
   /// scheme downgrade, non-default ports, fragments, userinfo, and local/private IP ranges.

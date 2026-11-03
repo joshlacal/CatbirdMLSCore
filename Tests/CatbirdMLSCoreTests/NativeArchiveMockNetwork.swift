@@ -1,0 +1,1192 @@
+import CatbirdMLS
+import CryptoKit
+import Foundation
+import PetrelCore
+import PetrelCrypto
+
+/// In-process home `mls-ds` plus per-account PDS/Space hosts serving the verified native archive
+/// (`LabyrinthSession`) contract. Swift port of `catbird-mls/tests/support/native_archive_auth.rs`
+/// (Space tokens, RFC 9421 PoP, `Atproto-Space-Mac`, LtHash commits, DAG-CBOR CIDs,
+/// `mailboxKeys` CAS) and the `client_live_chat_data_plane.rs` mock DS (enrollment, group
+/// invite/accept/welcome, entries, ES256 `#mls-receipt-1` I13 receipts, epoch heads).
+///
+/// Fixed test-only keys. Each account's PDS is `https://<plc-id>.pds.catbird.blue`, so the PDS host
+/// names the OAuth principal; DS principals are the enrolled chat device a request names.
+/// Requests that break the contract are refused and recorded in `contractViolations`.
+final class NativeArchiveMockNetwork: @unchecked Sendable {
+  typealias JSON = [String: Any]
+
+  struct Reply {
+    var status: Int
+    var headers: [String: String] = ["Content-Type": "application/json"]
+    var body: Data
+  }
+
+  static let shared = NativeArchiveMockNetwork()
+  static let dsDid = "did:web:chat.catbird.blue"
+  static let dsEndpoint = "https://chat.catbird.blue"
+  static let batch = "blue.catbird.labyrinth.batch"
+  static let ownerBatch = "blue.catbird.labyrinth.ownerBatch"
+  private static let dsHost = "chat.catbird.blue"
+  private static let pdsSuffix = ".pds.catbird.blue"
+  private static let mailboxKeysCollection = "blue.catbird.labyrinth.mailboxKeys"
+  private static let credentialLabel = "atproto-space-credential"
+
+  static func pdsEndpoint(for did: String) -> String {
+    "https://\(did.dropFirst("did:plc:".count))\(pdsSuffix)"
+  }
+
+  private struct RecordKey: Hashable, Comparable {
+    let space: String
+    let repo: String
+    let collection: String
+    let rkey: String
+
+    static func < (lhs: RecordKey, rhs: RecordKey) -> Bool {
+      (lhs.space, lhs.repo, lhs.collection, lhs.rkey) < (rhs.space, rhs.repo, rhs.collection, rhs.rkey)
+    }
+  }
+
+  private struct StoredRecord {
+    let value: Any
+    let cid: CID
+  }
+
+  private struct Fault: Error {
+    let message: String
+  }
+
+  private let lock = NSLock()
+  private var signingKeys: [String: P256.Signing.PrivateKey] = [:]
+  private var kemKeys: [String: P256.KeyAgreement.PrivateKey] = [:]
+  private var violations: [String] = []
+  private var statusOverrides: [String: Int] = [:]
+  private var overrideRejections: [String: Int] = [:]
+  private var mainThreadRequest = false
+  private var sequence: UInt64 = 0
+  // PDS + Space world.
+  private var records: [RecordKey: StoredRecord] = [:]
+  private var mailboxKeys: [String: [String: StoredRecord]] = [:]
+  private var repoRevisions: [String: String] = [:]
+  private var spentDelegations: Set<String> = []
+  private var pdsRecords: [String: (value: JSON, cid: CID)] = [:]
+  // DS world.
+  private var deviceKeys: [String: [String: Data]] = [:]
+  private var conversationKeyPackages: [String: [JSON]] = [:]
+  private var directRequestRevisions: [String: Int64] = [:]
+  private var conversations: [String: JSON] = [:]
+  private var entries: [String: [JSON]] = [:]
+  private var pendingWelcomes: [String: [JSON]] = [:]
+  private var leafRecoveries: [String: [JSON]] = [:]
+  private var epochHeads: [String: [JSON]] = [:]
+  /// Per conversation device leaf periods: `userDid`, `deviceId`, `joinedSeq`, `removedSeq`.
+  private var leafPeriods: [String: [JSON]] = [:]
+
+  func reset() {
+    lock.lock()
+    defer { lock.unlock() }
+    violations = []
+    statusOverrides = [:]
+    overrideRejections = [:]
+    mainThreadRequest = false
+    sequence = 0
+    records = [:]
+    mailboxKeys = [:]
+    repoRevisions = [:]
+    spentDelegations = []
+    pdsRecords = [:]
+    deviceKeys = [:]
+    conversationKeyPackages = [:]
+    directRequestRevisions = [:]
+    conversations = [:]
+    entries = [:]
+    pendingWelcomes = [:]
+    leafRecoveries = [:]
+    epochHeads = [:]
+    leafPeriods = [:]
+  }
+
+  // MARK: - Test controls
+
+  /// Every Space operation on `space` answers `status` (`503` offline, `403` access revoked).
+  func setStatusOverride(_ status: Int?, forSpace space: String) {
+    locked { statusOverrides[space] = status }
+  }
+
+  /// Space operations on `space` answered with its status override so far.
+  func overrideRejections(forSpace space: String) -> Int {
+    locked { overrideRejections[space] ?? 0 }
+  }
+
+  func recordCount(space: String, repo: String, collection: String) -> Int {
+    locked { records.keys.filter { $0.space == space && $0.repo == repo && $0.collection == collection }.count }
+  }
+
+  /// Sealed message items across `collection` batch records (the server-visible `items` arrays).
+  func archivedItemCount(space: String, repo: String, collection: String) -> Int {
+    locked {
+      records.filter { $0.key.space == space && $0.key.repo == repo && $0.key.collection == collection }
+        .reduce(0) { $0 + (($1.value.value as? JSON)?["items"] as? [Any] ?? []).count }
+    }
+  }
+
+  var contractViolations: [String] { locked { violations } }
+  var sawMainThreadRequest: Bool { locked { mainThreadRequest } }
+
+  /// Hex Labyrinth device key of the `account` mailbox device bound to chat device `chatDeviceId`.
+  func labyrinthDeviceKeyHex(account: String, chatDeviceId: String) -> String? {
+    locked {
+      guard let chatKey = deviceKeys[account]?[chatDeviceId] else { return nil }
+      let mailbox = "at://\(account)/space/blue.catbird.labyrinth.mailbox/self"
+      for (key, record) in records
+      where key.space == mailbox && key.repo == account && key.collection == "blue.catbird.labyrinth.device" {
+        guard let value = record.value as? JSON,
+              let binding = value["chatBinding"] as? JSON,
+              bytes(binding["transportPubkey"]) == chatKey,
+              let deviceKey = bytes(value["deviceKeyPubkey"])
+        else { continue }
+        return deviceKey.map { String(format: "%02x", $0) }.joined()
+      }
+      return nil
+    }
+  }
+
+  // MARK: - Dispatch
+
+  func handle(_ request: URLRequest, body: Data, onMainThread: Bool) -> Reply {
+    lock.lock()
+    defer { lock.unlock() }
+    if onMainThread {
+      mainThreadRequest = true
+    }
+    guard let url = request.url, let host = url.host?.lowercased() else {
+      return xrpcError(400, "InvalidRequest", "missing host")
+    }
+    let method = request.httpMethod ?? "GET"
+    if host == Self.dsHost, url.path == "/.well-known/did.json" {
+      return reply(200, didDocument(Self.dsDid))
+    }
+    guard url.path.hasPrefix("/xrpc/") else {
+      return xrpcError(404, "NotFound", url.path)
+    }
+    let nsid = String(url.path.dropFirst("/xrpc/".count))
+    let rawQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery ?? ""
+    do {
+      if host == Self.dsHost {
+        return try handleDS(nsid: nsid, method: method, rawQuery: rawQuery, request: request, body: body)
+      }
+      guard host.hasSuffix(Self.pdsSuffix) else {
+        return xrpcError(404, "NotFound", host)
+      }
+      let account = "did:plc:" + host.dropLast(Self.pdsSuffix.count)
+      return try handlePDS(account: account, nsid: nsid, method: method, rawQuery: rawQuery, request: request, body: body)
+    } catch let fault as Fault {
+      violations.append("\(nsid): \(fault.message)")
+      return xrpcError(500, "FixtureContractViolation", fault.message)
+    } catch {
+      violations.append("\(nsid): \(error)")
+      return xrpcError(500, "FixtureContractViolation", "\(error)")
+    }
+  }
+
+  /// `PetrelPlatformTransport` `httpOverride` entry: the same dispatch `NativeArchiveMockURLProtocol` uses.
+  func handle(_ request: PlatformHttpRequest) -> PlatformHttpResponse {
+    guard let url = URL(string: request.url) else {
+      let reply = xrpcError(400, "InvalidRequest", "invalid URL")
+      return PlatformHttpResponse(status: UInt16(reply.status), headers: [], body: reply.body)
+    }
+    var urlRequest = URLRequest(url: url)
+    urlRequest.httpMethod = request.method
+    for header in request.headers {
+      urlRequest.setValue(header.value, forHTTPHeaderField: header.name)
+    }
+    let reply = handle(urlRequest, body: request.body ?? Data(), onMainThread: Thread.isMainThread)
+    return PlatformHttpResponse(
+      status: UInt16(reply.status),
+      headers: reply.headers.map { PlatformHttpHeader(name: $0.key, value: $0.value) },
+      body: reply.body
+    )
+  }
+
+  // MARK: - PDS + Space host (native_archive_auth.rs)
+
+  private func handlePDS(
+    account: String, nsid: String, method: String, rawQuery: String, request: URLRequest, body: Data
+  ) throws -> Reply {
+    let params = try strictQuery(rawQuery)
+    let now = nowSeconds()
+    switch nsid {
+    case "com.atproto.identity.resolveDid":
+      return reply(200, ["didDoc": didDocument(try required(params, "did"))])
+    case "com.atproto.repo.putRecord", "com.atproto.repo.getRecord", "com.atproto.repo.listRecords",
+         "com.atproto.repo.deleteRecord":
+      let json = method == "POST" ? try object(body) : nil
+      let collection = (json?["collection"] as? String) ?? params["collection"]
+      if collection == Self.mailboxKeysCollection {
+        return try mailboxKeysRecord(account: account, nsid: nsid, params: params, body: json)
+      }
+      return try repoRecord(nsid: nsid, params: params, body: json)
+    case "com.atproto.space.getDelegationToken":
+      let space = try SpaceURI(try required(params, "space"))
+      let token = SpaceToken.mint(typ: SpaceToken.delegation, key: signingKey(account), claims: [
+        "iss": account, "sub": space.raw, "aud": "\(space.authority)#atproto_pds",
+        "iat": now, "exp": now + 60, "jti": "delegation-\(next())",
+      ])
+      return reply(200, ["token": token])
+    case "com.atproto.space.getSpaceCredential":
+      return try spaceCredential(account: account, body: try object(body), relayed: false, now: now)
+    case "com.atproto.space.applyWrites":
+      return try applyWrites(account: account, body: try object(body))
+    case "com.atproto.space.deleteRecord":
+      let json = try object(body)
+      return try applyWrites(account: account, body: [
+        "space": json["space"] ?? NSNull(), "repo": json["repo"] ?? NSNull(),
+        "writes": [[
+          "$type": "com.atproto.space.applyWrites#delete",
+          "collection": json["collection"] ?? NSNull(), "rkey": json["rkey"] ?? NSNull(),
+        ]],
+      ])
+    case "com.atproto.space.listSpaces":
+      let spaces = Set(records.keys.filter { $0.repo == account }.map(\.space)).sorted()
+      return reply(200, ["spaces": spaces.map { ["uri": $0] }])
+    case "com.atproto.space.getSpace" where params["space"] == nil:
+      return xrpcError(400, "InvalidRequest", "space required")
+    default:
+      guard method == "GET", nsid.hasPrefix("com.atproto.space.") else {
+        throw Fault(message: "unsupported native Space fixture endpoint")
+      }
+      return try spaceRead(
+        account: account, nsid: nsid, params: params,
+        authorization: try header(request, "authorization"),
+        audience: try header(request, "atproto-space-audience"),
+        signatureInput: try header(request, "signature-input"),
+        signature: try header(request, "signature"),
+        wantMac: request.value(forHTTPHeaderField: "atproto-space-want-mac"),
+        now: now
+      )
+    }
+  }
+
+  private func didDocument(_ did: String) -> JSON {
+    var methods: [JSON] = []
+    if did == Self.dsDid {
+      methods.append(verificationMethod(did, "#mls-receipt-1", receiptKey.publicKey))
+    }
+    methods.append(verificationMethod(did, "#atproto", signingKey(did).publicKey))
+    let kem = kemKey(did).publicKey.compressedRepresentation
+    methods.append(verificationMethod(did, "#atproto_kem", try! P256.Signing.PublicKey(compressedRepresentation: kem)))
+    var services: [JSON] = []
+    if did.hasPrefix("did:plc:") {
+      services.append(["id": "#atproto_pds", "type": "AtprotoPersonalDataServer", "serviceEndpoint": Self.pdsEndpoint(for: did)])
+    }
+    return ["id": did, "verificationMethod": methods, "service": services]
+  }
+
+  private func verificationMethod(_ did: String, _ fragment: String, _ key: P256.Signing.PublicKey) -> JSON {
+    ["id": did + fragment, "controller": did, "type": "Multikey",
+     "publicKeyMultibase": String(P256DIDKey(publicKey: key).value.dropFirst("did:key:".count))]
+  }
+
+  private func mailboxKeysRecord(account: String, nsid: String, params: [String: String], body: JSON?) throws -> Reply {
+    let repo = try (body?["repo"] as? String) ?? required(params, "repo")
+    let rkey = (body?["rkey"] as? String) ?? params["rkey"]
+    let uri = { (rkey: String) in "at://\(repo)/\(Self.mailboxKeysCollection)/\(rkey)" }
+    switch nsid {
+    case "com.atproto.repo.putRecord":
+      guard account == repo else { return xrpcError(403, "NotAuthorized") }
+      guard let rkey, let body, let value = body["record"] else { throw Fault(message: "mailbox record missing") }
+      if body.keys.contains("swapRecord"), (body["swapRecord"] as? String) != mailboxKeys[repo]?[rkey]?.cid.string {
+        return xrpcError(400, "InvalidSwap")
+      }
+      let cid = try dagCborCID(value)
+      mailboxKeys[repo, default: [:]][rkey] = StoredRecord(value: value, cid: cid)
+      return reply(200, ["uri": uri(rkey), "cid": cid.string])
+    case "com.atproto.repo.getRecord":
+      guard let rkey else { throw Fault(message: "mailbox rkey missing") }
+      guard let record = mailboxKeys[repo]?[rkey] else { return xrpcError(404, "RecordNotFound") }
+      return reply(200, ["uri": uri(rkey), "cid": record.cid.string, "value": record.value])
+    case "com.atproto.repo.listRecords":
+      let limit = try pageLimit(params, default: 100)
+      var listed = (mailboxKeys[repo] ?? [:]).sorted { $0.key < $1.key }
+        .filter { params["cursor"] == nil || $0.key > params["cursor"]! }
+      let more = listed.count > limit
+      listed = Array(listed.prefix(limit))
+      var out: JSON = ["records": listed.map { ["uri": uri($0.key), "cid": $0.value.cid.string, "value": $0.value.value] }]
+      if more, let last = listed.last { out["cursor"] = last.key }
+      return reply(200, out)
+    default:
+      guard account == repo else { return xrpcError(403, "NotAuthorized") }
+      guard let rkey else { throw Fault(message: "mailbox rkey missing") }
+      if let expected = body?["swapRecord"] as? String, mailboxKeys[repo]?[rkey]?.cid.string != expected {
+        return xrpcError(400, "InvalidSwap")
+      }
+      mailboxKeys[repo]?[rkey] = nil
+      return reply(200, JSON())
+    }
+  }
+
+  /// Non-mailbox repo records (`blue.catbird.chat.device`, `.declaration`), as the mock DS stores them.
+  private func repoRecord(nsid: String, params: [String: String], body: JSON?) throws -> Reply {
+    switch nsid {
+    case "com.atproto.repo.putRecord":
+      guard let body, let repo = body["repo"] as? String, let collection = body["collection"] as? String,
+            let rkey = body["rkey"] as? String, let value = body["record"] as? JSON
+      else { throw Fault(message: "putRecord body malformed") }
+      let cid = try dagCborCID(value)
+      pdsRecords["\(repo)|\(collection)|\(rkey)"] = (value, cid)
+      return reply(200, ["uri": "at://\(repo)/\(collection)/\(rkey)", "cid": cid.string])
+    case "com.atproto.repo.getRecord":
+      let (repo, collection, rkey) = (try required(params, "repo"), try required(params, "collection"), try required(params, "rkey"))
+      guard let record = pdsRecords["\(repo)|\(collection)|\(rkey)"] else { return xrpcError(400, "RecordNotFound") }
+      return reply(200, ["uri": "at://\(repo)/\(collection)/\(rkey)", "cid": record.cid.string, "value": record.value])
+    case "com.atproto.repo.listRecords":
+      let prefix = "\(try required(params, "repo"))|\(try required(params, "collection"))|"
+      let listed = pdsRecords.filter { $0.key.hasPrefix(prefix) }.sorted { $0.key < $1.key }.map { entry in
+        let parts = entry.key.split(separator: "|").map(String.init)
+        return ["uri": "at://\(parts[0])/\(parts[1])/\(parts[2])", "cid": entry.value.cid.string, "value": entry.value.value] as JSON
+      }
+      return reply(200, ["records": listed])
+    default:
+      throw Fault(message: "repo deleteRecord outside mailboxKeys")
+    }
+  }
+
+  private func spaceCredential(account: String, body: JSON, relayed: Bool, now: UInt64) throws -> Reply {
+    let space = try SpaceURI(try text(body, "space"))
+    if relayed, try text(body, "authorityDid") != space.authority {
+      throw Fault(message: "relay authority mismatch")
+    }
+    let kid = try text(body, relayed ? "cnfKey" : "credentialKid")
+    _ = try P256DIDKey(kid)
+    if let denied = overridden(space.raw) { return denied }
+    guard let delegation = SpaceToken.verify(try text(body, "delegationToken"), typ: SpaceToken.delegation, issuerKey: { self.signingKey($0).publicKey }),
+          delegation["iss"] as? String == account, delegation["sub"] as? String == space.raw,
+          delegation["aud"] as? String == "\(space.authority)#atproto_pds",
+          let exp = uint64(delegation["exp"]), exp > now, let jti = delegation["jti"] as? String
+    else { throw Fault(message: "delegation account/Space/expiry mismatch") }
+    guard spentDelegations.insert("\(account):\(jti)").inserted else { throw Fault(message: "delegation replay") }
+    let expires = now + 600
+    let credential = SpaceToken.mint(typ: SpaceToken.credential, key: signingKey(space.authority), claims: [
+      "iss": space.authority, "sub": space.raw, "iat": now, "exp": expires,
+      "jti": "credential-\(next())", "cnf": ["kid": kid],
+    ])
+    let expiresAt = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(expires)))
+    return reply(200, ["credential": credential, "expiresAt": expiresAt])
+  }
+
+  private func applyWrites(account: String, body: JSON) throws -> Reply {
+    let space = try SpaceURI(try text(body, "space"))
+    let repo = try text(body, "repo")
+    guard repo == account else { return xrpcError(403, "NotAuthorized") }
+    guard let writes = body["writes"] as? [JSON] else { throw Fault(message: "writes missing") }
+    if let denied = overridden(space.raw) { return denied }
+    var working = records
+    let rev = tid(next())
+    var results: [JSON] = []
+    for (index, write) in writes.enumerated() {
+      let collection = try text(write, "collection")
+      let rkey = (write["rkey"] as? String) ?? tid(sequence + UInt64(index) + 1)
+      let key = RecordKey(space: space.raw, repo: repo, collection: collection, rkey: rkey)
+      let current = working[key]
+      if write.keys.contains("swapRecord"), (write["swapRecord"] as? String) != current?.cid.string {
+        return xrpcError(400, "InvalidSwap")
+      }
+      let action = try text(write, "$type").split(separator: "#").last.map(String.init) ?? ""
+      var cid: CID?
+      switch action {
+      case "create" where current != nil:
+        return xrpcError(400, "RecordAlreadyExists")
+      case "update" where current == nil, "delete" where current == nil:
+        return xrpcError(400, "RecordNotFound")
+      case "create", "update":
+        guard let value = write["value"] else { throw Fault(message: "write value missing") }
+        let stored = StoredRecord(value: value, cid: try dagCborCID(value))
+        working[key] = stored
+        cid = stored.cid
+      case "delete":
+        working[key] = nil
+      default:
+        throw Fault(message: "unsupported Space write action")
+      }
+      var result: JSON = ["$type": "com.atproto.space.applyWrites#\(action)Result"]
+      if let cid {
+        result["uri"] = space.recordURI(repo, collection, rkey)
+        result["cid"] = cid.string
+      }
+      results.append(result)
+    }
+    records = working
+    repoRevisions["\(space.raw)|\(repo)"] = rev
+    return reply(200, ["results": results])
+  }
+
+  private func spaceRead(
+    account: String, nsid: String, params: [String: String], authorization: String, audience: String,
+    signatureInput: String, signature: String, wantMac: String?, now: UInt64
+  ) throws -> Reply {
+    let space = try SpaceURI(try required(params, "space"))
+    let writer = ["com.atproto.space.getSpace", "com.atproto.space.listRepos"].contains(nsid)
+      ? space.authority
+      : try required(params, "repo")
+    guard audience == writer else { throw Fault(message: "Space audience mismatch") }
+    let scheme = "Atproto-Space-Credential "
+    guard authorization.hasPrefix(scheme) else { throw Fault(message: "Space credential missing") }
+    let jwt = String(authorization.dropFirst(scheme.count))
+    guard let claims = SpaceToken.verify(jwt, typ: SpaceToken.credential, issuerKey: { self.signingKey($0).publicKey }),
+          claims["iss"] as? String == space.authority, claims["sub"] as? String == space.raw,
+          let exp = uint64(claims["exp"]), exp > now,
+          let cnf = (claims["cnf"] as? JSON)?["kid"] as? String
+    else { throw Fault(message: "Space credential binding mismatch") }
+    try verifyPresentation(authorization: authorization, audience: audience, signatureInput: signatureInput, signature: signature, cnf: cnf)
+    if space.spaceType == "blue.catbird.labyrinth.mailbox", space.authority != account || writer != account || space.skey != "self" {
+      return xrpcError(403, "NotAuthorized")
+    }
+    if let denied = overridden(space.raw) { return denied }
+    let written = records.filter { $0.key.space == space.raw && $0.key.repo == writer }.sorted { $0.key < $1.key }
+    switch nsid {
+    case "com.atproto.space.getRecord":
+      let collection = try required(params, "collection")
+      let rkey = try required(params, "rkey")
+      guard let record = records[RecordKey(space: space.raw, repo: writer, collection: collection, rkey: rkey)] else {
+        return xrpcError(404, "RecordNotFound")
+      }
+      let uri = space.recordURI(writer, collection, rkey)
+      let mac = try SpaceMAC.record(sharedSecret: try sharedSecret(writer, wantMac, "atproto-space-record"), uri: uri, cid: record.cid.bytes)
+      var out = reply(200, ["uri": uri, "cid": record.cid.string, "value": record.value])
+      out.headers["atproto-space-mac"] = "type=\"atproto-space-record\", ver=1, mac=:\(mac.base64EncodedString()):"
+      return out
+    case "com.atproto.space.listRecords":
+      let collection = params["collection"]
+      let reverse = params["reverse"] == "true"
+      var matching = written.filter { entry in
+        let path = "\(entry.key.collection)/\(entry.key.rkey)"
+        return (collection == nil || entry.key.collection == collection)
+          && (params["cursor"].map { reverse ? path < $0 : path > $0 } ?? true)
+      }
+      if reverse { matching.reverse() }
+      let limit = try pageLimit(params, default: 50)
+      let more = matching.count > limit
+      matching = Array(matching.prefix(limit))
+      let listed: [JSON] = matching.map { entry in
+        var item: JSON = ["collection": entry.key.collection, "rkey": entry.key.rkey, "cid": entry.value.cid.string]
+        if params["excludeValues"] != "true" { item["value"] = entry.value.value }
+        return item
+      }
+      var out: JSON = ["records": listed]
+      if more, let last = matching.last { out["cursor"] = "\(last.key.collection)/\(last.key.rkey)" }
+      return reply(200, out)
+    case "com.atproto.space.listRepos":
+      let dids = Set(records.keys.filter { $0.space == space.raw }.map(\.repo)).sorted()
+      return reply(200, ["repos": dids.map { did -> JSON in
+        let rev = repoRevisions["\(space.raw)|\(did)"] ?? tid(0)
+        let data = commitment(records.filter { $0.key.space == space.raw && $0.key.repo == did })
+        return ["did": did, "repoRev": rev, "spaceRev": rev, "data": ["$bytes": data.base64EncodedString()]]
+      }])
+    case "com.atproto.space.getSpace":
+      return reply(200, ["uri": space.raw, "policy": [
+        "$type": "blue.catbird.labyrinth.conversationPolicy", "authority": space.authority,
+      ]])
+    default:
+      throw Fault(message: "unsupported Space read")
+    }
+  }
+
+  /// RFC 9421 `atproto-space-credential` minimal profile, verified with the credential `cnf` key.
+  private func verifyPresentation(authorization: String, audience: String, signatureInput: String, signature: String, cnf: String) throws {
+    let params = "(\"authorization\" \"atproto-space-audience\");tag=\"\(Self.credentialLabel)\""
+    guard signatureInput == "\(Self.credentialLabel)=\(params)",
+          signature.hasPrefix("\(Self.credentialLabel)=:"), signature.hasSuffix(":"),
+          let raw = Data(base64Encoded: String(signature.dropFirst(Self.credentialLabel.count + 2).dropLast())),
+          let ecdsa = try? P256.Signing.ECDSASignature(rawRepresentation: raw)
+    else { throw Fault(message: "malformed RFC 9421 presentation") }
+    let base = "\"authorization\": \(authorization)\n\"atproto-space-audience\": \(audience)\n\"@signature-params\": \(params)"
+    guard try P256DIDKey(cnf).publicKey.isValidSignature(ecdsa, for: Data(base.utf8)) else {
+      throw Fault(message: "Space proof binding mismatch")
+    }
+  }
+
+  private func sharedSecret(_ writer: String, _ wantMac: String?, _ macType: String) throws -> Data {
+    guard let wantMac else { throw Fault(message: "Want-Mac missing") }
+    var fields: [String: String] = [:]
+    for member in wantMac.split(separator: ",") {
+      let pair = member.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1).map(String.init)
+      guard pair.count == 2 else { throw Fault(message: "malformed Want-Mac") }
+      fields[pair[0]] = pair[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    }
+    guard fields["type"] == macType, fields["ver"] == "1", let share = fields["key_share"] else {
+      throw Fault(message: "Want-Mac type or ver mismatch")
+    }
+    return try SpaceMAC.decapsulate(privateKey: kemKey(writer), keyShare: share)
+  }
+
+  private func commitment<S: Sequence>(_ entries: S) -> Data where S.Element == (key: RecordKey, value: StoredRecord) {
+    var hash = SpaceSetHash()
+    for entry in entries {
+      hash.add(path: "\(entry.key.collection)/\(entry.key.rkey)", cid: entry.value.cid.string)
+    }
+    return hash.digest
+  }
+
+  private func overridden(_ space: String) -> Reply? {
+    guard let status = statusOverrides[space] else { return nil }
+    overrideRejections[space, default: 0] += 1
+    return xrpcError(status, status == 403 ? "Forbidden" : "SpaceUnavailable", space)
+  }
+
+  // MARK: - Home mls-ds (client_live_chat_data_plane.rs mock DS)
+
+  private func handleDS(nsid: String, method: String, rawQuery: String, request: URLRequest, body: Data) throws -> Reply {
+    let q = lenientQuery(rawQuery)
+    let b = method == "POST" ? ((try? object(body)) ?? JSON()) : JSON()
+    let signed = (b["signedRequest"] as? JSON)?["body"] as? JSON ?? JSON()
+    switch nsid {
+    case "blue.catbird.chat.relaySpaceCredential":
+      return try spaceCredential(account: try principal(b["actorDeviceId"]), body: b, relayed: true, now: nowSeconds())
+    case "blue.catbird.chat.relaySpaceRead":
+      let audience = try text(b, "spaceAudience")
+      guard try text(b, "targetDid") == audience else { throw Fault(message: "relay target/audience mismatch") }
+      return try spaceRead(
+        account: try principal(b["actorDeviceId"]), nsid: try text(b, "nsid"),
+        params: try strictQuery(b["query"] as? String ?? ""),
+        authorization: "Atproto-Space-Credential \(try text(b, "credential"))", audience: audience,
+        signatureInput: try text(b, "signatureInput"), signature: try text(b, "signature"),
+        wantMac: b["wantMac"] as? String, now: nowSeconds()
+      )
+    case "blue.catbird.labyrinth.publishEpochHead":
+      let (write, account, key) = try deviceSignedClaim(request, header: "catbird-labyrinth-write", deviceField: "actorDeviceId", domain: "CATBIRD-LABYRINTH-WRITE\0")
+      guard write["endpointNsid"] as? String == nsid, write["payloadSha256"] as? String == hex(Data(SHA256.hash(data: body))) else {
+        return xrpcError(400, "InvalidRequest", "write body does not bind this payload")
+      }
+      guard let epoch = b["epoch"] as? JSON, let number = uint64(epoch["epochNumber"]) else {
+        return xrpcError(400, "InvalidRequest", "epoch head does not verify")
+      }
+      guard bytes((epoch["attestation"] as? JSON)?["transportPubkey"]) == key else {
+        return xrpcError(400, "AttestationNotCaller", "head not attested by caller")
+      }
+      var chain = epochHeads[account] ?? []
+      if let existing = chain.first(where: { uint64($0["epochNumber"]) == number }) {
+        return NSDictionary(dictionary: existing).isEqual(to: epoch)
+          ? reply(200, JSON()) : xrpcError(409, "EpochHeadConflict", "different head at this epoch")
+      }
+      let links = chain.last.map { latest in
+        uint64(latest["epochNumber"]).map { $0 + 1 } == number
+          && bytes(epoch["previousEpochHead"]) == bytes(latest["epochHead"])
+      } ?? (number == 0)
+      guard links else { return xrpcError(400, "InvalidEpochChain", "head does not extend the chain") }
+      chain.append(epoch)
+      epochHeads[account] = chain
+      return reply(200, JSON())
+    case "blue.catbird.labyrinth.getEpochHead":
+      try verifyRead(request, nsid: nsid, rawQuery: rawQuery)
+      let chain = epochHeads[q["did"] ?? ""] ?? []
+      let end: Int?
+      if let wanted = q["epochNumber"] {
+        end = chain.firstIndex { uint64($0["epochNumber"]).map { String($0) } == wanted }
+      } else {
+        end = chain.isEmpty ? nil : chain.count - 1
+      }
+      guard let end else { return xrpcError(404, "EpochNotFound", "no such epoch head") }
+      return reply(200, ["epoch": chain[end], "chain": Array(chain[...end]), "floorSeq": chain[0]["epochNumber"]!])
+    case "blue.catbird.labyrinth.getChatDeviceKeys":
+      try verifyRead(request, nsid: nsid, rawQuery: rawQuery)
+      let keys = (deviceKeys[q["did"] ?? ""] ?? [:]).sorted { $0.key < $1.key }.map(\.value)
+      return reply(200, ["items": keys.map { key -> JSON in
+        ["keyId": JWTBase64URL.encode(Data(SHA256.hash(data: key))), "signingPublicKey": ["$bytes": key.base64EncodedString()]]
+      }])
+    case "blue.catbird.labyrinth.getMemberDevices":
+      // `mls-ds` `member_devices`: `did`'s leaf periods with the chat seqs that added and removed
+      // them; only a past or present participant may read the conversation's leaf view.
+      let caller = try verifyRead(request, nsid: nsid, rawQuery: rawQuery)
+      let periods = leafPeriods[q["threadId"] ?? ""] ?? []
+      guard periods.contains(where: { $0["userDid"] as? String == caller }) else {
+        return xrpcError(404, "ConversationNotFound")
+      }
+      let did = q["did"] ?? ""
+      return reply(200, ["items": periods.filter { $0["userDid"] as? String == did }.compactMap { period -> JSON? in
+        guard let key = deviceKeys[did]?[period["deviceId"] as? String ?? ""] else { return nil }
+        var item: JSON = [
+          "keyId": JWTBase64URL.encode(Data(SHA256.hash(data: key))),
+          "signingPublicKey": ["$bytes": key.base64EncodedString()], "joinedSeq": period["joinedSeq"] ?? 0,
+        ]
+        item["removedSeq"] = period["removedSeq"]
+        return item
+      }])
+    case "blue.catbird.chat.enrollDevice":
+      let did = try text(signed, "actorDid")
+      let device = try text(signed, "deviceId")
+      // `mls-ds` enrollment is create-only per (did, deviceId).
+      if deviceKeys[did]?[device] != nil {
+        return xrpcError(400, "DeviceAlreadyExists", "DeviceAlreadyExists")
+      }
+      guard let key = bytes(signed["signaturePublicKey"]), key.count == 32 else { throw Fault(message: "enrollment key malformed") }
+      deviceKeys[did, default: [:]][device] = key
+      conversationKeyPackages["\(did)|\(device)", default: []].append(contentsOf: signed["keyPackages"] as? [JSON] ?? [])
+      return reply(200, ["device": ["authGeneration": 1]])
+    case "blue.catbird.chat.replenishKeyPackages":
+      let slot = "\(try text(signed, "actorDid"))|\(try text(signed, "actorDeviceId"))"
+      conversationKeyPackages[slot, default: []].append(contentsOf: signed["keyPackages"] as? [JSON] ?? [])
+      return reply(200, ["acceptedCount": 4])
+    case "blue.catbird.chat.publishDirectRequestKeys":
+      // `mls-ds` `publish_request_keys`: each publication advances the revision by one.
+      let slot = "\(try text(signed, "actorDid"))|\(try text(signed, "actorDeviceId"))"
+      guard let revision = int64(signed["revision"]), revision == (directRequestRevisions[slot] ?? 0) + 1 else {
+        return xrpcError(400, "InvalidRequest", "request-key revision must advance by one")
+      }
+      directRequestRevisions[slot] = revision
+      return reply(200, ["published": true])
+    case "blue.catbird.chat.createConversation":
+      return try createConversation(b)
+    case "blue.catbird.chat.acceptConversation":
+      return try acceptConversation(b)
+    case "blue.catbird.chat.submitTransition":
+      return try submitTransition(b)
+    case "blue.catbird.chat.sendMessage":
+      return try sendMessage(b)
+    case "blue.catbird.chat.getConversations":
+      return reply(200, ["conversations": conversations.sorted { $0.key < $1.key }.map(\.value)])
+    case "blue.catbird.chat.getPendingWelcomes":
+      let device = q["actorDeviceId"] ?? ""
+      var found: [JSON] = []
+      for slot in Array(pendingWelcomes.keys) where slot.hasSuffix("|\(device)") {
+        found += pendingWelcomes[slot] ?? []
+        pendingWelcomes[slot] = []
+      }
+      return reply(200, ["welcomes": found])
+    case "blue.catbird.chat.acknowledgeWelcome":
+      return reply(200, ["acknowledged": true])
+    case "blue.catbird.chat.getConversationState":
+      let cid = q["conversationId"] ?? ""
+      let device = q["actorDeviceId"] ?? ""
+      guard let state = conversations[cid] else { return xrpcError(400, "ConversationNotFound", cid) }
+      let currentLeaf = (state["leaves"] as? [JSON] ?? []).contains { $0["deviceId"] as? String == device }
+      let requests = (leafRecoveries[cid] ?? []).filter { request in
+        currentLeaf && request["requesterDeviceId"] as? String != device && request["status"] as? String == "open"
+          && jsonEqual(request["boundCoordinate"], state["coordinates"])
+      }
+      // `accountDeletions` is required by the lexicon (PetrelCatbird 0f4f58a2);
+      // this mock models no account deletions, so the list is empty.
+      return reply(200, [
+        "state": state, "pendingLeafRecoveryRequests": requests,
+        "pendingResetRequests": [Any](), "pendingLeaveRequests": [Any](),
+        "accountDeletions": [Any](),
+      ])
+    case "blue.catbird.chat.getLeafRecoveryInbox":
+      let device = q["actorDeviceId"] ?? ""
+      let items = leafRecoveries.values.flatMap { $0 }.filter { $0["requesterDeviceId"] as? String == device }
+      var out: JSON = [
+        "items": items, "snapshotEventCursor": "fixture-events",
+        "snapshotExpiresAt": "2099-01-01T00:00:00.000Z", "hasMore": false,
+      ]
+      out["inventorySessionId"] = q["inventorySessionId"]
+      return reply(200, out)
+    case "blue.catbird.chat.getEntries":
+      let after = Int64(q["afterSeq"] ?? "0") ?? 0
+      let list = (entries[q["conversationId"] ?? ""] ?? []).filter { int64($0["seq"]) ?? 0 > after }
+      return reply(200, ["entries": list])
+    case "blue.catbird.chat.acknowledgeEntries":
+      let wm = int64(b["upToSeq"]) ?? 0
+      return reply(200, ["watermarkSeq": wm])
+    default:
+      return reply(200, JSON())
+    }
+  }
+
+  private func createConversation(_ b: JSON) throws -> Reply {
+    guard let sr = b["signedRequest"] as? JSON, let body = sr["body"] as? JSON, let manifest = body["manifest"] as? JSON else {
+      throw Fault(message: "createConversation body malformed")
+    }
+    let cid = try text(body, "conversationId")
+    let coords = body["next"] ?? NSNull()
+    let actorLeaf = manifest["actorLeaf"] as? JSON ?? JSON()
+    let participants = (manifest["participants"] as? [JSON] ?? []).map { participant -> JSON in
+      var p = participant
+      p["leafCount"] = participant["userDid"] as? String == actorLeaf["userDid"] as? String ? 1 : 0
+      return p
+    }
+    conversations[cid] = [
+      "conversationKind": "group", "sequencerDid": Self.dsDid, "coordinates": coords,
+      "participants": participants, "leaves": [actorLeaf],
+      "metadataSnapshot": body["metadataSnapshot"] ?? NSNull(), "snapshotSeq": 1,
+    ]
+    entries[cid, default: []].append([
+      "$type": "blue.catbird.chat.defs#creationEntry", "seq": 1, "coordinates": coords, "signedRequest": sr,
+    ])
+    leafPeriods[cid] = [["userDid": actorLeaf["userDid"] ?? NSNull(), "deviceId": actorLeaf["deviceId"] ?? NSNull(), "joinedSeq": 1]]
+    return reply(200, ["seq": 1, "state": ["coordinates": coords]])
+  }
+
+  /// Group participant acceptance: an inviter-visible leaf-recovery request for the invitee's device.
+  private func acceptConversation(_ b: JSON) throws -> Reply {
+    guard let sr = b["signedRequest"] as? JSON, let body = sr["body"] as? JSON, let next = body["next"] as? JSON else {
+      throw Fault(message: "acceptConversation body malformed")
+    }
+    let cid = try text(next, "conversationId")
+    let invitee = try text(body, "actorDid")
+    let inviteeDevice = try text(body, "actorDeviceId")
+    let recoveryRequestId = try text(body, "recoveryRequestId")
+    guard let keyPackage = conversationKeyPackages["\(invitee)|\(inviteeDevice)"]?.popLast(),
+          var state = conversations[cid]
+    else { throw Fault(message: "invitee must have a conversation KeyPackage") }
+    state["coordinates"] = next
+    state["participants"] = (state["participants"] as? [JSON] ?? []).map { participant -> JSON in
+      var p = participant
+      if p["userDid"] as? String == invitee { p["status"] = "active" }
+      return p
+    }
+    let seq = (entries[cid]?.count ?? 0) + 1
+    entries[cid, default: []].append([
+      "$type": "blue.catbird.chat.defs#participantAcceptanceEntry", "seq": seq, "coordinates": next, "signedRequest": sr,
+    ])
+    state["snapshotSeq"] = seq
+    conversations[cid] = state
+    let signedAt = ISO8601DateFormatter.fractional.date(from: try text(body, "signedAt")) ?? Date()
+    let expiresAt = ISO8601DateFormatter.fractional.string(from: signedAt.addingTimeInterval(300))
+    var requests = (leafRecoveries[cid] ?? []).map { request -> JSON in
+      guard request["status"] as? String == "open" else { return request }
+      var superseded = request
+      superseded["status"] = "superseded"
+      var reservation = request["reservation"] as? JSON ?? JSON()
+      reservation["status"] = "released"
+      superseded["reservation"] = reservation
+      return superseded
+    }
+    requests.append([
+      "$type": "blue.catbird.chat.defs#leafRecoveryView", "conversationId": cid,
+      "recoveryRequestId": recoveryRequestId, "requesterDid": invitee, "requesterDeviceId": inviteeDevice,
+      "recoveryKind": "add", "boundCoordinate": next, "status": "open",
+      "requestedAt": body["signedAt"] ?? NSNull(), "expiresAt": expiresAt,
+      "reservation": [
+        "conversationId": cid, "recoveryRequestId": recoveryRequestId, "boundCoordinate": next,
+        "requesterDid": invitee, "requesterDeviceId": inviteeDevice,
+        "requesterKeyId": body["keyId"] ?? NSNull(), "requesterAuthGeneration": body["authGeneration"] ?? NSNull(),
+        "keyPackageRef": keyPackage["keyPackageRef"] ?? NSNull(),
+        "cipherSuite": "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+        "purpose": "leafRecovery", "status": "active", "expiresAt": expiresAt, "keyPackage": keyPackage,
+      ] as JSON,
+    ])
+    leafRecoveries[cid] = requests
+    return reply(200, ["seq": seq])
+  }
+
+  private func submitTransition(_ b: JSON) throws -> Reply {
+    guard let sr = b["signedRequest"] as? JSON, let body = sr["body"] as? JSON, let next = body["next"] as? JSON else {
+      throw Fault(message: "submitTransition body malformed")
+    }
+    let type = body["$type"] as? String ?? ""
+    let cid = try text(next, "conversationId")
+    guard var state = conversations[cid] else { throw Fault(message: "unknown conversation") }
+    guard jsonEqual(state["coordinates"], body["prior"]) else {
+      throw Fault(message: "transition built against a superseded coordinate")
+    }
+    let seq = (entries[cid]?.count ?? 0) + 1
+    let manifest = body["manifest"] as? JSON ?? JSON()
+    if type.hasSuffix("leafRecoveryFulfillmentBody"), let bundle = manifest["welcomeBundle"] as? JSON {
+      for delivery in bundle["deliveries"] as? [JSON] ?? [] {
+        let slot = "\(try text(delivery, "recipientDid"))|\(try text(delivery, "recipientDeviceId"))"
+        pendingWelcomes[slot, default: []].append([
+          "welcomeId": bundle["welcomeId"] ?? NSNull(), "conversationId": cid, "sequencerDid": Self.dsDid,
+          "transitionSeq": seq, "coordinates": next, "opaqueWelcome": bundle["opaqueWelcome"] ?? NSNull(),
+          "metadataSnapshot": body["metadataSnapshot"] ?? NSNull(),
+        ])
+      }
+    }
+    entries[cid, default: []].append(["seq": seq, "coordinates": next, "signedRequest": sr])
+    state["coordinates"] = next
+    state["snapshotSeq"] = seq
+    if let snapshot = body["metadataSnapshot"] { state["metadataSnapshot"] = snapshot }
+    var leaves = state["leaves"] as? [JSON] ?? []
+    for change in manifest["leafChanges"] as? [JSON] ?? [] {
+      if change["$type"] as? String == "blue.catbird.chat.defs#removeLeaf" {
+        leaves.removeAll { $0["userDid"] as? String == change["userDid"] as? String && $0["deviceId"] as? String == change["deviceId"] as? String }
+        leafPeriods[cid] = (leafPeriods[cid] ?? []).map { period in
+          guard period["removedSeq"] == nil, period["userDid"] as? String == change["userDid"] as? String,
+                period["deviceId"] as? String == change["deviceId"] as? String else { return period }
+          return period.merging(["removedSeq": seq]) { $1 }
+        }
+      } else if change["$type"] as? String == "blue.catbird.chat.defs#addLeafByRecovery" {
+        leaves.append(["userDid": change["userDid"] ?? NSNull(), "deviceId": change["deviceId"] ?? NSNull(), "leafOrigin": "recovery"])
+        leafPeriods[cid, default: []].append(["userDid": change["userDid"] ?? NSNull(), "deviceId": change["deviceId"] ?? NSNull(), "joinedSeq": seq])
+      }
+    }
+    state["leaves"] = leaves
+    var participants = state["participants"] as? [JSON] ?? []
+    for change in body["participantChanges"] as? [JSON] ?? [] where change["$type"] as? String == "blue.catbird.chat.defs#removeParticipant" {
+      participants.removeAll { $0["userDid"] as? String == change["userDid"] as? String }
+    }
+    state["participants"] = participants.map { participant -> JSON in
+      var p = participant
+      p["leafCount"] = leaves.filter { $0["userDid"] as? String == participant["userDid"] as? String }.count
+      return p
+    }
+    conversations[cid] = state
+    leafRecoveries[cid] = (leafRecoveries[cid] ?? []).map { request -> JSON in
+      guard request["status"] as? String == "open" else { return request }
+      let fulfilled = request["recoveryRequestId"] as? String == body["recoveryRequestId"] as? String
+      var updated = request
+      updated["status"] = fulfilled ? "fulfilled" : "superseded"
+      var reservation = request["reservation"] as? JSON ?? JSON()
+      reservation["status"] = fulfilled ? "consumed" : "released"
+      updated["reservation"] = reservation
+      return updated
+    }
+    return reply(200, ["seq": seq, "state": ["coordinates": next]])
+  }
+
+  /// The DS sequences the entry, mints its ID, and signs the `I13` receipt over it.
+  private func sendMessage(_ b: JSON) throws -> Reply {
+    guard let sr = b["signedRequest"] as? JSON, let body = sr["body"] as? JSON, let prior = body["prior"] as? JSON else {
+      throw Fault(message: "sendMessage body malformed")
+    }
+    let cid = try text(prior, "conversationId")
+    let messageId = try text(body, "messageId")
+    if let replayed = entries[cid]?.first(where: { (($0["signedRequest"] as? JSON)?["body"] as? JSON)?["messageId"] as? String == messageId }) {
+      guard jsonEqual(replayed["signedRequest"], sr) else { throw Fault(message: "uncertain send retries must replay the exact signed ciphertext") }
+      return reply(200, ["entry": replayed, "sequencerReceipt": replayed["sequencerReceipt"] ?? NSNull()])
+    }
+    let actor = try text(body, "actorDid")
+    let device = try text(body, "actorDeviceId")
+    guard let groupId = bytes(prior["groupId"]),
+          let commitment = bytes((body["aad"] as? JSON)?["archiveCommitment"]), commitment.count == 32
+    else { throw Fault(message: "sendMessage coordinates malformed") }
+    let epoch = uint64(prior["epoch"]) ?? 0
+    let seq = UInt64((entries[cid]?.count ?? 0) + 1)
+    let entryId = UUID().uuidString.lowercased()
+    let issuedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+    let kid = "\(Self.dsDid)#mls-receipt-1"
+    var transcript = Data("catbird-mls-sequencer-receipt-v2\0".utf8)
+    for field in [Data(Self.dsDid.utf8), Data(kid.utf8), Data(cid.utf8), groupId] { transcript.appendLengthPrefixed(field) }
+    transcript.appendBigEndian(epoch)
+    transcript.appendLengthPrefixed(Data("\(actor)#\(device)".utf8))
+    transcript.appendLengthPrefixed(Data(entryId.utf8))
+    transcript.append(commitment)
+    transcript.appendBigEndian(seq)
+    transcript.appendBigEndian(UInt64(bitPattern: issuedAtMs))
+    let signature = try P256WireSignature.sign(transcript, using: receiptKey)
+    let receipt: JSON = [
+      "kid": kid, "sequencerDid": Self.dsDid, "conversationId": cid, "generation": prior["generation"] ?? 0,
+      "groupId": ["$bytes": groupId.base64EncodedString()], "epoch": epoch, "seq": seq, "entryId": entryId,
+      "senderDid": actor, "senderDeviceId": device,
+      "archiveCommitment": ["$bytes": commitment.base64EncodedString()], "issuedAtMs": issuedAtMs,
+      "signature": ["$bytes": signature.base64EncodedString()],
+    ]
+    let entry: JSON = [
+      "$type": "blue.catbird.chat.defs#applicationEntry", "entryId": entryId, "conversationId": cid,
+      "seq": seq, "signedRequest": sr, "sequencerReceipt": receipt, "receivedAt": body["signedAt"] ?? NSNull(),
+    ]
+    entries[cid, default: []].append(entry)
+    return reply(200, ["entry": entry, "sequencerReceipt": receipt])
+  }
+
+  /// `mls-ds` device-signed Labyrinth request: base64url claim `header` with an Ed25519
+  /// `{header}-signature` over `domain || claim` by an enrolled chat device.
+  private func deviceSignedClaim(_ request: URLRequest, header: String, deviceField: String, domain: String) throws -> (JSON, String, Data) {
+    guard let claimBytes = request.value(forHTTPHeaderField: header).flatMap({ try? JWTBase64URL.decode($0) }),
+          let signature = request.value(forHTTPHeaderField: "\(header)-signature").flatMap({ try? JWTBase64URL.decode($0) }),
+          let claim = (try? JSONSerialization.jsonObject(with: claimBytes)) as? JSON,
+          let device = claim[deviceField] as? String
+    else { throw Fault(message: "missing device-signed claim") }
+    guard let enrolled = deviceKeys.first(where: { $0.value[device] != nil }),
+          let key = enrolled.value[device],
+          (try? Curve25519.Signing.PublicKey(rawRepresentation: key))?.isValidSignature(signature, for: Data(domain.utf8) + claimBytes) == true
+    else { throw Fault(message: "device signature does not verify for an enrolled device") }
+    return (claim, enrolled.key, key)
+  }
+
+  /// `read_auth::verify`: the claim names its account, this route, and this exact canonical query.
+  /// Returns the verified caller account.
+  @discardableResult
+  private func verifyRead(_ request: URLRequest, nsid: String, rawQuery: String) throws -> String {
+    let (claim, account, _) = try deviceSignedClaim(request, header: "catbird-labyrinth-read", deviceField: "deviceId", domain: "CATBIRD-LABYRINTH-READ\0")
+    let pairs = decodedPairs(rawQuery)
+    guard claim["did"] as? String == account, claim["nsid"] as? String == nsid,
+          claim["query"] as? String == canonicalQuery(pairs),
+          pairs.filter({ $0.0 == "actorDeviceId" }).map(\.1) == [claim["deviceId"] as? String ?? ""]
+    else { throw Fault(message: "read claim does not bind this account, route, and query") }
+    return account
+  }
+
+  private func principal(_ device: Any?) throws -> String {
+    guard let device = device as? String,
+          let account = deviceKeys.first(where: { $0.value[device] != nil })?.key
+    else { throw Fault(message: "relay names no enrolled chat device") }
+    return account
+  }
+
+  // MARK: - Helpers
+
+  private lazy var receiptKey = Self.fixtureSigningKey(Self.dsDid, "mls-receipt")
+
+  private func signingKey(_ did: String) -> P256.Signing.PrivateKey {
+    if let key = signingKeys[did] { return key }
+    let key = Self.fixtureSigningKey(did, "sign")
+    signingKeys[did] = key
+    return key
+  }
+
+  private func kemKey(_ did: String) -> P256.KeyAgreement.PrivateKey {
+    if let key = kemKeys[did] { return key }
+    let key = (0 ..< 128).lazy.compactMap { try? P256.KeyAgreement.PrivateKey(rawRepresentation: Self.fixtureScalar(did, "kem", $0)) }.first!
+    kemKeys[did] = key
+    return key
+  }
+
+  private static func fixtureSigningKey(_ did: String, _ purpose: String) -> P256.Signing.PrivateKey {
+    (0 ..< 128).lazy.compactMap { try? P256.Signing.PrivateKey(rawRepresentation: fixtureScalar(did, purpose, $0)) }.first!
+  }
+
+  /// `native_archive_auth.rs` `key()`: SHA-256 over a fixture-only domain, purpose, DID, attempt.
+  private static func fixtureScalar(_ did: String, _ purpose: String, _ attempt: Int) -> Data {
+    var data = Data("catbird-native-archive-fixture-only\0".utf8) + Data(purpose.utf8) + Data(did.utf8)
+    data.appendBigEndian(UInt32(attempt))
+    return Data(SHA256.hash(data: data))
+  }
+
+  private func next() -> UInt64 {
+    sequence += 1
+    return sequence
+  }
+
+  private func locked<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+
+  private func nowSeconds() -> UInt64 {
+    UInt64(Date().timeIntervalSince1970)
+  }
+
+  private func tid(_ sequence: UInt64) -> String {
+    let alphabet = Array("234567abcdefghijklmnopqrstuvwxyz")
+    let value = (UInt64(1) << 62) | sequence
+    return String((0 ..< 13).reversed().map { alphabet[Int((value >> (5 * UInt64($0))) & 31)] })
+  }
+
+  /// CIDv1 (dag-cbor, sha2-256) of a record as written, in the ATProto data model.
+  private func dagCborCID(_ value: Any) throws -> CID {
+    CID.fromDAGCBOR(try DAGCBOR.encodeValue(try dataModel(value)))
+  }
+
+  private func dataModel(_ value: Any) throws -> Any {
+    switch value {
+    case let string as String:
+      return string
+    case let number as NSNumber:
+      if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+      guard !CFNumberIsFloatType(number) else { throw Fault(message: "floats are not DAG-CBOR") }
+      return number.int64Value
+    case is NSNull:
+      return NSNull()
+    case let array as [Any]:
+      return try array.map(dataModel)
+    case let object as JSON:
+      if object.count == 1, let encoded = object["$bytes"] as? String {
+        guard let data = Data(base64Unpadded: encoded) else { throw Fault(message: "invalid $bytes") }
+        return data
+      }
+      if object.count == 1, let link = object["$link"] as? String {
+        return CIDAsLink(cid: try CID.parse(link), representation: .link)
+      }
+      return try object.mapValues(dataModel)
+    default:
+      throw Fault(message: "unsupported record value \(type(of: value))")
+    }
+  }
+
+  private func bytes(_ value: Any?) -> Data? {
+    if let object = value as? JSON, let encoded = object["$bytes"] as? String { return Data(base64Unpadded: encoded) }
+    return (value as? String).flatMap { Data(base64Unpadded: $0) }
+  }
+
+  private func jsonEqual(_ lhs: Any?, _ rhs: Any?) -> Bool {
+    guard let lhs, let rhs else { return lhs == nil && rhs == nil }
+    return NSArray(object: lhs).isEqual(to: [rhs])
+  }
+
+  private func object(_ data: Data) throws -> JSON {
+    guard let object = (try? JSONSerialization.jsonObject(with: data)) as? JSON else { throw Fault(message: "body is not a JSON object") }
+    return object
+  }
+
+  private func text(_ object: JSON, _ field: String) throws -> String {
+    guard let value = object[field] as? String else { throw Fault(message: "missing \(field)") }
+    return value
+  }
+
+  private func required(_ params: [String: String], _ field: String) throws -> String {
+    guard let value = params[field] else { throw Fault(message: "missing \(field)") }
+    return value
+  }
+
+  private func header(_ request: URLRequest, _ name: String) throws -> String {
+    guard let value = request.value(forHTTPHeaderField: name) else { throw Fault(message: "missing \(name)") }
+    return value
+  }
+
+  private func pageLimit(_ params: [String: String], default fallback: Int) throws -> Int {
+    let limit = try params["limit"].map { raw -> Int in
+      guard let value = Int(raw) else { throw Fault(message: "invalid page limit") }
+      return value
+    } ?? fallback
+    guard (1 ... 1000).contains(limit) else { throw Fault(message: "invalid page limit") }
+    return limit
+  }
+
+  private func uint64(_ value: Any?) -> UInt64? { (value as? NSNumber)?.uint64Value }
+  private func int64(_ value: Any?) -> Int64? { (value as? NSNumber)?.int64Value }
+
+  private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+  private func decodedPairs(_ rawQuery: String) -> [(String, String)] {
+    rawQuery.split(separator: "&").compactMap { pair in
+      let parts = pair.split(separator: "=", maxSplits: 1).map { String($0).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String($0) }
+      return parts.count == 2 ? (parts[0], parts[1]) : nil
+    }
+  }
+
+  /// Fixture routes: duplicate parameters are refused (`native_archive_auth.rs` `query_params`).
+  private func strictQuery(_ rawQuery: String) throws -> [String: String] {
+    var params: [String: String] = [:]
+    for (key, value) in decodedPairs(rawQuery) {
+      guard params.updateValue(value, forKey: key) == nil else { throw Fault(message: "duplicate query parameter \(key)") }
+    }
+    return params
+  }
+
+  /// Mock DS routes keep the last repeated key (`supportedProtocolVersions=1&...=2`).
+  private func lenientQuery(_ rawQuery: String) -> [String: String] {
+    Dictionary(decodedPairs(rawQuery), uniquingKeysWith: { _, last in last })
+  }
+
+  /// `mls-ds` `canonical_query`: decoded pairs sorted bytewise, RFC 3986 re-encoded.
+  private func canonicalQuery(_ pairs: [(String, String)]) -> String {
+    let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+    let encode = { (value: String) in value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? value }
+    return pairs.sorted { ($0.0.utf8.lexicographicallyPrecedes($1.0.utf8)) || ($0.0 == $1.0 && $0.1.utf8.lexicographicallyPrecedes($1.1.utf8)) }
+      .map { "\(encode($0.0))=\(encode($0.1))" }
+      .joined(separator: "&")
+  }
+
+  private func reply(_ status: Int, _ value: Any) -> Reply {
+    Reply(status: status, body: (try? JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes])) ?? Data("{}".utf8))
+  }
+
+  private func xrpcError(_ status: Int, _ error: String, _ message: String = "") -> Reply {
+    reply(status, ["error": error, "message": message])
+  }
+}
+
+/// `at://{authority}/space/{spaceType}/{skey}` (`atproto_spaces::SpaceUri`).
+private struct SpaceURI {
+  let raw: String
+  let authority: String
+  let spaceType: String
+  let skey: String
+
+  init(_ raw: String) throws {
+    let parts = raw.hasPrefix("at://") ? raw.dropFirst(5).split(separator: "/", omittingEmptySubsequences: false).map(String.init) : []
+    guard parts.count == 4, parts[1] == "space", parts.allSatisfy({ !$0.isEmpty }), parts[0].hasPrefix("did:") else {
+      throw CocoaError(.coderInvalidValue)
+    }
+    (self.raw, authority, spaceType, skey) = (raw, parts[0], parts[2], parts[3])
+  }
+
+  func recordURI(_ author: String, _ collection: String, _ rkey: String) -> String {
+    "\(raw)/\(author)/\(collection)/\(rkey)"
+  }
+}
+
+/// Compact ES256 Space delegation/credential tokens (`atproto_spaces::tokens`).
+private enum SpaceToken {
+  static let delegation = "atproto-space-delegation+jwt"
+  static let credential = "atproto-space-credential+jwt"
+
+  static func mint(typ: String, key: P256.Signing.PrivateKey, claims: [String: Any]) -> String {
+    let encode = { (value: Any) in JWTBase64URL.encode(try! JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes])) }
+    let input = encode(["alg": "ES256", "typ": typ, "kid": "#atproto"]) + "." + encode(claims)
+    return input + "." + JWTBase64URL.encode(try! P256WireSignature.sign(Data(input.utf8), using: key))
+  }
+
+  /// Claims of a `typ` token whose ES256 signature verifies under its issuer's `#atproto` key.
+  static func verify(_ jwt: String, typ: String, issuerKey: (String) -> P256.Signing.PublicKey) -> [String: Any]? {
+    let parts = jwt.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+    guard parts.count == 3,
+          let headerData = try? JWTBase64URL.decode(parts[0]),
+          let header = (try? JSONSerialization.jsonObject(with: headerData)) as? [String: Any],
+          header["alg"] as? String == "ES256", header["typ"] as? String == typ,
+          let claimsData = try? JWTBase64URL.decode(parts[1]),
+          let claims = (try? JSONSerialization.jsonObject(with: claimsData)) as? [String: Any],
+          let issuer = claims["iss"] as? String,
+          let signature = (try? JWTBase64URL.decode(parts[2])).flatMap({ try? P256.Signing.ECDSASignature(rawRepresentation: $0) }),
+          issuerKey(issuer).isValidSignature(signature, for: Data("\(parts[0]).\(parts[1])".utf8))
+    else { return nil }
+    return claims
+  }
+}
+
+private extension Data {
+  init?(base64Unpadded value: String) {
+    let padded = value + String(repeating: "=", count: (4 - value.utf8.count % 4) % 4)
+    self.init(base64Encoded: padded)
+  }
+
+  mutating func appendBigEndian<T: FixedWidthInteger>(_ value: T) {
+    Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
+  }
+
+  mutating func appendLengthPrefixed(_ field: Data) {
+    appendBigEndian(UInt32(field.count))
+    append(field)
+  }
+}
+
+private extension ISO8601DateFormatter {
+  static var fractional: ISO8601DateFormatter {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }
+}
+
+/// Routes `MLSBoundedURLSession` traffic into `NativeArchiveMockNetwork.shared`.
+final class NativeArchiveMockURLProtocol: URLProtocol, @unchecked Sendable {
+  private static let queue = DispatchQueue(
+    label: "blue.catbird.mls.test.native-archive-urlprotocol",
+    qos: .userInitiated,
+    attributes: .concurrent
+  )
+
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+  override func startLoading() {
+    let request = self.request
+    let body = Self.body(of: request)
+    let onMain = Thread.isMainThread
+    Self.queue.async { [weak self] in
+      guard let self, let url = request.url else { return }
+      let reply = NativeArchiveMockNetwork.shared.handle(request, body: body, onMainThread: onMain)
+      let response = HTTPURLResponse(url: url, statusCode: reply.status, httpVersion: "HTTP/1.1", headerFields: reply.headers)!
+      self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      self.client?.urlProtocol(self, didLoad: reply.body)
+      self.client?.urlProtocolDidFinishLoading(self)
+    }
+  }
+
+  override func stopLoading() {}
+
+  private static func body(of request: URLRequest) -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return Data() }
+    stream.open()
+    defer { stream.close() }
+    var out = Data()
+    var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+    while stream.hasBytesAvailable {
+      let count = stream.read(&buffer, maxLength: buffer.count)
+      if count <= 0 { break }
+      out.append(buffer, count: count)
+    }
+    return out
+  }
+}
