@@ -323,10 +323,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
         ?? (signedBody?["actorDid"] as? String)
         ?? ""
 
-      let entryId = (signedBody?["messageId"] as? String)
-        ?? (raw["entryId"] as? String)
+      let entryId = (raw["entryId"] as? String)
         ?? (raw["messageId"] as? String)
         ?? (raw["message_id"] as? String)
+        ?? (signedBody?["messageId"] as? String)
         ?? "entry-\(seq)"
 
       let payloadPruned = (raw["payloadPruned"] as? Bool) == true

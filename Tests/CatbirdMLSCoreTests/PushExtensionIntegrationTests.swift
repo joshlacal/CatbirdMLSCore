@@ -251,7 +251,7 @@ final class PushExtensionIntegrationTests: XCTestCase {
     XCTAssertEqual(bundle.entries[1].seq, 5)
     XCTAssertEqual(bundle.entries[1].epoch, 3)
     XCTAssertEqual(bundle.entries[1].entryKind, "application")
-    XCTAssertEqual(bundle.entries[1].entryId, "cccccccc-dddd-4eee-8fff-000000000000")
+    XCTAssertEqual(bundle.entries[1].entryId, "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff")
     XCTAssertEqual(bundle.entries[1].senderDid, "did:plc:alice123")
     XCTAssertEqual(bundle.entries[1].mlsBytes, rawMls)
   }
