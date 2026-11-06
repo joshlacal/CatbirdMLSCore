@@ -1,3 +1,4 @@
+import CPetrelBLAKE3
 import CatbirdMLS
 import CryptoKit
 import Foundation
@@ -52,6 +53,14 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     let cid: CID
   }
 
+  private struct SpaceOperation {
+    let collection: String
+    let rkey: String
+    let rev: String
+    let cid: String?
+    let previousCID: String?
+  }
+
   private struct Fault: Error {
     let message: String
   }
@@ -68,6 +77,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   private var records: [RecordKey: StoredRecord] = [:]
   private var mailboxKeys: [String: [String: StoredRecord]] = [:]
   private var repoRevisions: [String: String] = [:]
+  private var repoOperations: [String: [SpaceOperation]] = [:]
   private var spentDelegations: Set<String> = []
   private var pdsRecords: [String: (value: JSON, cid: CID)] = [:]
   // DS world.
@@ -93,6 +103,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     records = [:]
     mailboxKeys = [:]
     repoRevisions = [:]
+    repoOperations = [:]
     spentDelegations = []
     pdsRecords = [:]
     deviceKeys = [:]
@@ -383,6 +394,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     var working = records
     let rev = tid(next())
     var results: [JSON] = []
+    var operations: [SpaceOperation] = []
     for (index, write) in writes.enumerated() {
       let collection = try text(write, "collection")
       let rkey = (write["rkey"] as? String) ?? tid(sequence + UInt64(index) + 1)
@@ -414,9 +426,18 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         result["cid"] = cid.string
       }
       results.append(result)
+      operations.append(SpaceOperation(
+        collection: collection,
+        rkey: rkey,
+        rev: rev,
+        cid: cid?.string,
+        previousCID: current?.cid.string
+      ))
     }
     records = working
-    repoRevisions["\(space.raw)|\(repo)"] = rev
+    let repoKey = "\(space.raw)|\(repo)"
+    repoRevisions[repoKey] = rev
+    repoOperations[repoKey, default: []].append(contentsOf: operations)
     return reply(200, ["results": results])
   }
 
@@ -476,12 +497,117 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       if more, let last = matching.last { out["cursor"] = "\(last.key.collection)/\(last.key.rkey)" }
       return reply(200, out)
     case "com.atproto.space.listRepos":
+      guard params.keys.allSatisfy({ ["space", "cursor", "limit"].contains($0) }) else {
+        return xrpcError(400, "InvalidRequest", "unknown inventory parameter")
+      }
       let dids = Set(records.keys.filter { $0.space == space.raw }.map(\.repo)).sorted()
-      return reply(200, ["repos": dids.map { did -> JSON in
+      let rows = dids.map { did -> (did: String, repoRev: String, spaceRev: String, data: Data) in
         let rev = repoRevisions["\(space.raw)|\(did)"] ?? tid(0)
         let data = commitment(records.filter { $0.key.space == space.raw && $0.key.repo == did })
-        return ["did": did, "repoRev": rev, "spaceRev": rev, "data": ["$bytes": data.base64EncodedString()]]
-      }])
+        return (did, rev, rev, data)
+      }
+      let data = try inventoryCommitment(rows)
+      let rev = rows.map(\.spaceRev).max() ?? tid(0)
+      let commitmentHex = hex(data)
+      var offset = 0
+      if let cursor = params["cursor"] {
+        let parts = cursor.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3, let parsedOffset = Int(parts[2]), parsedOffset >= 0 else {
+          return xrpcError(400, "InvalidRequest", "invalid inventory cursor")
+        }
+        guard parts[0] == rev, parts[1] == commitmentHex else {
+          return xrpcError(409, "SnapshotChanged", "writer inventory changed during pagination")
+        }
+        offset = parsedOffset
+      }
+      guard offset < rows.count || (offset == 0 && rows.isEmpty) else {
+        return xrpcError(400, "InvalidRequest", "inventory cursor is past the terminal page")
+      }
+      let limit = try pageLimit(params, default: 100)
+      let end = min(offset + limit, rows.count)
+      let complete = end == rows.count
+      let page = rows[offset ..< end]
+      let secret = try sharedSecret(writer, wantMac, "atproto-space-repo")
+      let mac = try SpaceMAC.commit(sharedSecret: secret, space: space.raw, repo: writer, rev: rev, data: data)
+      var body: JSON = [
+        "repos": page.map { [
+          "did": $0.did, "repoRev": $0.repoRev, "spaceRev": $0.spaceRev,
+          "data": ["$bytes": $0.data.base64EncodedString()],
+        ] },
+        "complete": complete,
+        "commit": [
+          "space": space.raw, "repo": writer, "rev": rev, "ver": 1,
+          "data": ["$bytes": data.base64EncodedString()],
+        ],
+      ]
+      if !complete {
+        body["cursor"] = "\(rev).\(commitmentHex).\(end)"
+      }
+      var out = reply(200, body)
+      out.headers["atproto-space-mac"] = "type=\"atproto-space-repo\", ver=1, mac=:\(mac.base64EncodedString()):"
+      return out
+    case "com.atproto.space.getRepo", "com.atproto.space.listRepoOps":
+      let rev = repoRevisions["\(space.raw)|\(writer)"] ?? tid(0)
+      let data = commitment(written)
+      let secret = try sharedSecret(writer, wantMac, "atproto-space-repo")
+      let mac = try SpaceMAC.commit(sharedSecret: secret, space: space.raw, repo: writer, rev: rev, data: data)
+      let commit: JSON = [
+        "space": space.raw, "repo": writer, "rev": rev, "ver": 1,
+        "data": ["$bytes": data.base64EncodedString()],
+      ]
+      if nsid == "com.atproto.space.getRepo" {
+        var out = Reply(
+          status: 200,
+          headers: ["Content-Type": "application/vnd.atproto.star"],
+          body: try starArchive(space: space.raw, writer: writer, rev: rev, data: data, records: written)
+        )
+        out.headers["atproto-space-mac"] = "type=\"atproto-space-repo\", ver=1, mac=:\(mac.base64EncodedString()):"
+        return out
+      }
+
+      var operations = repoOperations["\(space.raw)|\(writer)"] ?? []
+      if let since = params["since"] {
+        operations.removeAll { $0.rev <= since }
+      }
+      let start: Int
+      if let cursor = params["cursor"] {
+        guard let parsed = Int(cursor), parsed >= 0 else {
+          return xrpcError(400, "InvalidRequest", "invalid oplog cursor")
+        }
+        start = parsed
+      } else {
+        start = 0
+      }
+      guard start <= operations.count else {
+        return xrpcError(400, "InvalidRequest", "oplog cursor is past the terminal page")
+      }
+      let limit = try pageLimit(params, default: 100)
+      let end = min(start + limit, operations.count)
+      let excludeValues = params["excludeValues"] == "true"
+      let selected: [JSON] = operations[start ..< end].map { operation in
+        var op: JSON = [
+          "collection": operation.collection,
+          "rkey": operation.rkey,
+          "rev": operation.rev,
+          "cid": operation.cid ?? NSNull(),
+          "prev": operation.previousCID ?? NSNull(),
+        ]
+        if !excludeValues, let cid = operation.cid {
+          let key = RecordKey(
+            space: space.raw, repo: writer, collection: operation.collection, rkey: operation.rkey
+          )
+          if let current = records[key], current.cid.string == cid {
+            op["value"] = current.value
+          }
+        }
+        return op
+      }
+      if end < operations.count {
+        return reply(200, ["ops": selected, "cursor": String(end)])
+      }
+      var out = reply(200, ["ops": selected, "commit": commit])
+      out.headers["atproto-space-mac"] = "type=\"atproto-space-repo\", ver=1, mac=:\(mac.base64EncodedString()):"
+      return out
     case "com.atproto.space.getSpace":
       return reply(200, ["uri": space.raw, "policy": [
         "$type": "blue.catbird.labyrinth.conversationPolicy", "authority": space.authority,
@@ -519,6 +645,68 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     return try SpaceMAC.decapsulate(privateKey: kemKey(writer), keyShare: share)
   }
 
+
+  private func inventoryCommitment(
+    _ rows: [(did: String, repoRev: String, spaceRev: String, data: Data)]
+  ) throws -> Data {
+    var state = [UInt8](repeating: 0, count: 2048)
+    for row in rows {
+      guard row.data.count == 32 else { throw Fault(message: "inventory row commitment malformed") }
+      var input = Data("atproto-space-writer-inventory-v1".utf8)
+      for field in [row.did, row.repoRev, row.spaceRev] {
+        let bytes = Data(field.utf8)
+        guard bytes.count <= Int(UInt16.max) else { throw Fault(message: "inventory field too long") }
+        input.appendBigEndian(UInt16(bytes.count))
+        input.append(bytes)
+      }
+      input.append(row.data)
+      var hasher = petrel_blake3_hasher()
+      petrel_blake3_hasher_init(&hasher)
+      input.withUnsafeBytes { petrel_blake3_hasher_update(&hasher, $0.baseAddress, $0.count) }
+      var element = [UInt8](repeating: 0, count: state.count)
+      element.withUnsafeMutableBufferPointer {
+        petrel_blake3_hasher_finalize(&hasher, $0.baseAddress, $0.count)
+      }
+      for offset in stride(from: 0, to: state.count, by: 2) {
+        let lhs = UInt16(state[offset]) | UInt16(state[offset + 1]) << 8
+        let rhs = UInt16(element[offset]) | UInt16(element[offset + 1]) << 8
+        let sum = lhs &+ rhs
+        state[offset] = UInt8(truncatingIfNeeded: sum)
+        state[offset + 1] = UInt8(truncatingIfNeeded: sum >> 8)
+      }
+    }
+    return Data(SHA256.hash(data: Data(state)))
+  }
+
+  private func starArchive(
+    space: String, writer: String, rev: String, data: Data,
+    records: [(key: RecordKey, value: StoredRecord)]
+  ) throws -> Data {
+    var archive = Data([0x2A, 0x6C, 1, 0])
+    let metadata: JSON = [
+      "$type": "atproto-space-repo", "ver": 1, "repo": writer,
+      "space": space, "rev": rev, "data": ["$bytes": data.base64EncodedString()],
+    ]
+    archive.append(starFrame(try DAGCBOR.encodeValue(try dataModel(metadata))))
+    for record in records {
+      archive.append(starFrame(Data("\(record.key.collection)/\(record.key.rkey)".utf8)))
+      archive.append(starFrame(try DAGCBOR.encodeValue(try dataModel(record.value.value))))
+    }
+    return archive
+  }
+
+  private func starFrame(_ bytes: Data) -> Data {
+    var length = UInt64(bytes.count)
+    var frame = Data()
+    repeat {
+      var byte = UInt8(length & 0x7F)
+      length >>= 7
+      if length != 0 { byte |= 0x80 }
+      frame.append(byte)
+    } while length != 0
+    frame.append(bytes)
+    return frame
+  }
   private func commitment<S: Sequence>(_ entries: S) -> Data where S.Element == (key: RecordKey, value: StoredRecord) {
     var hash = SpaceSetHash()
     for entry in entries {
@@ -540,6 +728,17 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     let b = method == "POST" ? ((try? object(body)) ?? JSON()) : JSON()
     let signed = (b["signedRequest"] as? JSON)?["body"] as? JSON ?? JSON()
     switch nsid {
+    case "blue.catbird.labyrinth.getMailboxKeysRecord":
+      let did = try required(q, "did")
+      let rkey = try required(q, "rkey")
+      guard let record = mailboxKeys[did]?[rkey] else {
+        return xrpcError(404, "RecordNotFound")
+      }
+      return reply(200, [
+        "uri": "at://\(did)/\(Self.mailboxKeysCollection)/\(rkey)",
+        "cid": record.cid.string,
+        "value": record.value,
+      ])
     case "blue.catbird.chat.relaySpaceCredential":
       return try spaceCredential(account: try principal(b["actorDeviceId"]), body: b, relayed: true, now: nowSeconds())
     case "blue.catbird.chat.relaySpaceRead":
@@ -659,6 +858,15 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       let device = q["actorDeviceId"] ?? ""
       guard let state = conversations[cid] else { return xrpcError(400, "ConversationNotFound", cid) }
       let currentLeaf = (state["leaves"] as? [JSON] ?? []).contains { $0["deviceId"] as? String == device }
+      let conversationSpacePrefix =
+        "at://\(Self.dsDid)/space/blue.catbird.labyrinth.conversation/\(cid)-"
+      if !currentLeaf, statusOverrides.contains(where: {
+        $0.value == 403 && $0.key.hasPrefix(conversationSpacePrefix)
+      }) {
+        // The fixture's Space override is global, so its DS projection must not
+        // claim that a fresh, non-member device can read that conversation.
+        return xrpcError(400, "ConversationNotFound", cid)
+      }
       let requests = (leafRecoveries[cid] ?? []).filter { request in
         currentLeaf && request["requesterDeviceId"] as? String != device && request["status"] as? String == "open"
           && jsonEqual(request["boundCoordinate"], state["coordinates"])
