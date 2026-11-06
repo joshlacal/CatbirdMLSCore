@@ -38,8 +38,8 @@
         "size_bytes": 66
       },
       "ios-arm64/libCatbirdMLSFFI.a": {
-        "sha256": "346f831cd5d4d515bea7e29814978902056bc618f85d54894de2a2fa2b991c89",
-        "size_bytes": 790860408
+        "sha256": "ad508f5746c4c73aec84e1358dc2633ba75eabb04bcfc56210caf9f2d500bd05",
+        "size_bytes": 792305496
       },
       "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": {
         "sha256": "7b46c9895cd06fc29dd0e03d15e884e34aa6cde2630c452de11b7aa07760aefa",
@@ -50,8 +50,8 @@
         "size_bytes": 66
       },
       "ios-arm64_x86_64-maccatalyst/libCatbirdMLSFFI.a": {
-        "sha256": "14501acf311325a534f3e68f32537b1ca2d572bf2cb807228d7f516357f0d92f",
-        "size_bytes": 1570471112
+        "sha256": "4654d7e2a31283cd114383acaf9f377dc93e5d545fd8d2e30783d3bd6a02f766",
+        "size_bytes": 1571920224
       },
       "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": {
         "sha256": "7b46c9895cd06fc29dd0e03d15e884e34aa6cde2630c452de11b7aa07760aefa",
@@ -62,11 +62,11 @@
         "size_bytes": 66
       },
       "ios-arm64_x86_64-simulator/libCatbirdMLSFFI.a": {
-        "sha256": "5bcc1ba0cc7a4a360c257e39af76c5ebe167326c84283409f544ed8a441252b0",
-        "size_bytes": 1568554264
+        "sha256": "0f999734a73b5c292e28cedb7f92a474b88c1cd144c6025ef886cfac4677e96c",
+        "size_bytes": 1569903728
       },
       "labyrinth-space-protocol.json": {
-        "sha256": "2e03f90875ddd6ed9d3265a8666981236a799bbce9ef7cb7e76d47d7df001933",
+        "sha256": "31e79394feb4380d6fea7b17967dd2dd154d85915d4563a67c20bdba78686bf3",
         "size_bytes": 276
       },
       "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": {
@@ -78,8 +78,8 @@
         "size_bytes": 66
       },
       "macos-arm64_x86_64/libCatbirdMLSFFI.a": {
-        "sha256": "dc880ca7c004b4b6a1bca09f64b1039ba825f55f8ca70ecc4767a77dbbae2d58",
-        "size_bytes": 1575695376
+        "sha256": "3ba87cb77d7ae63cddaad1a7ab5f31ebfea976a832a1c61ed84fc521a41eb1c3",
+        "size_bytes": 1577266704
       }
     },
     "libraries": [
@@ -128,11 +128,11 @@
       }
     ],
     "path": "../Sources/CatbirdMLSFFI.xcframework",
-    "sha256": "7c3d9bc28e6d76253e838844b7992f6a8775bae47d05760f51300ee0fb7a15a8"
+    "sha256": "9311bc537b3f1d53704b28b7983de8c38a5736f8a9c7576d60ceee93f0e0db81"
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "253c252a05308a460e877ead20a8f5074a60089a8acd563c27e35584f06529b4"
+    "canonical_sha256": "e1253b501260cf68d13712a8683cbed46f93623526087631430af33e85106fba"
   },
   "interface": {
     "generated_swift": {
@@ -3375,8 +3375,8 @@
         "size_bytes": 80571
       },
       "src/client/native_archive.rs": {
-        "sha256": "8b97dcf89ca65659d5c351c8c26e5f05df15d9588ccad500e94ced5c94cc2ba3",
-        "size_bytes": 75361
+        "sha256": "dc8fa4818fc2226354c224f89bf943e17b7725cd3133409a27c745483b018628",
+        "size_bytes": 75483
       },
       "src/client/native_archive_space.rs": {
         "sha256": "653f5fdc477d9ab91470c569f4d8b0053109d14bbe4e73832f9bdf43e5dfcbcc",
@@ -3495,12 +3495,12 @@
         "size_bytes": 5963
       },
       "src/labyrinth/tests.rs": {
-        "sha256": "0aeda24eb98d40d30bf305ca39031d0918fb9b4302801b159c89953adcc6635e",
-        "size_bytes": 42757
+        "sha256": "4e433d6784948621d4bcc09315cabddedf1649c08a6b37caa231d6de1ab64442",
+        "size_bytes": 42866
       },
       "src/labyrinth/transport.rs": {
-        "sha256": "0da070bf7b34c4a55bd7fe6ac5ac504635e9fbd8c0cf83e0c035ccf6d976c473",
-        "size_bytes": 65887
+        "sha256": "012dd822a7e7e8b45657a574d5eb01ba7290ae5aecd19dd01c1d3a422bda202b",
+        "size_bytes": 69307
       },
       "src/labyrinth/write_auth.rs": {
         "sha256": "5389eb8793dd806573f2d7a12994ab1f9a737aa48316d96fac7e0d5d69e07f5d",
@@ -4303,7 +4303,7 @@
         "size_bytes": 2185
       }
     },
-    "native_source_sha256": "789279997a32c119a78fd9c732a94f265a4c55b760ec0b32f159502508fba932",
+    "native_source_sha256": "6613be088e564bb932d7c94d90fbef5124ec3f40941601a6683aa974faace4e0",
     "repositories": {
       "Petrel": {
         "commit": "08508fb9d54cb46b02c595c0df16305c6ea88a58",
@@ -4318,7 +4318,7 @@
         "path": "../../catbird-atproto"
       },
       "catbird-mls": {
-        "commit": "b3c40d05baf512c5093db8615abe66bbb90941ee",
+        "commit": "e9f56c44878c0797b37724e425a02301649f8312",
         "path": "../../catbird-mls"
       }
     },
