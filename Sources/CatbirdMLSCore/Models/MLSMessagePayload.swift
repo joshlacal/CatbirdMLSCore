@@ -19,7 +19,6 @@ public enum MLSMessageType: String, Codable, Sendable, Equatable {
   case deliveryAck       // proof of successful decryption
   case recoveryRequest   // request re-delivery of a missed message
   case edit              // in-place edit of a previously sent text message
-  case delete            // tombstone/unsend of a previously sent message
 
   /// Sentinel for a `messageType` string this build doesn't recognize (e.g. a
   /// payload type introduced by a newer client). Decoding falls back to this
@@ -481,17 +480,6 @@ public struct MLSEditPayload: Codable, Sendable, Hashable {
   }
 }
 
-// MARK: - Delete Payload
-
-/// Tombstone/unsend of a previously sent message.
-/// Wire format: `{"version":1,"messageType":"delete","delete":{"targetMessageId":"<ULID>"}}`
-public struct MLSDeletePayload: Codable, Sendable, Hashable {
-  public let targetMessageId: String
-
-  public init(targetMessageId: String) {
-    self.targetMessageId = targetMessageId
-  }
-}
 
 // MARK: - Read Receipt Payload
 
@@ -606,8 +594,6 @@ public struct MLSMessagePayload: Codable, Sendable {
   /// Edit payload (for messageType: edit)
   public let edit: MLSEditPayload?
 
-  /// Delete/unsend payload (for messageType: delete)
-  public let delete: MLSDeletePayload?
 
   /// Read receipt payload (for messageType: readReceipt)
   public let readReceipt: MLSReadReceiptPayload?
@@ -640,7 +626,6 @@ public struct MLSMessagePayload: Codable, Sendable {
     embed: MLSEmbedData? = nil,
     reaction: MLSReactionPayload? = nil,
     edit: MLSEditPayload? = nil,
-    delete: MLSDeletePayload? = nil,
     readReceipt: MLSReadReceiptPayload? = nil,
     typing: MLSTypingPayload? = nil,
     adminRoster: MLSAdminRosterPayload? = nil,
@@ -655,7 +640,6 @@ public struct MLSMessagePayload: Codable, Sendable {
     self.embed = embed
     self.reaction = reaction
     self.edit = edit
-    self.delete = delete
     self.readReceipt = readReceipt
     self.typing = typing
     self.adminRoster = adminRoster
@@ -714,14 +698,6 @@ public struct MLSMessagePayload: Codable, Sendable {
     )
   }
 
-  /// Create a delete/unsend payload (tombstone of a previously sent message).
-  /// Named `unsend` (rather than `delete`) to avoid clashing with any `delete` member.
-  public static func unsend(targetMessageId: String) -> MLSMessagePayload {
-    MLSMessagePayload(
-      messageType: .delete,
-      delete: MLSDeletePayload(targetMessageId: targetMessageId)
-    )
-  }
 
   /// Create a read receipt payload
   public static func readReceipt(messageId: String) -> MLSMessagePayload {

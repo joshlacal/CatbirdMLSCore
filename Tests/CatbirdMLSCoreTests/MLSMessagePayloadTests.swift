@@ -3,7 +3,7 @@ import Testing
 
 @testable import CatbirdMLSCore
 
-@Suite("MLSMessagePayload edit/unsend + tolerant decode")
+@Suite("MLSMessagePayload edit + tolerant decode")
 struct MLSMessagePayloadTests {
 
   // MARK: - Tolerant decode of unrecognized messageType
@@ -77,35 +77,6 @@ struct MLSMessagePayloadTests {
     #expect(payload.edit?.newText == "hi")
   }
 
-  // MARK: - Delete/unsend payload round-trip
-
-  @Test("unsend payload round-trips through JSON with camelCase keys")
-  func unsend_roundTripsWithCamelCaseKeys() throws {
-    let payload = MLSMessagePayload.unsend(targetMessageId: "01ARZ3NDEKTSV4RRFFQ69G5FAV")
-
-    let data = try payload.encodeToJSON()
-    let jsonString = String(data: data, encoding: .utf8)!
-
-    // Wire format per spec: {"version":1,"messageType":"delete","delete":{"targetMessageId":"..."}}
-    #expect(jsonString.contains("\"messageType\":\"delete\""))
-    #expect(jsonString.contains("\"targetMessageId\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\""))
-
-    let decoded = try MLSMessagePayload.decodeFromJSON(data)
-    #expect(decoded.messageType == .delete)
-    #expect(decoded.delete?.targetMessageId == "01ARZ3NDEKTSV4RRFFQ69G5FAV")
-  }
-
-  @Test("delete payload decodes from a hand-written wire-format JSON literal")
-  func delete_decodesFromExplicitWireFormat() throws {
-    let json = """
-      {"version":1,"messageType":"delete","delete":{"targetMessageId":"01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
-      """.data(using: .utf8)!
-
-    let payload = try MLSMessagePayload.decodeFromJSON(json)
-
-    #expect(payload.messageType == .delete)
-    #expect(payload.delete?.targetMessageId == "01ARZ3NDEKTSV4RRFFQ69G5FAV")
-  }
 
   // MARK: - .unknown must never be encoded
 
@@ -115,7 +86,6 @@ struct MLSMessagePayloadTests {
       .text("hi"),
       .reaction(messageId: "m1", emoji: "🎉", action: .add),
       .edit(targetMessageId: "m1", newText: "edited"),
-      .unsend(targetMessageId: "m1"),
     ]
 
     for payload in payloads {

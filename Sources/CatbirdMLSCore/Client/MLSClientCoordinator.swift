@@ -616,6 +616,14 @@ public final class MLSClientCoordinator {
     return row
   }
 
+  @discardableResult
+  public func unsendMessage(conversationId: String, messageId: String) async throws -> UInt32 {
+    let c = client
+    return try await runOffMain {
+      try c.unsendMessage(conversationId: conversationId, messageId: messageId)
+    }
+  }
+
   public func acceptDirectRequest(requestId: String) async throws {
     let c = client
     try await runOffMain {

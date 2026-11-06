@@ -638,6 +638,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func sync() throws -> UInt32
 
+    func unsendMessage(conversationId: String, messageId: String) throws -> UInt32
+
     func updateGroupMetadata(conversationId: String, title: String, description: String, spaceAvatar: SpaceAvatarPointer?) throws -> GroupMetadataRow
 }
 
@@ -973,6 +975,14 @@ open class CatbirdMlsClient:
     open func sync() throws -> UInt32 {
         return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_sync(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func unsendMessage(conversationId: String, messageId: String) throws -> UInt32 {
+        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_unsend_message(self.uniffiClonePointer(),
+                                                                         FfiConverterString.lower(conversationId),
+                                                                         FfiConverterString.lower(messageId), $0)
         })
     }
 
@@ -5478,16 +5488,67 @@ public struct LabyrinthBackupStatus {
     public var hasPasskeyPrf: Bool
     public var epochSeq: UInt64
     public var activeDeviceIds: [String]
+    /**
+     * Advisory only: this restored keychain/passkey method passed its
+     * client-clock freshness window but remains valid until rotation.
+     */
+    public var recoveryMethodStale: Bool
+    /**
+     * Recovery/device members unexpectedly excluded by the latest rotation.
+     */
+    public var rotationExclusions: [LabyrinthRotationExclusion]
+    /**
+     * Epoch head durably queued for PDS + directory publication.
+     */
+    public var pendingDirectoryEpoch: UInt64?
+    /**
+     * True after a publication retry failed; archive items remain queued.
+     */
+    public var directoryPublicationStalled: Bool
+    /**
+     * Number of app-start/sync publication attempts observed by this device.
+     */
+    public var directoryPublicationRetryCount: UInt64
+    /**
+     * Last retry failure, cleared once both directory publications succeed.
+     */
+    public var directoryPublicationError: String?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(backupEnabled: Bool, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool, epochSeq: UInt64, activeDeviceIds: [String]) {
+    public init(backupEnabled: Bool, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool, epochSeq: UInt64, activeDeviceIds: [String],
+                /* 
+                    * Advisory only: this restored keychain/passkey method passed its
+                    * client-clock freshness window but remains valid until rotation.
+                    */ recoveryMethodStale: Bool,
+                /* 
+                    * Recovery/device members unexpectedly excluded by the latest rotation.
+                    */ rotationExclusions: [LabyrinthRotationExclusion],
+                /* 
+                    * Epoch head durably queued for PDS + directory publication.
+                    */ pendingDirectoryEpoch: UInt64?,
+                /* 
+                    * True after a publication retry failed; archive items remain queued.
+                    */ directoryPublicationStalled: Bool,
+                /* 
+                    * Number of app-start/sync publication attempts observed by this device.
+                    */ directoryPublicationRetryCount: UInt64,
+                /* 
+                    * Last retry failure, cleared once both directory publications succeed.
+                    */ directoryPublicationError: String?)
+    {
         self.backupEnabled = backupEnabled
         self.mailboxSpaceUri = mailboxSpaceUri
         self.hasRecoveryCode = hasRecoveryCode
         self.hasPasskeyPrf = hasPasskeyPrf
         self.epochSeq = epochSeq
         self.activeDeviceIds = activeDeviceIds
+        self.recoveryMethodStale = recoveryMethodStale
+        self.rotationExclusions = rotationExclusions
+        self.pendingDirectoryEpoch = pendingDirectoryEpoch
+        self.directoryPublicationStalled = directoryPublicationStalled
+        self.directoryPublicationRetryCount = directoryPublicationRetryCount
+        self.directoryPublicationError = directoryPublicationError
     }
 }
 
@@ -5511,6 +5572,24 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
         if lhs.activeDeviceIds != rhs.activeDeviceIds {
             return false
         }
+        if lhs.recoveryMethodStale != rhs.recoveryMethodStale {
+            return false
+        }
+        if lhs.rotationExclusions != rhs.rotationExclusions {
+            return false
+        }
+        if lhs.pendingDirectoryEpoch != rhs.pendingDirectoryEpoch {
+            return false
+        }
+        if lhs.directoryPublicationStalled != rhs.directoryPublicationStalled {
+            return false
+        }
+        if lhs.directoryPublicationRetryCount != rhs.directoryPublicationRetryCount {
+            return false
+        }
+        if lhs.directoryPublicationError != rhs.directoryPublicationError {
+            return false
+        }
         return true
     }
 
@@ -5521,6 +5600,12 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
         hasher.combine(hasPasskeyPrf)
         hasher.combine(epochSeq)
         hasher.combine(activeDeviceIds)
+        hasher.combine(recoveryMethodStale)
+        hasher.combine(rotationExclusions)
+        hasher.combine(pendingDirectoryEpoch)
+        hasher.combine(directoryPublicationStalled)
+        hasher.combine(directoryPublicationRetryCount)
+        hasher.combine(directoryPublicationError)
     }
 }
 
@@ -5536,7 +5621,13 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
                 hasRecoveryCode: FfiConverterBool.read(from: &buf),
                 hasPasskeyPrf: FfiConverterBool.read(from: &buf),
                 epochSeq: FfiConverterUInt64.read(from: &buf),
-                activeDeviceIds: FfiConverterSequenceString.read(from: &buf)
+                activeDeviceIds: FfiConverterSequenceString.read(from: &buf),
+                recoveryMethodStale: FfiConverterBool.read(from: &buf),
+                rotationExclusions: FfiConverterSequenceTypeLabyrinthRotationExclusion.read(from: &buf),
+                pendingDirectoryEpoch: FfiConverterOptionUInt64.read(from: &buf),
+                directoryPublicationStalled: FfiConverterBool.read(from: &buf),
+                directoryPublicationRetryCount: FfiConverterUInt64.read(from: &buf),
+                directoryPublicationError: FfiConverterOptionString.read(from: &buf)
             )
     }
 
@@ -5547,6 +5638,12 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
         FfiConverterBool.write(value.hasPasskeyPrf, into: &buf)
         FfiConverterUInt64.write(value.epochSeq, into: &buf)
         FfiConverterSequenceString.write(value.activeDeviceIds, into: &buf)
+        FfiConverterBool.write(value.recoveryMethodStale, into: &buf)
+        FfiConverterSequenceTypeLabyrinthRotationExclusion.write(value.rotationExclusions, into: &buf)
+        FfiConverterOptionUInt64.write(value.pendingDirectoryEpoch, into: &buf)
+        FfiConverterBool.write(value.directoryPublicationStalled, into: &buf)
+        FfiConverterUInt64.write(value.directoryPublicationRetryCount, into: &buf)
+        FfiConverterOptionString.write(value.directoryPublicationError, into: &buf)
     }
 }
 
@@ -5562,6 +5659,78 @@ public func FfiConverterTypeLabyrinthBackupStatus_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeLabyrinthBackupStatus_lower(_ value: LabyrinthBackupStatus) -> RustBuffer {
     return FfiConverterTypeLabyrinthBackupStatus.lower(value)
+}
+
+/**
+ * A member unexpectedly dropped during a mailbox epoch rotation.
+ */
+public struct LabyrinthRotationExclusion {
+    public var deviceKeyHex: String?
+    public var reason: String
+    public var recoveryMethod: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(deviceKeyHex: String?, reason: String, recoveryMethod: String?) {
+        self.deviceKeyHex = deviceKeyHex
+        self.reason = reason
+        self.recoveryMethod = recoveryMethod
+    }
+}
+
+extension LabyrinthRotationExclusion: Equatable, Hashable {
+    public static func == (lhs: LabyrinthRotationExclusion, rhs: LabyrinthRotationExclusion) -> Bool {
+        if lhs.deviceKeyHex != rhs.deviceKeyHex {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.recoveryMethod != rhs.recoveryMethod {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(deviceKeyHex)
+        hasher.combine(reason)
+        hasher.combine(recoveryMethod)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLabyrinthRotationExclusion: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LabyrinthRotationExclusion {
+        return
+            try LabyrinthRotationExclusion(
+                deviceKeyHex: FfiConverterOptionString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf),
+                recoveryMethod: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: LabyrinthRotationExclusion, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.deviceKeyHex, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterOptionString.write(value.recoveryMethod, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRotationExclusion_lift(_ buf: RustBuffer) throws -> LabyrinthRotationExclusion {
+    return try FfiConverterTypeLabyrinthRotationExclusion.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRotationExclusion_lower(_ value: LabyrinthRotationExclusion) -> RustBuffer {
+    return FfiConverterTypeLabyrinthRotationExclusion.lower(value)
 }
 
 public struct MemberCredential {
@@ -6962,6 +7131,7 @@ public struct QueuedLabyrinthArchivePayload {
     public var mlsCiphertextB64: String
     public var frameNonceB64: String?
     public var sequencerReceiptJson: String?
+    public var originalSenderAttestationJson: String?
     public var createdAtMs: Int64
 
     /// Default memberwise initializers are never public by default, so we
@@ -6969,7 +7139,7 @@ public struct QueuedLabyrinthArchivePayload {
     public init(version: UInt8, messageId: String, conversationId: String, groupIdHex: String, epoch: Int64,
                 /* 
                     * Authenticated MLS account roster at send time, never replaced by a flush-time roster.
-                    */ expectedMemberDids: [String], seq: Int64, senderDid: String, senderDeviceId: String, sequencerDid: String, spaceUri: String?, plaintextJson: String, labyrinthFrameJson: String, mlsCiphertextB64: String, frameNonceB64: String?, sequencerReceiptJson: String?, createdAtMs: Int64)
+                    */ expectedMemberDids: [String], seq: Int64, senderDid: String, senderDeviceId: String, sequencerDid: String, spaceUri: String?, plaintextJson: String, labyrinthFrameJson: String, mlsCiphertextB64: String, frameNonceB64: String?, sequencerReceiptJson: String?, originalSenderAttestationJson: String?, createdAtMs: Int64)
     {
         self.version = version
         self.messageId = messageId
@@ -6987,6 +7157,7 @@ public struct QueuedLabyrinthArchivePayload {
         self.mlsCiphertextB64 = mlsCiphertextB64
         self.frameNonceB64 = frameNonceB64
         self.sequencerReceiptJson = sequencerReceiptJson
+        self.originalSenderAttestationJson = originalSenderAttestationJson
         self.createdAtMs = createdAtMs
     }
 }
@@ -7041,6 +7212,9 @@ extension QueuedLabyrinthArchivePayload: Equatable, Hashable {
         if lhs.sequencerReceiptJson != rhs.sequencerReceiptJson {
             return false
         }
+        if lhs.originalSenderAttestationJson != rhs.originalSenderAttestationJson {
+            return false
+        }
         if lhs.createdAtMs != rhs.createdAtMs {
             return false
         }
@@ -7064,6 +7238,7 @@ extension QueuedLabyrinthArchivePayload: Equatable, Hashable {
         hasher.combine(mlsCiphertextB64)
         hasher.combine(frameNonceB64)
         hasher.combine(sequencerReceiptJson)
+        hasher.combine(originalSenderAttestationJson)
         hasher.combine(createdAtMs)
     }
 }
@@ -7091,6 +7266,7 @@ public struct FfiConverterTypeQueuedLabyrinthArchivePayload: FfiConverterRustBuf
                 mlsCiphertextB64: FfiConverterString.read(from: &buf),
                 frameNonceB64: FfiConverterOptionString.read(from: &buf),
                 sequencerReceiptJson: FfiConverterOptionString.read(from: &buf),
+                originalSenderAttestationJson: FfiConverterOptionString.read(from: &buf),
                 createdAtMs: FfiConverterInt64.read(from: &buf)
             )
     }
@@ -7112,6 +7288,7 @@ public struct FfiConverterTypeQueuedLabyrinthArchivePayload: FfiConverterRustBuf
         FfiConverterString.write(value.mlsCiphertextB64, into: &buf)
         FfiConverterOptionString.write(value.frameNonceB64, into: &buf)
         FfiConverterOptionString.write(value.sequencerReceiptJson, into: &buf)
+        FfiConverterOptionString.write(value.originalSenderAttestationJson, into: &buf)
         FfiConverterInt64.write(value.createdAtMs, into: &buf)
     }
 }
@@ -11971,6 +12148,31 @@ private struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuf
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeLabyrinthRotationExclusion: FfiConverterRustBuffer {
+    typealias SwiftType = [LabyrinthRotationExclusion]
+
+    static func write(_ value: [LabyrinthRotationExclusion], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLabyrinthRotationExclusion.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LabyrinthRotationExclusion] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LabyrinthRotationExclusion]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeLabyrinthRotationExclusion.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer {
     typealias SwiftType = [MemberCredential]
 
@@ -12638,6 +12840,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sync() != 27939 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_unsend_message() != 31177 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_update_group_metadata() != 6891 {
