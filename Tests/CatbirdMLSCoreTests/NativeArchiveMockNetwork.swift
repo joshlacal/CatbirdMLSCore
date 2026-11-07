@@ -818,9 +818,27 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         return xrpcError(400, "DeviceAlreadyExists", "DeviceAlreadyExists")
       }
       guard let key = bytes(signed["signaturePublicKey"]), key.count == 32 else { throw Fault(message: "enrollment key malformed") }
+      let keyId = try text(signed, "keyId")
+      guard keyId == JWTBase64URL.encode(Data(SHA256.hash(data: key))) else {
+        throw Fault(message: "enrollment keyId does not name its signaturePublicKey")
+      }
+      let packages = signed["keyPackages"] as? [JSON] ?? []
+      let enrolledAt = try text(signed, "signedAt")
       deviceKeys[did, default: [:]][device] = key
-      conversationKeyPackages["\(did)|\(device)", default: []].append(contentsOf: signed["keyPackages"] as? [JSON] ?? [])
-      return reply(200, ["device": ["authGeneration": 1]])
+      conversationKeyPackages["\(did)|\(device)", default: []].append(contentsOf: packages)
+      // `mls-ds` `enroll_device` answers `{device: deviceView}` (`blue.catbird.chat.defs#deviceView`):
+      // this device under this key at generation 1, which the client binds before any PDS write.
+      return reply(200, ["device": [
+        "deviceId": device,
+        "keyId": keyId,
+        "signaturePublicKey": ["$bytes": key.base64EncodedString()],
+        "authGeneration": 1,
+        "status": "active",
+        "createdAt": enrolledAt,
+        "updatedAt": enrolledAt,
+        "availablePackageCount": packages.count,
+        "reservedPackageCount": 0,
+      ] as JSON])
     case "blue.catbird.chat.replenishKeyPackages":
       let slot = "\(try text(signed, "actorDid"))|\(try text(signed, "actorDeviceId"))"
       conversationKeyPackages[slot, default: []].append(contentsOf: signed["keyPackages"] as? [JSON] ?? [])
@@ -867,9 +885,10 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         // claim that a fresh, non-member device can read that conversation.
         return xrpcError(400, "ConversationNotFound", cid)
       }
+      // Every coordinate change supersedes the open requests: exactly the open ones are pending,
+      // served as the DS holds them.
       let requests = (leafRecoveries[cid] ?? []).filter { request in
         currentLeaf && request["requesterDeviceId"] as? String != device && request["status"] as? String == "open"
-          && jsonEqual(request["boundCoordinate"], state["coordinates"])
       }
       // `accountDeletions` is required by the lexicon (PetrelCatbird 0f4f58a2);
       // this mock models no account deletions, so the list is empty.
@@ -920,7 +939,14 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       "$type": "blue.catbird.chat.defs#creationEntry", "seq": 1, "coordinates": coords, "signedRequest": sr,
     ])
     leafPeriods[cid] = [["userDid": actorLeaf["userDid"] ?? NSNull(), "deviceId": actorLeaf["deviceId"] ?? NSNull(), "joinedSeq": 1]]
-    return reply(200, ["seq": 1, "state": ["coordinates": coords]])
+    // `mls-ds` answers the sequenced creation entry carrying the exact signed request.
+    return reply(200, ["result": [
+      "$type": "blue.catbird.chat.defs#conversationCreatedResult", "coordinates": coords,
+      "entry": [
+        "entryId": body["transitionId"] ?? NSNull(), "conversationId": cid, "seq": 1,
+        "signedRequest": sr, "receivedAt": body["signedAt"] ?? NSNull(),
+      ] as JSON,
+    ] as JSON])
   }
 
   /// Group participant acceptance: an inviter-visible leaf-recovery request for the invitee's device.
@@ -958,7 +984,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       superseded["reservation"] = reservation
       return superseded
     }
-    requests.append([
+    let view: JSON = [
       "$type": "blue.catbird.chat.defs#leafRecoveryView", "conversationId": cid,
       "recoveryRequestId": recoveryRequestId, "requesterDid": invitee, "requesterDeviceId": inviteeDevice,
       "recoveryKind": "add", "boundCoordinate": next, "status": "open",
@@ -971,9 +997,11 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         "cipherSuite": "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
         "purpose": "leafRecovery", "status": "active", "expiresAt": expiresAt, "keyPackage": keyPackage,
       ] as JSON,
-    ])
+    ]
+    requests.append(view)
     leafRecoveries[cid] = requests
-    return reply(200, ["seq": seq])
+    // `mls-ds` `acceptance_response`: the acceptance's coordinate and recovery view.
+    return reply(200, ["seq": seq, "coordinates": next, "recovery": view])
   }
 
   private func submitTransition(_ b: JSON) throws -> Reply {
@@ -1037,7 +1065,22 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       updated["reservation"] = reservation
       return updated
     }
-    return reply(200, ["seq": seq, "state": ["coordinates": next]])
+    let entryKinds = [
+      "commitTransitionBody": "commitEntry", "leafRecoveryFulfillmentBody": "leafRecoveryFulfillmentEntry",
+      "policyTransitionBody": "policyEntry", "metadataTransitionBody": "metadataEntry",
+    ]
+    guard let entryKind = entryKinds[String(type.dropFirst("blue.catbird.chat.defs#".count))] else {
+      throw Fault(message: "fixture has no entry kind for \(type)")
+    }
+    // `mls-ds` answers the sequenced entry carrying the exact signed request.
+    return reply(200, [
+      "coordinates": next,
+      "entry": [
+        "$type": "blue.catbird.chat.defs#\(entryKind)", "entryId": body["transitionId"] ?? NSNull(),
+        "conversationId": cid, "seq": seq, "signedRequest": sr, "receivedAt": body["signedAt"] ?? NSNull(),
+      ] as JSON,
+      "welcomes": [Any](),
+    ])
   }
 
   /// The DS sequences the entry, mints its ID, and signs the `I13` receipt over it.

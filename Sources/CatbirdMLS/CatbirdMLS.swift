@@ -9855,6 +9855,20 @@ public enum MlsError {
      * caller must discard the staged commit and re-sync before retrying.
      */
     case EpochMismatch(message: String)
+
+    /**
+     * This device holds no verified roster of `conversation_id` (it learned none from the
+     * conversation's creation, a verified reset or a recovery Welcome's roster attestation), so
+     * it can establish neither admin authority nor a zero-leaf participant's entitlement there.
+     */
+    case RosterUnverified(message: String)
+
+    /**
+     * `sync` reconciled every conversation it could; `applied` counts what the conversations
+     * that finished applied. Each listed conversation stopped at a step that did not verify or
+     * apply, with its cursor and acknowledgement still below that step. No failure is dropped.
+     */
+    case SyncIncomplete(message: String)
 }
 
 #if swift(>=5.8)
@@ -10034,6 +10048,14 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 43: return try .RosterUnverified(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 44: return try .SyncIncomplete(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10124,6 +10146,10 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(41))
         case .EpochMismatch(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(42))
+        case .RosterUnverified(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(43))
+        case .SyncIncomplete(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(44))
         }
     }
 }

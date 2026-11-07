@@ -6,7 +6,7 @@ Guidance for Claude Code when working in CatbirdMLSCore.
 
 CatbirdMLSCore is the thin Swift host layer over the Rust `catbird-mls` SDK (UniFFI `CatbirdMlsClient`), shared by the Catbird app and its Notification Service Extension (NSE). Rust owns MLS/OpenMLS state, the SQLCipher database, sync, the Labyrinth archive and push decryption. This package supplies only what needs Apple APIs: Keychain, App Group paths and file protection, the Petrel-backed HTTP transport, NSE entry points and Darwin notifications. There is no GRDB, no Swift MLS state and no Swift-side database schema.
 
-Branch status (2026-11-06): bookmark `clean-slate-2026-10-31` (`ad63968c` here) remains the last sealed state. The unsealed Task 4 R2 artifact candidate rebuilds the generated interface and Apple XCFramework from exact `catbird-mls@67b007901061a356fc94b16d81a5cb6d5d0e2c54`, `catbird-atproto@a6986331eee54f3f0ce16e7ea07dda63ab581dd7`, `labyrinth@c8a6f6c76fd3ffe84137b5508a20a8258496f2ba`, `Petrel@08508fb9d54cb46b02c595c0df16305c6ea88a58` and `PetrelCatbird@464eef2d5a6d4c95305372e49fb7620d180cf257`. The verified schema-2 manifest identity is `ba53c09293d9937834582908cfbb2eeeccb36700408c43b336757024e6ff4a24`. This reviewed-source candidate is neither sealed nor release-qualified; rebuild after any source change (see [FFI workflow](#ffi-workflow)).
+Branch status (2026-11-08): bookmark `clean-slate-2026-10-31` (`ad63968c` here) remains the last sealed state. The unsealed Task 4 R4 artifact candidate rebuilds the generated interface and all-target Apple XCFramework from exact `catbird-mls@85d25801a538d82c85d11213d4aafaef213afa58`, `catbird-atproto@49c6fdb00671ffe96e58e3b5ebec7d5e6532f51f`, `labyrinth@f771b9c26558ce6a39ed87c657dc8bd6e331d94a`, `Petrel@f381cb844d33d76ad7ca948698480d381712304b` and `PetrelCatbird@e782e46ca8489c881517186fe0bf1a9c35c99634`. The verified schema-2 manifest identity is `cf1a37d833b49a2efc1b61c20ad6da41ae7290717eee2991f5a250833715d0bc`. It awaits independent R4 review, so this candidate is neither sealed nor release-qualified. Rebuild after any source change (see [FFI workflow](#ffi-workflow)).
 
 ## Commands
 
@@ -88,7 +88,7 @@ cargo run --offline --release --bin catbird-sim -- batch --start <N> --count <C>
 cargo run --offline --release --bin catbird-sim -- planted --bug <p1|p2|p3|p4|p5|p6|p8|p9|p10|p11|p12|p13|p15> [--max-seeds <N>]
 ```
 
-`replay` prints `seed=… full_stack=… steps=… http_calls=… trace_blake3=… failures=…` and exits 1 on an oracle failure; `--shrink` prints the shrunk English failure story, and `--traces` writes HTTP traces and snapshots to stderr. As of 2026-11-04, full-stack replay-hash determinism is still under investigation for Task 4 R1, so judge a replay by `failures` and the oracle story, not only by `trace_blake3`.
+`replay` prints `seed=… full_stack=… steps=… http_calls=… trace_blake3=… failures=…` and exits 1 on an oracle failure; `--shrink` prints the shrunk English failure story, and `--traces` writes HTTP traces and snapshots to stderr. Full-stack replay is deterministic: the Phase 2 gates `full_stack_seeds_replay_identically_in_process` and `full_stack_replay_is_identical_across_processes` require an identical `trace_blake3`. A different hash for the same seed on the same binary is itself a failure.
 
 ## Tests
 

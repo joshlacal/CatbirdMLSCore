@@ -1,6 +1,8 @@
 import CatbirdMLS
 @testable import CatbirdMLSCore
+import CryptoKit
 import Foundation
+import PetrelCrypto
 import XCTest
 
 /// Labyrinth outbox, kick rescue, and recovery end to end over the production native archive
@@ -38,6 +40,51 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     }
     roots = []
     try super.tearDownWithError()
+  }
+
+  /// The mock DS answers `enrollDevice` as `mls-ds` R4 does: exactly the lexicon
+  /// `blue.catbird.chat.defs#deviceView` naming this device and key at generation 1, which
+  /// catbird-mls binds before any PDS write. Enrollment stays create-only per device, and a
+  /// `keyId` that does not name the enrolled key is a fixture contract violation.
+  func testMockEnrollDeviceAnswersExactR4DeviceView() throws {
+    let key = Data((0..<32).map { UInt8($0) })
+    let keyId = JWTBase64URL.encode(Data(SHA256.hash(data: key)))
+    let deviceId = "e0011000-0000-4000-8000-000000000001"
+    let signedAt = "2026-11-08T00:00:00.000Z"
+    func enroll(keyId: String) throws -> (status: Int, answer: [String: Any]) {
+      var request = URLRequest(url: URL(string: "\(NativeArchiveMockNetwork.dsEndpoint)/xrpc/blue.catbird.chat.enrollDevice")!)
+      request.httpMethod = "POST"
+      let body: [String: Any] = ["signedRequest": ["body": [
+        "actorDid": "did:plc:enrollcontractaaaaaaaaaa", "deviceId": deviceId, "keyId": keyId,
+        "signaturePublicKey": ["$bytes": key.base64EncodedString()],
+        "keyPackages": [["framing": "mlsMessage"], ["framing": "mlsMessage"]], "signedAt": signedAt,
+      ]]]
+      let reply = network.handle(request, body: try JSONSerialization.data(withJSONObject: body), onMainThread: false)
+      return (reply.status, try XCTUnwrap(JSONSerialization.jsonObject(with: reply.body) as? [String: Any]))
+    }
+
+    let first = try enroll(keyId: keyId)
+    XCTAssertEqual(first.status, 200)
+    let device = try XCTUnwrap(first.answer["device"] as? [String: Any])
+    XCTAssertEqual(Set(device.keys), [
+      "deviceId", "keyId", "signaturePublicKey", "authGeneration", "status",
+      "createdAt", "updatedAt", "availablePackageCount", "reservedPackageCount",
+    ])
+    XCTAssertEqual(device["deviceId"] as? String, deviceId)
+    XCTAssertEqual(device["keyId"] as? String, keyId)
+    XCTAssertEqual((device["signaturePublicKey"] as? [String: Any])?["$bytes"] as? String, key.base64EncodedString())
+    XCTAssertEqual(device["authGeneration"] as? Int, 1)
+    XCTAssertEqual(device["status"] as? String, "active")
+    XCTAssertEqual(device["createdAt"] as? String, signedAt)
+    XCTAssertEqual(device["updatedAt"] as? String, signedAt)
+    XCTAssertEqual(device["availablePackageCount"] as? Int, 2)
+    XCTAssertEqual(device["reservedPackageCount"] as? Int, 0)
+    XCTAssertEqual(try enroll(keyId: keyId).answer["error"] as? String, "DeviceAlreadyExists")
+    XCTAssertTrue(network.contractViolations.isEmpty)
+
+    network.reset()
+    XCTAssertEqual(try enroll(keyId: "not-the-enrolled-key").status, 500)
+    XCTAssertEqual(network.contractViolations.count, 1)
   }
 
   func testAutomaticBackgroundOutboxDrainAndOfflineRestartResumeSurvival() async throws {
