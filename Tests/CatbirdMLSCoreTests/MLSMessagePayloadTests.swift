@@ -94,4 +94,11 @@ struct MLSMessagePayloadTests {
       #expect(!jsonString.contains("__unknown__"))
     }
   }
+
+  @Test("undecryptable gap row renders as a system notice")
+  func undecryptableGapRowPresentation() {
+    let payload = MLSMessagePayload(messageType: .system, text: "message.undecryptable")
+    #expect(MLSSystemMessagePresentation.isSystem(payload))
+    #expect(MLSSystemMessagePresentation.text(payload) == "This message couldn't be decrypted on this device")
+  }
 }

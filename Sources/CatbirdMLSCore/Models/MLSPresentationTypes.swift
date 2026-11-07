@@ -113,6 +113,8 @@ public enum MLSSystemMessagePresentation {
       return verifiedAccountLeave ? "You left this conversation" : "Conversation membership changed"
     case "conversation.closed":
       return "Conversation status changed"
+    case "message.undecryptable":
+      return "This message couldn't be decrypted on this device"
     default:
       return payload.text ?? ""
     }
