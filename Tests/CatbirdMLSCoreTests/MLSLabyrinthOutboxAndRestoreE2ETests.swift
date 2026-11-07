@@ -557,6 +557,12 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
       messageId: "ad5e6f70-8192-4da3-9eb4-f5a6b7c8d912",
       text: "Alice message at epoch 2"
     )
+    // The automatic drain and the kick rescue race for the outbox lock on the concurrent FFI
+    // queue. Restore reads the still-readable conversation Space, so publish the sender copy
+    // first, as for Epoch 1.
+    try await waitUntil(timeoutSeconds: 3.0) {
+      try await device1.listPendingLabyrinthQueue(conversationId: ep2).isEmpty
+    }
     let r2 = try await device1.rescueConversationOnKick(conversationId: ep2)
     XCTAssertEqual(r2, 1)
 
@@ -585,6 +591,9 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
       messageId: "ad5e6f70-8192-4da3-9eb4-f5a6b7c8d913",
       text: "Alice message at epoch 3"
     )
+    try await waitUntil(timeoutSeconds: 3.0) {
+      try await device1.listPendingLabyrinthQueue(conversationId: ep3).isEmpty
+    }
     let r3 = try await device1.rescueConversationOnKick(conversationId: ep3)
     XCTAssertEqual(r3, 1)
     try await device1.signOutAndWipe()
@@ -614,6 +623,9 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
       messageId: "ad5e6f70-8192-4da3-9eb4-f5a6b7c8d914",
       text: "Device 2 message at epoch 4"
     )
+    try await waitUntil(timeoutSeconds: 3.0) {
+      try await device2.listPendingLabyrinthQueue(conversationId: ep4).isEmpty
+    }
     let r4 = try await device2.rescueConversationOnKick(conversationId: ep4)
     XCTAssertEqual(r4, 1)
     try await device2.signOutAndWipe()
