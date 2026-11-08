@@ -93,6 +93,16 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   private var leafPeriods: [String: [JSON]] = [:]
   /// Message IDs whose application entry `getEntries` serves with an altered `I13` receipt signature.
   private var forgedReceiptMessageIds: Set<String> = []
+  private var spaceDenialForgery: SpaceDenialForgery?
+
+  /// How a conversation Space refusal deviates from the authority's signed denial
+  /// (`mls-ds` `space_denial_two_home_live.rs` relays).
+  enum SpaceDenialForgery {
+    /// The refusal without its `denial`.
+    case unsigned
+    /// The denial's `jti` claim altered under the original signature.
+    case tampered
+  }
 
   func reset() {
     lock.lock()
@@ -118,13 +128,20 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     epochHeads = [:]
     leafPeriods = [:]
     forgedReceiptMessageIds = []
+    spaceDenialForgery = nil
   }
 
   // MARK: - Test controls
 
-  /// Every Space operation on `space` answers `status` (`503` offline, `403` access revoked).
+  /// Every Space operation on `space` answers `status` (`503` offline, `403` access revoked). A
+  /// `403` conversation Space credential request gets the authority's signed denial, as from `mls-ds`.
   func setStatusOverride(_ status: Int?, forSpace space: String) {
     locked { statusOverrides[space] = status }
+  }
+
+  /// Serve each signed Space denial `forgery`d; `nil` serves it as the authority signed it.
+  func forgeSpaceDenials(_ forgery: SpaceDenialForgery?) {
+    locked { spaceDenialForgery = forgery }
   }
 
   /// Space operations on `space` answered with its status override so far.
@@ -378,12 +395,18 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     }
     let kid = try text(body, relayed ? "cnfKey" : "credentialKid")
     _ = try P256DIDKey(kid)
-    if let denied = overridden(space.raw) { return denied }
     guard let delegation = SpaceToken.verify(try text(body, "delegationToken"), typ: SpaceToken.delegation, issuerKey: { self.signingKey($0).publicKey }),
           delegation["iss"] as? String == account, delegation["sub"] as? String == space.raw,
           delegation["aud"] as? String == "\(space.authority)#atproto_pds",
           let exp = uint64(delegation["exp"]), exp > now, let jti = delegation["jti"] as? String
     else { throw Fault(message: "delegation account/Space/expiry mismatch") }
+    // `mls-ds` `space_host`: once the delegation verifies, a non-member of a conversation Space is
+    // refused with the authority's signed denial of exactly this request.
+    if statusOverrides[space.raw] == 403, space.spaceType == "blue.catbird.labyrinth.conversation" {
+      overrideRejections[space.raw, default: 0] += 1
+      return try spaceDenial(space, requester: account, kid: kid, now: now)
+    }
+    if let denied = overridden(space.raw) { return denied }
     guard spentDelegations.insert("\(account):\(jti)").inserted else { throw Fault(message: "delegation replay") }
     let expires = now + 600
     let credential = SpaceToken.mint(typ: SpaceToken.credential, key: signingKey(space.authority), claims: [
@@ -392,6 +415,36 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     ])
     let expiresAt = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(expires)))
     return reply(200, ["credential": credential, "expiresAt": expiresAt])
+  }
+
+  /// `mls-ds` `mint_space_denial`: the authority's `#atproto` ES256 refusal of `requester`'s
+  /// credential request under PoP key `kid`, binding the Space's conversation, generation and MLS
+  /// group, live 60 s; `forgeSpaceDenials` serves it unsigned or tampered instead.
+  private func spaceDenial(_ space: SpaceURI, requester: String, kid: String, now: UInt64) throws -> Reply {
+    guard let dash = space.skey.lastIndex(of: "-"),
+          let generation = UInt64(space.skey[space.skey.index(after: dash)...]),
+          let group = bytes((conversations[String(space.skey[..<dash])]?["coordinates"] as? JSON)?["groupId"])
+    else { throw Fault(message: "denied Space names no fixture conversation") }
+    var claims: JSON = [
+      "iss": space.authority, "sub": space.raw, "aud": requester, "iat": now, "exp": now + 60,
+      "jti": UUID().uuidString.lowercased(), "cnf": ["kid": kid],
+      "conversationId": String(space.skey[..<dash]), "generation": generation, "groupId": hex(group),
+      "reason": "notActiveMember",
+    ]
+    let denial = SpaceToken.mint(typ: SpaceToken.denial, key: signingKey(space.authority), claims: claims)
+    var refusal: JSON = ["error": "NotAuthorized", "message": "requester is not an active member of this conversation Space"]
+    switch spaceDenialForgery {
+    case nil:
+      refusal["denial"] = denial
+    case .unsigned:
+      break
+    case .tampered:
+      var parts = denial.split(separator: ".").map(String.init)
+      claims["jti"] = "\(claims["jti"]!)-altered"
+      parts[1] = JWTBase64URL.encode(try JSONSerialization.data(withJSONObject: claims, options: [.withoutEscapingSlashes]))
+      refusal["denial"] = parts.joined(separator: ".")
+    }
+    return reply(403, refusal)
   }
 
   private func applyWrites(account: String, body: JSON) throws -> Reply {
@@ -1370,10 +1423,12 @@ private struct SpaceURI {
   }
 }
 
-/// Compact ES256 Space delegation/credential tokens (`atproto_spaces::tokens`).
+/// Compact ES256 Space delegation/credential tokens (`atproto_spaces::tokens`) and the authority's
+/// signed Space denial (`mls-ds` `space_host`).
 private enum SpaceToken {
   static let delegation = "atproto-space-delegation+jwt"
   static let credential = "atproto-space-credential+jwt"
+  static let denial = "catbird-space-denial+jwt"
 
   static func mint(typ: String, key: P256.Signing.PrivateKey, claims: [String: Any]) -> String {
     let encode = { (value: Any) in JWTBase64URL.encode(try! JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes])) }

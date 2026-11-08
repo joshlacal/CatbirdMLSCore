@@ -230,7 +230,8 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     let batchesBeforeKick = network.recordCount(space: convoSpaceURI, repo: aliceDid, collection: batch)
     XCTAssertGreaterThanOrEqual(batchesBeforeKick, 1)
 
-    // Kick Alice from the conversation Space (403 Forbidden on conversation Space; personal mailbox stays 200).
+    // Kick Alice from the conversation Space (403 on conversation Space, a credential request gets
+    // the authority's signed denial; personal mailbox stays 200).
     network.setStatusOverride(403, forSpace: convoSpaceURI)
 
     _ = try await device1.sendMessage(
@@ -300,6 +301,25 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     XCTAssertTrue(backupStatus.hasRecoveryCode)
     XCTAssertTrue(backupStatus.activeDeviceIds.contains(aliceDevice2))
 
+    // Only the Space authority's signed denial of this request proves the removal (`mls-ds`
+    // `space_host`): the same refusal unsigned, or its claims altered under the signature, keeps
+    // the restore pending with nothing imported.
+    for forgery in [NativeArchiveMockNetwork.SpaceDenialForgery.unsigned, .tampered] {
+      network.forgeSpaceDenials(forgery)
+      let refusalsBefore = network.overrideRejections(forSpace: convoSpaceURI)
+      do {
+        _ = try await device2.restoreConversationFromOwnerMailbox(conversationId: conversationId)
+        XCTFail("A \(forgery) Space denial must not prove the removal")
+      } catch MlsError.InvalidState(let message) {
+        XCTAssertTrue(message.contains("ArchiveRestorePending"), "\(forgery): \(message)")
+      }
+      XCTAssertGreaterThan(network.overrideRejections(forSpace: convoSpaceURI), refusalsBefore)
+      let imported = try await device2.listMessages(conversationId: conversationId, limit: 20)
+      XCTAssertEqual(imported.map(\.messageId), [], "\(forgery)")
+    }
+    network.forgeSpaceDenials(nil)
+
+    // The authority's signed denial, faithfully relayed, permits the owner restore.
     let restoredMessagesCount = try await device2.restoreConversationFromOwnerMailbox(
       conversationId: conversationId
     )
