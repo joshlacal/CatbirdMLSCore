@@ -91,6 +91,8 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   private var epochHeads: [String: [JSON]] = [:]
   /// Per conversation device leaf periods: `userDid`, `deviceId`, `joinedSeq`, `removedSeq`.
   private var leafPeriods: [String: [JSON]] = [:]
+  /// Message IDs whose application entry `getEntries` serves with an altered `I13` receipt signature.
+  private var forgedReceiptMessageIds: Set<String> = []
 
   func reset() {
     lock.lock()
@@ -115,6 +117,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     leafRecoveries = [:]
     epochHeads = [:]
     leafPeriods = [:]
+    forgedReceiptMessageIds = []
   }
 
   // MARK: - Test controls
@@ -143,6 +146,12 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
 
   var contractViolations: [String] { locked { violations } }
   var sawMainThreadRequest: Bool { locked { mainThreadRequest } }
+
+  /// `getEntries` serves each listed message's application entry with one bit of its `I13`
+  /// receipt signature flipped; the stored entry is unchanged, so `[]` serves every entry genuine.
+  func forgeReceipts(messageIds: Set<String>) {
+    locked { forgedReceiptMessageIds = messageIds }
+  }
 
   /// Hex Labyrinth device key of the `account` mailbox device bound to chat device `chatDeviceId`.
   func labyrinthDeviceKeyHex(account: String, chatDeviceId: String) -> String? {
@@ -908,7 +917,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       return reply(200, out)
     case "blue.catbird.chat.getEntries":
       let after = Int64(q["afterSeq"] ?? "0") ?? 0
-      let list = (entries[q["conversationId"] ?? ""] ?? []).filter { int64($0["seq"]) ?? 0 > after }
+      let list = (entries[q["conversationId"] ?? ""] ?? []).filter { int64($0["seq"]) ?? 0 > after }.map(served)
       return reply(200, ["entries": list])
     case "blue.catbird.chat.acknowledgeEntries":
       let wm = int64(b["upToSeq"]) ?? 0
@@ -1247,6 +1256,20 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   private func bytes(_ value: Any?) -> Data? {
     if let object = value as? JSON, let encoded = object["$bytes"] as? String { return Data(base64Unpadded: encoded) }
     return (value as? String).flatMap { Data(base64Unpadded: $0) }
+  }
+
+  /// The entry as `getEntries` serves it (see `forgeReceipts(messageIds:)`).
+  private func served(_ entry: JSON) -> JSON {
+    guard let messageId = ((entry["signedRequest"] as? JSON)?["body"] as? JSON)?["messageId"] as? String,
+          forgedReceiptMessageIds.contains(messageId),
+          var receipt = entry["sequencerReceipt"] as? JSON,
+          var signature = bytes(receipt["signature"]), !signature.isEmpty
+    else { return entry }
+    signature[signature.startIndex] ^= 0x01
+    receipt["signature"] = ["$bytes": signature.base64EncodedString()]
+    var forged = entry
+    forged["sequencerReceipt"] = receipt
+    return forged
   }
 
   private func jsonEqual(_ lhs: Any?, _ rhs: Any?) -> Bool {

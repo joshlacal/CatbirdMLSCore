@@ -558,16 +558,26 @@ public final class MLSClientCoordinator {
     }
   }
 
+  /// One `sync` pass, then its post-sync work: file protection and the outbox drain. A
+  /// `SyncIncomplete` still synced every conversation it does not name, so that work runs before
+  /// the error is rethrown.
   @discardableResult
   public func sync() async throws -> UInt32 {
     let c = client
     let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
-    let synced = try await runOffMain {
-      let count = try c.sync()
-      if count > 0 {
-        try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+    let synced: UInt32
+    do {
+      synced = try await runOffMain {
+        let count = try c.sync()
+        if count > 0 {
+          try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+        }
+        return count
       }
-      return count
+    } catch CatbirdMLS.MlsError.SyncIncomplete(let message) {
+      try? await runOffMain { try MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir) }
+      scheduleBackgroundOutboxDrain()
+      throw CatbirdMLS.MlsError.SyncIncomplete(message: message)
     }
     if synced > 0 {
       scheduleBackgroundOutboxDrain()
@@ -967,5 +977,21 @@ private final class WeakCoordinatorBox: @unchecked Sendable {
   @MainActor
   init(coordinator: MLSClientCoordinator) {
     self.coordinator = coordinator
+  }
+}
+
+extension CatbirdMLS.MlsError {
+  /// The conversations a `SyncIncomplete` names: each stopped at a step that did not verify or
+  /// apply while every other conversation synced. `nil` for any other error. Only canonical
+  /// conversation IDs are returned; the failure text itself is never parsed.
+  /// ponytail: parses the flat FFI message (`sync incomplete (N applied): conversation <id>: <error>; …`);
+  /// a structured `failures` field on the UniFFI error would replace the parse.
+  public var syncIncompleteConversationIDs: Set<String>? {
+    guard case .SyncIncomplete(let message) = self else { return nil }
+    let id = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+    guard let pattern = try? Regex("(?:^sync incomplete \\(\\d+ applied\\): |; )conversation (\(id)): ") else {
+      return []
+    }
+    return Set(message.matches(of: pattern).compactMap { $0.output[1].substring.map(String.init) })
   }
 }

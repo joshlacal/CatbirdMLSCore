@@ -696,6 +696,62 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     XCTAssertEqual(network.contractViolations, [])
   }
 
+  /// R4 per-conversation sync reaches Swift as the typed `MlsError.SyncIncomplete`. One
+  /// conversation's entry is served with a forged `I13` receipt: the error names exactly that
+  /// conversation, the healthy conversation's message is applied and its witness copy still
+  /// drains to the conversation Space, and once the genuine entry is served the next sync applies
+  /// it (the failed conversation's cursor stayed below the entry).
+  func testSyncIncompleteNamesOnlyTheFailedConversationWhileHealthyOnesApplyAndDrain() async throws {
+    let aliceDid = "did:plc:alicesyncincompleteaaaaa"
+    let bobDid = "did:plc:bobsyncincompletebbbbbbb"
+    let forgedConvo = "be6f7081-92a3-4eb4-8fc5-a6b7c8d9e001"
+    let healthyConvo = "be6f7081-92a3-4eb4-8fc5-a6b7c8d9e002"
+    let forgedMessageId = "be6f7081-92a3-4eb4-8fc5-a6b7c8d9e011"
+    let healthyMessageId = "be6f7081-92a3-4eb4-8fc5-a6b7c8d9e012"
+    let healthySpaceURI = conversationSpace(healthyConvo)
+
+    let bob = try await open(try device(did: bobDid, deviceId: "b0b00006-0000-4000-8000-000000000001", label: "Bob"))
+    _ = try await bob.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    let alice = try await open(try device(did: aliceDid, deviceId: "a11ce006-0000-4000-8000-000000000001", label: "Alice"))
+    _ = try await alice.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await createGroup(forgedConvo, title: "Forged", owner: alice, peer: bob, peerDid: bobDid)
+    _ = try await createGroup(healthyConvo, title: "Healthy", owner: alice, peer: bob, peerDid: bobDid)
+    _ = try await bob.sendMessage(conversationId: forgedConvo, messageId: forgedMessageId, text: "served with a forged receipt")
+    _ = try await bob.sendMessage(conversationId: healthyConvo, messageId: healthyMessageId, text: "applies beside the failure")
+    let healthyBatchesBefore = network.recordCount(space: healthySpaceURI, repo: aliceDid, collection: batch)
+
+    network.forgeReceipts(messageIds: [forgedMessageId])
+    do {
+      let applied = try await alice.sync()
+      XCTFail("a forged receipt must fail its conversation; sync applied \(applied)")
+    } catch let error as CatbirdMLS.MlsError {
+      guard case .SyncIncomplete(let message) = error else { return XCTFail("not SyncIncomplete: \(error)") }
+      XCTAssertTrue(message.hasPrefix("sync incomplete ("), message)
+      XCTAssertEqual(error.syncIncompleteConversationIDs, [forgedConvo], message)
+    }
+    XCTAssertNil(CatbirdMLS.MlsError.Internal(message: "conversation \(forgedConvo): x").syncIncompleteConversationIDs)
+
+    let healthyIds = try await alice.listMessages(conversationId: healthyConvo, limit: 10).map(\.messageId)
+    XCTAssertTrue(healthyIds.contains(healthyMessageId), "the healthy conversation must apply beside the failure")
+    let forgedIds = try await alice.listMessages(conversationId: forgedConvo, limit: 10).map(\.messageId)
+    XCTAssertFalse(forgedIds.contains(forgedMessageId), "an entry whose receipt does not verify must not apply")
+    try await waitUntil(timeoutSeconds: 3.0) {
+      network.recordCount(space: healthySpaceURI, repo: aliceDid, collection: batch) > healthyBatchesBefore
+    }
+    try await waitUntil(timeoutSeconds: 3.0) {
+      try await alice.listPendingLabyrinthQueue(conversationId: healthyConvo).isEmpty
+    }
+
+    network.forgeReceipts(messageIds: [])
+    _ = try await alice.sync()
+    let recoveredIds = try await alice.listMessages(conversationId: forgedConvo, limit: 10).map(\.messageId)
+    XCTAssertTrue(recoveredIds.contains(forgedMessageId), "the genuine entry must apply on the next sync")
+
+    await alice.close()
+    await bob.close()
+    XCTAssertEqual(network.contractViolations, [])
+  }
+
   // MARK: - Helpers
 
   private func conversationSpace(_ conversationId: String) -> String {
