@@ -284,6 +284,13 @@ public enum MLSPushExtensionProcessor {
     }
   }
 
+  static func shouldPostDidCommit(
+    for preview: NotificationPreview,
+    requested: Bool
+  ) -> Bool {
+    requested && preview.receiptVerified && !preview.fallbackGeneric && !preview.fromCache
+  }
+
   public static func process(
     storageRoot: URL,
     accountDidHash: String,
@@ -302,7 +309,7 @@ public enum MLSPushExtensionProcessor {
         wake: wake
       )
       try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: mlsDir)
-      if !preview.fallbackGeneric && !preview.fromCache && postDarwinNotification {
+      if shouldPostDidCommit(for: preview, requested: postDarwinNotification) {
         postNseDidCommitDarwinNotification(name: preview.darwinNotificationName)
       }
       return preview
@@ -318,7 +325,8 @@ public enum MLSPushExtensionProcessor {
         seq: wake.entrySeq,
         fromCache: false,
         fallbackGeneric: true,
-        darwinNotificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification
+        darwinNotificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification,
+        receiptVerified: false
       )
     }
   }
@@ -524,6 +532,39 @@ public final class MLSClientCoordinator {
       return row
     }
     scheduleBackgroundOutboxDrain()
+    return row
+  }
+
+  public func pendingGroupCreationStatus(
+    conversationId: String
+  ) async throws -> PendingGroupCreationStatus? {
+    let c = client
+    return try await runOffMain {
+      try c.pendingGroupCreationStatus(conversationId: conversationId)
+    }
+  }
+
+  @discardableResult
+  public func cancelPendingGroupCreation(conversationId: String) async throws -> Bool {
+    let c = client
+    return try await runOffMain {
+      try c.cancelPendingGroupCreation(conversationId: conversationId)
+    }
+  }
+
+  public func retryPendingGroupCreation(conversationId: String) async throws -> ConversationRow? {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    let row = try await runOffMain {
+      let row = try c.retryPendingGroupCreation(conversationId: conversationId)
+      if row != nil {
+        try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      }
+      return row
+    }
+    if row != nil {
+      scheduleBackgroundOutboxDrain()
+    }
     return row
   }
 

@@ -9,6 +9,122 @@ import XCTest
 /// (`LabyrinthSession`) through `PetrelPlatformTransport`, against `NativeArchiveMockNetwork`.
 /// Live sends carry DS-signed `I13` receipts, so every id is canonical: bare `did:plc`
 /// accounts, UUIDv4 devices, conversations, and messages.
+private final class R4CreationLossTransport: @unchecked Sendable {
+  private let lock = NSLock()
+  private var loseNextCreate = true
+  private var failNextStateAfterLostCreate = false
+  private var createRequests = 0
+
+  var createRequestCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return createRequests
+  }
+
+  func execute(_ request: PlatformHttpRequest) throws -> PlatformHttpResponse {
+    if request.url.contains("/xrpc/blue.catbird.chat.getConversationState") {
+      lock.lock()
+      let failState = failNextStateAfterLostCreate
+      if failState {
+        failNextStateAfterLostCreate = false
+      }
+      lock.unlock()
+      if failState {
+        return PlatformHttpResponse(
+          status: 503,
+          headers: [],
+          body: Data(#"{"error":"CapacityUnavailable","message":"state unavailable after lost create"}"#.utf8)
+        )
+      }
+    }
+
+    let create = request.url.hasSuffix("/xrpc/blue.catbird.chat.createConversation")
+    let response = NativeArchiveMockNetwork.shared.handle(request)
+    guard create else { return response }
+
+    lock.lock()
+    createRequests += 1
+    let lose = loseNextCreate && response.status < 300
+    if lose {
+      loseNextCreate = false
+      failNextStateAfterLostCreate = true
+    }
+    lock.unlock()
+    if lose {
+      return PlatformHttpResponse(
+        status: 503,
+        headers: [],
+        body: Data(#"{"error":"CapacityUnavailable","message":"lost response"}"#.utf8)
+      )
+    }
+    return response
+  }
+}
+
+private final class R4CreationControlTransport: @unchecked Sendable {
+  private let lock = NSLock()
+  private var refuseNextCreate = false
+  private var expireAllCreates = false
+  private var createRequests = 0
+  private var mainThreadRequests = 0
+
+  var createRequestCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return createRequests
+  }
+
+  var sawMainThreadRequest: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return mainThreadRequests > 0
+  }
+
+  func refuseOneCreate() {
+    lock.lock()
+    refuseNextCreate = true
+    lock.unlock()
+  }
+
+  func expireCreatesUntilCancelled() {
+    lock.lock()
+    expireAllCreates = true
+    lock.unlock()
+  }
+
+  func execute(_ request: PlatformHttpRequest) throws -> PlatformHttpResponse {
+    let create = request.url.hasSuffix("/xrpc/blue.catbird.chat.createConversation")
+    lock.lock()
+    if Thread.isMainThread {
+      mainThreadRequests += 1
+    }
+    if create {
+      createRequests += 1
+    }
+    let refuseTransient = create && refuseNextCreate
+    if refuseTransient {
+      refuseNextCreate = false
+    }
+    let refuseExpired = create && !refuseTransient && expireAllCreates
+    lock.unlock()
+    if refuseTransient {
+      return PlatformHttpResponse(
+        status: 503,
+        headers: [],
+        body: Data(#"{"error":"CapacityUnavailable","message":"try later"}"#.utf8)
+      )
+    }
+    if refuseExpired {
+      return PlatformHttpResponse(
+        status: 400,
+        headers: [],
+        body: Data(#"{"error":"SignedOperationExpired","message":"signed operation expired"}"#.utf8)
+      )
+    }
+    return NativeArchiveMockNetwork.shared.handle(request)
+  }
+}
+
 final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
   private struct Device {
     let config: CatbirdMlsClientConfig
@@ -85,6 +201,169 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     network.reset()
     XCTAssertEqual(try enroll(keyId: "not-the-enrolled-key").status, 500)
     XCTAssertEqual(network.contractViolations.count, 1)
+  }
+
+  /// A committed create whose response was lost leaves a durable genesis journal. Reopening that
+  /// account on `MainActor` must be a storage-only operation: replay belongs to explicit sync.
+  func testMainActorOpenWithRetainedCreationJournalPerformsNoTransport() async throws {
+    let aliceDid = "did:plc:mainopenaaaaaaaaaaaaaaaa"
+    let deviceId = "a11ce009-0000-4000-8000-000000000001"
+    let conversationId = "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f699"
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CatbirdMainOpen-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    roots.append(root)
+    let loss = R4CreationLossTransport()
+    let transport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      homeDsDid: dsDid,
+      actorDeviceId: deviceId,
+      boundedSession: boundedSession,
+      allowLoopbackForTesting: true,
+      httpOverride: { try loss.execute($0) }
+    )
+    let device = Device(
+      config: CatbirdMlsClientConfig(
+        storageRoot: root.path,
+        accountDid: aliceDid,
+        deviceId: deviceId,
+        homeDsDid: dsDid,
+        homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+        pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: aliceDid)
+      ),
+      keystore: KeychainPlatformKeyStore(
+        service: "blue.catbird.mls.main-open.\(UUID().uuidString)",
+        backend: RecordingKeychainBackend()
+      ),
+      transport: transport
+    )
+
+    let first = try await open(device)
+    _ = try await first.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await first.setupRecoveryCode()
+    do {
+      _ = try await first.createGroup(
+        conversationId: conversationId,
+        sequencerDid: dsDid,
+        title: "Retained creation",
+        description: nil
+      )
+      XCTFail("the committed create response should be lost")
+    } catch {
+      // The transport failure is the positive control; the journal was written before dispatch.
+    }
+    XCTAssertEqual(loss.createRequestCount, 1)
+    await first.close()
+
+    let reopened = try await MainActor.run {
+      try MLSClientCoordinator(
+        config: device.config,
+        keystore: device.keystore,
+        transport: device.transport
+      )
+    }
+    XCTAssertEqual(loss.createRequestCount, 1, "open must not replay the pending creation")
+    XCTAssertFalse(network.sawMainThreadRequest)
+    try await Task.sleep(nanoseconds: 1_100_000_000)
+    _ = try await reopened.sync()
+    XCTAssertEqual(loss.createRequestCount, 2, "explicit sync replays the retained creation")
+    await reopened.close()
+  }
+
+  @MainActor
+  func testCoordinatorCanInspectRetryAndCancelPendingGroupCreationOffMain() async throws {
+    let aliceDid = "did:plc:creationcontrolaaaaaaaaa"
+    let deviceId = "a11ce00a-0000-4000-8000-000000000001"
+    let retryConversationId = "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f69a"
+    let cancelConversationId = "6f1c2a3b-4d5e-4f60-8a71-b2c3d4e5f69b"
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CatbirdCreationControl-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    roots.append(root)
+    let control = R4CreationControlTransport()
+    let transport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      homeDsDid: dsDid,
+      actorDeviceId: deviceId,
+      boundedSession: boundedSession,
+      allowLoopbackForTesting: true,
+      httpOverride: { try control.execute($0) }
+    )
+    let device = Device(
+      config: CatbirdMlsClientConfig(
+        storageRoot: root.path,
+        accountDid: aliceDid,
+        deviceId: deviceId,
+        homeDsDid: dsDid,
+        homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+        pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: aliceDid)
+      ),
+      keystore: KeychainPlatformKeyStore(
+        service: "blue.catbird.mls.creation-control.\(UUID().uuidString)",
+        backend: RecordingKeychainBackend()
+      ),
+      transport: transport
+    )
+    let coordinator = try MLSClientCoordinator(
+      config: device.config,
+      keystore: device.keystore,
+      transport: device.transport
+    )
+    _ = try await coordinator.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await coordinator.setupRecoveryCode()
+
+    control.refuseOneCreate()
+    do {
+      _ = try await coordinator.createGroup(
+        conversationId: retryConversationId,
+        sequencerDid: dsDid,
+        title: "Retry me",
+        description: nil
+      )
+      XCTFail("the first create must remain pending")
+    } catch {}
+    let pending = try await coordinator.pendingGroupCreationStatus(
+      conversationId: retryConversationId
+    )
+    XCTAssertEqual(pending?.conversationId, retryConversationId)
+    XCTAssertEqual(pending?.state, .pendingRetry)
+    XCTAssertEqual(pending?.lastErrorCode, "CreationAttemptsMayStillCommit")
+
+    let retried = try await coordinator.retryPendingGroupCreation(
+      conversationId: retryConversationId
+    )
+    XCTAssertEqual(retried?.conversationId, retryConversationId)
+    let statusAfterRetry = try await coordinator.pendingGroupCreationStatus(
+      conversationId: retryConversationId
+    )
+    XCTAssertNil(statusAfterRetry)
+
+    control.refuseOneCreate()
+    do {
+      _ = try await coordinator.createGroup(
+        conversationId: cancelConversationId,
+        sequencerDid: dsDid,
+        title: "Cancel me",
+        description: nil
+      )
+      XCTFail("the second create must remain pending")
+    } catch {}
+    let cancellable = try await coordinator.pendingGroupCreationStatus(
+      conversationId: cancelConversationId
+    )
+    XCTAssertNotNil(cancellable)
+    control.expireCreatesUntilCancelled()
+    let cancelled = try await coordinator.cancelPendingGroupCreation(
+      conversationId: cancelConversationId
+    )
+    XCTAssertTrue(cancelled)
+    let statusAfterCancel = try await coordinator.pendingGroupCreationStatus(
+      conversationId: cancelConversationId
+    )
+    XCTAssertNil(statusAfterCancel)
+    XCTAssertEqual(control.createRequestCount, 4)
+    XCTAssertFalse(control.sawMainThreadRequest)
+    await coordinator.close()
   }
 
   func testAutomaticBackgroundOutboxDrainAndOfflineRestartResumeSurvival() async throws {

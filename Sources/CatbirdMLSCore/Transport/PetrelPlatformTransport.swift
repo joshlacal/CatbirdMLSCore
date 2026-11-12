@@ -308,6 +308,12 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       let rawType = raw["$type"] as? String
       let signedRequest = raw["signedRequest"] as? [String: Any]
       let signedBody = signedRequest?["body"] as? [String: Any]
+      let signedRequestData = signedRequest.flatMap {
+        try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+      }
+      let sequencerReceiptData = (raw["sequencerReceipt"] as? [String: Any]).flatMap {
+        try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+      }
 
       let entryKind = resolveEntryKind(raw: raw, rawType: rawType)
       let priorEpoch = parseInt64((signedBody?["prior"] as? [String: Any])?["epoch"])
@@ -355,7 +361,9 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
           epoch: epoch,
           entryKind: entryKind,
           senderDid: senderDid,
-          mlsBytes: mlsBytes
+          mlsBytes: mlsBytes,
+          signedRequest: signedRequestData,
+          sequencerReceipt: sequencerReceiptData
         )
       )
     }
@@ -376,8 +384,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     switch fragment {
     case "applicationEntry":
       return "application"
-    case "commitEntry", "leafRecoveryFulfillmentEntry", "leaveCommitFulfillmentEntry":
+    case "commitEntry":
       return "commit"
+    case "leafRecoveryFulfillmentEntry", "leaveCommitFulfillmentEntry":
+      return String(fragment.dropLast("Entry".count))
     case "metadataEntry":
       return "metadata"
     default:

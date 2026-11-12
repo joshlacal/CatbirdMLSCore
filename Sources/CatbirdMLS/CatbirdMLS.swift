@@ -574,6 +574,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration
 
+    func cancelPendingGroupCreation(conversationId: String) throws -> Bool
+
     func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus
 
     func closeConversation(conversationId: String) throws
@@ -610,6 +612,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func listRequests(consentFilter: String?) throws -> [RequestRow]
 
+    func pendingGroupCreationStatus(conversationId: String) throws -> PendingGroupCreationStatus?
+
     func preCutoverWipeReport() -> PreCutoverWipeReport
 
     func prepareForBackground() throws -> BackgroundCheckpointReport
@@ -627,6 +631,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
     func restoreWithRecoveryCode(recoveryCodeInput: String) throws -> LabyrinthBackupStatus
 
     func resumeFromBackground() throws
+
+    func retryPendingGroupCreation(conversationId: String) throws -> ConversationRow?
 
     func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus
 
@@ -748,6 +754,13 @@ open class CatbirdMlsClient:
                                                                                                  FfiConverterString.lower(appId),
                                                                                                  FfiConverterString.lower(pushKey),
                                                                                                  FfiConverterBool.lower(enabled), $0)
+        })
+    }
+
+    open func cancelPendingGroupCreation(conversationId: String) throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_cancel_pending_group_creation(self.uniffiClonePointer(),
+                                                                                        FfiConverterString.lower(conversationId), $0)
         })
     }
 
@@ -881,6 +894,13 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func pendingGroupCreationStatus(conversationId: String) throws -> PendingGroupCreationStatus? {
+        return try FfiConverterOptionTypePendingGroupCreationStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_pending_group_creation_status(self.uniffiClonePointer(),
+                                                                                        FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
     open func preCutoverWipeReport() -> PreCutoverWipeReport {
         return try! FfiConverterTypePreCutoverWipeReport.lift(try! rustCall {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_pre_cutover_wipe_report(self.uniffiClonePointer(), $0)
@@ -942,6 +962,13 @@ open class CatbirdMlsClient:
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_resume_from_background(self.uniffiClonePointer(), $0)
         }
+    }
+
+    open func retryPendingGroupCreation(conversationId: String) throws -> ConversationRow? {
+        return try FfiConverterOptionTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_retry_pending_group_creation(self.uniffiClonePointer(),
+                                                                                       FfiConverterString.lower(conversationId), $0)
+        })
     }
 
     open func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus {
@@ -4672,16 +4699,33 @@ public struct FetchedPushEntry {
     public var entryKind: String
     public var senderDid: String
     public var mlsBytes: Data
+    /**
+     * JSON-encoded actor-signed request returned by `getEntries`.
+     */
+    public var signedRequest: Data?
+    /**
+     * JSON-encoded sequencer receipt returned by `getEntries`.
+     */
+    public var sequencerReceipt: Data?
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(entryId: String, seq: Int64, epoch: Int64, entryKind: String, senderDid: String, mlsBytes: Data) {
+    public init(entryId: String, seq: Int64, epoch: Int64, entryKind: String, senderDid: String, mlsBytes: Data,
+                /* 
+                    * JSON-encoded actor-signed request returned by `getEntries`.
+                    */ signedRequest: Data?,
+                /* 
+                    * JSON-encoded sequencer receipt returned by `getEntries`.
+                    */ sequencerReceipt: Data?)
+    {
         self.entryId = entryId
         self.seq = seq
         self.epoch = epoch
         self.entryKind = entryKind
         self.senderDid = senderDid
         self.mlsBytes = mlsBytes
+        self.signedRequest = signedRequest
+        self.sequencerReceipt = sequencerReceipt
     }
 }
 
@@ -4705,6 +4749,12 @@ extension FetchedPushEntry: Equatable, Hashable {
         if lhs.mlsBytes != rhs.mlsBytes {
             return false
         }
+        if lhs.signedRequest != rhs.signedRequest {
+            return false
+        }
+        if lhs.sequencerReceipt != rhs.sequencerReceipt {
+            return false
+        }
         return true
     }
 
@@ -4715,6 +4765,8 @@ extension FetchedPushEntry: Equatable, Hashable {
         hasher.combine(entryKind)
         hasher.combine(senderDid)
         hasher.combine(mlsBytes)
+        hasher.combine(signedRequest)
+        hasher.combine(sequencerReceipt)
     }
 }
 
@@ -4730,7 +4782,9 @@ public struct FfiConverterTypeFetchedPushEntry: FfiConverterRustBuffer {
                 epoch: FfiConverterInt64.read(from: &buf),
                 entryKind: FfiConverterString.read(from: &buf),
                 senderDid: FfiConverterString.read(from: &buf),
-                mlsBytes: FfiConverterData.read(from: &buf)
+                mlsBytes: FfiConverterData.read(from: &buf),
+                signedRequest: FfiConverterOptionData.read(from: &buf),
+                sequencerReceipt: FfiConverterOptionData.read(from: &buf)
             )
     }
 
@@ -4741,6 +4795,8 @@ public struct FfiConverterTypeFetchedPushEntry: FfiConverterRustBuffer {
         FfiConverterString.write(value.entryKind, into: &buf)
         FfiConverterString.write(value.senderDid, into: &buf)
         FfiConverterData.write(value.mlsBytes, into: &buf)
+        FfiConverterOptionData.write(value.signedRequest, into: &buf)
+        FfiConverterOptionData.write(value.sequencerReceipt, into: &buf)
     }
 }
 
@@ -6009,10 +6065,11 @@ public struct NotificationPreview {
     public var fromCache: Bool
     public var fallbackGeneric: Bool
     public var darwinNotificationName: String
+    public var receiptVerified: Bool
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(messageId: String, conversationId: String, senderDid: String, senderDisplayName: String?, groupTitle: String?, body: String, epoch: Int64, seq: Int64, fromCache: Bool, fallbackGeneric: Bool, darwinNotificationName: String) {
+    public init(messageId: String, conversationId: String, senderDid: String, senderDisplayName: String?, groupTitle: String?, body: String, epoch: Int64, seq: Int64, fromCache: Bool, fallbackGeneric: Bool, darwinNotificationName: String, receiptVerified: Bool) {
         self.messageId = messageId
         self.conversationId = conversationId
         self.senderDid = senderDid
@@ -6024,6 +6081,7 @@ public struct NotificationPreview {
         self.fromCache = fromCache
         self.fallbackGeneric = fallbackGeneric
         self.darwinNotificationName = darwinNotificationName
+        self.receiptVerified = receiptVerified
     }
 }
 
@@ -6062,6 +6120,9 @@ extension NotificationPreview: Equatable, Hashable {
         if lhs.darwinNotificationName != rhs.darwinNotificationName {
             return false
         }
+        if lhs.receiptVerified != rhs.receiptVerified {
+            return false
+        }
         return true
     }
 
@@ -6077,6 +6138,7 @@ extension NotificationPreview: Equatable, Hashable {
         hasher.combine(fromCache)
         hasher.combine(fallbackGeneric)
         hasher.combine(darwinNotificationName)
+        hasher.combine(receiptVerified)
     }
 }
 
@@ -6097,7 +6159,8 @@ public struct FfiConverterTypeNotificationPreview: FfiConverterRustBuffer {
                 seq: FfiConverterInt64.read(from: &buf),
                 fromCache: FfiConverterBool.read(from: &buf),
                 fallbackGeneric: FfiConverterBool.read(from: &buf),
-                darwinNotificationName: FfiConverterString.read(from: &buf)
+                darwinNotificationName: FfiConverterString.read(from: &buf),
+                receiptVerified: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -6113,6 +6176,7 @@ public struct FfiConverterTypeNotificationPreview: FfiConverterRustBuffer {
         FfiConverterBool.write(value.fromCache, into: &buf)
         FfiConverterBool.write(value.fallbackGeneric, into: &buf)
         FfiConverterString.write(value.darwinNotificationName, into: &buf)
+        FfiConverterBool.write(value.receiptVerified, into: &buf)
     }
 }
 
@@ -6272,6 +6336,86 @@ public func FfiConverterTypeOtcPairingOffer_lift(_ buf: RustBuffer) throws -> Ot
 #endif
 public func FfiConverterTypeOtcPairingOffer_lower(_ value: OtcPairingOffer) -> RustBuffer {
     return FfiConverterTypeOtcPairingOffer.lower(value)
+}
+
+/**
+ * Current state of one durable group creation.
+ */
+public struct PendingGroupCreationStatus {
+    public var conversationId: String
+    public var state: PendingGroupCreationState
+    public var retryAtMs: Int64?
+    public var lastErrorCode: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, state: PendingGroupCreationState, retryAtMs: Int64?, lastErrorCode: String?) {
+        self.conversationId = conversationId
+        self.state = state
+        self.retryAtMs = retryAtMs
+        self.lastErrorCode = lastErrorCode
+    }
+}
+
+extension PendingGroupCreationStatus: Equatable, Hashable {
+    public static func == (lhs: PendingGroupCreationStatus, rhs: PendingGroupCreationStatus) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.state != rhs.state {
+            return false
+        }
+        if lhs.retryAtMs != rhs.retryAtMs {
+            return false
+        }
+        if lhs.lastErrorCode != rhs.lastErrorCode {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(state)
+        hasher.combine(retryAtMs)
+        hasher.combine(lastErrorCode)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingGroupCreationStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingGroupCreationStatus {
+        return
+            try PendingGroupCreationStatus(
+                conversationId: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypePendingGroupCreationState.read(from: &buf),
+                retryAtMs: FfiConverterOptionInt64.read(from: &buf),
+                lastErrorCode: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PendingGroupCreationStatus, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterTypePendingGroupCreationState.write(value.state, into: &buf)
+        FfiConverterOptionInt64.write(value.retryAtMs, into: &buf)
+        FfiConverterOptionString.write(value.lastErrorCode, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingGroupCreationStatus_lift(_ buf: RustBuffer) throws -> PendingGroupCreationStatus {
+    return try FfiConverterTypePendingGroupCreationStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingGroupCreationStatus_lower(_ value: PendingGroupCreationStatus) -> RustBuffer {
+    return FfiConverterTypePendingGroupCreationStatus.lower(value)
 }
 
 public struct PendingProposalDetail {
@@ -9857,6 +10001,12 @@ public enum MlsError {
     case EpochMismatch(message: String)
 
     /**
+     * A peer's valid device signature proves that it sent from a different MLS state at this
+     * device's current epoch. The entry is not decrypted, stored, or acknowledged.
+     */
+    case ForkDetected(message: String)
+
+    /**
      * This device holds no verified roster of `conversation_id` (it learned none from the
      * conversation's creation, a verified reset or a recovery Welcome's roster attestation), so
      * it can establish neither admin authority nor a zero-leaf participant's entitlement there.
@@ -9869,6 +10019,38 @@ public enum MlsError {
      * apply, with its cursor and acknowledgement still below that step. No failure is dropped.
      */
     case SyncIncomplete(message: String)
+
+    /**
+     * A valid, coordinate-bound recovery request named a participant for which this device has
+     * neither a current same-account leaf nor member-authenticated admission authority.
+     */
+    case AdmissionProofUnavailable(message: String)
+
+    /**
+     * A retained creation is waiting for its bounded retry deadline.
+     */
+    case GroupCreationPending(message: String)
+
+    /**
+     * A retained creation needs an explicit user decision before it can continue.
+     */
+    case GroupCreationNeedsUserAction(message: String)
+
+    /**
+     * The sequencer proved that this retained creation cannot be completed.
+     */
+    case GroupCreationRejected(message: String)
+
+    /**
+     * Cancellation could not prove that no server-side conversation exists.
+     */
+    case GroupCreationCancellationUnproven(message: String)
+
+    /**
+     * The whole encrypted client database predates or exceeds this build's storage contract.
+     * Refuse it before any operation; the app must wipe local state and re-enrol.
+     */
+    case LocalStateFormatUnsupported(message: String)
 }
 
 #if swift(>=5.8)
@@ -10048,11 +10230,39 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 43: return try .RosterUnverified(
+        case 43: return try .ForkDetected(
                 message: FfiConverterString.read(from: &buf)
             )
 
-        case 44: return try .SyncIncomplete(
+        case 44: return try .RosterUnverified(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 45: return try .SyncIncomplete(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 46: return try .AdmissionProofUnavailable(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 47: return try .GroupCreationPending(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 48: return try .GroupCreationNeedsUserAction(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 49: return try .GroupCreationRejected(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 50: return try .GroupCreationCancellationUnproven(
+                message: FfiConverterString.read(from: &buf)
+            )
+
+        case 51: return try .LocalStateFormatUnsupported(
                 message: FfiConverterString.read(from: &buf)
             )
 
@@ -10146,10 +10356,24 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(41))
         case .EpochMismatch(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(42))
-        case .RosterUnverified(_ /* message is ignored*/ ):
+        case .ForkDetected(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(43))
-        case .SyncIncomplete(_ /* message is ignored*/ ):
+        case .RosterUnverified(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(44))
+        case .SyncIncomplete(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(45))
+        case .AdmissionProofUnavailable(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(46))
+        case .GroupCreationPending(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(47))
+        case .GroupCreationNeedsUserAction(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(48))
+        case .GroupCreationRejected(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(49))
+        case .GroupCreationCancellationUnproven(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(50))
+        case .LocalStateFormatUnsupported(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(51))
         }
     }
 }
@@ -10289,6 +10513,64 @@ public func FfiConverterTypeOperationType_lower(_ value: OperationType) -> RustB
 }
 
 extension OperationType: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/* 
+ * App-visible disposition of a durable group-creation journal.
+ */
+
+public enum PendingGroupCreationState {
+    case pendingRetry
+    /**
+     * ABI-reserved. The creation resolver currently has no state with a user-remediable action.
+     */
+    case needsUserAction
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingGroupCreationState: FfiConverterRustBuffer {
+    typealias SwiftType = PendingGroupCreationState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingGroupCreationState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .pendingRetry
+
+        case 2: return .needsUserAction
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PendingGroupCreationState, into buf: inout [UInt8]) {
+        switch value {
+        case .pendingRetry:
+            writeInt(&buf, Int32(1))
+
+        case .needsUserAction:
+            writeInt(&buf, Int32(2))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingGroupCreationState_lift(_ buf: RustBuffer) throws -> PendingGroupCreationState {
+    return try FfiConverterTypePendingGroupCreationState.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingGroupCreationState_lower(_ value: PendingGroupCreationState) -> RustBuffer {
+    return FfiConverterTypePendingGroupCreationState.lower(value)
+}
+
+extension PendingGroupCreationState: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -11831,6 +12113,30 @@ private struct FfiConverterOptionTypeCommitMetadataInfo: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeConversationRow: FfiConverterRustBuffer {
+    typealias SwiftType = ConversationRow?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeConversationRow.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeConversationRow.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeFetchedMetadataSnapshot: FfiConverterRustBuffer {
     typealias SwiftType = FetchedMetadataSnapshot?
 
@@ -11895,6 +12201,30 @@ private struct FfiConverterOptionTypeGroupMetadataRow: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeGroupMetadataRow.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypePendingGroupCreationStatus: FfiConverterRustBuffer {
+    typealias SwiftType = PendingGroupCreationStatus?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePendingGroupCreationStatus.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePendingGroupCreationStatus.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12772,6 +13102,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_build_signed_push_gateway_registration() != 29444 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_cancel_pending_group_creation() != 51162 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_check_spaces_eligibility() != 37495 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12826,6 +13159,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_requests() != 27470 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_pending_group_creation_status() != 59446 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_pre_cutover_wipe_report() != 62956 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12851,6 +13187,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_resume_from_background() != 10481 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_retry_pending_group_creation() != 7292 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_labyrinth_device() != 44837 {

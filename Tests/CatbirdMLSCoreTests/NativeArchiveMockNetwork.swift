@@ -4,6 +4,7 @@ import CryptoKit
 import Foundation
 import PetrelCore
 import PetrelCrypto
+import PetrelCatbird
 
 /// In-process home `mls-ds` plus per-account PDS/Space hosts serving the verified native archive
 /// (`LabyrinthSession`) contract. Swift port of `catbird-mls/tests/support/native_archive_auth.rs`
@@ -986,6 +987,17 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     }
     let cid = try text(body, "conversationId")
     let coords = body["next"] ?? NSNull()
+    if let existingState = conversations[cid],
+      let existingEntry = entries[cid]?.first,
+      let existingSr = existingEntry["signedRequest"] as? JSON,
+      (existingSr["operationId"] as? String) == (sr["operationId"] as? String)
+    {
+      return reply(200, ["result": [
+        "$type": "blue.catbird.chat.defs#conversationCreatedResult",
+        "coordinates": existingState["coordinates"] ?? coords,
+        "entry": existingEntry,
+      ] as JSON])
+    }
     let actorLeaf = manifest["actorLeaf"] as? JSON ?? JSON()
     let participants = (manifest["participants"] as? [JSON] ?? []).map { participant -> JSON in
       var p = participant
@@ -997,17 +1009,18 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       "participants": participants, "leaves": [actorLeaf],
       "metadataSnapshot": body["metadataSnapshot"] ?? NSNull(), "snapshotSeq": 1,
     ]
-    entries[cid, default: []].append([
-      "$type": "blue.catbird.chat.defs#creationEntry", "seq": 1, "coordinates": coords, "signedRequest": sr,
-    ])
+    let entry = try controlEntry(
+      type: "creationEntry",
+      signedRequest: sr,
+      coordinate: coords as? JSON ?? JSON(),
+      seq: 1
+    )
+    entries[cid, default: []].append(entry)
     leafPeriods[cid] = [["userDid": actorLeaf["userDid"] ?? NSNull(), "deviceId": actorLeaf["deviceId"] ?? NSNull(), "joinedSeq": 1]]
     // `mls-ds` answers the sequenced creation entry carrying the exact signed request.
     return reply(200, ["result": [
       "$type": "blue.catbird.chat.defs#conversationCreatedResult", "coordinates": coords,
-      "entry": [
-        "entryId": body["transitionId"] ?? NSNull(), "conversationId": cid, "seq": 1,
-        "signedRequest": sr, "receivedAt": body["signedAt"] ?? NSNull(),
-      ] as JSON,
+      "entry": entry,
     ] as JSON])
   }
 
@@ -1030,9 +1043,13 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       return p
     }
     let seq = (entries[cid]?.count ?? 0) + 1
-    entries[cid, default: []].append([
-      "$type": "blue.catbird.chat.defs#participantAcceptanceEntry", "seq": seq, "coordinates": next, "signedRequest": sr,
-    ])
+    let entry = try controlEntry(
+      type: "participantAcceptanceEntry",
+      signedRequest: sr,
+      coordinate: next,
+      seq: seq
+    )
+    entries[cid, default: []].append(entry)
     state["snapshotSeq"] = seq
     conversations[cid] = state
     let signedAt = ISO8601DateFormatter.fractional.date(from: try text(body, "signedAt")) ?? Date()
@@ -1062,8 +1079,8 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     ]
     requests.append(view)
     leafRecoveries[cid] = requests
-    // `mls-ds` `acceptance_response`: the acceptance's coordinate and recovery view.
-    return reply(200, ["seq": seq, "coordinates": next, "recovery": view])
+    // `mls-ds` answers the acceptance entry, its coordinate, and recovery view.
+    return reply(200, ["seq": seq, "coordinates": next, "entry": entry, "recovery": view])
   }
 
   private func submitTransition(_ b: JSON) throws -> Reply {
@@ -1088,7 +1105,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         ])
       }
     }
-    entries[cid, default: []].append(["seq": seq, "coordinates": next, "signedRequest": sr])
+    // The exact entry is added after its schema arm is selected below.
     state["coordinates"] = next
     state["snapshotSeq"] = seq
     if let snapshot = body["metadataSnapshot"] { state["metadataSnapshot"] = snapshot }
@@ -1134,15 +1151,194 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     guard let entryKind = entryKinds[String(type.dropFirst("blue.catbird.chat.defs#".count))] else {
       throw Fault(message: "fixture has no entry kind for \(type)")
     }
-    // `mls-ds` answers the sequenced entry carrying the exact signed request.
+    let entry = try controlEntry(
+      type: entryKind,
+      signedRequest: sr,
+      coordinate: next,
+      seq: seq
+    )
+    entries[cid, default: []].append(entry)
+    // `mls-ds` answers the sequenced entry carrying the exact signed request and receipt.
     return reply(200, [
       "coordinates": next,
-      "entry": [
-        "$type": "blue.catbird.chat.defs#\(entryKind)", "entryId": body["transitionId"] ?? NSNull(),
-        "conversationId": cid, "seq": seq, "signedRequest": sr, "receivedAt": body["signedAt"] ?? NSNull(),
-      ] as JSON,
+      "entry": entry,
       "welcomes": [Any](),
     ])
+  }
+
+  private func controlEntry(
+    type: String,
+    signedRequest: JSON,
+    coordinate: JSON,
+    seq: Int
+  ) throws -> JSON {
+    guard let body = signedRequest["body"] as? JSON else {
+      throw Fault(message: "control entry has no signed body")
+    }
+    let conversationId = try text(coordinate, "conversationId")
+    let entryId = try text(body, body["transitionId"] == nil ? "conversationId" : "transitionId")
+    let actor = try text(body, "actorDid")
+    let device = try text(body, "actorDeviceId")
+    let receivedAt = try text(body, "signedAt")
+    guard let signedAt = ISO8601DateFormatter.fractional.date(from: receivedAt) else {
+      throw Fault(message: "control request has invalid signedAt")
+    }
+    let issuedAtMs = Int64(signedAt.timeIntervalSince1970 * 1000)
+    let commitment = try controlRequestDigest(signedRequest)
+    let receipt = try signedSequencerReceipt(
+      conversationId: conversationId,
+      coordinate: coordinate,
+      actorDid: actor,
+      actorDeviceId: device,
+      entryId: entryId,
+      commitment: commitment,
+      seq: UInt64(seq),
+      issuedAtMs: issuedAtMs
+    )
+    return [
+      "$type": "blue.catbird.chat.defs#\(type)",
+      "entryId": entryId,
+      "conversationId": conversationId,
+      "seq": seq,
+      "signedRequest": signedRequest,
+      "sequencerReceipt": receipt,
+      "receivedAt": receivedAt,
+    ]
+  }
+
+  private func controlRequestDigest(_ signedRequest: JSON) throws -> Data {
+    guard let body = signedRequest["body"] as? JSON,
+          let type = body["$type"] as? String,
+          let domain = body["signatureDomain"] as? String
+    else {
+      throw Fault(message: "control request is missing its type or signature domain")
+    }
+    let data = try JSONSerialization.data(withJSONObject: lexiconBodyJSON(body))
+    let projected: Any
+    switch type {
+    case BlueCatbirdChatDefs.CreationBody.typeIdentifier:
+      projected = try JSONDecoder().decode(BlueCatbirdChatDefs.CreationBody.self, from: data).toCBORValue()
+    case BlueCatbirdChatDefs.CommitTransitionBody.typeIdentifier:
+      projected = try JSONDecoder().decode(BlueCatbirdChatDefs.CommitTransitionBody.self, from: data).toCBORValue()
+    case BlueCatbirdChatDefs.PolicyTransitionBody.typeIdentifier:
+      projected = try JSONDecoder().decode(BlueCatbirdChatDefs.PolicyTransitionBody.self, from: data).toCBORValue()
+    case BlueCatbirdChatDefs.ParticipantAcceptanceBody.typeIdentifier:
+      projected = try JSONDecoder().decode(BlueCatbirdChatDefs.ParticipantAcceptanceBody.self, from: data).toCBORValue()
+    case BlueCatbirdChatDefs.MetadataTransitionBody.typeIdentifier:
+      projected = try JSONDecoder().decode(BlueCatbirdChatDefs.MetadataTransitionBody.self, from: data).toCBORValue()
+    case BlueCatbirdChatDefs.LeafRecoveryFulfillmentBody.typeIdentifier:
+      projected = try JSONDecoder().decode(BlueCatbirdChatDefs.LeafRecoveryFulfillmentBody.self, from: data).toCBORValue()
+    default:
+      throw Fault(message: "fixture has no canonical control body for \(type)")
+    }
+    var transcript = Data(domain.utf8)
+    transcript.append(try DAGCBOR.encodeValue(canonicalBodyValue(projected, wire: body)))
+
+    guard let actor = body["actorDid"] as? String,
+          let device = body["actorDeviceId"] as? String,
+          let key = deviceKeys[actor]?[device],
+          let signature = bytes(signedRequest["signature"]),
+          let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: key),
+          publicKey.isValidSignature(signature, for: transcript)
+    else {
+      throw Fault(message: "canonical control transcript does not verify")
+    }
+    return Data(SHA256.hash(data: transcript))
+  }
+
+  private func lexiconBodyJSON(_ value: Any, field: String? = nil) -> Any {
+    let byteFields: Set<String> = [
+      "archiveCommitment", "authorDeviceId", "blobId", "bytes", "ciphertext",
+      "ciphertextSha256", "confirmationTag", "contentSignature", "conversationId",
+      "epochHead", "groupContextHash", "groupId", "joinKeyPackageRef", "key",
+      "keyPackageRef", "messageId", "nonce", "opaqueWelcome", "originTransitionId",
+      "sha256", "signaturePublicKey", "transitionId", "waveform",
+    ]
+    if let object = value as? JSON {
+      return Dictionary(uniqueKeysWithValues: object.map { key, nested in
+        (key, lexiconBodyJSON(nested, field: key))
+      })
+    }
+    if let array = value as? [Any] {
+      return array.map { lexiconBodyJSON($0, field: field) }
+    }
+    if let field, byteFields.contains(field), let string = value as? String,
+       bytes(string) != nil
+    {
+      return ["$bytes": string]
+    }
+    return value
+  }
+
+  private func canonicalBodyValue(_ value: Any, wire: Any?) -> Any {
+    if let map = value as? OrderedCBORMap {
+      let wireObject = wire as? JSON
+      var converted = OrderedCBORMap()
+      for entry in map.entries {
+        if entry.key == "$type", wireObject?["$type"] == nil {
+          continue
+        }
+        converted.append(
+          key: entry.key,
+          value: canonicalBodyValue(entry.value, wire: wireObject?[entry.key])
+        )
+      }
+      return converted
+    }
+    if let values = value as? [Any] {
+      let wireValues = wire as? [Any] ?? []
+      return values.enumerated().map {
+        canonicalBodyValue($0.element, wire: $0.offset < wireValues.count ? wireValues[$0.offset] : nil)
+      }
+    }
+    if let text = value as? String, text.utf8.count == 36, let uuid = UUID(uuidString: text) {
+      var bytes = uuid.uuid
+      return Data(bytes: &bytes, count: MemoryLayout.size(ofValue: bytes))
+    }
+    return value
+  }
+
+  private func signedSequencerReceipt(
+    conversationId: String,
+    coordinate: JSON,
+    actorDid: String,
+    actorDeviceId: String,
+    entryId: String,
+    commitment: Data,
+    seq: UInt64,
+    issuedAtMs: Int64
+  ) throws -> JSON {
+    guard let groupId = bytes(coordinate["groupId"]) else {
+      throw Fault(message: "receipt coordinate has no groupId")
+    }
+    let epoch = uint64(coordinate["epoch"]) ?? 0
+    let kid = "\(Self.dsDid)#mls-receipt-1"
+    var transcript = Data("catbird-mls-sequencer-receipt-v2\0".utf8)
+    for field in [Data(Self.dsDid.utf8), Data(kid.utf8), Data(conversationId.utf8), groupId] {
+      transcript.appendLengthPrefixed(field)
+    }
+    transcript.appendBigEndian(epoch)
+    transcript.appendLengthPrefixed(Data("\(actorDid)#\(actorDeviceId)".utf8))
+    transcript.appendLengthPrefixed(Data(entryId.utf8))
+    transcript.append(commitment)
+    transcript.appendBigEndian(seq)
+    transcript.appendBigEndian(UInt64(bitPattern: issuedAtMs))
+    let signature = try P256WireSignature.sign(transcript, using: receiptKey)
+    return [
+      "kid": kid,
+      "sequencerDid": Self.dsDid,
+      "conversationId": conversationId,
+      "generation": coordinate["generation"] ?? 0,
+      "groupId": ["$bytes": groupId.base64EncodedString()],
+      "epoch": epoch,
+      "seq": seq,
+      "entryId": entryId,
+      "senderDid": actorDid,
+      "senderDeviceId": actorDeviceId,
+      "archiveCommitment": ["$bytes": commitment.base64EncodedString()],
+      "issuedAtMs": issuedAtMs,
+      "signature": ["$bytes": signature.base64EncodedString()],
+    ]
   }
 
   /// The DS sequences the entry, mints its ID, and signs the `I13` receipt over it.
