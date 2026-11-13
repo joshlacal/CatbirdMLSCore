@@ -302,9 +302,9 @@ extension MLSAPIClient {
       let detail = message ?? error.errorDescription ?? "Space not found or not authorized"
       return (403, nil, "\(name): \(detail)")
     case let .authorizationRefused(_, name, message):
-      // This reader was refused by name (UserNotAuthorized, AppNotAuthorized
-      // or NotAuthorized; other authorities may still send them), or any 403:
-      // labyrinth's read refusal, on which history degrades.
+      // This reader was refused by name (AccountNotAuthorized,
+      // AppNotAuthorized or NotAuthorized), or by any 403: labyrinth's read
+      // refusal, on which history degrades.
       return (403, name, message)
     case let .tokenRejected(_, name, message, _):
       // InvalidDelegationToken or InvalidClientAttestation (400 upstream and
@@ -348,8 +348,11 @@ extension MLSAPIClient {
         throw LabyrinthTransportError.invalidRequest("duplicate conversation inventory parameter")
       }
     }
+    if let spaceDid = params["spaceDid"], (try? DID(didString: spaceDid)) == nil {
+      throw LabyrinthTransportError.invalidRequest("invalid conversation Space authority")
+    }
     guard params["spaceType"] == "blue.catbird.labyrinth.conversation",
-          Set(params.keys).isSubset(of: ["spaceType", "limit", "cursor"]) else {
+          Set(params.keys).isSubset(of: ["spaceDid", "spaceType", "limit", "cursor"]) else {
       throw LabyrinthTransportError.invalidRequest("conversation inventory is not scoped")
     }
     return url.queryItems ?? []
@@ -457,6 +460,12 @@ extension MLSAPIClient {
         guard let value = item.value, values.updateValue(value, forKey: item.name) == nil else {
           throw LabyrinthTransportError.invalidRequest("duplicate or empty Space query parameter")
         }
+      }
+      let allowed = nsid == "com.atproto.space.getRecord"
+        ? Set(["space", "repo", "collection", "rkey"])
+        : Set(["space", "repo", "collection", "limit", "cursor", "excludeValues"])
+      guard Set(values.keys).isSubset(of: allowed) else {
+        throw LabyrinthTransportError.invalidRequest("unsupported Space query parameter")
       }
       parameters = values
     } else {
