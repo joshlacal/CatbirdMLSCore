@@ -60,7 +60,7 @@ final class MLSLabyrinthTransportTests: XCTestCase {
   // MARK: - Space credential reuse (MLSDS-01)
 
   /// Petrel caches credentials on the manager. A new manager per foreign
-  /// read exchanged a fresh credential (delegation token, getSpaceCredential,
+  /// read exchanged a fresh credential (delegation token, authorizeSpaceSync,
   /// authority policy call) for every record.
   func testForeignConversationReadsReuseOneCredentialManagerPerAccount() async {
     let atProto = await ATProtoClient(baseURL: URL(string: "https://example.com")!)
@@ -262,7 +262,7 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertEqual(raw.status, 400)
     XCTAssertEqual(raw.error, "SpaceDeleted")
 
-    for name in ["NotAuthorized", "UserNotAuthorized", "AppNotAuthorized"] {
+    for name in ["NotAuthorized", "AccountNotAuthorized", "AppNotAuthorized"] {
       raw = try rawResponse(.authorizationRefused(host: "authority.example", error: name, message: nil))
       XCTAssertEqual(raw.status, 403, name)
       XCTAssertEqual(raw.error, name)
@@ -344,6 +344,15 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertNil(raw.error)
     XCTAssertEqual(raw.message, "conversation policy unavailable")
 
+    for (name, status) in [("RepoTakendown", 400), ("RepoDeactivated", 400),
+                           ("UpstreamFailure", 502)] {
+      let body = #"{"error":"\#(name)"}"#
+      raw = try rawResponse(.exchangeFailed(statusCode: status, message: body))
+      XCTAssertEqual(raw.status, status, name)
+      XCTAssertEqual(raw.error, name)
+      XCTAssertNotEqual(raw.status, 403, "\(name) must remain transient")
+    }
+
     // Never synthesize a success.
     raw = try rawResponse(.exchangeFailed(statusCode: 200, message: "unexpected"))
     XCTAssertEqual(raw.status, 502)
@@ -387,6 +396,20 @@ final class MLSLabyrinthTransportTests: XCTestCase {
     XCTAssertThrowsError(try Client.validateLabyrinthSpaceRequest(
       did: did, method: "GET", nsid: "com.atproto.space.getRepo",
       path: "/xrpc/com.atproto.space.getRepo", body: nil))
+  }
+
+  func testListRecordsRejectsRetiredReverseParameter() {
+    let did = "did:plc:alice"
+    let mailbox = "at://\(did)/space/blue.catbird.labyrinth.mailbox/self"
+    let ownerPath = "/xrpc/com.atproto.space.listRecords?space=\(mailbox)&repo=\(did)&collection=blue.catbird.labyrinth.epoch&reverse=true"
+    XCTAssertThrowsError(try Client.validateLabyrinthSpaceRequest(
+      did: did, method: "GET", nsid: "com.atproto.space.listRecords", path: ownerPath, body: nil))
+
+    let conversation = "at://did:plc:authority/space/blue.catbird.labyrinth.conversation/11111111-1111-4111-8111-111111111111"
+    let conversationPath = "/xrpc/com.atproto.space.listRecords?space=\(conversation)&repo=\(did)&collection=blue.catbird.labyrinth.batch&reverse=true"
+    XCTAssertThrowsError(try Client.conversationSpaceRequest(
+      did: did, method: "GET", nsid: "com.atproto.space.listRecords",
+      path: conversationPath, body: nil))
   }
 
   func testOwnerSpaceWritesCannotEscapeMailboxCollections() throws {
@@ -448,7 +471,10 @@ final class MLSLabyrinthTransportTests: XCTestCase {
   func testConversationInventoryIsRestrictedToHistorySpaces() throws {
     let path = "/xrpc/com.atproto.space.listSpaces?spaceType=blue.catbird.labyrinth.conversation&limit=100"
     XCTAssertNoThrow(try Client.validateConversationSpaceInventory(method: "GET", path: path, body: nil))
-    for bad in [path + "&did=did:plc:bob", path + "&spaceType=app.bsky.feed", path + "#fragment",
+    XCTAssertNoThrow(try Client.validateConversationSpaceInventory(
+      method: "GET", path: path + "&spaceDid=did:plc:authority", body: nil))
+    for bad in [path + "&did=did:plc:bob", path + "&spaceDid=not-a-did",
+                path + "&spaceType=app.bsky.feed", path + "#fragment",
                 path.replacingOccurrences(of: "blue.catbird.labyrinth.conversation", with: "app.bsky.feed")] {
       XCTAssertThrowsError(try Client.validateConversationSpaceInventory(method: "GET", path: bad, body: nil))
     }
