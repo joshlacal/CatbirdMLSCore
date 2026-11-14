@@ -144,7 +144,8 @@ final class PushExtensionIntegrationTests: XCTestCase {
       fromCache: false,
       fallbackGeneric: false,
       darwinNotificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification,
-      receiptVerified: false
+      receiptVerified: false,
+      isOwnSiblingSender: false
     )
     XCTAssertFalse(MLSPushExtensionProcessor.shouldPostDidCommit(for: preview, requested: true))
 
@@ -160,7 +161,8 @@ final class PushExtensionIntegrationTests: XCTestCase {
       fromCache: false,
       fallbackGeneric: false,
       darwinNotificationName: preview.darwinNotificationName,
-      receiptVerified: true
+      receiptVerified: true,
+      isOwnSiblingSender: false
     )
     XCTAssertTrue(MLSPushExtensionProcessor.shouldPostDidCommit(for: verified, requested: true))
   }
@@ -236,6 +238,243 @@ final class PushExtensionIntegrationTests: XCTestCase {
     XCTAssertEqual(decoded.entrySeq, 17)
     XCTAssertFalse(decoded.fetchRequired)
     XCTAssertEqual(decoded.inlineCiphertext, ciphertext)
+  }
+
+  /// The same wake as `testDecodeNestApnsPushWakeEnvelope`, sealed as version 2
+  /// (`docs/security/2026-11-09-sealed-push-wake-envelope.md`): the provider-visible object
+  /// holds only `v`, `kid` and `sealed`, and decoding yields the identical `PushWakePayload`.
+  func testDecodeNestApnsSealedPushWakeEnvelopeMatchesVersion1() throws {
+    let accountDid = "did:plc:pushwakev2user0000000000"
+    let didHash = try accountDidHashHex(accountDid: accountDid)
+    let ciphertext = Data([0x10, 0x20, 0x30, 0x40])
+    let pushKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+    let store = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.test.pushwake",
+      accessGroup: nil,
+      backend: RecordingKeychainBackend()
+    )
+    try store.storePushWakeKey(pushKey: pushKey, appId: "blue.catbird", accountDid: accountDid)
+
+    let version1: [AnyHashable: Any] = [
+      "aps": ["alert": ["body": "New message"], "mutable-content": 1],
+      "catbird": [
+        "recipientAccountHash": didHash,
+        "wakeKind": "application",
+        "conversationId": "11111111-2222-4333-8444-555555555555",
+        "generation": 2,
+        "seq": 17,
+        "epoch": 4,
+        "fetchRequired": false,
+        "ciphertext": ciphertext.base64EncodedString(),
+      ] as [String: Any],
+    ]
+    let header = Data(
+      #"{"wakeKind":"application","conversationId":"11111111-2222-4333-8444-555555555555","generation":2,"seq":17,"epoch":4,"fetchRequired":false}"#
+        .utf8
+    )
+    let sealed = try PushWakeEnvelope.seal(
+      header: header,
+      ciphertext: ciphertext,
+      keys: PushWakeEnvelope.Keys(pushKey: pushKey),
+      appId: "blue.catbird"
+    )
+    XCTAssertEqual(Set(sealed.keys), ["v", "kid", "sealed"])
+    let version2: [AnyHashable: Any] = [
+      "aps": ["alert": ["body": "New message"], "mutable-content": 1],
+      "catbird": sealed,
+    ]
+
+    let fromV1 = try XCTUnwrap(
+      MLSPushExtensionProcessor.decodePushWakePayload(from: version1, wakeKeys: store)
+    )
+    let fromV2 = try XCTUnwrap(
+      MLSPushExtensionProcessor.decodePushWakePayload(from: version2, wakeKeys: store)
+    )
+    XCTAssertEqual(fromV2.kind, fromV1.kind)
+    XCTAssertEqual(fromV2.conversationId, fromV1.conversationId)
+    XCTAssertEqual(fromV2.generation, fromV1.generation)
+    XCTAssertEqual(fromV2.entrySeq, fromV1.entrySeq)
+    XCTAssertEqual(fromV2.messageId, fromV1.messageId)
+    XCTAssertEqual(fromV2.recipientAccountHash, didHash)
+    XCTAssertEqual(fromV2.recipientAccountHash, fromV1.recipientAccountHash)
+    XCTAssertEqual(fromV2.fetchRequired, fromV1.fetchRequired)
+    XCTAssertEqual(fromV2.senderDid, fromV1.senderDid)
+    XCTAssertEqual(fromV2.inlineCiphertext, ciphertext)
+    XCTAssertEqual(fromV2.inlineCiphertext, fromV1.inlineCiphertext)
+
+    // A device that does not hold the key leaves the notification untouched.
+    let empty = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.test.pushwake",
+      accessGroup: nil,
+      backend: RecordingKeychainBackend()
+    )
+    XCTAssertNil(MLSPushExtensionProcessor.decodePushWakePayload(from: version2, wakeKeys: empty))
+  }
+
+  /// `T7-SWIFT-PUSH-RECEIPT`: Live end-to-end verification through `PetrelPlatformTransport`,
+  /// `MLSPushExtensionProcessor.processAsync`, and `NativeArchiveMockNetwork`:
+  /// - A tampered/forged `sequencerReceipt` in `getEntries` fails verification (`receiptVerified == false`),
+  ///   returns generic fallback without leaking plaintext, and suppresses Darwin wakeup.
+  /// - A genuine DS-signed `sequencerReceipt` verifies (`receiptVerified == true`), decrypts the
+  ///   plaintext body, and gates `shouldPostDidCommit == true`.
+  func testT7SwiftPushReceiptLiveNseVerifiesSequencerReceiptAndRejectsForgedReceipt() async throws {
+    let network = NativeArchiveMockNetwork.shared
+    network.reset()
+    let boundedSession = MLSBoundedURLSession(protocolClasses: [NativeArchiveMockURLProtocol.self])
+    defer {
+      network.forgeReceipts(messageIds: [])
+      boundedSession.invalidateAndCancel()
+    }
+
+    let aliceRoot = tempRoot.appendingPathComponent("alice", isDirectory: true)
+    let bobRoot = tempRoot.appendingPathComponent("bob", isDirectory: true)
+    try FileManager.default.createDirectory(at: aliceRoot, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: bobRoot, withIntermediateDirectories: true)
+
+    let aliceDid = "did:plc:t7pushreceiptaliceaaaaaa"
+    let bobDid = "did:plc:t7pushreceiptbobbbbbbbbb"
+    let aliceDeviceId = "6b1e2d3f-4c5a-4b7e-9f80-a1b2c3d4e5a1"
+    let bobDeviceId = "6b1e2d3f-4c5a-4b7e-9f80-a1b2c3d4e5b1"
+    let conversationId = "7a2d3b4c-5e6f-4a70-8b81-c2d3e4f5a799"
+    let forgedMsgId = "7a2d3b4c-5e6f-4a70-8b81-c2d3e4f5a701"
+    let genuineMsgId = "7a2d3b4c-5e6f-4a70-8b81-c2d3e4f5a702"
+
+    let aliceKeystore = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.t7push.alice.\(UUID().uuidString)",
+      backend: RecordingKeychainBackend()
+    )
+    let bobKeystore = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.t7push.bob.\(UUID().uuidString)",
+      backend: RecordingKeychainBackend()
+    )
+    let aliceTransport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      homeDsDid: NativeArchiveMockNetwork.dsDid,
+      ownPdsEndpoint: URL(string: NativeArchiveMockNetwork.pdsEndpoint(for: aliceDid)),
+      actorDeviceId: aliceDeviceId,
+      boundedSession: boundedSession
+    )
+    let bobTransport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      homeDsDid: NativeArchiveMockNetwork.dsDid,
+      ownPdsEndpoint: URL(string: NativeArchiveMockNetwork.pdsEndpoint(for: bobDid)),
+      actorDeviceId: bobDeviceId,
+      boundedSession: boundedSession
+    )
+
+    let alice = try await MLSClientCoordinator.open(
+      config: CatbirdMlsClientConfig(
+        storageRoot: aliceRoot.path,
+        accountDid: aliceDid,
+        deviceId: aliceDeviceId,
+        homeDsDid: NativeArchiveMockNetwork.dsDid,
+        homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+        pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: aliceDid)
+      ),
+      keystore: aliceKeystore,
+      transport: aliceTransport
+    )
+    let bob = try await MLSClientCoordinator.open(
+      config: CatbirdMlsClientConfig(
+        storageRoot: bobRoot.path,
+        accountDid: bobDid,
+        deviceId: bobDeviceId,
+        homeDsDid: NativeArchiveMockNetwork.dsDid,
+        homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+        pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: bobDid)
+      ),
+      keystore: bobKeystore,
+      transport: bobTransport
+    )
+
+    _ = try await bob.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await alice.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await alice.createGroup(
+      conversationId: conversationId,
+      sequencerDid: NativeArchiveMockNetwork.dsDid,
+      memberDids: [bobDid],
+      title: "Receipt Gate Group",
+      description: nil
+    )
+    _ = try await bob.sync()
+    _ = try await alice.sync()
+    _ = try await bob.sync()
+
+    let bobDidHash = try MLSAppGroupStorage.accountDidHash(for: bobDid)
+    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+    try bobKeystore.storeCachedChatDpopToken(
+      accountDidHash: bobDidHash,
+      token: "valid-nse-chat-dpop-token",
+      expiresAtMs: nowMs + 120_000
+    )
+    _ = try await bob.prepareForBackground()
+
+    // 1. Forged I13 sequencerReceipt must be rejected before rendering or Darwin wakeup.
+    let sentForged = try await alice.sendMessage(
+      conversationId: conversationId,
+      messageId: forgedMsgId,
+      text: "forged-secret-must-not-render"
+    )
+    network.forgeReceipts(messageIds: [forgedMsgId])
+
+    let forgedWake = PushWakePayload(
+      kind: "application",
+      conversationId: conversationId,
+      generation: 0,
+      entrySeq: sentForged.seq,
+      messageId: forgedMsgId,
+      recipientAccountHash: bobDidHash,
+      fetchRequired: true,
+      senderDid: aliceDid,
+      inlineCiphertext: nil
+    )
+    let forgedPreview = await MLSPushExtensionProcessor.processAsync(
+      storageRoot: bobRoot,
+      accountDidHash: bobDidHash,
+      keystore: bobKeystore,
+      transport: bobTransport,
+      wake: forgedWake,
+      postDarwinNotification: false
+    )
+    XCTAssertFalse(forgedPreview.receiptVerified, "Forged sequencerReceipt must fail verification")
+    XCTAssertTrue(forgedPreview.fallbackGeneric, "Forged sequencerReceipt must degrade to generic fallback")
+    XCTAssertFalse(forgedPreview.body.contains("forged-secret-must-not-render"))
+    XCTAssertFalse(MLSPushExtensionProcessor.shouldPostDidCommit(for: forgedPreview, requested: true))
+
+    // 2. Restore genuine receipts: NSE catch-up verifies both entries and produces verified preview.
+    network.forgeReceipts(messageIds: [])
+    let sentGenuine = try await alice.sendMessage(
+      conversationId: conversationId,
+      messageId: genuineMsgId,
+      text: "genuine-receipt-verified-body"
+    )
+    let genuineWake = PushWakePayload(
+      kind: "application",
+      conversationId: conversationId,
+      generation: 0,
+      entrySeq: sentGenuine.seq,
+      messageId: genuineMsgId,
+      recipientAccountHash: bobDidHash,
+      fetchRequired: true,
+      senderDid: aliceDid,
+      inlineCiphertext: nil
+    )
+    let genuinePreview = await MLSPushExtensionProcessor.processAsync(
+      storageRoot: bobRoot,
+      accountDidHash: bobDidHash,
+      keystore: bobKeystore,
+      transport: bobTransport,
+      wake: genuineWake,
+      postDarwinNotification: false
+    )
+    XCTAssertTrue(genuinePreview.receiptVerified, "Genuine DS-signed sequencerReceipt must verify")
+    XCTAssertFalse(genuinePreview.fallbackGeneric)
+    XCTAssertTrue(genuinePreview.body.contains("genuine-receipt-verified-body"))
+    XCTAssertFalse(genuinePreview.isOwnSiblingSender)
+    XCTAssertTrue(MLSPushExtensionProcessor.shouldPostDidCommit(for: genuinePreview, requested: true))
+
+    await alice.close()
+    await bob.close()
   }
 
   func testDecodeCanonicalMlsDsGetEntriesWithPrunedEntry() throws {

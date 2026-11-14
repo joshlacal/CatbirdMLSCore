@@ -1,5 +1,9 @@
 import Foundation
+#if DEBUG
+@_spi(Fixtures) import Petrel
+#else
 import Petrel
+#endif
 import PetrelCatbird
 
 extension MLSPublicPDSReader {

@@ -33,6 +33,22 @@ extension MemberRole: @unchecked Sendable {}
 extension PlatformChangeEvent: @unchecked Sendable {}
 extension QueuedLabyrinthArchivePayload: @unchecked Sendable {}
 extension SignedPushGatewayRegistration: @unchecked Sendable {}
+extension CircleKeyOpenResult: @unchecked Sendable {}
+extension CircleKeyWrapRequest: @unchecked Sendable {}
+extension CircleKeyWrapResult: @unchecked Sendable {}
+extension CircleOwnerStateDto: @unchecked Sendable {}
+extension CirclePostOpenRequest: @unchecked Sendable {}
+extension CirclePostSealRequest: @unchecked Sendable {}
+extension DeviceRevocationReport: @unchecked Sendable {}
+extension LeaveConversationOutcome: @unchecked Sendable {}
+extension MailboxReadStateRecord: @unchecked Sendable {}
+extension OtcInitiatedSession: @unchecked Sendable {}
+extension PeerRepinProposalInfo: @unchecked Sendable {}
+extension PendingGroupCreationStatus: @unchecked Sendable {}
+extension PendingGroupCreationState: @unchecked Sendable {}
+extension RegisteredDeviceInfo: @unchecked Sendable {}
+extension UploadedConversationAttachment: @unchecked Sendable {}
+extension VoicePrepareResult: @unchecked Sendable {}
 
 public enum MLSAppGroupStorage {
   public static let appGroupIdentifier = "group.blue.catbird.shared"
@@ -41,9 +57,9 @@ public enum MLSAppGroupStorage {
     "atproto",
     "blob:*/*",
     "repo:blue.catbird.labyrinth.mailboxKeys",
-    "repo:blue.catbird.chat.device",
-    "space:blue.catbird.labyrinth.mailbox?action=create&action=delete&action=read&action=update&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.device&collection=blue.catbird.labyrinth.epoch&collection=blue.catbird.labyrinth.epochMember&collection=blue.catbird.labyrinth.otcSession&collection=blue.catbird.labyrinth.ownerBatch&collection=blue.catbird.labyrinth.virtualDevice&manage=create&manage=delete",
-    "space:blue.catbird.labyrinth.conversation?action=create&action=delete&action=read&action=update&authority=*&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.batch&collection=blue.catbird.labyrinth.mek",
+    "repo:blue.catbird.chat.device?action=create",
+    "space:blue.catbird.labyrinth.mailbox?action=create&action=delete&action=read&action=update&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.circleOwnerState&collection=blue.catbird.labyrinth.device&collection=blue.catbird.labyrinth.epoch&collection=blue.catbird.labyrinth.epochMember&collection=blue.catbird.labyrinth.otcSession&collection=blue.catbird.labyrinth.ownerBatch&collection=blue.catbird.labyrinth.readState&collection=blue.catbird.labyrinth.virtualDevice&manage=create&manage=delete",
+    "space:blue.catbird.labyrinth.conversation?action=create&action=delete&action=read&action=update&authority=*&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.authorRedaction&collection=blue.catbird.labyrinth.batch&collection=blue.catbird.labyrinth.mek",
   ]
 
   /// Canonicalize an ATProto DID (`did:plc:...` or `did:web:...`) before hashing (`I8`).
@@ -154,7 +170,17 @@ public enum MLSPushExtensionProcessor {
 
   /// Decodes a canonical `nest` APNs `{"aps": ..., "catbird": {...}}` wake envelope
   /// (as well as legacy `"payload"` or flat `userInfo` dictionaries) into a `PushWakePayload`.
-  public static func decodePushWakePayload(from userInfo: [AnyHashable: Any]) -> PushWakePayload? {
+  ///
+  /// A `catbird` object with `v == 2` is the sealed envelope
+  /// (`docs/security/2026-11-09-sealed-push-wake-envelope.md`): its `kid` is looked up in
+  /// `wakeKeys`, the blob is opened, and `recipientAccountHash` is computed locally from the
+  /// account the `kid` maps to. An unknown `kid`, a failed open or an unsupported `v` returns
+  /// nil, so the caller delivers the notification unchanged. An object without `v` is the
+  /// version 1 clear payload.
+  public static func decodePushWakePayload(
+    from userInfo: [AnyHashable: Any],
+    wakeKeys: @autoclosure () -> any PushWakeKeyLookup = KeychainPlatformKeyStore()
+  ) -> PushWakePayload? {
     let dict: [String: Any]
     if let nested = unwrapDictionary(userInfo["catbird"]) {
       dict = nested
@@ -164,6 +190,17 @@ public enum MLSPushExtensionProcessor {
       dict = Dictionary(uniqueKeysWithValues: userInfo.compactMap { k, v in
         (k as? String).map { ($0, v) }
       })
+    }
+
+    if dict["v"] != nil {
+      switch PushWakeEnvelope.version(of: dict) {
+      case PushWakeEnvelope.version:
+        return decodeSealedPushWake(dict, wakeKeys: wakeKeys())
+      case 1:
+        break
+      default:
+        return nil
+      }
     }
 
     guard let rawConvo = (dict["conversationId"] as? String)
@@ -216,6 +253,34 @@ public enum MLSPushExtensionProcessor {
       fetchRequired: fetchRequired,
       senderDid: senderDid,
       inlineCiphertext: inlineCiphertext
+    )
+  }
+
+  private static func decodeSealedPushWake(
+    _ catbird: [String: Any],
+    wakeKeys: any PushWakeKeyLookup
+  ) -> PushWakePayload? {
+    guard let kid = catbird["kid"] as? String,
+          let record = wakeKeys.pushWakeKey(forKid: kid),
+          let opened = try? PushWakeEnvelope.open(
+            catbird,
+            keys: PushWakeEnvelope.Keys(pushKey: record.pushKey),
+            appId: record.appId
+          ),
+          !opened.header.conversationId.isEmpty,
+          let recipientAccountHash = try? MLSAppGroupStorage.accountDidHash(for: record.accountDid)
+    else { return nil }
+
+    return PushWakePayload(
+      kind: opened.header.wakeKind,
+      conversationId: opened.header.conversationId,
+      generation: opened.header.generation,
+      entrySeq: opened.header.seq,
+      messageId: "msg-\(opened.header.seq)",
+      recipientAccountHash: recipientAccountHash,
+      fetchRequired: opened.header.fetchRequired,
+      senderDid: nil,
+      inlineCiphertext: opened.ciphertext
     )
   }
 
@@ -301,13 +366,28 @@ public enum MLSPushExtensionProcessor {
   ) -> NotificationPreview {
     do {
       let mlsDir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRoot)
-      let preview = try processPushNotification(
+      let safeTransport = transport.map { UniFFINonThrowingPushFetchTransportProxy(inner: $0) }
+      var preview = try processPushNotification(
         storageRoot: storageRoot.path,
         accountDidHash: accountDidHash,
         keystore: keystore,
-        transport: transport,
+        transport: safeTransport,
         wake: wake
       )
+      if let safeTransport,
+         safeTransport.didFailFetch,
+         preview.fallbackGeneric,
+         !wake.fetchRequired,
+         wake.inlineCiphertext != nil
+      {
+        preview = try processPushNotification(
+          storageRoot: storageRoot.path,
+          accountDidHash: accountDidHash,
+          keystore: keystore,
+          transport: nil,
+          wake: wake
+        )
+      }
       try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: mlsDir)
       if shouldPostDidCommit(for: preview, requested: postDarwinNotification) {
         postNseDidCommitDarwinNotification(name: preview.darwinNotificationName)
@@ -326,7 +406,8 @@ public enum MLSPushExtensionProcessor {
         fromCache: false,
         fallbackGeneric: true,
         darwinNotificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification,
-        receiptVerified: false
+        receiptVerified: false,
+        isOwnSiblingSender: false
       )
     }
   }
@@ -342,6 +423,83 @@ public enum MLSPushExtensionProcessor {
       nil,
       true
     )
+  }
+}
+
+private final class UniFFINonThrowingPushFetchTransportProxy: PushFetchTransport, @unchecked Sendable {
+  private let inner: PushFetchTransport
+  private let lock = NSLock()
+  private var failedFetch = false
+
+  var didFailFetch: Bool {
+    lock.withLock { failedFetch }
+  }
+
+  init(inner: PushFetchTransport) {
+    self.inner = inner
+  }
+
+  func fetchMissingEntries(
+    conversationId: String,
+    afterSeq: Int64,
+    chatDpopToken: String
+  ) throws -> PushFetchBundle {
+    do {
+      return try inner.fetchMissingEntries(
+        conversationId: conversationId,
+        afterSeq: afterSeq,
+        chatDpopToken: chatDpopToken
+      )
+    } catch {
+      lock.withLock { failedFetch = true }
+      return PushFetchBundle(entries: [], metadataSnapshot: nil, authorizedDeviceKeys: [])
+    }
+  }
+
+  func getAuthorizedDeviceKeys(
+    did: String,
+    chatDpopToken: String?
+  ) throws -> [AuthorizedPeerDeviceKey] {
+    do {
+      return try inner.getAuthorizedDeviceKeys(did: did, chatDpopToken: chatDpopToken)
+    } catch {
+      return []
+    }
+  }
+}
+
+/// Shields UniFFI `0.28.3` callback traits whose Rust error type is `#[uniffi(flat_error)]` (`MLSError`),
+/// because UniFFI `0.28.3`'s generated `try_lift` for `flat_error` panics (`"Can't lift flat errors"`)
+/// whenever a foreign callback throws `CALL_ERROR` or `CALL_UNEXPECTED_ERROR` (`P0-7`).
+private final class UniFFINonThrowingPlatformTransportProxy: PlatformTransport, @unchecked Sendable {
+  private let inner: PlatformTransport
+
+  init(inner: PlatformTransport) {
+    self.inner = inner
+  }
+
+  func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
+    do {
+      return try inner.executeHttp(request: request)
+    } catch {
+      let body = (try? JSONSerialization.data(withJSONObject: [
+        "error": "PlatformTransportError",
+        "message": String(describing: error),
+      ])) ?? Data("{\"error\":\"PlatformTransportError\"}".utf8)
+      return PlatformHttpResponse(
+        status: 503,
+        headers: [PlatformHttpHeader(name: "content-type", value: "application/json")],
+        body: body
+      )
+    }
+  }
+
+  func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws {
+    try? inner.connectRealtimeStream(homeDsEndpoint: homeDsEndpoint, cursorSeq: cursorSeq)
+  }
+
+  func disconnectRealtimeStream() throws {
+    try? inner.disconnectRealtimeStream()
   }
 }
 
@@ -420,7 +578,86 @@ public final class MLSClientCoordinator {
     isClosedForSession || client.isHandleClosed()
   }
 
-  public init(
+  /// Encrypted Circle operations over this account's Rust client.
+  public func circleCrypto() -> any CircleCrypto {
+    FFICircleCrypto(client: client)
+  }
+
+  /// Opens a `CatbirdMlsClient` and prepares App Group storage off `@MainActor` on `ffiDispatchQueue`,
+  /// hopping to `@MainActor` only to initialize the `@Observable` wrapper and Darwin notification observer (`P0-7`).
+  nonisolated public static func open(
+    config: CatbirdMlsClientConfig,
+    keystore: PlatformKeyStore,
+    transport: PlatformTransport
+  ) async throws -> MLSClientCoordinator {
+    let canonicalDid = try MLSAppGroupStorage.canonicalizeAccountDid(config.accountDid)
+    let storageRootURL = URL(fileURLWithPath: config.storageRoot, isDirectory: true)
+    var normalizedConfig = config
+    normalizedConfig.accountDid = canonicalDid
+
+    let deferredBox = DeferredCoordinatorBox()
+    let bridge = CoordinatorObserverBridge { event in
+      Task { @MainActor in
+        deferredBox.coordinator?.recordPlatformChange(event)
+      }
+    }
+
+    let safeTransport = UniFFINonThrowingPlatformTransportProxy(inner: transport)
+    let (openedClient, combinedRemoved): (CatbirdMlsClient, [String]) = try await withCheckedThrowingContinuation { continuation in
+      Self.ffiDispatchQueue.async {
+        continuation.resume(with: Result {
+          let preWipe = try MLSAppGroupStorage.prepareStorageRoot(storageRootURL)
+          let client = try CatbirdMlsClient.open(
+            config: normalizedConfig,
+            keystore: keystore,
+            transport: safeTransport,
+            observer: bridge
+          )
+          let mlsDir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+          try MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: mlsDir)
+          let sdkWipe = client.preCutoverWipeReport()
+          let merged = Array(Set(preWipe.removedFiles + sdkWipe.removedFiles)).sorted()
+          return (client, merged)
+        })
+      }
+    }
+
+    return await MainActor.run {
+      let coordinator = MLSClientCoordinator(
+        openedClient: openedClient,
+        storageRootURL: storageRootURL,
+        preCutoverWipeReport: PreCutoverWipeReport(removedFiles: combinedRemoved),
+        observerBridge: bridge
+      )
+      deferredBox.setCoordinator(coordinator)
+      return coordinator
+    }
+  }
+
+  private init(
+    openedClient: CatbirdMlsClient,
+    storageRootURL: URL,
+    preCutoverWipeReport: PreCutoverWipeReport,
+    observerBridge: CoordinatorObserverBridge
+  ) {
+    self.accountDid = openedClient.accountDid()
+    self.accountDidHash = openedClient.accountDidHash()
+    self.storageRootURL = storageRootURL
+    self.preCutoverWipeReport = preCutoverWipeReport
+    self.client = openedClient
+    self.observerBridge = observerBridge
+
+    let box = WeakCoordinatorBox(coordinator: self)
+    self.darwinToken = DarwinNotificationToken(
+      notificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification
+    ) {
+      Task { @MainActor in
+        box.coordinator?.handleDarwinNotification()
+      }
+    }
+  }
+
+  public convenience init(
     config: CatbirdMlsClientConfig,
     keystore: PlatformKeyStore,
     transport: PlatformTransport
@@ -432,17 +669,17 @@ public final class MLSClientCoordinator {
     var normalizedConfig = config
     normalizedConfig.accountDid = canonicalDid
 
-    var weakSelfBox: WeakCoordinatorBox?
+    let deferredBox = DeferredCoordinatorBox()
     let bridge = CoordinatorObserverBridge { event in
       Task { @MainActor in
-        weakSelfBox?.coordinator?.recordPlatformChange(event)
+        deferredBox.coordinator?.recordPlatformChange(event)
       }
     }
 
     let openedClient = try CatbirdMlsClient.open(
       config: normalizedConfig,
       keystore: keystore,
-      transport: transport,
+      transport: UniFFINonThrowingPlatformTransportProxy(inner: transport),
       observer: bridge
     )
     let mlsDir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
@@ -451,23 +688,13 @@ public final class MLSClientCoordinator {
     let sdkWipe = openedClient.preCutoverWipeReport()
     let combinedRemoved = Array(Set(preWipe.removedFiles + sdkWipe.removedFiles)).sorted()
 
-    self.accountDid = openedClient.accountDid()
-    self.accountDidHash = openedClient.accountDidHash()
-    self.storageRootURL = storageRootURL
-    self.preCutoverWipeReport = PreCutoverWipeReport(removedFiles: combinedRemoved)
-    self.client = openedClient
-    self.observerBridge = bridge
-
-    let box = WeakCoordinatorBox(coordinator: self)
-    weakSelfBox = box
-
-    self.darwinToken = DarwinNotificationToken(
-      notificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification
-    ) {
-      Task { @MainActor in
-        box.coordinator?.handleDarwinNotification()
-      }
-    }
+    self.init(
+      openedClient: openedClient,
+      storageRootURL: storageRootURL,
+      preCutoverWipeReport: PreCutoverWipeReport(removedFiles: combinedRemoved),
+      observerBridge: bridge
+    )
+    deferredBox.setCoordinator(self)
   }
 
   nonisolated public static func evaluateEligibility(
@@ -861,6 +1088,303 @@ public final class MLSClientCoordinator {
     }
   }
 
+  // MARK: - Wave 2 Group Leave, Space Attachments, Multi-Device, OTC, ReadState & Circles
+
+  @discardableResult
+  public func leaveConversation(conversationId: String) async throws -> LeaveConversationOutcome {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    let outcome = try await runOffMain {
+      let result = try c.leaveConversation(conversationId: conversationId)
+      try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      return result
+    }
+    scheduleBackgroundOutboxDrain()
+    return outcome
+  }
+
+  @discardableResult
+  public func fulfillPendingGroupLeaves() async throws -> UInt32 {
+    let c = client
+    return try await runOffMain {
+      try c.fulfillPendingGroupLeaves()
+    }
+  }
+
+  public func closeConversation(conversationId: String) async throws {
+    let c = client
+    try await runOffMain {
+      try c.closeConversation(conversationId: conversationId)
+    }
+  }
+
+  public func uploadConversationAttachment(
+    conversationId: String,
+    plaintext: Data,
+    mimeType: String
+  ) async throws -> UploadedConversationAttachment {
+    let c = client
+    let uploaded = try await runOffMain {
+      try c.uploadConversationAttachment(
+        conversationId: conversationId,
+        plaintext: plaintext,
+        mimeType: mimeType
+      )
+    }
+    scheduleBackgroundOutboxDrain()
+    return uploaded
+  }
+
+  public func restoreWithPasskeyPrf(
+    credentialId: Data,
+    prfOutput32: Data
+  ) async throws -> LabyrinthBackupStatus {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    let status = try await runOffMain {
+      let restored = try c.restoreWithPasskeyPrf(credentialId: credentialId, prfOutput32: prfOutput32)
+      try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      return restored
+    }
+    scheduleBackgroundOutboxDrain()
+    return status
+  }
+
+  public func retireCurrentDevice() async throws {
+    let c = client
+    try await runOffMain {
+      try c.retireCurrentDevice()
+    }
+  }
+
+  public func isDevicePendingApproval() async throws -> Bool {
+    let c = client
+    return try await runOffMain {
+      try c.isDevicePendingApproval()
+    }
+  }
+
+  public func approveDevice(targetDeviceId: String) async throws {
+    let c = client
+    try await runOffMain {
+      try c.approveDevice(targetDeviceId: targetDeviceId)
+    }
+    scheduleBackgroundOutboxDrain()
+  }
+
+  public func approveDeviceWithKey(
+    targetDeviceId: String,
+    targetSignaturePublicKey: Data,
+    targetAuthGeneration: Int64
+  ) async throws {
+    let c = client
+    try await runOffMain {
+      try c.approveDeviceWithKey(
+        targetDeviceId: targetDeviceId,
+        targetSignaturePublicKey: targetSignaturePublicKey,
+        targetAuthGeneration: targetAuthGeneration
+      )
+    }
+    scheduleBackgroundOutboxDrain()
+  }
+
+  public func listDevices() async throws -> [RegisteredDeviceInfo] {
+    let c = client
+    return try await runOffMain {
+      try c.listDevices()
+    }
+  }
+
+  @discardableResult
+  public func revokeDevice(targetDeviceId: String) async throws -> DeviceRevocationReport {
+    let c = client
+    let report = try await runOffMain {
+      try c.revokeDevice(targetDeviceId: targetDeviceId)
+    }
+    scheduleBackgroundOutboxDrain()
+    return report
+  }
+
+  public func deleteAccountData() async throws {
+    outboxDrainCoalescer.setSuspended(true)
+    darwinToken?.unregister(notificationName: MLSAppGroupStorage.nseDidCommitDarwinNotification)
+    darwinToken = nil
+    let c = client
+    try await runOffMain {
+      try c.deleteAccountData()
+    }
+    isClosedForSession = true
+  }
+
+  public func startOtcPairing(sixDigitCode: String) async throws -> OtcInitiatedSession {
+    let c = client
+    return try await runOffMain {
+      try c.startOtcPairing(sixDigitCode: sixDigitCode)
+    }
+  }
+
+  public func respondOtcPairing(sessionIdHex: String, sixDigitCode: String?) async throws {
+    let c = client
+    try await runOffMain {
+      try c.respondOtcPairing(sessionIdHex: sessionIdHex, sixDigitCode: sixDigitCode)
+    }
+    scheduleBackgroundOutboxDrain()
+  }
+
+  @discardableResult
+  public func verifyAndReindexHistory(conversationId: String) async throws -> UInt32 {
+    let c = client
+    let dir = MLSAppGroupStorage.mlsDirectoryURL(storageRoot: storageRootURL)
+    return try await runOffMain {
+      let count = try c.verifyAndReindexHistory(conversationId: conversationId)
+      if count > 0 {
+        try? MLSAppGroupStorage.applyProtectionAttributes(toDirectoryAndContents: dir)
+      }
+      return count
+    }
+  }
+
+  public func proposePeerRepin(peerDid: String) async throws -> PeerRepinProposalInfo {
+    let c = client
+    return try await runOffMain {
+      try c.proposePeerRepin(peerDid: peerDid)
+    }
+  }
+
+  public func repinPeer(peerDid: String, confirmedHead: Data) async throws {
+    let c = client
+    try await runOffMain {
+      try c.repinPeer(peerDid: peerDid, confirmedHead: confirmedHead)
+    }
+  }
+
+  public func getReadState(conversationId: String) async throws -> MailboxReadStateRecord? {
+    let c = client
+    return try await runOffMain {
+      try c.getReadState(conversationId: conversationId)
+    }
+  }
+
+  @discardableResult
+  public func advanceReadState(
+    conversationId: String,
+    candidateSeq: UInt64
+  ) async throws -> MailboxReadStateRecord {
+    let c = client
+    return try await runOffMain {
+      try c.advanceReadState(conversationId: conversationId, candidateSeq: candidateSeq)
+    }
+  }
+
+  public func listReadStates() async throws -> [MailboxReadStateRecord] {
+    let c = client
+    return try await runOffMain {
+      try c.listReadStates()
+    }
+  }
+
+  public func getCircleOwnerState(circleId: String) async throws -> CircleOwnerStateDto? {
+    let c = client
+    return try await runOffMain {
+      try c.getCircleOwnerState(circleId: circleId)
+    }
+  }
+
+  @discardableResult
+  public func putCircleOwnerState(
+    state: CircleOwnerStateDto,
+    swapRecordCid: String? = nil
+  ) async throws -> String {
+    let c = client
+    return try await runOffMain {
+      try c.putCircleOwnerState(state: state, swapRecordCid: swapRecordCid)
+    }
+  }
+
+  @discardableResult
+  public func mergeCircleOwnerState(update: CircleOwnerStateDto) async throws -> CircleOwnerStateDto {
+    let c = client
+    return try await runOffMain {
+      try c.mergeCircleOwnerState(update: update)
+    }
+  }
+
+  @discardableResult
+  public func clearCircleAclTombstone(
+    circleId: String,
+    memberDid: String
+  ) async throws -> CircleOwnerStateDto? {
+    let c = client
+    return try await runOffMain {
+      try c.clearCircleAclTombstone(circleId: circleId, memberDid: memberDid)
+    }
+  }
+
+  public func listCircleOwnerStates() async throws -> [CircleOwnerStateDto] {
+    let c = client
+    return try await runOffMain {
+      try c.listCircleOwnerStates()
+    }
+  }
+
+  // MARK: - Voice DSP & Cross-Platform Opus Codec (`FC-09`)
+
+  nonisolated public static func prepareVoiceMessage(
+    pcmPath: String,
+    sampleRate: UInt32
+  ) async throws -> VoicePrepareResult {
+    try await withCheckedThrowingContinuation { continuation in
+      ffiDispatchQueue.async {
+        continuation.resume(with: Result {
+          try ffiPrepareVoiceMessage(pcmPath: pcmPath, sampleRate: sampleRate)
+        })
+      }
+    }
+  }
+
+  nonisolated public static func decodeOpusToPcm(opusData: Data) async throws -> Data {
+    try await withCheckedThrowingContinuation { continuation in
+      ffiDispatchQueue.async {
+        continuation.resume(with: Result {
+          try ffiDecodeOpusToPcm(opusData: opusData)
+        })
+      }
+    }
+  }
+
+  /// Decodes Opus-in-OGG (`audio/ogg; codecs=opus`) into an in-memory 48 kHz, 16-bit LE mono
+  /// RIFF/WAVE container ready for `AVAudioPlayer(data:)` (`FC-09`).
+  nonisolated public static func decodeOpusToWav(opusData: Data) async throws -> Data {
+    let pcm = try await decodeOpusToPcm(opusData: opusData)
+    return wrapPcm16MonoAsWav(pcmData: pcm, sampleRate: 48_000)
+  }
+
+  nonisolated internal static func wrapPcm16MonoAsWav(pcmData: Data, sampleRate: UInt32) -> Data {
+    let dataSize = UInt32(clamping: pcmData.count)
+    let riffChunkSize = 36 &+ dataSize
+    let channels: UInt16 = 1
+    let bitsPerSample: UInt16 = 16
+    let blockAlign: UInt16 = channels * (bitsPerSample / 8)
+    let byteRate: UInt32 = sampleRate * UInt32(blockAlign)
+
+    var wav = Data(capacity: 44 + pcmData.count)
+    wav.append(contentsOf: "RIFF".utf8)
+    withUnsafeBytes(of: riffChunkSize.littleEndian) { wav.append(contentsOf: $0) }
+    wav.append(contentsOf: "WAVE".utf8)
+    wav.append(contentsOf: "fmt ".utf8)
+    withUnsafeBytes(of: UInt32(16).littleEndian) { wav.append(contentsOf: $0) }
+    withUnsafeBytes(of: UInt16(1).littleEndian) { wav.append(contentsOf: $0) } // PCM = 1
+    withUnsafeBytes(of: channels.littleEndian) { wav.append(contentsOf: $0) }
+    withUnsafeBytes(of: sampleRate.littleEndian) { wav.append(contentsOf: $0) }
+    withUnsafeBytes(of: byteRate.littleEndian) { wav.append(contentsOf: $0) }
+    withUnsafeBytes(of: blockAlign.littleEndian) { wav.append(contentsOf: $0) }
+    withUnsafeBytes(of: bitsPerSample.littleEndian) { wav.append(contentsOf: $0) }
+    wav.append(contentsOf: "data".utf8)
+    withUnsafeBytes(of: dataSize.littleEndian) { wav.append(contentsOf: $0) }
+    wav.append(pcmData)
+    return wav
+  }
+
   // MARK: - Lifecycle (I9, I11, Sign-Out)
 
   @discardableResult
@@ -1018,6 +1542,25 @@ private final class WeakCoordinatorBox: @unchecked Sendable {
   @MainActor
   init(coordinator: MLSClientCoordinator) {
     self.coordinator = coordinator
+  }
+}
+
+private final class DeferredCoordinatorBox: @unchecked Sendable {
+  private let lock = NSLock()
+  @MainActor private weak var storedCoordinator: MLSClientCoordinator?
+
+  @MainActor
+  var coordinator: MLSClientCoordinator? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedCoordinator
+  }
+
+  @MainActor
+  func setCoordinator(_ coordinator: MLSClientCoordinator) {
+    lock.lock()
+    storedCoordinator = coordinator
+    lock.unlock()
   }
 }
 

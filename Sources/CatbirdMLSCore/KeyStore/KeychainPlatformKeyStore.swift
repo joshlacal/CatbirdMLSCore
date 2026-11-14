@@ -36,6 +36,28 @@ private struct CachedChatDpopEnvelope: Codable {
   let expiresAtMs: Int64
 }
 
+/// What the Notification Service Extension needs to open a sealed (version 2) push
+/// wake addressed to one account: the gateway-issued `pushKey`, the `appId` it was
+/// registered under (part of the AEAD associated data) and the account it belongs to.
+public struct PushWakeKeyRecord: Codable, Equatable, Sendable {
+  public let pushKey: String
+  public let appId: String
+  public let accountDid: String
+  public let kid: String
+
+  public init(pushKey: String, appId: String, accountDid: String) {
+    self.pushKey = pushKey
+    self.appId = appId
+    self.accountDid = accountDid
+    self.kid = PushWakeEnvelope.Keys(pushKey: pushKey).kid
+  }
+}
+
+/// Resolves the `kid` of a sealed push wake to the key that opens it.
+public protocol PushWakeKeyLookup: Sendable {
+  func pushWakeKey(forKid kid: String) -> PushWakeKeyRecord?
+}
+
 /// Thin Keychain-backed implementation of `PlatformKeyStore` & `PushKeystore` (`Spec §6.3`, `I8`, `A-7`, `A-8`, `I10`).
 ///
 /// Security invariants:
@@ -131,117 +153,130 @@ public final class KeychainPlatformKeyStore: PlatformKeyStore, PushKeystore, @un
   }
 
   public func loadOrCreateDbKey(accountDidHash: String) throws -> Data {
-    try Self.validateDidHash(accountDidHash)
-    let account = Self.dbKeyAccount(for: accountDidHash)
-    if let existing = try readData(account: account) {
+    try Self.mapCallbackError {
+      try Self.validateDidHash(accountDidHash)
+      let account = Self.dbKeyAccount(for: accountDidHash)
+      if let existing = try readData(account: account) {
+        guard existing.count == 32 else {
+          throw CatbirdMLS.MlsError.StorageError(
+            message: "Corrupt DB key length (\(existing.count) bytes) in Keychain"
+          )
+        }
+        return existing
+      }
+
+      var generated = Data(count: 32)
+      let rngStatus = generated.withUnsafeMutableBytes { rawBuffer -> Int32 in
+        guard let base = rawBuffer.baseAddress else { return errSecParam }
+        return SecRandomCopyBytes(kSecRandomDefault, 32, base)
+      }
+      guard rngStatus == errSecSuccess else {
+        throw CatbirdMLS.MlsError.StorageError(
+          message: "SecRandomCopyBytes failed with status \(rngStatus)"
+        )
+      }
+
+      var addAttrs = baseQuery(account: account)
+      addAttrs[kSecValueData as String] = generated
+      addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+      addAttrs[kSecAttrSynchronizable as String] = kCFBooleanFalse
+
+      let status = backend.add(addAttrs)
+      if status == errSecDuplicateItem {
+        if let raced = try readData(account: account), raced.count == 32 {
+          return raced
+        }
+      }
+      guard status == errSecSuccess else {
+        throw CatbirdMLS.MlsError.StorageError(
+          message: "Keychain SecItemAdd(dbkey) failed with OSStatus \(status)"
+        )
+      }
+      return generated
+    }
+  }
+
+  public func loadDbKey(accountDidHash: String) throws -> Data {
+    try Self.mapCallbackError {
+      try Self.validateDidHash(accountDidHash)
+      let account = Self.dbKeyAccount(for: accountDidHash)
+      guard let existing = try readData(account: account) else {
+        throw CatbirdMLS.MlsError.StorageError(
+          message: "Missing SQLCipher DB key for account hash \(accountDidHash.prefix(12))"
+        )
+      }
       guard existing.count == 32 else {
         throw CatbirdMLS.MlsError.StorageError(
-          message: "Corrupt DB key length (\(existing.count) bytes) in Keychain"
+          message: "Invalid SQLCipher DB key length (\(existing.count))"
         )
       }
       return existing
     }
-
-    var generated = Data(count: 32)
-    let rngStatus = generated.withUnsafeMutableBytes { rawBuffer -> Int32 in
-      guard let base = rawBuffer.baseAddress else { return errSecParam }
-      return SecRandomCopyBytes(kSecRandomDefault, 32, base)
-    }
-    guard rngStatus == errSecSuccess else {
-      throw CatbirdMLS.MlsError.StorageError(
-        message: "SecRandomCopyBytes failed with status \(rngStatus)"
-      )
-    }
-
-    var addAttrs = baseQuery(account: account)
-    addAttrs[kSecValueData as String] = generated
-    addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    addAttrs[kSecAttrSynchronizable as String] = kCFBooleanFalse
-
-    let status = backend.add(addAttrs)
-    if status == errSecDuplicateItem {
-      if let raced = try readData(account: account), raced.count == 32 {
-        return raced
-      }
-    }
-    guard status == errSecSuccess else {
-      throw CatbirdMLS.MlsError.StorageError(
-        message: "Keychain SecItemAdd(dbkey) failed with OSStatus \(status)"
-      )
-    }
-    return generated
-  }
-
-  public func loadDbKey(accountDidHash: String) throws -> Data {
-    try Self.validateDidHash(accountDidHash)
-    let account = Self.dbKeyAccount(for: accountDidHash)
-    guard let existing = try readData(account: account) else {
-      throw CatbirdMLS.MlsError.StorageError(
-        message: "Missing SQLCipher DB key for account hash \(accountDidHash.prefix(12))"
-      )
-    }
-    guard existing.count == 32 else {
-      throw CatbirdMLS.MlsError.StorageError(
-        message: "Invalid SQLCipher DB key length (\(existing.count))"
-      )
-    }
-    return existing
   }
 
   public func loadSignatureKeypair(keyId: String) throws -> Data? {
-    guard !keyId.isEmpty else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Empty signature keyId")
+    try Self.mapCallbackError {
+      guard !keyId.isEmpty else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Empty signature keyId")
+      }
+      return try readData(account: Self.sigKeyAccount(for: keyId))
     }
-    return try readData(account: Self.sigKeyAccount(for: keyId))
   }
 
   public func storeSignatureKeypair(keyId: String, keypairBytes: Data) throws {
-    guard !keyId.isEmpty, !keypairBytes.isEmpty else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid signature keypair input")
-    }
-    let account = Self.sigKeyAccount(for: keyId)
-    try upsertData(account: account, data: keypairBytes)
-    for segment in keyId.split(separator: ":") {
-      let candidate = String(segment).lowercased()
-      if candidate.count == 64 && candidate.allSatisfy(\.isHexDigit) {
-        lock.lock()
-        knownSignatureKeyIdsByAccount[candidate, default: []].insert(keyId)
-        lock.unlock()
+    try Self.mapCallbackError {
+      guard !keyId.isEmpty, !keypairBytes.isEmpty else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid signature keypair input")
+      }
+      let account = Self.sigKeyAccount(for: keyId)
+      try upsertData(account: account, data: keypairBytes)
+      for segment in keyId.split(separator: ":") {
+        let candidate = String(segment).lowercased()
+        if candidate.count == 64 && candidate.allSatisfy(\.isHexDigit) {
+          lock.lock()
+          knownSignatureKeyIdsByAccount[candidate, default: []].insert(keyId)
+          lock.unlock()
+        }
       }
     }
   }
 
   public func deleteAccountKeys(accountDidHash: String) throws {
-    try Self.validateDidHash(accountDidHash)
-    let normalized = accountDidHash.lowercased()
-    deleteAccountItem(account: Self.dbKeyAccount(for: normalized))
-    deleteAccountItem(account: Self.chatDpopAccount(for: normalized))
-    // Deterministic cleanup across cold app restarts where in-memory tracking is empty (`I8`).
-    deleteAccountItem(account: Self.sigKeyAccount(for: "mls-signer:\(normalized)"))
-    deleteAccountItem(account: Self.sigKeyAccount(for: "mls-push-gw-signer:\(normalized)"))
-    deleteAccountItem(account: Self.sigKeyAccount(for: "\(normalized):sig"))
+    try Self.mapCallbackError {
+      try Self.validateDidHash(accountDidHash)
+      let normalized = accountDidHash.lowercased()
+      deleteAccountItem(account: Self.dbKeyAccount(for: normalized))
+      deleteAccountItem(account: Self.chatDpopAccount(for: normalized))
+      deletePushWakeKey(normalizedDidHash: normalized)
+      // Deterministic cleanup across cold app restarts where in-memory tracking is empty (`I8`).
+      deleteAccountItem(account: Self.sigKeyAccount(for: "mls-signer:\(normalized)"))
+      deleteAccountItem(account: Self.sigKeyAccount(for: "mls-push-gw-signer:\(normalized)"))
+      deleteAccountItem(account: Self.sigKeyAccount(for: "\(normalized):sig"))
 
-    lock.lock()
-    let trackedSigKeys = knownSignatureKeyIdsByAccount.removeValue(forKey: normalized) ?? []
-    lock.unlock()
-    for sigKeyId in trackedSigKeys {
-      deleteAccountItem(account: Self.sigKeyAccount(for: sigKeyId))
+      lock.lock()
+      let trackedSigKeys = knownSignatureKeyIdsByAccount.removeValue(forKey: normalized) ?? []
+      lock.unlock()
+      for sigKeyId in trackedSigKeys {
+        deleteAccountItem(account: Self.sigKeyAccount(for: sigKeyId))
+      }
     }
   }
 
   public func loadCachedChatDpopToken(accountDidHash: String) throws -> String? {
-    try Self.validateDidHash(accountDidHash)
-    let account = Self.chatDpopAccount(for: accountDidHash)
-    guard let raw = try readData(account: account),
-          let decoded = try? JSONDecoder().decode(CachedChatDpopEnvelope.self, from: raw)
-    else {
-      return nil
+    try Self.mapCallbackError {
+      try Self.validateDidHash(accountDidHash)
+      let account = Self.chatDpopAccount(for: accountDidHash)
+      guard let raw = try readData(account: account),
+            let decoded = try? JSONDecoder().decode(CachedChatDpopEnvelope.self, from: raw)
+      else {
+        return nil
+      }
+      let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+      guard decoded.expiresAtMs > nowMs, !decoded.token.isEmpty else {
+        return nil
+      }
+      return decoded.token
     }
-    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-    guard decoded.expiresAtMs > nowMs, !decoded.token.isEmpty else {
-      return nil
-    }
-    return decoded.token
   }
 
   public func storeCachedChatDpopToken(
@@ -249,14 +284,77 @@ public final class KeychainPlatformKeyStore: PlatformKeyStore, PushKeystore, @un
     token: String,
     expiresAtMs: Int64
   ) throws {
-    try Self.validateDidHash(accountDidHash)
-    let encoded = try JSONEncoder().encode(
-      CachedChatDpopEnvelope(token: token, expiresAtMs: expiresAtMs)
-    )
-    try upsertData(account: Self.chatDpopAccount(for: accountDidHash), data: encoded)
+    try Self.mapCallbackError {
+      try Self.validateDidHash(accountDidHash)
+      let encoded = try JSONEncoder().encode(
+        CachedChatDpopEnvelope(token: token, expiresAtMs: expiresAtMs)
+      )
+      try upsertData(account: Self.chatDpopAccount(for: accountDidHash), data: encoded)
+    }
+  }
+
+  // MARK: - Sealed push wake keys
+
+  /// Stores the account's `pushKey` and the `kid -> account DID` index entry, replacing
+  /// (and un-indexing) any previous key for the same account.
+  public func storePushWakeKey(pushKey: String, appId: String, accountDid: String) throws {
+    let didHash = try MLSAppGroupStorage.accountDidHash(for: accountDid)
+    let record = PushWakeKeyRecord(pushKey: pushKey, appId: appId, accountDid: accountDid)
+    let previous = try? loadPushWakeRecord(didHash: didHash)
+    try upsertData(account: Self.pushWakeAccount(for: didHash), data: JSONEncoder().encode(record))
+    try upsertData(account: Self.pushWakeKidAccount(for: record.kid), data: Data(accountDid.utf8))
+    if let previous, previous.kid != record.kid {
+      deleteAccountItem(account: Self.pushWakeKidAccount(for: previous.kid))
+    }
+  }
+
+  /// Removes the account's `pushKey` and its `kid` index entry. Safe when none is stored.
+  public func deletePushWakeKey(accountDid: String) throws {
+    deletePushWakeKey(normalizedDidHash: try MLSAppGroupStorage.accountDidHash(for: accountDid))
+  }
+
+  private func deletePushWakeKey(normalizedDidHash didHash: String) {
+    if let record = try? loadPushWakeRecord(didHash: didHash) {
+      deleteAccountItem(account: Self.pushWakeKidAccount(for: record.kid))
+    }
+    deleteAccountItem(account: Self.pushWakeAccount(for: didHash))
+  }
+
+  fileprivate func pushWakeRecord(forIndexedKid kid: String) -> PushWakeKeyRecord? {
+    guard let rawDid = try? readData(account: Self.pushWakeKidAccount(for: kid)),
+          let accountDid = String(data: rawDid, encoding: .utf8),
+          let didHash = try? MLSAppGroupStorage.accountDidHash(for: accountDid),
+          let record = try? loadPushWakeRecord(didHash: didHash),
+          record.kid == kid,
+          PushWakeEnvelope.Keys(pushKey: record.pushKey).kid == kid
+    else { return nil }
+    return record
+  }
+
+  private func loadPushWakeRecord(didHash: String) throws -> PushWakeKeyRecord? {
+    guard let raw = try readData(account: Self.pushWakeAccount(for: didHash)) else { return nil }
+    return try? JSONDecoder().decode(PushWakeKeyRecord.self, from: raw)
+  }
+
+  private static func pushWakeAccount(for didHash: String) -> String {
+    "pushwake:\(didHash)"
+  }
+
+  private static func pushWakeKidAccount(for kid: String) -> String {
+    "pushwakekid:\(kid)"
   }
 
   // MARK: - Private Helpers
+
+  private static func mapCallbackError<T>(_ operation: () throws -> T) throws -> T {
+    do {
+      return try operation()
+    } catch let mlsError as CatbirdMLS.MlsError {
+      throw mlsError
+    } catch {
+      throw CatbirdMLS.MlsError.StorageError(message: String(describing: error))
+    }
+  }
 
   private static func validateDidHash(_ hash: String) throws {
     guard hash.count == 64,
@@ -334,5 +432,16 @@ public final class KeychainPlatformKeyStore: PlatformKeyStore, PushKeystore, @un
   private func deleteAccountItem(account: String) {
     let status = backend.delete(baseQuery(account: account))
     _ = status
+  }
+}
+
+extension KeychainPlatformKeyStore: PushWakeKeyLookup {
+  /// `kid -> account DID -> pushKey`. Returns nil for an unknown `kid`, and for an
+  /// index entry whose account no longer holds a key deriving that `kid`.
+  public func pushWakeKey(forKid kid: String) -> PushWakeKeyRecord? {
+    guard kid.count == 16,
+          kid.utf8.allSatisfy({ ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66) })
+    else { return nil }
+    return pushWakeRecord(forIndexedKid: kid)
   }
 }

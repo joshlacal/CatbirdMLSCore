@@ -1,6 +1,10 @@
 import Foundation
 import OSLog
+#if DEBUG
+@_spi(Fixtures) import Petrel
+#else
 import Petrel
+#endif
 import PetrelCatbird
 
 /// Reads PUBLIC `blue.catbird.chat.device` records directly from a DID's hosting PDS.

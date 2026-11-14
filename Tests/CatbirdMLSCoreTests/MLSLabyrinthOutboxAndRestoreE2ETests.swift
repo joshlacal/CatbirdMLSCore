@@ -887,10 +887,18 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     let r1 = try await device1.rescueConversationOnKick(conversationId: ep1)
     XCTAssertEqual(r1, 1)
 
-    // Rotate 0 -> 1 via OTC pairing, rescue Epoch 1, setup recovery code at Epoch 1
+    // Rotate 0 -> 1 via live 2-device CPace + ML-KEM-768 OTC pairing over OwnerMailbox (`otcSession`),
+    // rescue Epoch 1, setup recovery code at Epoch 1
     let otcOffer = try await device1.initiateOtcPairing()
-    let otcDone = try await device1.completeOtcPairing(sixDigitCode: otcOffer.sixDigitCode)
+    let otcCompanion = try await open(
+      try device(did: aliceDid, deviceId: "a11ce005-0000-4000-8000-000000000099", label: "OtcCompanion")
+    )
+    _ = try await otcCompanion.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    let otcInitiated = try await otcCompanion.startOtcPairing(sixDigitCode: otcOffer.sixDigitCode)
+    try await device1.respondOtcPairing(sessionIdHex: otcInitiated.sessionIdHex, sixDigitCode: nil)
+    let otcDone = try await otcCompanion.completeOtcPairing(sixDigitCode: otcOffer.sixDigitCode)
     XCTAssertEqual(otcDone.newEpochSeq, 1)
+    await otcCompanion.close()
 
     _ = try await device1.createGroup(
       conversationId: ep2,
@@ -912,19 +920,21 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     let r2 = try await device1.rescueConversationOnKick(conversationId: ep2)
     XCTAssertEqual(r2, 1)
 
-    let recoveryCode = try await device1.setupRecoveryCode()
+    let preRevocationCode = try await device1.setupRecoveryCode()
 
     // The old iPad enrolls into the mailbox with the recovery code (Gate 3 rotation 1 -> 2), then
-    // Device 1 revokes its Labyrinth device key (2 -> 3), rescues Epoch 3, and wipes itself.
+    // Device 1 revokes its Labyrinth device key (2 -> 3), re-keys the recovery code at Epoch 3
+    // (revocation invalidates pre-revocation recovery codes), rescues Epoch 3, and wipes itself.
     let ipad = try await open(try device(did: aliceDid, deviceId: ipadDeviceId, label: "OldIPad"))
     _ = try await ipad.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
-    let ipadStatus = try await ipad.restoreWithRecoveryCode(recoveryCode)
+    let ipadStatus = try await ipad.restoreWithRecoveryCode(preRevocationCode)
     XCTAssertEqual(ipadStatus.epochSeq, 2)
     await ipad.close()
     let oldIPadKey = try XCTUnwrap(network.labyrinthDeviceKeyHex(account: aliceDid, chatDeviceId: ipadDeviceId))
 
     let revStatus = try await device1.revokeLabyrinthDevice(targetDeviceId: oldIPadKey)
     XCTAssertEqual(revStatus.epochSeq, 3)
+    let recoveryCode = try await device1.setupRecoveryCode()
 
     _ = try await device1.createGroup(
       conversationId: ep3,
@@ -944,9 +954,16 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     XCTAssertEqual(r3, 1)
     try await device1.signOutAndWipe()
 
-    // Device 2 restores (backward 1->0, forward 1->3, rotates 3->4), rescues Epoch 4, wipes Device 2
+    // Device 2 verifies pre-revocation code rejection, then restores with re-keyed code
+    // (backward 3->2->1->0, rotates 3->4), rescues Epoch 4, wipes Device 2
     let device2 = try await open(try device(did: aliceDid, deviceId: "a11ce005-0000-4000-8000-000000000002", label: "Dev2"))
     _ = try await device2.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    do {
+      _ = try await device2.restoreWithRecoveryCode(preRevocationCode)
+      XCTFail("Pre-revocation recovery code must be rejected after device revocation")
+    } catch {
+      // Expected: pre-revocation recovery code invalidated on device revocation.
+    }
     let st2 = try await device2.restoreWithRecoveryCode(recoveryCode)
     XCTAssertEqual(st2.epochSeq, 4)
 
@@ -1078,6 +1095,7 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
       ),
       transport: PetrelPlatformTransport(
         homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+        ownPdsEndpoint: URL(string: NativeArchiveMockNetwork.pdsEndpoint(for: did)),
         boundedSession: boundedSession
       )
     )

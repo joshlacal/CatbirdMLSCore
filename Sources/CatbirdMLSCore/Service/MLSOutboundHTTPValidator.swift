@@ -1,6 +1,10 @@
 import Darwin
 import Foundation
+#if DEBUG
+@_spi(Fixtures) import Petrel
+#else
 import Petrel
+#endif
 
 /// Shared SSRF, NSID, query-encoding, redirect-blocking, and streaming response size
 /// defenses for outbound HTTP requests in `CatbirdMLSCore`.
@@ -50,17 +54,76 @@ enum MLSOutboundHTTPValidator {
   ]
 
   /// Exact `com.atproto.*` procedures/queries the native core sends: ATProto Space attachment
-  /// blob staging (`atproto#5187`), public `blue.catbird.labyrinth.mailboxKeys` CAS/discovery, and
-  /// DID resolution through the account PDS (native archive Space reads, `D1`). Destructive or
-  /// unrelated repo endpoints (`applyWrites`, etc.) remain blocked; `deleteRecord` passes only
-  /// in the shape `mailboxKeysDeletionRepo(method:body:)` accepts.
+  /// blob staging (`atproto#5187`) and public `blue.catbird.labyrinth.mailboxKeys` CAS/discovery.
+  /// Destructive or unrelated repo endpoints (`applyWrites`, etc.) remain blocked; `deleteRecord`
+  /// passes only in the shape `mailboxKeysDeletionRepo(method:body:)` accepts.
   static let allowedPreparedRequestExactNSIDs: Set<String> = [
-    "com.atproto.identity.resolveDid",
     "com.atproto.repo.uploadBlob",
     "com.atproto.repo.putRecord",
     "com.atproto.repo.getRecord",
     "com.atproto.repo.listRecords",
+    "com.atproto.sync.getRecord",
   ]
+
+  /// NSIDs permitted only as a `GET` to the signed-in account's OWN PDS origin
+  /// (the origin the transport's `ATProtoClient` or configured `ownPdsEndpoint` is bound to).
+  /// Circle owner/member DID resolution and native archive Space reads ask the user's PDS first
+  /// (`com.atproto.identity.resolveDid`); the Rust layer falls back to plc.directory / did:web on
+  /// its own path. The same NSID to any other host, or with any other method, is rejected so the
+  /// prepared-request channel cannot be used to probe arbitrary hosts.
+  static let ownPDSOnlyExactNSIDs: Set<String> = [
+    "com.atproto.identity.resolveDid",
+  ]
+
+  /// Validates a prepared request's NSID against its route. Own-PDS-only NSIDs
+  /// pass only as a `GET` whose URL is same-origin with `ownPDSOrigin`; every
+  /// other NSID goes through `validatePreparedRequestNSID(_:)` unchanged.
+  static func validatePreparedRequestNSID(
+    _ nsid: String,
+    method: String,
+    requestURL: URL,
+    ownPDSOrigin: URL?
+  ) throws {
+    try validatePreparedRequestNSID(
+      nsid,
+      method: method,
+      requestURL: requestURL,
+      ownPDSOrigins: ownPDSOrigin.map { [$0] } ?? []
+    )
+  }
+
+  static func validatePreparedRequestNSID(
+    _ nsid: String,
+    method: String,
+    requestURL: URL,
+    ownPDSOrigins: [URL]
+  ) throws {
+    guard ownPDSOnlyExactNSIDs.contains(nsid) else {
+      try validatePreparedRequestNSID(nsid)
+      return
+    }
+    guard method.uppercased() == "GET",
+          ownPDSOrigins.contains(where: { isSameOrigin(requestURL, $0) })
+    else {
+      throw ValidationError.disallowedNSID(nsid)
+    }
+    try validatePreparedRequestNSID(nsid, permittingOwnPDSOnly: true)
+  }
+
+  /// Scheme, host and effective port equality (default ports filled in).
+  static func isSameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+    guard let lScheme = lhs.scheme?.lowercased(),
+          let rScheme = rhs.scheme?.lowercased(),
+          lScheme == rScheme,
+          let lHost = lhs.host?.lowercased(),
+          let rHost = rhs.host?.lowercased(),
+          lHost == rHost
+    else {
+      return false
+    }
+    let defaultPort: Int? = (lScheme == "https") ? 443 : (lScheme == "http" ? 80 : nil)
+    return (lhs.port ?? defaultPort) == (rhs.port ?? defaultPort)
+  }
 
   static let deleteRecordNSID = "com.atproto.repo.deleteRecord"
 
@@ -279,7 +342,13 @@ enum MLSOutboundHTTPValidator {
   }
 
   /// Validates strict ATProto NSID syntax AND restricts to Catbird MLS/Labyrinth namespaces.
+  /// Own-PDS-only NSIDs are rejected here; they are admitted only through the
+  /// route-aware overload, which checks method and origin first.
   static func validatePreparedRequestNSID(_ nsid: String) throws {
+    try validatePreparedRequestNSID(nsid, permittingOwnPDSOnly: false)
+  }
+
+  private static func validatePreparedRequestNSID(_ nsid: String, permittingOwnPDSOnly: Bool) throws {
     guard !nsid.isEmpty,
           nsid.count <= 317,
           !nsid.contains(".."),
@@ -293,6 +362,7 @@ enum MLSOutboundHTTPValidator {
           }),
           allowedPreparedRequestNamespacePrefixes.contains(where: { nsid.hasPrefix($0) })
             || allowedPreparedRequestExactNSIDs.contains(nsid)
+            || (permittingOwnPDSOnly && ownPDSOnlyExactNSIDs.contains(nsid))
     else {
       throw ValidationError.disallowedNSID(nsid)
     }

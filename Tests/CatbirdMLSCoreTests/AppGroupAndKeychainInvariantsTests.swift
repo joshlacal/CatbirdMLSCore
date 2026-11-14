@@ -266,6 +266,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     )
     let transport = PetrelPlatformTransport(
       homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      ownPdsEndpoint: URL(string: NativeArchiveMockNetwork.pdsEndpoint(for: accountDid)),
       boundedSession: boundedSession
     )
 
@@ -325,7 +326,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     XCTAssertEqual(
       missingSpaceScope.reason,
       .missingOAuthScopes(missingScopes: [
-        "space:blue.catbird.labyrinth.conversation?action=create&action=delete&action=read&action=update&authority=*&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.batch&collection=blue.catbird.labyrinth.mek",
+        "space:blue.catbird.labyrinth.conversation?action=create&action=delete&action=read&action=update&authority=*&collection=blue.catbird.labyrinth.attachmentManifest&collection=blue.catbird.labyrinth.authorRedaction&collection=blue.catbird.labyrinth.batch&collection=blue.catbird.labyrinth.mek",
       ])
     )
 
@@ -377,7 +378,6 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("blue.catbird.push.registerKey")
     )
     for allowedRepoNSID in [
-      "com.atproto.identity.resolveDid",
       "com.atproto.repo.uploadBlob",
       "com.atproto.repo.putRecord",
       "com.atproto.repo.getRecord",
@@ -387,6 +387,17 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
         try MLSOutboundHTTPValidator.validatePreparedRequestNSID(allowedRepoNSID)
       )
     }
+    XCTAssertThrowsError(
+      try MLSOutboundHTTPValidator.validatePreparedRequestNSID("com.atproto.identity.resolveDid")
+    )
+    XCTAssertNoThrow(
+      try MLSOutboundHTTPValidator.validatePreparedRequestNSID(
+        "com.atproto.identity.resolveDid",
+        method: "GET",
+        requestURL: URL(string: "https://pds.catbird.blue/xrpc/com.atproto.identity.resolveDid?did=did%3Aplc%3Aabc")!,
+        ownPDSOrigin: URL(string: "https://pds.catbird.blue")!
+      )
+    )
     XCTAssertThrowsError(
       try MLSOutboundHTTPValidator.validatePreparedRequestNSID("com.atproto.server.createAppPassword")
     )
@@ -441,13 +452,172 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
       headers: [PlatformHttpHeader(name: "content-type", value: "application/json")],
       body: body
     )
-    let outcome = await Task.detached { Result { try transport.executeHttp(request: request) } }.value
-    XCTAssertThrowsError(try outcome.get()) { error in
+    let rawOutcome = await Task.detached { Result { try transport.executeHttpRaw(request: request) } }.value
+    XCTAssertThrowsError(try rawOutcome.get()) { error in
       XCTAssertEqual(
         error as? MLSOutboundHTTPValidator.ValidationError,
         .disallowedNSID("com.atproto.repo.deleteRecord")
       )
     }
+    let ffiOutcome = await Task.detached { Result { try transport.executeHttp(request: request) } }.value
+    XCTAssertThrowsError(try ffiOutcome.get()) { error in
+      guard case .InvalidInput = (error as? CatbirdMLS.MlsError) else {
+        XCTFail("Expected FFI-safe MlsError.InvalidInput, got \(error)")
+        return
+      }
+    }
+  }
+
+  /// `P0-7`: `MLSClientCoordinator.open` runs SQLCipher/FFI initialization off `@MainActor`,
+  /// and foreign Swift callback errors map to `CatbirdMLS.MlsError` instead of panicking in Rust
+  /// via UniFFI `0.28.3` `flat_error` `CALL_UNEXPECTED_ERROR`.
+  func testP07AsyncOpenRunsOffMainActorAndCallbackThrowNeverTrapsAcrossUniFFI() async throws {
+    struct ArbitraryForeignCallbackError: Error, LocalizedError {
+      var errorDescription: String? { "simulated foreign callback throw" }
+    }
+    final class ThreadRecordingKeystoreProxy: PlatformKeyStore, @unchecked Sendable {
+      let inner: KeychainPlatformKeyStore
+      private let lock = NSLock()
+      private(set) var sawMainThreadDuringOpen = false
+      init(inner: KeychainPlatformKeyStore) { self.inner = inner }
+      func loadOrCreateDbKey(accountDidHash: String) throws -> Data {
+        lock.lock()
+        if Thread.isMainThread { sawMainThreadDuringOpen = true }
+        lock.unlock()
+        return try inner.loadOrCreateDbKey(accountDidHash: accountDidHash)
+      }
+      func loadDbKey(accountDidHash: String) throws -> Data {
+        try inner.loadDbKey(accountDidHash: accountDidHash)
+      }
+      func loadSignatureKeypair(keyId: String) throws -> Data? {
+        try inner.loadSignatureKeypair(keyId: keyId)
+      }
+      func storeSignatureKeypair(keyId: String, keypairBytes: Data) throws {
+        try inner.storeSignatureKeypair(keyId: keyId, keypairBytes: keypairBytes)
+      }
+      func deleteAccountKeys(accountDidHash: String) throws {
+        try inner.deleteAccountKeys(accountDidHash: accountDidHash)
+      }
+      func loadCachedChatDpopToken(accountDidHash: String) throws -> String? {
+        try inner.loadCachedChatDpopToken(accountDidHash: accountDidHash)
+      }
+      func storeCachedChatDpopToken(accountDidHash: String, token: String, expiresAtMs: Int64) throws {
+        try inner.storeCachedChatDpopToken(accountDidHash: accountDidHash, token: token, expiresAtMs: expiresAtMs)
+      }
+    }
+
+    let innerKeystore = KeychainPlatformKeyStore(
+      service: "blue.catbird.mls.test.p07.\(UUID().uuidString)",
+      backend: RecordingKeychainBackend()
+    )
+    let proxyKeystore = ThreadRecordingKeystoreProxy(inner: innerKeystore)
+    let accountDid = "did:plc:p07asyncopenuseraaaaaaaa"
+    let transport = PetrelPlatformTransport(
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      ownPdsEndpoint: URL(string: "https://pds.catbird.blue"),
+      boundedSession: MLSBoundedURLSession(protocolClasses: []),
+      httpOverride: { _ in
+        throw ArbitraryForeignCallbackError()
+      }
+    )
+    let config = CatbirdMlsClientConfig(
+      storageRoot: tempRoot.path,
+      accountDid: accountDid,
+      deviceId: "5a0f1c2e-3b4d-4e6f-8a7b-9c0d1e2f3a99",
+      homeDsDid: "did:web:chat.catbird.blue",
+      homeDsEndpoint: "https://chat.catbird.blue",
+      pdsEndpoint: "https://pds.catbird.blue"
+    )
+
+    let coordinator = try await MainActor.run {
+      Task {
+        try await MLSClientCoordinator.open(
+          config: config,
+          keystore: proxyKeystore,
+          transport: transport
+        )
+      }
+    }.value
+
+    XCTAssertFalse(
+      proxyKeystore.sawMainThreadDuringOpen,
+      "P0-7: MLSClientCoordinator.open must open SQLCipher/Rust FFI off the main thread"
+    )
+
+    do {
+      _ = try await coordinator.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+      XCTFail("Expected enrollDevice to fail when transport throws ArbitraryForeignCallbackError")
+    } catch let mlsError as CatbirdMLS.MlsError {
+      XCTAssertFalse(String(describing: mlsError).isEmpty)
+    } catch {
+      XCTFail("Expected CatbirdMLS.MlsError across UniFFI, got \(error)")
+    }
+
+    await coordinator.close()
+  }
+
+  /// `P0-8`: When `atProtoClient` is configured and `getServiceAuth` fails on a `homeDs`
+  /// `blue.catbird.chat.*` XRPC call, `PetrelPlatformTransport` MUST fail closed and never
+  /// fall through to an unauthenticated HTTP request against `homeDs`.
+  func testP08GetServiceAuthFailureFailsClosedWithoutUnauthenticatedHomeDsFallback() async throws {
+    final class HomeDsSpyProtocol: URLProtocol {
+      private static let lock = NSLock()
+      nonisolated(unsafe) private static var observedURLs: [String] = []
+      static func reset() {
+        lock.lock()
+        observedURLs = []
+        lock.unlock()
+      }
+      static func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return observedURLs
+      }
+      override class func canInit(with request: URLRequest) -> Bool { true }
+      override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+      override func startLoading() {
+        if let u = request.url?.absoluteString {
+          Self.lock.lock()
+          Self.observedURLs.append(u)
+          Self.lock.unlock()
+        }
+        let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+      }
+      override func stopLoading() {}
+    }
+
+    HomeDsSpyProtocol.reset()
+    let spySession = MLSBoundedURLSession(protocolClasses: [HomeDsSpyProtocol.self])
+    defer { spySession.invalidateAndCancel() }
+
+    // Unauthenticated ATProtoClient bound to local loopback/invalid port so getServiceAuth fails immediately.
+    let unauthedClient = await ATProtoClient(baseURL: URL(string: "http://127.0.0.1:1")!)
+    let transport = PetrelPlatformTransport(
+      atProtoClient: unauthedClient,
+      homeDsEndpoint: URL(string: "https://chat.catbird.blue"),
+      homeDsDid: "did:web:chat.catbird.blue",
+      ownPdsEndpoint: URL(string: "https://pds.catbird.blue"),
+      boundedSession: spySession
+    )
+    let request = PlatformHttpRequest(
+      method: "GET",
+      url: "https://chat.catbird.blue/xrpc/blue.catbird.chat.getConversationState?conversationId=5a0f1c2e-3b4d-4e6f-8a7b-9c0d1e2f3b01",
+      headers: [],
+      body: nil
+    )
+
+    let outcome = await Task.detached { Result { try transport.executeHttp(request: request) } }.value
+    XCTAssertThrowsError(try outcome.get()) { error in
+      XCTAssertNotNil(error as? CatbirdMLS.MlsError, "Expected MlsError on getServiceAuth failure, got \(error)")
+    }
+    XCTAssertEqual(
+      HomeDsSpyProtocol.snapshot(),
+      [],
+      "P0-8: getServiceAuth failure must fail closed with zero unauthenticated requests sent to homeDs"
+    )
   }
 
   private func openFileDescriptorPaths(matching targetPath: String) -> [String] {

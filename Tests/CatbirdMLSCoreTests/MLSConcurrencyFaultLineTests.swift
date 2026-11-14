@@ -332,8 +332,10 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
 
     let network = NativeArchiveMockNetwork.shared
     network.reset()
+    let accountDid = "did:plc:fl4coordinatoruseraaaaaa"
     let transport = PetrelPlatformTransport(
       homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+      ownPdsEndpoint: URL(string: NativeArchiveMockNetwork.pdsEndpoint(for: accountDid)),
       boundedSession: boundedSession,
       httpOverride: { req in
         if Thread.isMainThread {
@@ -351,7 +353,6 @@ final class MLSConcurrencyFaultLineTests: XCTestCase {
       service: "blue.catbird.mls.fl4.\(UUID().uuidString)",
       backend: backend
     )
-    let accountDid = "did:plc:fl4coordinatoruseraaaaaa"
     let conversationId = "7c2f3e4a-5d6b-4c8f-a091-b2c3d4e5f6b0"
     let storageRootPath = tempRoot.path
 

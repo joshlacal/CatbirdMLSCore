@@ -81,6 +81,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   private var repoOperations: [String: [SpaceOperation]] = [:]
   private var spentDelegations: Set<String> = []
   private var pdsRecords: [String: (value: JSON, cid: CID)] = [:]
+  private var blobs: [String: Data] = [:]
   // DS world.
   private var deviceKeys: [String: [String: Data]] = [:]
   private var conversationKeyPackages: [String: [JSON]] = [:]
@@ -119,6 +120,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     repoOperations = [:]
     spentDelegations = []
     pdsRecords = [:]
+    blobs = [:]
     deviceKeys = [:]
     conversationKeyPackages = [:]
     directRequestRevisions = [:]
@@ -256,6 +258,23 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     switch nsid {
     case "com.atproto.identity.resolveDid":
       return reply(200, ["didDoc": didDocument(try required(params, "did"))])
+    case "com.atproto.sync.getRecord":
+      return try syncGetRecordCar(
+        did: try required(params, "did"),
+        collection: try required(params, "collection"),
+        rkey: try required(params, "rkey")
+      )
+    case "com.atproto.repo.uploadBlob":
+      let cid = CID.fromBlob(body)
+      blobs["\(account)|\(cid.string)"] = body
+      return reply(200, [
+        "blob": [
+          "$type": "blob",
+          "ref": ["$link": cid.string],
+          "mimeType": "application/octet-stream",
+          "size": body.count,
+        ],
+      ])
     case "com.atproto.repo.putRecord", "com.atproto.repo.getRecord", "com.atproto.repo.listRecords",
          "com.atproto.repo.deleteRecord":
       let json = method == "POST" ? try object(body) : nil
@@ -271,7 +290,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         "iat": now, "exp": now + 60, "jti": "delegation-\(next())",
       ])
       return reply(200, ["token": token])
-    case "com.atproto.space.getSpaceCredential":
+    case "com.atproto.space.authorizeSpaceSync", "com.atproto.space.getSpaceCredential":
       return try spaceCredential(account: account, body: try object(body), relayed: false, now: now)
     case "com.atproto.space.applyWrites":
       return try applyWrites(account: account, body: try object(body))
@@ -299,7 +318,8 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         audience: try header(request, "atproto-space-audience"),
         signatureInput: try header(request, "signature-input"),
         signature: try header(request, "signature"),
-        wantMac: request.value(forHTTPHeaderField: "atproto-space-want-mac"),
+        acceptSignature: request.value(forHTTPHeaderField: "accept-signature")
+          ?? request.value(forHTTPHeaderField: "atproto-space-want-mac"),
         now: now
       )
     }
@@ -394,7 +414,14 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     if relayed, try text(body, "authorityDid") != space.authority {
       throw Fault(message: "relay authority mismatch")
     }
-    let kid = try text(body, relayed ? "cnfKey" : "credentialKid")
+    let kid: String
+    if relayed {
+      kid = try text(body, "cnfKey")
+    } else if let credKey = body["credentialKey"] as? String {
+      kid = credKey
+    } else {
+      kid = try text(body, "credentialKid")
+    }
     _ = try P256DIDKey(kid)
     guard let delegation = SpaceToken.verify(try text(body, "delegationToken"), typ: SpaceToken.delegation, issuerKey: { self.signingKey($0).publicKey }),
           delegation["iss"] as? String == account, delegation["sub"] as? String == space.raw,
@@ -506,10 +533,10 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
 
   private func spaceRead(
     account: String, nsid: String, params: [String: String], authorization: String, audience: String,
-    signatureInput: String, signature: String, wantMac: String?, now: UInt64
+    signatureInput: String, signature: String, acceptSignature: String?, now: UInt64
   ) throws -> Reply {
     let space = try SpaceURI(try required(params, "space"))
-    let writer = ["com.atproto.space.getSpace", "com.atproto.space.listRepos"].contains(nsid)
+    let writer = ["com.atproto.space.getSpace", "com.atproto.space.listWriters", "com.atproto.space.listRepos"].contains(nsid)
       ? space.authority
       : try required(params, "repo")
     guard audience == writer else { throw Fault(message: "Space audience mismatch") }
@@ -526,7 +553,9 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       return xrpcError(403, "NotAuthorized")
     }
     if let denied = overridden(space.raw) { return denied }
-    let written = records.filter { $0.key.space == space.raw && $0.key.repo == writer }.sorted { $0.key < $1.key }
+    let written = records
+      .filter { $0.key.space == space.raw && $0.key.repo == writer }
+      .sorted { "\($0.key.collection)/\($0.key.rkey)".utf8.lexicographicallyPrecedes("\($1.key.collection)/\($1.key.rkey)".utf8) }
     switch nsid {
     case "com.atproto.space.getRecord":
       let collection = try required(params, "collection")
@@ -535,9 +564,9 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         return xrpcError(404, "RecordNotFound")
       }
       let uri = space.recordURI(writer, collection, rkey)
-      let mac = try SpaceMAC.record(sharedSecret: try sharedSecret(writer, wantMac, "atproto-space-record"), uri: uri, cid: record.cid.bytes)
+      let (label, share, secret) = try sharedSecret(writer, acceptSignature, profile: "atproto-space-record")
       var out = reply(200, ["uri": uri, "cid": record.cid.string, "value": record.value])
-      out.headers["atproto-space-mac"] = "type=\"atproto-space-record\", ver=1, mac=:\(mac.base64EncodedString()):"
+      attachRecordMac(&out, secret: secret, keyShare: share, label: label, uri: uri, cid: record.cid.string)
       return out
     case "com.atproto.space.listRecords":
       let collection = params["collection"]
@@ -559,7 +588,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       var out: JSON = ["records": listed]
       if more, let last = matching.last { out["cursor"] = "\(last.key.collection)/\(last.key.rkey)" }
       return reply(200, out)
-    case "com.atproto.space.listRepos":
+    case "com.atproto.space.listWriters", "com.atproto.space.listRepos":
       guard params.keys.allSatisfy({ ["space", "cursor", "limit"].contains($0) }) else {
         return xrpcError(400, "InvalidRequest", "unknown inventory parameter")
       }
@@ -575,13 +604,16 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       var offset = 0
       if let cursor = params["cursor"] {
         let parts = cursor.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3, let parsedOffset = Int(parts[2]), parsedOffset >= 0 else {
+        if parts.count == 3, let parsedOffset = Int(parts[2]), parsedOffset >= 0 {
+          guard parts[0] == rev, parts[1] == commitmentHex else {
+            return xrpcError(409, "SnapshotChanged", "writer inventory changed during pagination")
+          }
+          offset = parsedOffset
+        } else if let parsedOffset = Int(cursor), parsedOffset >= 0 {
+          offset = parsedOffset
+        } else {
           return xrpcError(400, "InvalidRequest", "invalid inventory cursor")
         }
-        guard parts[0] == rev, parts[1] == commitmentHex else {
-          return xrpcError(409, "SnapshotChanged", "writer inventory changed during pagination")
-        }
-        offset = parsedOffset
       }
       guard offset < rows.count || (offset == 0 && rows.isEmpty) else {
         return xrpcError(400, "InvalidRequest", "inventory cursor is past the terminal page")
@@ -590,16 +622,18 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       let end = min(offset + limit, rows.count)
       let complete = end == rows.count
       let page = rows[offset ..< end]
-      let secret = try sharedSecret(writer, wantMac, "atproto-space-repo")
-      let mac = try SpaceMAC.commit(sharedSecret: secret, space: space.raw, repo: writer, rev: rev, data: data)
+      let (label, share, secret) = try sharedSecret(space.authority, acceptSignature, profile: "atproto-space-commit")
       var body: JSON = [
         "repos": page.map { [
-          "did": $0.did, "repoRev": $0.repoRev, "spaceRev": $0.spaceRev,
+          "$type": "com.atproto.space.defs#repoWrite",
+          "repo": $0.did,
+          "repoRev": $0.repoRev,
+          "spaceRev": $0.spaceRev,
           "data": ["$bytes": $0.data.base64EncodedString()],
         ] },
         "complete": complete,
         "commit": [
-          "space": space.raw, "repo": writer, "rev": rev, "ver": 1,
+          "space": space.raw, "repo": space.authority, "rev": rev, "ver": 1,
           "data": ["$bytes": data.base64EncodedString()],
         ],
       ]
@@ -607,24 +641,28 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         body["cursor"] = "\(rev).\(commitmentHex).\(end)"
       }
       var out = reply(200, body)
-      out.headers["atproto-space-mac"] = "type=\"atproto-space-repo\", ver=1, mac=:\(mac.base64EncodedString()):"
+      attachCommitMac(&out, secret: secret, keyShare: share, label: label, space: space.raw, repo: space.authority, rev: rev, data: data)
       return out
-    case "com.atproto.space.getRepo", "com.atproto.space.listRepoOps":
+    case "com.atproto.space.getLatestCommit", "com.atproto.space.getRepo", "com.atproto.space.listRepoOps":
       let rev = repoRevisions["\(space.raw)|\(writer)"] ?? tid(0)
       let data = commitment(written)
-      let secret = try sharedSecret(writer, wantMac, "atproto-space-repo")
-      let mac = try SpaceMAC.commit(sharedSecret: secret, space: space.raw, repo: writer, rev: rev, data: data)
+      let (label, share, secret) = try sharedSecret(writer, acceptSignature, profile: "atproto-space-commit")
       let commit: JSON = [
         "space": space.raw, "repo": writer, "rev": rev, "ver": 1,
         "data": ["$bytes": data.base64EncodedString()],
       ]
+      if nsid == "com.atproto.space.getLatestCommit" {
+        var out = reply(200, ["commit": commit])
+        attachCommitMac(&out, secret: secret, keyShare: share, label: label, space: space.raw, repo: writer, rev: rev, data: data)
+        return out
+      }
       if nsid == "com.atproto.space.getRepo" {
         var out = Reply(
           status: 200,
-          headers: ["Content-Type": "application/vnd.atproto.star"],
+          headers: ["Content-Type": "application/vnd.dasl.star"],
           body: try starArchive(space: space.raw, writer: writer, rev: rev, data: data, records: written)
         )
-        out.headers["atproto-space-mac"] = "type=\"atproto-space-repo\", ver=1, mac=:\(mac.base64EncodedString()):"
+        attachCommitMac(&out, secret: secret, keyShare: share, label: label, space: space.raw, repo: writer, rev: rev, data: data)
         return out
       }
 
@@ -669,8 +707,14 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         return reply(200, ["ops": selected, "cursor": String(end)])
       }
       var out = reply(200, ["ops": selected, "commit": commit])
-      out.headers["atproto-space-mac"] = "type=\"atproto-space-repo\", ver=1, mac=:\(mac.base64EncodedString()):"
+      attachCommitMac(&out, secret: secret, keyShare: share, label: label, space: space.raw, repo: writer, rev: rev, data: data)
       return out
+    case "com.atproto.space.getBlob":
+      let cid = try required(params, "cid")
+      guard let bytes = blobs["\(writer)|\(cid)"] else {
+        return xrpcError(404, "BlobNotFound")
+      }
+      return Reply(status: 200, headers: ["Content-Type": "application/octet-stream"], body: bytes)
     case "com.atproto.space.getSpace":
       return reply(200, ["uri": space.raw, "policy": [
         "$type": "blue.catbird.labyrinth.conversationPolicy", "authority": space.authority,
@@ -694,20 +738,128 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     }
   }
 
-  private func sharedSecret(_ writer: String, _ wantMac: String?, _ macType: String) throws -> Data {
-    guard let wantMac else { throw Fault(message: "Want-Mac missing") }
-    var fields: [String: String] = [:]
-    for member in wantMac.split(separator: ",") {
-      let pair = member.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1).map(String.init)
-      guard pair.count == 2 else { throw Fault(message: "malformed Want-Mac") }
-      fields[pair[0]] = pair[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+  /// Parse Nov-12 RFC 9421 `Accept-Signature: <label>=("<profile>";sf);keyid="<did:key:...>";tag="<profile>"`.
+  private func sharedSecret(_ writer: String, _ acceptSignature: String?, profile: String) throws -> (label: String, keyShare: String, secret: Data) {
+    guard let acceptSignature, !acceptSignature.isEmpty else {
+      throw Fault(message: "Accept-Signature missing")
     }
-    guard fields["type"] == macType, fields["ver"] == "1", let share = fields["key_share"] else {
-      throw Fault(message: "Want-Mac type or ver mismatch")
+    for member in acceptSignature.split(separator: ",") {
+      let trimmed = member.trimmingCharacters(in: .whitespaces)
+      guard let eq = trimmed.firstIndex(of: "=") else { continue }
+      let label = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+      let rest = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+      guard let closeParen = rest.firstIndex(of: ")"), rest.hasPrefix("(") else { continue }
+      let inner = String(rest[rest.index(after: rest.startIndex) ..< closeParen]).trimmingCharacters(in: .whitespaces)
+      guard inner == "\"\(profile)\";sf" else { continue }
+      let paramString = String(rest[rest.index(after: closeParen)...])
+      var keyShare: String?
+      var tag: String?
+      for part in paramString.split(separator: ";") {
+        let kv = part.split(separator: "=", maxSplits: 1).map(String.init)
+        guard kv.count == 2 else { continue }
+        let k = kv[0].trimmingCharacters(in: .whitespaces)
+        let v = kv[1].trimmingCharacters(in: CharacterSet(charactersIn: " \""))
+        if k == "keyid" { keyShare = v }
+        if k == "tag" { tag = v }
+      }
+      if tag == profile, let share = keyShare, !share.isEmpty {
+        let secret = try SpaceMAC.decapsulate(privateKey: kemKey(writer), keyShare: share)
+        return (label, share, secret)
+      }
     }
-    return try SpaceMAC.decapsulate(privateKey: kemKey(writer), keyShare: share)
+    throw Fault(message: "Accept-Signature profile \(profile) mismatch: \(acceptSignature)")
   }
 
+  private func sfEscape(_ value: String) -> String {
+    "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+  }
+
+  private func attachRecordMac(
+    _ reply: inout Reply, secret: Data, keyShare: String, label: String, uri: String, cid: String
+  ) {
+    let profile = "atproto-space-record"
+    let covered = "uri=\(sfEscape(uri)), cid=\(sfEscape(cid))"
+    attachMacHeaders(&reply, profile: profile, headerName: "Atproto-Space-Record", covered: covered, secret: secret, keyShare: keyShare, label: label)
+  }
+
+  private func attachCommitMac(
+    _ reply: inout Reply, secret: Data, keyShare: String, label: String, space: String, repo: String, rev: String, data: Data
+  ) {
+    let profile = "atproto-space-commit"
+    let covered = "ver=1, repo=\(sfEscape(repo)), space=\(sfEscape(space)), rev=\(sfEscape(rev)), data=:\(data.base64EncodedString()):"
+    attachMacHeaders(&reply, profile: profile, headerName: "Atproto-Space-Commit", covered: covered, secret: secret, keyShare: keyShare, label: label)
+  }
+
+  private func attachMacHeaders(
+    _ reply: inout Reply, profile: String, headerName: String, covered: String, secret: Data, keyShare: String, label: String
+  ) {
+    let sigParams = "(\(sfEscape(profile));sf);keyid=\(sfEscape(keyShare));tag=\(sfEscape(profile))"
+    let base = Data("\"\(profile)\";sf: \(covered)\n\"@signature-params\": \(sigParams)".utf8)
+    let mac = Data(HMAC<SHA256>.authenticationCode(for: base, using: SymmetricKey(data: secret)))
+    reply.headers[headerName] = covered
+    reply.headers["Signature-Input"] = "\(label)=\(sigParams)"
+    reply.headers["Signature"] = "\(label)=:\(mac.base64EncodedString()):"
+    reply.headers["Vary"] = "accept-signature"
+  }
+
+  /// Build a signed ATProto CARv1 Merkle inclusion proof (`com.atproto.sync.getRecord`) for
+  /// `mailboxKeys` or `blue.catbird.chat.device` (`repo_proof.rs` `build_repo_proof_car_v1`).
+  private func syncGetRecordCar(did: String, collection: String, rkey: String) throws -> Reply {
+    let storedValue: Any?
+    if collection == Self.mailboxKeysCollection {
+      storedValue = mailboxKeys[did]?[rkey]?.value
+    } else {
+      storedValue = pdsRecords["\(did)|\(collection)|\(rkey)"]?.value
+    }
+    guard let value = storedValue else {
+      return xrpcError(404, "RecordNotFound")
+    }
+    let recordCbor = try DAGCBOR.encodeValue(try dataModel(value))
+    let recordCid = CID.fromDAGCBOR(recordCbor)
+    let pathBytes = Data("\(collection)/\(rkey)".utf8)
+    let mstEntry: [String: Any] = [
+      "p": Int64(0),
+      "k": pathBytes,
+      "v": CIDAsLink(cid: recordCid, representation: .link),
+      "t": NSNull(),
+    ]
+    let mstNode: [String: Any] = [
+      "l": NSNull(),
+      "e": [mstEntry],
+    ]
+    let mstBytes = try DAGCBOR.encodeValue(mstNode)
+    let mstCid = CID.fromDAGCBOR(mstBytes)
+    let rev = "3lb2zzzzzzzzz"
+    let unsignedCommit: [String: Any] = [
+      "did": did,
+      "version": Int64(3),
+      "data": CIDAsLink(cid: mstCid, representation: .link),
+      "rev": rev,
+      "prev": NSNull(),
+    ]
+    let unsignedBytes = try DAGCBOR.encodeValue(unsignedCommit)
+    let sig = try P256WireSignature.sign(unsignedBytes, using: signingKey(did))
+    let signedCommit: [String: Any] = [
+      "did": did,
+      "version": Int64(3),
+      "data": CIDAsLink(cid: mstCid, representation: .link),
+      "rev": rev,
+      "prev": NSNull(),
+      "sig": sig,
+    ]
+    let commitBytes = try DAGCBOR.encodeValue(signedCommit)
+    let commitCid = CID.fromDAGCBOR(commitBytes)
+    let headerObj: [String: Any] = [
+      "version": Int64(1),
+      "roots": [CIDAsLink(cid: commitCid, representation: .link)],
+    ]
+    let headerBytes = try DAGCBOR.encodeValue(headerObj)
+    var car = starFrame(headerBytes)
+    for (cid, block) in [(commitCid, commitBytes), (mstCid, mstBytes), (recordCid, recordCbor)] {
+      car.append(starFrame(cid.bytes + block))
+    }
+    return Reply(status: 200, headers: ["Content-Type": "application/vnd.ipld.car"], body: car)
+  }
 
   private func inventoryCommitment(
     _ rows: [(did: String, repoRev: String, spaceRev: String, data: Data)]
@@ -752,9 +904,11 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     ]
     archive.append(starFrame(try DAGCBOR.encodeValue(try dataModel(metadata))))
     for record in records {
+      archive.append(0x01)
       archive.append(starFrame(Data("\(record.key.collection)/\(record.key.rkey)".utf8)))
       archive.append(starFrame(try DAGCBOR.encodeValue(try dataModel(record.value.value))))
     }
+    archive.append(0x00)
     return archive
   }
 
@@ -812,7 +966,7 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         params: try strictQuery(b["query"] as? String ?? ""),
         authorization: "Atproto-Space-Credential \(try text(b, "credential"))", audience: audience,
         signatureInput: try text(b, "signatureInput"), signature: try text(b, "signature"),
-        wantMac: b["wantMac"] as? String, now: nowSeconds()
+        acceptSignature: (b["acceptSignature"] as? String) ?? (b["wantMac"] as? String), now: nowSeconds()
       )
     case "blue.catbird.labyrinth.publishEpochHead":
       let (write, account, key) = try deviceSignedClaim(request, header: "catbird-labyrinth-write", deviceField: "actorDeviceId", domain: "CATBIRD-LABYRINTH-WRITE\0")
@@ -1004,17 +1158,17 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
       p["leafCount"] = participant["userDid"] as? String == actorLeaf["userDid"] as? String ? 1 : 0
       return p
     }
-    conversations[cid] = [
-      "conversationKind": "group", "sequencerDid": Self.dsDid, "coordinates": coords,
-      "participants": participants, "leaves": [actorLeaf],
-      "metadataSnapshot": body["metadataSnapshot"] ?? NSNull(), "snapshotSeq": 1,
-    ]
     let entry = try controlEntry(
       type: "creationEntry",
       signedRequest: sr,
       coordinate: coords as? JSON ?? JSON(),
       seq: 1
     )
+    conversations[cid] = [
+      "conversationKind": "group", "sequencerDid": Self.dsDid, "coordinates": coords,
+      "participants": participants, "leaves": [actorLeaf],
+      "metadataSnapshot": body["metadataSnapshot"] ?? NSNull(), "snapshotSeq": 1,
+    ]
     entries[cid, default: []].append(entry)
     leafPeriods[cid] = [["userDid": actorLeaf["userDid"] ?? NSNull(), "deviceId": actorLeaf["deviceId"] ?? NSNull(), "joinedSeq": 1]]
     // `mls-ds` answers the sequenced creation entry carrying the exact signed request.
@@ -1274,14 +1428,19 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     if let map = value as? OrderedCBORMap {
       let wireObject = wire as? JSON
       var converted = OrderedCBORMap()
+      var sawType = false
       for entry in map.entries {
-        if entry.key == "$type", wireObject?["$type"] == nil {
-          continue
+        if entry.key == "$type" {
+          guard wireObject?["$type"] != nil else { continue }
+          sawType = true
         }
         converted.append(
           key: entry.key,
           value: canonicalBodyValue(entry.value, wire: wireObject?[entry.key])
         )
+      }
+      if !sawType, let wireType = wireObject?["$type"] as? String {
+        converted.append(key: "$type", value: wireType)
       }
       return converted
     }

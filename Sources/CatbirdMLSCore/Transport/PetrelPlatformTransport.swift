@@ -13,6 +13,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   private let atProtoClient: ATProtoClient?
   private let homeDsEndpoint: URL?
   private let homeDsDid: String
+  private let ownPdsEndpoint: URL?
   private let actorDeviceId: String?
   private let boundedSession: MLSBoundedURLSession
   private let allowLoopbackForTesting: Bool
@@ -25,6 +26,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     atProtoClient: ATProtoClient? = nil,
     homeDsEndpoint: URL? = URL(string: "https://chat.catbird.blue"),
     homeDsDid: String = "did:web:chat.catbird.blue",
+    ownPdsEndpoint: URL? = nil,
     actorDeviceId: String? = nil,
     allowLoopbackForTesting: Bool = false,
     httpOverride: (@Sendable (PlatformHttpRequest) throws -> PlatformHttpResponse)? = nil
@@ -32,6 +34,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     self.atProtoClient = atProtoClient
     self.homeDsEndpoint = homeDsEndpoint
     self.homeDsDid = Self.stripDidFragment(homeDsDid)
+    self.ownPdsEndpoint = ownPdsEndpoint
     self.actorDeviceId = actorDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
     self.boundedSession = .shared
     self.allowLoopbackForTesting = allowLoopbackForTesting
@@ -42,6 +45,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     atProtoClient: ATProtoClient? = nil,
     homeDsEndpoint: URL? = URL(string: "https://chat.catbird.blue"),
     homeDsDid: String = "did:web:chat.catbird.blue",
+    ownPdsEndpoint: URL? = nil,
     actorDeviceId: String? = nil,
     boundedSession: MLSBoundedURLSession,
     allowLoopbackForTesting: Bool = false,
@@ -50,6 +54,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     self.atProtoClient = atProtoClient
     self.homeDsEndpoint = homeDsEndpoint
     self.homeDsDid = Self.stripDidFragment(homeDsDid)
+    self.ownPdsEndpoint = ownPdsEndpoint
     self.actorDeviceId = actorDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
     self.boundedSession = boundedSession
     self.allowLoopbackForTesting = allowLoopbackForTesting
@@ -57,6 +62,12 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   }
 
   public func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
+    try Self.mapCallbackError {
+      try executeHttpRaw(request: request)
+    }
+  }
+
+  func executeHttpRaw(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
     precondition(!Thread.isMainThread, "PetrelPlatformTransport.executeHttp must never block the main thread")
     if let httpOverride {
       return try httpOverride(request)
@@ -68,7 +79,11 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     let mailboxKeysDeletionRepo: String? = try Self.extractXrpcNsid(url) == MLSOutboundHTTPValidator.deleteRecordNSID
       ? MLSOutboundHTTPValidator.mailboxKeysDeletionRepo(method: request.method, body: request.body)
       : nil
-    try validateOutboundURLAndNSID(url, permittingMailboxKeysDeletion: mailboxKeysDeletionRepo != nil)
+    try validateOutboundURLAndNSID(
+      url,
+      method: request.method,
+      permittingMailboxKeysDeletion: mailboxKeysDeletionRepo != nil
+    )
 
     var urlRequest = URLRequest(url: url)
     urlRequest.httpMethod = request.method
@@ -110,15 +125,18 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
               lxm: try NSID(nsidString: nsid)
             )
           )
-          if (200..<300).contains(code), let token = authOut?.token, !token.isEmpty {
-            var authedRequest = immutableRequest
-            authedRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            let (data, http) = try await self.boundedSession.data(
-              for: authedRequest,
-              maxBytes: Self.maxHttpResponseBytes
+          guard (200..<300).contains(code), let token = authOut?.token, !token.isEmpty else {
+            throw CatbirdMLS.MlsError.Internal(
+              message: "getServiceAuth(\(nsid)) failed closed with HTTP \(code)"
             )
-            return Self.makePlatformHttpResponse(data: data, http: http)
           }
+          var authedRequest = immutableRequest
+          authedRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+          let (data, http) = try await self.boundedSession.data(
+            for: authedRequest,
+            maxBytes: Self.maxHttpResponseBytes
+          )
+          return Self.makePlatformHttpResponse(data: data, http: http)
         }
         return nil
       }
@@ -149,48 +167,52 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   }
 
   public func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws {
-    guard let baseURL = URL(string: homeDsEndpoint) else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid homeDsEndpoint: \(homeDsEndpoint)")
-    }
-    if !self.allowLoopbackForTesting {
-      try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(baseURL)
-    }
+    try Self.mapCallbackError {
+      guard let baseURL = URL(string: homeDsEndpoint) else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid homeDsEndpoint: \(homeDsEndpoint)")
+      }
+      if !self.allowLoopbackForTesting {
+        try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(baseURL)
+      }
 
-    var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-    components?.scheme = (baseURL.scheme == "http" && self.allowLoopbackForTesting) ? "ws" : "wss"
-    components?.path = "/xrpc/blue.catbird.chat.subscribeEvents"
-    if let cursorSeq {
-      components?.queryItems = [URLQueryItem(name: "cursor", value: String(cursorSeq))]
-    }
-    guard let wsURL = components?.url else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Failed to construct realtime WebSocket URL")
-    }
+      var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+      components?.scheme = (baseURL.scheme == "http" && self.allowLoopbackForTesting) ? "ws" : "wss"
+      components?.path = "/xrpc/blue.catbird.chat.subscribeEvents"
+      if let cursorSeq {
+        components?.queryItems = [URLQueryItem(name: "cursor", value: String(cursorSeq))]
+      }
+      guard let wsURL = components?.url else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Failed to construct realtime WebSocket URL")
+      }
 
-    self.lock.lock()
-    defer { self.lock.unlock() }
-    self.webSocketTask?.cancel(with: .goingAway, reason: nil)
-    self.webSocketSession?.invalidateAndCancel()
+      self.lock.lock()
+      defer { self.lock.unlock() }
+      self.webSocketTask?.cancel(with: .goingAway, reason: nil)
+      self.webSocketSession?.invalidateAndCancel()
 
-    let config = URLSessionConfiguration.ephemeral
-    config.httpCookieStorage = nil
-    config.urlCredentialStorage = nil
-    let session = URLSession(configuration: config)
-    let task = session.webSocketTask(with: wsURL)
-    self.webSocketSession = session
-    self.webSocketTask = task
-    task.resume()
+      let config = URLSessionConfiguration.ephemeral
+      config.httpCookieStorage = nil
+      config.urlCredentialStorage = nil
+      let session = URLSession(configuration: config)
+      let task = session.webSocketTask(with: wsURL)
+      self.webSocketSession = session
+      self.webSocketTask = task
+      task.resume()
+    }
   }
 
   public func disconnectRealtimeStream() throws {
-    self.lock.lock()
-    let task = self.webSocketTask
-    let session = self.webSocketSession
-    self.webSocketTask = nil
-    self.webSocketSession = nil
-    self.lock.unlock()
+    try Self.mapCallbackError {
+      self.lock.lock()
+      let task = self.webSocketTask
+      let session = self.webSocketSession
+      self.webSocketTask = nil
+      self.webSocketSession = nil
+      self.lock.unlock()
 
-    task?.cancel(with: .normalClosure, reason: nil)
-    session?.invalidateAndCancel()
+      task?.cancel(with: .normalClosure, reason: nil)
+      session?.invalidateAndCancel()
+    }
   }
 
   // MARK: - PushFetchTransport (Zero OAuth Refresh, I10 < 2s Budget)
@@ -200,62 +222,64 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     afterSeq: Int64,
     chatDpopToken: String
   ) throws -> PushFetchBundle {
-    precondition(!Thread.isMainThread, "PetrelPlatformTransport.fetchMissingEntries must never block the main thread")
-    let trimmedToken = chatDpopToken.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedToken.isEmpty else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Missing cached chat-dpop token")
-    }
-    guard let base = self.homeDsEndpoint else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Missing home DS endpoint")
-    }
-    if !self.allowLoopbackForTesting {
-      try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(base)
-    }
-
-    var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
-    components?.path = "/xrpc/blue.catbird.chat.getEntries"
-    var queryItems = [
-      URLQueryItem(name: "conversationId", value: conversationId),
-      URLQueryItem(name: "afterSeq", value: String(afterSeq)),
-    ]
-    if let actorDeviceId = self.actorDeviceId, !actorDeviceId.isEmpty {
-      queryItems.append(URLQueryItem(name: "actorDeviceId", value: actorDeviceId))
-    }
-    components?.queryItems = queryItems
-    guard let url = components?.url else {
-      throw CatbirdMLS.MlsError.InvalidInput(message: "Malformed getEntries URL")
-    }
-
-    var req = URLRequest(url: url)
-    req.httpMethod = "GET"
-    req.timeoutInterval = 1.5
-    let authHeader: String
-    if trimmedToken.lowercased().hasPrefix("bearer ") || trimmedToken.lowercased().hasPrefix("dpop ") {
-      authHeader = trimmedToken
-    } else {
-      authHeader = "Bearer \(trimmedToken)"
-    }
-    req.setValue(authHeader, forHTTPHeaderField: "Authorization")
-
-    do {
-      let (data, http) = try self.boundedSession.performSync(
-        for: req,
-        maxBytes: MLSBoundedURLSession.labyrinthMaxBytes,
-        timeoutSeconds: 1.6
-      )
-      guard (200..<300).contains(http.statusCode) else {
-        throw CatbirdMLS.MlsError.Internal(message: "Push getEntries returned HTTP \(http.statusCode)")
+    try Self.mapCallbackError {
+      precondition(!Thread.isMainThread, "PetrelPlatformTransport.fetchMissingEntries must never block the main thread")
+      let trimmedToken = chatDpopToken.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedToken.isEmpty else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Missing cached chat-dpop token")
       }
-      return try Self.decodePushGetEntriesBundle(from: data)
-    } catch let mlsErr as CatbirdMLS.MlsError {
-      throw mlsErr
-    } catch let err as MLSBoundedURLSession.BoundedFetchError {
-      if case .timedOut = err {
-        throw CatbirdMLS.MlsError.Internal(message: "Push catch-up timed out (I10 < 2s budget)")
+      guard let base = self.homeDsEndpoint else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Missing home DS endpoint")
       }
-      throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
-    } catch {
-      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
+      if !self.allowLoopbackForTesting {
+        try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(base)
+      }
+
+      var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
+      components?.path = "/xrpc/blue.catbird.chat.getEntries"
+      var queryItems = [
+        URLQueryItem(name: "conversationId", value: conversationId),
+        URLQueryItem(name: "afterSeq", value: String(afterSeq)),
+      ]
+      if let actorDeviceId = self.actorDeviceId, !actorDeviceId.isEmpty {
+        queryItems.append(URLQueryItem(name: "actorDeviceId", value: actorDeviceId))
+      }
+      components?.queryItems = queryItems
+      guard let url = components?.url else {
+        throw CatbirdMLS.MlsError.InvalidInput(message: "Malformed getEntries URL")
+      }
+
+      var req = URLRequest(url: url)
+      req.httpMethod = "GET"
+      req.timeoutInterval = 1.5
+      let authHeader: String
+      if trimmedToken.lowercased().hasPrefix("bearer ") || trimmedToken.lowercased().hasPrefix("dpop ") {
+        authHeader = trimmedToken
+      } else {
+        authHeader = "Bearer \(trimmedToken)"
+      }
+      req.setValue(authHeader, forHTTPHeaderField: "Authorization")
+
+      do {
+        let (data, http) = try self.boundedSession.performSync(
+          for: req,
+          maxBytes: MLSBoundedURLSession.labyrinthMaxBytes,
+          timeoutSeconds: 1.6
+        )
+        guard (200..<300).contains(http.statusCode) else {
+          throw CatbirdMLS.MlsError.Internal(message: "Push getEntries returned HTTP \(http.statusCode)")
+        }
+        return try Self.decodePushGetEntriesBundle(from: data)
+      } catch let mlsErr as CatbirdMLS.MlsError {
+        throw mlsErr
+      } catch let err as MLSBoundedURLSession.BoundedFetchError {
+        if case .timedOut = err {
+          throw CatbirdMLS.MlsError.Internal(message: "Push catch-up timed out (I10 < 2s budget)")
+        }
+        throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
+      } catch {
+        throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
+      }
     }
   }
 
@@ -263,28 +287,30 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     did: String,
     chatDpopToken _: String?
   ) throws -> [AuthorizedPeerDeviceKey] {
-    precondition(!Thread.isMainThread, "PetrelPlatformTransport.getAuthorizedDeviceKeys must never block the main thread")
-    do {
-      let records = try MLSPublicPDSReader.fetchAuthorizedDeviceRecordsSync(
-        did: did,
-        boundedSession: self.boundedSession,
-        timeoutSeconds: 1.5
-      )
-      return records.map { record in
-        let deviceId = record.uri.split(separator: "/").last.map(String.init) ?? record.uri
-        return AuthorizedPeerDeviceKey(
+    try Self.mapCallbackError {
+      precondition(!Thread.isMainThread, "PetrelPlatformTransport.getAuthorizedDeviceKeys must never block the main thread")
+      do {
+        let records = try MLSPublicPDSReader.fetchAuthorizedDeviceRecordsSync(
           did: did,
-          deviceId: deviceId,
-          signaturePublicKey: record.publicKey
+          boundedSession: self.boundedSession,
+          timeoutSeconds: 1.5
         )
+        return records.map { record in
+          let deviceId = record.uri.split(separator: "/").last.map(String.init) ?? record.uri
+          return AuthorizedPeerDeviceKey(
+            did: did,
+            deviceId: deviceId,
+            signaturePublicKey: record.publicKey
+          )
+        }
+      } catch let err as MLSBoundedURLSession.BoundedFetchError {
+        if case .timedOut = err {
+          throw CatbirdMLS.MlsError.Internal(message: "Authorized device key fetch timed out")
+        }
+        throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
+      } catch {
+        throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
       }
-    } catch let err as MLSBoundedURLSession.BoundedFetchError {
-      if case .timedOut = err {
-        throw CatbirdMLS.MlsError.Internal(message: "Authorized device key fetch timed out")
-      }
-      throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
-    } catch {
-      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
     }
   }
 
@@ -306,13 +332,33 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     for raw in rawEntries {
       let seq = parseInt64(raw["seq"]) ?? 0
       let rawType = raw["$type"] as? String
-      let signedRequest = raw["signedRequest"] as? [String: Any]
-      let signedBody = signedRequest?["body"] as? [String: Any]
-      let signedRequestData = signedRequest.flatMap {
-        try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+      let signedRequestDict: [String: Any]? = if let dict = raw["signedRequest"] as? [String: Any] {
+        dict
+      } else if let str = raw["signedRequest"] as? String,
+                let parsed = (try? JSONSerialization.jsonObject(with: Data(str.utf8))) as? [String: Any]
+      {
+        parsed
+      } else {
+        nil
       }
-      let sequencerReceiptData = (raw["sequencerReceipt"] as? [String: Any]).flatMap {
-        try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
+      let signedBody = signedRequestDict?["body"] as? [String: Any]
+      let signedRequestData: Data? = if let signedRequestDict {
+        try? JSONSerialization.data(withJSONObject: signedRequestDict, options: [.sortedKeys])
+      } else if let rawString = raw["signedRequest"] as? String,
+                rawString.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
+      {
+        Data(rawString.utf8)
+      } else {
+        nil
+      }
+      let sequencerReceiptData: Data? = if let receiptDict = raw["sequencerReceipt"] as? [String: Any] {
+        try? JSONSerialization.data(withJSONObject: receiptDict, options: [.sortedKeys])
+      } else if let receiptString = raw["sequencerReceipt"] as? String,
+                receiptString.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
+      {
+        Data(receiptString.utf8)
+      } else {
+        nil
       }
 
       let entryKind = resolveEntryKind(raw: raw, rawType: rawType)
@@ -454,17 +500,19 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   }
 
   private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
-    guard let lScheme = lhs.scheme?.lowercased(),
-          let rScheme = rhs.scheme?.lowercased(),
-          lScheme == rScheme,
-          let lHost = lhs.host?.lowercased(),
-          let rHost = rhs.host?.lowercased(),
-          lHost == rHost
-    else {
-      return false
+    MLSOutboundHTTPValidator.isSameOrigin(lhs, rhs)
+  }
+
+  private static func mapCallbackError<T>(_ operation: () throws -> T) throws -> T {
+    do {
+      return try operation()
+    } catch let mlsErr as CatbirdMLS.MlsError {
+      throw mlsErr
+    } catch let valErr as MLSOutboundHTTPValidator.ValidationError {
+      throw CatbirdMLS.MlsError.InvalidInput(message: valErr.localizedDescription)
+    } catch {
+      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
     }
-    let defaultPort: Int? = (lScheme == "https") ? 443 : (lScheme == "http" ? 80 : nil)
-    return (lhs.port ?? defaultPort) == (rhs.port ?? defaultPort)
   }
 
   private static func extractXrpcNsid(_ url: URL) -> String? {
@@ -508,7 +556,11 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     return box.readResult() ?? .failure(CatbirdMLS.MlsError.Internal(message: "Authenticated HTTP bridge missing result"))
   }
 
-  private func validateOutboundURLAndNSID(_ url: URL, permittingMailboxKeysDeletion: Bool) throws {
+  private func validateOutboundURLAndNSID(
+    _ url: URL,
+    method: String,
+    permittingMailboxKeysDeletion: Bool
+  ) throws {
     if !allowLoopbackForTesting {
       try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(url)
     }
@@ -519,10 +571,43 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       if components.path.hasPrefix("/xrpc/") {
         let nsid = String(components.path.dropFirst("/xrpc/".count))
         if !(permittingMailboxKeysDeletion && nsid == MLSOutboundHTTPValidator.deleteRecordNSID) {
-          try MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)
+          if MLSOutboundHTTPValidator.ownPDSOnlyExactNSIDs.contains(nsid) {
+            try MLSOutboundHTTPValidator.validatePreparedRequestNSID(
+              nsid,
+              method: method,
+              requestURL: url,
+              ownPDSOrigins: allowedOwnPDSOrigins()
+            )
+          } else {
+            try MLSOutboundHTTPValidator.validatePreparedRequestNSID(nsid)
+          }
         }
       }
     }
+  }
+}
+
+extension PetrelPlatformTransport {
+  /// Origins permitted for `ownPDSOnlyExactNSIDs` (`com.atproto.identity.resolveDid`):
+  /// the signed-in account's `ownPdsEndpoint` (when configured explicitly) and/or the base URL
+  /// the injected `ATProtoClient` is bound to. Empty without either, so own-PDS-only NSIDs fail closed.
+  fileprivate func allowedOwnPDSOrigins() -> [URL] {
+    var origins: [URL] = []
+    if let ownPdsEndpoint {
+      origins.append(ownPdsEndpoint)
+    }
+    if let clientOrigin = ownPDSOrigin() {
+      origins.append(clientOrigin)
+    }
+    return origins
+  }
+
+  fileprivate func ownPDSOrigin() -> URL? {
+    guard let atProtoClient else { return nil }
+    let result = Self.runAsyncAuthBridge(timeoutSeconds: 5.0) { () -> URL in
+      await atProtoClient.networkService.baseURL
+    }
+    return try? result.get()
   }
 }
 

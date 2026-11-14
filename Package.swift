@@ -9,18 +9,30 @@ let environment = ProcessInfo.processInfo.environment
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let siblingRoot = packageRoot.deletingLastPathComponent()
 
-func siblingPathIfAvailable(_ name: String) -> String? {
-  let candidate = siblingRoot.appendingPathComponent(name).standardizedFileURL
-  let manifest = candidate.appendingPathComponent("Package.swift")
-  var isDirectory: ObjCBool = false
-  guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
-        isDirectory.boolValue,
-        FileManager.default.fileExists(atPath: manifest.path),
-        candidate.resolvingSymlinksInPath() == candidate
-  else {
-    return nil
+func localPackagePathIfAvailable(_ candidates: [URL]) -> String? {
+  for raw in candidates {
+    let candidate = raw.standardizedFileURL
+    let manifest = candidate.appendingPathComponent("Package.swift")
+    var isDirectory: ObjCBool = false
+    if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+       isDirectory.boolValue,
+       FileManager.default.fileExists(atPath: manifest.path),
+       candidate.resolvingSymlinksInPath() == candidate
+    {
+      return candidate.path
+    }
   }
-  return candidate.path
+  return nil
+}
+
+func siblingPathIfAvailable(_ name: String) -> String? {
+  let wave1CohesiveRoot = siblingRoot
+    .deletingLastPathComponent()
+    .appendingPathComponent("dec1-w0/wave1-cohesive", isDirectory: true)
+  return localPackagePathIfAvailable([
+    siblingRoot.appendingPathComponent(name, isDirectory: true),
+    wave1CohesiveRoot.appendingPathComponent(name, isDirectory: true),
+  ])
 }
 
 let forceRemote = environment["CATBIRD_MLS_LOCAL_INTEGRATION"] == "0"
@@ -37,11 +49,11 @@ if !forceRemote,
   sdkDependencies = [
     .package(
       url: "https://github.com/joshlacal/Petrel.git",
-      revision: "92b05b81966c07a2a7d3d96a68f9230dd7787c5d"
+      revision: "932c82921092256c05788a5c348f56f901f26280"
     ),
     .package(
       url: "https://github.com/joshlacal/PetrelCatbird.git",
-      revision: "3208d02e38e9b7b176d8c2cf46d1e92feb555974"
+      revision: "26380cefa2e4734925efabb178d83052e10a46c7"
     ),
   ]
 }

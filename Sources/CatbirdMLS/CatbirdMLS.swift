@@ -478,6 +478,22 @@ private struct FfiConverterInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterFloat: FfiConverterPrimitive {
+    typealias FfiType = Float
+    typealias SwiftType = Float
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Float {
+        return try lift(readFloat(&buf))
+    }
+
+    static func write(_ value: Float, into buf: inout [UInt8]) {
+        writeFloat(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterBool: FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -572,11 +588,31 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func addGroupMembers(conversationId: String, memberDids: [String]) throws -> ConversationRow
 
+    func advanceReadState(conversationId: String, candidateSeq: UInt64) throws -> MailboxReadStateRecord
+
+    func approveDevice(targetDeviceId: String) throws
+
+    func approveDeviceWithKey(targetDeviceId: String, targetSignaturePublicKey: Data, targetAuthGeneration: Int64) throws
+
     func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration
 
     func cancelPendingGroupCreation(conversationId: String) throws -> Bool
 
     func checkSpacesEligibility(grantedOauthScopes: [String]) throws -> SpacesEligibilityStatus
+
+    func circleKeyGenerate() -> Data
+
+    func circleKeyOpen(recordJson: String, spaceUri: String, ownerDid: String) throws -> CircleKeyOpenResult?
+
+    func circleKeyWrap(req: CircleKeyWrapRequest, circleKey: Data) throws -> CircleKeyWrapResult
+
+    func circlePostKey(circleKey: Data, circleId: String, postUri: String) throws -> Data
+
+    func circlePostOpen(req: CirclePostOpenRequest) throws -> String
+
+    func circlePostSeal(req: CirclePostSealRequest) throws -> String
+
+    func clearCircleAclTombstone(circleId: String, memberDid: String) throws -> CircleOwnerStateDto?
 
     func closeConversation(conversationId: String) throws
 
@@ -586,11 +622,19 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func declineDirectRequest(requestId: String) throws
 
+    func deleteAccountData() throws
+
     func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt
 
     func flushLabyrinthQueue() throws -> UInt32
 
+    func fulfillPendingGroupLeaves() throws -> UInt32
+
+    func getCircleOwnerState(circleId: String) throws -> CircleOwnerStateDto?
+
     func getGroupMetadata(conversationId: String) throws -> GroupMetadataRow?
+
+    func getReadState(conversationId: String) throws -> MailboxReadStateRecord?
 
     func handleDarwinPushWakeup() throws
 
@@ -598,11 +642,19 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func initiateOtcPairing() throws -> OtcPairingOffer
 
+    func isDevicePendingApproval() throws -> Bool
+
     func isHandleClosed() -> Bool
 
     func labyrinthStatus() throws -> LabyrinthBackupStatus
 
+    func leaveConversation(conversationId: String) throws -> LeaveConversationOutcome
+
+    func listCircleOwnerStates() throws -> [CircleOwnerStateDto]
+
     func listConversations(beforeUpdatedMs: Int64?, limit: UInt32) throws -> [ConversationRow]
+
+    func listDevices() throws -> [RegisteredDeviceInfo]
 
     func listMembers(conversationId: String) throws -> [String]
 
@@ -610,7 +662,11 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func listPendingLabyrinthQueue(conversationId: String?, limit: UInt32) throws -> [QueuedLabyrinthArchivePayload]
 
+    func listReadStates() throws -> [MailboxReadStateRecord]
+
     func listRequests(consentFilter: String?) throws -> [RequestRow]
+
+    func mergeCircleOwnerState(update: CircleOwnerStateDto) throws -> CircleOwnerStateDto
 
     func pendingGroupCreationStatus(conversationId: String) throws -> PendingGroupCreationStatus?
 
@@ -618,21 +674,37 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func prepareForBackground() throws -> BackgroundCheckpointReport
 
+    func processPushWake(wake: PushWakePayload) throws -> NotificationPreview
+
+    func proposePeerRepin(peerDid: String) throws -> PeerRepinProposalInfo
+
+    func putCircleOwnerState(state: CircleOwnerStateDto, swapRecordCid: String?) throws -> String
+
     func registerPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus
 
     func removeGroupMember(actorRole: MemberRole, conversationId: String, targetDid: String) throws
+
+    func repinPeer(peerDid: String, confirmedHead: Data) throws
 
     func replenishKeyPackages(count: UInt32) throws -> UInt32
 
     func rescueConversationOnKick(conversationId: String) throws -> UInt32
 
+    func respondOtcPairing(sessionIdHex: String, sixDigitCode: String?) throws
+
     func restoreConversationFromOwnerMailbox(conversationId: String) throws -> UInt32
+
+    func restoreWithPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus
 
     func restoreWithRecoveryCode(recoveryCodeInput: String) throws -> LabyrinthBackupStatus
 
     func resumeFromBackground() throws
 
+    func retireCurrentDevice() throws
+
     func retryPendingGroupCreation(conversationId: String) throws -> ConversationRow?
+
+    func revokeDevice(targetDeviceId: String) throws -> DeviceRevocationReport
 
     func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus
 
@@ -642,11 +714,17 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func signOutAndWipe() throws
 
+    func startOtcPairing(sixDigitCode: String) throws -> OtcInitiatedSession
+
     func sync() throws -> UInt32
 
     func unsendMessage(conversationId: String, messageId: String) throws -> UInt32
 
     func updateGroupMetadata(conversationId: String, title: String, description: String, spaceAvatar: SpaceAvatarPointer?) throws -> GroupMetadataRow
+
+    func uploadConversationAttachment(conversationId: String, plaintext: Data, mimeType: String) throws -> UploadedConversationAttachment
+
+    func verifyAndReindexHistory(conversationId: String) throws -> UInt32
 }
 
 /**
@@ -747,6 +825,30 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func advanceReadState(conversationId: String, candidateSeq: UInt64) throws -> MailboxReadStateRecord {
+        return try FfiConverterTypeMailboxReadStateRecord.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_advance_read_state(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(conversationId),
+                                                                             FfiConverterUInt64.lower(candidateSeq), $0)
+        })
+    }
+
+    open func approveDevice(targetDeviceId: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_approve_device(self.uniffiClonePointer(),
+                                                                         FfiConverterString.lower(targetDeviceId), $0)
+        }
+    }
+
+    open func approveDeviceWithKey(targetDeviceId: String, targetSignaturePublicKey: Data, targetAuthGeneration: Int64) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_approve_device_with_key(self.uniffiClonePointer(),
+                                                                                  FfiConverterString.lower(targetDeviceId),
+                                                                                  FfiConverterData.lower(targetSignaturePublicKey),
+                                                                                  FfiConverterInt64.lower(targetAuthGeneration), $0)
+        }
+    }
+
     open func buildSignedPushGatewayRegistration(gatewayUrl: String, appId: String, pushKey: String, enabled: Bool) throws -> SignedPushGatewayRegistration {
         return try FfiConverterTypeSignedPushGatewayRegistration.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_build_signed_push_gateway_registration(self.uniffiClonePointer(),
@@ -768,6 +870,60 @@ open class CatbirdMlsClient:
         return try FfiConverterTypeSpacesEligibilityStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_check_spaces_eligibility(self.uniffiClonePointer(),
                                                                                    FfiConverterSequenceString.lower(grantedOauthScopes), $0)
+        })
+    }
+
+    open func circleKeyGenerate() -> Data {
+        return try! FfiConverterData.lift(try! rustCall {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_circle_key_generate(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func circleKeyOpen(recordJson: String, spaceUri: String, ownerDid: String) throws -> CircleKeyOpenResult? {
+        return try FfiConverterOptionTypeCircleKeyOpenResult.lift(rustCallWithError(FfiConverterTypeCircleFfiError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_circle_key_open(self.uniffiClonePointer(),
+                                                                          FfiConverterString.lower(recordJson),
+                                                                          FfiConverterString.lower(spaceUri),
+                                                                          FfiConverterString.lower(ownerDid), $0)
+        })
+    }
+
+    open func circleKeyWrap(req: CircleKeyWrapRequest, circleKey: Data) throws -> CircleKeyWrapResult {
+        return try FfiConverterTypeCircleKeyWrapResult.lift(rustCallWithError(FfiConverterTypeCircleFfiError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_circle_key_wrap(self.uniffiClonePointer(),
+                                                                          FfiConverterTypeCircleKeyWrapRequest.lower(req),
+                                                                          FfiConverterData.lower(circleKey), $0)
+        })
+    }
+
+    open func circlePostKey(circleKey: Data, circleId: String, postUri: String) throws -> Data {
+        return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeCircleFfiError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_circle_post_key(self.uniffiClonePointer(),
+                                                                          FfiConverterData.lower(circleKey),
+                                                                          FfiConverterString.lower(circleId),
+                                                                          FfiConverterString.lower(postUri), $0)
+        })
+    }
+
+    open func circlePostOpen(req: CirclePostOpenRequest) throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeCircleFfiError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_circle_post_open(self.uniffiClonePointer(),
+                                                                           FfiConverterTypeCirclePostOpenRequest.lower(req), $0)
+        })
+    }
+
+    open func circlePostSeal(req: CirclePostSealRequest) throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeCircleFfiError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_circle_post_seal(self.uniffiClonePointer(),
+                                                                           FfiConverterTypeCirclePostSealRequest.lower(req), $0)
+        })
+    }
+
+    open func clearCircleAclTombstone(circleId: String, memberDid: String) throws -> CircleOwnerStateDto? {
+        return try FfiConverterOptionTypeCircleOwnerStateDto.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_clear_circle_acl_tombstone(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(circleId),
+                                                                                     FfiConverterString.lower(memberDid), $0)
         })
     }
 
@@ -803,6 +959,12 @@ open class CatbirdMlsClient:
         }
     }
 
+    open func deleteAccountData() throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_delete_account_data(self.uniffiClonePointer(), $0)
+        }
+    }
+
     open func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt {
         return try FfiConverterTypeEnrollmentReceipt.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_enroll_device(self.uniffiClonePointer(),
@@ -816,10 +978,30 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func fulfillPendingGroupLeaves() throws -> UInt32 {
+        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_fulfill_pending_group_leaves(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func getCircleOwnerState(circleId: String) throws -> CircleOwnerStateDto? {
+        return try FfiConverterOptionTypeCircleOwnerStateDto.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_get_circle_owner_state(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(circleId), $0)
+        })
+    }
+
     open func getGroupMetadata(conversationId: String) throws -> GroupMetadataRow? {
         return try FfiConverterOptionTypeGroupMetadataRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_get_group_metadata(self.uniffiClonePointer(),
                                                                              FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
+    open func getReadState(conversationId: String) throws -> MailboxReadStateRecord? {
+        return try FfiConverterOptionTypeMailboxReadStateRecord.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_get_read_state(self.uniffiClonePointer(),
+                                                                         FfiConverterString.lower(conversationId), $0)
         })
     }
 
@@ -843,6 +1025,12 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func isDevicePendingApproval() throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_is_device_pending_approval(self.uniffiClonePointer(), $0)
+        })
+    }
+
     open func isHandleClosed() -> Bool {
         return try! FfiConverterBool.lift(try! rustCall {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_is_handle_closed(self.uniffiClonePointer(), $0)
@@ -855,11 +1043,30 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func leaveConversation(conversationId: String) throws -> LeaveConversationOutcome {
+        return try FfiConverterTypeLeaveConversationOutcome.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_leave_conversation(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
+    open func listCircleOwnerStates() throws -> [CircleOwnerStateDto] {
+        return try FfiConverterSequenceTypeCircleOwnerStateDto.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_circle_owner_states(self.uniffiClonePointer(), $0)
+        })
+    }
+
     open func listConversations(beforeUpdatedMs: Int64?, limit: UInt32) throws -> [ConversationRow] {
         return try FfiConverterSequenceTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_list_conversations(self.uniffiClonePointer(),
                                                                              FfiConverterOptionInt64.lower(beforeUpdatedMs),
                                                                              FfiConverterUInt32.lower(limit), $0)
+        })
+    }
+
+    open func listDevices() throws -> [RegisteredDeviceInfo] {
+        return try FfiConverterSequenceTypeRegisteredDeviceInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_devices(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -887,10 +1094,23 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func listReadStates() throws -> [MailboxReadStateRecord] {
+        return try FfiConverterSequenceTypeMailboxReadStateRecord.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_read_states(self.uniffiClonePointer(), $0)
+        })
+    }
+
     open func listRequests(consentFilter: String?) throws -> [RequestRow] {
         return try FfiConverterSequenceTypeRequestRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_list_requests(self.uniffiClonePointer(),
                                                                         FfiConverterOptionString.lower(consentFilter), $0)
+        })
+    }
+
+    open func mergeCircleOwnerState(update: CircleOwnerStateDto) throws -> CircleOwnerStateDto {
+        return try FfiConverterTypeCircleOwnerStateDto.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_merge_circle_owner_state(self.uniffiClonePointer(),
+                                                                                   FfiConverterTypeCircleOwnerStateDto.lower(update), $0)
         })
     }
 
@@ -913,6 +1133,28 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func processPushWake(wake: PushWakePayload) throws -> NotificationPreview {
+        return try FfiConverterTypeNotificationPreview.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_process_push_wake(self.uniffiClonePointer(),
+                                                                            FfiConverterTypePushWakePayload.lower(wake), $0)
+        })
+    }
+
+    open func proposePeerRepin(peerDid: String) throws -> PeerRepinProposalInfo {
+        return try FfiConverterTypePeerRepinProposalInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_propose_peer_repin(self.uniffiClonePointer(),
+                                                                             FfiConverterString.lower(peerDid), $0)
+        })
+    }
+
+    open func putCircleOwnerState(state: CircleOwnerStateDto, swapRecordCid: String?) throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_put_circle_owner_state(self.uniffiClonePointer(),
+                                                                                 FfiConverterTypeCircleOwnerStateDto.lower(state),
+                                                                                 FfiConverterOptionString.lower(swapRecordCid), $0)
+        })
+    }
+
     open func registerPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus {
         return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_register_passkey_prf(self.uniffiClonePointer(),
@@ -930,6 +1172,14 @@ open class CatbirdMlsClient:
         }
     }
 
+    open func repinPeer(peerDid: String, confirmedHead: Data) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_repin_peer(self.uniffiClonePointer(),
+                                                                     FfiConverterString.lower(peerDid),
+                                                                     FfiConverterData.lower(confirmedHead), $0)
+        }
+    }
+
     open func replenishKeyPackages(count: UInt32) throws -> UInt32 {
         return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_replenish_key_packages(self.uniffiClonePointer(),
@@ -944,10 +1194,26 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func respondOtcPairing(sessionIdHex: String, sixDigitCode: String?) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_respond_otc_pairing(self.uniffiClonePointer(),
+                                                                              FfiConverterString.lower(sessionIdHex),
+                                                                              FfiConverterOptionString.lower(sixDigitCode), $0)
+        }
+    }
+
     open func restoreConversationFromOwnerMailbox(conversationId: String) throws -> UInt32 {
         return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_restore_conversation_from_owner_mailbox(self.uniffiClonePointer(),
                                                                                                   FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
+    open func restoreWithPasskeyPrf(credentialId: Data, prfOutput32: Data) throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_restore_with_passkey_prf(self.uniffiClonePointer(),
+                                                                                   FfiConverterData.lower(credentialId),
+                                                                                   FfiConverterData.lower(prfOutput32), $0)
         })
     }
 
@@ -964,10 +1230,23 @@ open class CatbirdMlsClient:
         }
     }
 
+    open func retireCurrentDevice() throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_retire_current_device(self.uniffiClonePointer(), $0)
+        }
+    }
+
     open func retryPendingGroupCreation(conversationId: String) throws -> ConversationRow? {
         return try FfiConverterOptionTypeConversationRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_retry_pending_group_creation(self.uniffiClonePointer(),
                                                                                        FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
+    open func revokeDevice(targetDeviceId: String) throws -> DeviceRevocationReport {
+        return try FfiConverterTypeDeviceRevocationReport.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_revoke_device(self.uniffiClonePointer(),
+                                                                        FfiConverterString.lower(targetDeviceId), $0)
         })
     }
 
@@ -999,6 +1278,13 @@ open class CatbirdMlsClient:
         }
     }
 
+    open func startOtcPairing(sixDigitCode: String) throws -> OtcInitiatedSession {
+        return try FfiConverterTypeOtcInitiatedSession.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_start_otc_pairing(self.uniffiClonePointer(),
+                                                                            FfiConverterString.lower(sixDigitCode), $0)
+        })
+    }
+
     open func sync() throws -> UInt32 {
         return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_sync(self.uniffiClonePointer(), $0)
@@ -1020,6 +1306,22 @@ open class CatbirdMlsClient:
                                                                                 FfiConverterString.lower(title),
                                                                                 FfiConverterString.lower(description),
                                                                                 FfiConverterOptionTypeSpaceAvatarPointer.lower(spaceAvatar), $0)
+        })
+    }
+
+    open func uploadConversationAttachment(conversationId: String, plaintext: Data, mimeType: String) throws -> UploadedConversationAttachment {
+        return try FfiConverterTypeUploadedConversationAttachment.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_upload_conversation_attachment(self.uniffiClonePointer(),
+                                                                                         FfiConverterString.lower(conversationId),
+                                                                                         FfiConverterData.lower(plaintext),
+                                                                                         FfiConverterString.lower(mimeType), $0)
+        })
+    }
+
+    open func verifyAndReindexHistory(conversationId: String) throws -> UInt32 {
+        return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_verify_and_reindex_history(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(conversationId), $0)
         })
     }
 }
@@ -3340,6 +3642,631 @@ public func FfiConverterTypeChatV2Status_lower(_ value: ChatV2Status) -> RustBuf
 }
 
 /**
+ * An opened Circle key and the identity its wrap authenticated
+ * (`circle_id`/`key_version` from the verified AAD, never from the record's
+ * unauthenticated fields).
+ */
+public struct CircleKeyOpenResult {
+    public var circleKey: Data
+    public var circleId: String
+    public var keyVersion: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(circleKey: Data, circleId: String, keyVersion: UInt64) {
+        self.circleKey = circleKey
+        self.circleId = circleId
+        self.keyVersion = keyVersion
+    }
+}
+
+extension CircleKeyOpenResult: Equatable, Hashable {
+    public static func == (lhs: CircleKeyOpenResult, rhs: CircleKeyOpenResult) -> Bool {
+        if lhs.circleKey != rhs.circleKey {
+            return false
+        }
+        if lhs.circleId != rhs.circleId {
+            return false
+        }
+        if lhs.keyVersion != rhs.keyVersion {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(circleKey)
+        hasher.combine(circleId)
+        hasher.combine(keyVersion)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCircleKeyOpenResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CircleKeyOpenResult {
+        return
+            try CircleKeyOpenResult(
+                circleKey: FfiConverterData.read(from: &buf),
+                circleId: FfiConverterString.read(from: &buf),
+                keyVersion: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CircleKeyOpenResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.circleKey, into: &buf)
+        FfiConverterString.write(value.circleId, into: &buf)
+        FfiConverterUInt64.write(value.keyVersion, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleKeyOpenResult_lift(_ buf: RustBuffer) throws -> CircleKeyOpenResult {
+    return try FfiConverterTypeCircleKeyOpenResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleKeyOpenResult_lower(_ value: CircleKeyOpenResult) -> RustBuffer {
+    return FfiConverterTypeCircleKeyOpenResult.lower(value)
+}
+
+/**
+ * Inputs for wrapping a Circle key version to its members.
+ */
+public struct CircleKeyWrapRequest {
+    public var circleId: String
+    public var keyVersion: UInt64
+    public var spaceUri: String
+    public var reason: String
+    /**
+     * Members other than the owner; the owner's self-wrap is always added.
+     */
+    public var memberDids: [String]
+    public var createdAt: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(circleId: String, keyVersion: UInt64, spaceUri: String, reason: String,
+                /* 
+                    * Members other than the owner; the owner's self-wrap is always added.
+                    */ memberDids: [String], createdAt: String)
+    {
+        self.circleId = circleId
+        self.keyVersion = keyVersion
+        self.spaceUri = spaceUri
+        self.reason = reason
+        self.memberDids = memberDids
+        self.createdAt = createdAt
+    }
+}
+
+extension CircleKeyWrapRequest: Equatable, Hashable {
+    public static func == (lhs: CircleKeyWrapRequest, rhs: CircleKeyWrapRequest) -> Bool {
+        if lhs.circleId != rhs.circleId {
+            return false
+        }
+        if lhs.keyVersion != rhs.keyVersion {
+            return false
+        }
+        if lhs.spaceUri != rhs.spaceUri {
+            return false
+        }
+        if lhs.reason != rhs.reason {
+            return false
+        }
+        if lhs.memberDids != rhs.memberDids {
+            return false
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(circleId)
+        hasher.combine(keyVersion)
+        hasher.combine(spaceUri)
+        hasher.combine(reason)
+        hasher.combine(memberDids)
+        hasher.combine(createdAt)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCircleKeyWrapRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CircleKeyWrapRequest {
+        return
+            try CircleKeyWrapRequest(
+                circleId: FfiConverterString.read(from: &buf),
+                keyVersion: FfiConverterUInt64.read(from: &buf),
+                spaceUri: FfiConverterString.read(from: &buf),
+                reason: FfiConverterString.read(from: &buf),
+                memberDids: FfiConverterSequenceString.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CircleKeyWrapRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.circleId, into: &buf)
+        FfiConverterUInt64.write(value.keyVersion, into: &buf)
+        FfiConverterString.write(value.spaceUri, into: &buf)
+        FfiConverterString.write(value.reason, into: &buf)
+        FfiConverterSequenceString.write(value.memberDids, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleKeyWrapRequest_lift(_ buf: RustBuffer) throws -> CircleKeyWrapRequest {
+    return try FfiConverterTypeCircleKeyWrapRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleKeyWrapRequest_lower(_ value: CircleKeyWrapRequest) -> RustBuffer {
+    return FfiConverterTypeCircleKeyWrapRequest.lower(value)
+}
+
+/**
+ * A `blue.catbird.circle.key` record ready to write at `rkey`.
+ */
+public struct CircleKeyWrapResult {
+    public var recordJson: String
+    public var rkey: String
+    /**
+     * Members left out of the record because their epoch failed
+     * verification or they have none (D15); `excluded_reasons[i]` explains
+     * `excluded_dids[i]`.
+     */
+    public var excludedDids: [String]
+    public var excludedReasons: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(recordJson: String, rkey: String,
+                /* 
+                    * Members left out of the record because their epoch failed
+                    * verification or they have none (D15); `excluded_reasons[i]` explains
+                    * `excluded_dids[i]`.
+                    */ excludedDids: [String], excludedReasons: [String])
+    {
+        self.recordJson = recordJson
+        self.rkey = rkey
+        self.excludedDids = excludedDids
+        self.excludedReasons = excludedReasons
+    }
+}
+
+extension CircleKeyWrapResult: Equatable, Hashable {
+    public static func == (lhs: CircleKeyWrapResult, rhs: CircleKeyWrapResult) -> Bool {
+        if lhs.recordJson != rhs.recordJson {
+            return false
+        }
+        if lhs.rkey != rhs.rkey {
+            return false
+        }
+        if lhs.excludedDids != rhs.excludedDids {
+            return false
+        }
+        if lhs.excludedReasons != rhs.excludedReasons {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(recordJson)
+        hasher.combine(rkey)
+        hasher.combine(excludedDids)
+        hasher.combine(excludedReasons)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCircleKeyWrapResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CircleKeyWrapResult {
+        return
+            try CircleKeyWrapResult(
+                recordJson: FfiConverterString.read(from: &buf),
+                rkey: FfiConverterString.read(from: &buf),
+                excludedDids: FfiConverterSequenceString.read(from: &buf),
+                excludedReasons: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CircleKeyWrapResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.recordJson, into: &buf)
+        FfiConverterString.write(value.rkey, into: &buf)
+        FfiConverterSequenceString.write(value.excludedDids, into: &buf)
+        FfiConverterSequenceString.write(value.excludedReasons, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleKeyWrapResult_lift(_ buf: RustBuffer) throws -> CircleKeyWrapResult {
+    return try FfiConverterTypeCircleKeyWrapResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleKeyWrapResult_lower(_ value: CircleKeyWrapResult) -> RustBuffer {
+    return FfiConverterTypeCircleKeyWrapResult.lower(value)
+}
+
+/**
+ * Decrypted `OwnerMailbox` `circleOwnerState` record (`swapRecord` CAS).
+ */
+public struct CircleOwnerStateDto {
+    public var circleId: String
+    public var spaceUri: String
+    public var currentKeyVersion: UInt64
+    public var joinedAtVersionJson: String
+    public var pendingOpsJson: String
+    public var updatedAt: String
+    public var recordCid: String?
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(circleId: String, spaceUri: String, currentKeyVersion: UInt64, joinedAtVersionJson: String, pendingOpsJson: String, updatedAt: String, recordCid: String?) {
+        self.circleId = circleId
+        self.spaceUri = spaceUri
+        self.currentKeyVersion = currentKeyVersion
+        self.joinedAtVersionJson = joinedAtVersionJson
+        self.pendingOpsJson = pendingOpsJson
+        self.updatedAt = updatedAt
+        self.recordCid = recordCid
+    }
+}
+
+extension CircleOwnerStateDto: Equatable, Hashable {
+    public static func == (lhs: CircleOwnerStateDto, rhs: CircleOwnerStateDto) -> Bool {
+        if lhs.circleId != rhs.circleId {
+            return false
+        }
+        if lhs.spaceUri != rhs.spaceUri {
+            return false
+        }
+        if lhs.currentKeyVersion != rhs.currentKeyVersion {
+            return false
+        }
+        if lhs.joinedAtVersionJson != rhs.joinedAtVersionJson {
+            return false
+        }
+        if lhs.pendingOpsJson != rhs.pendingOpsJson {
+            return false
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return false
+        }
+        if lhs.recordCid != rhs.recordCid {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(circleId)
+        hasher.combine(spaceUri)
+        hasher.combine(currentKeyVersion)
+        hasher.combine(joinedAtVersionJson)
+        hasher.combine(pendingOpsJson)
+        hasher.combine(updatedAt)
+        hasher.combine(recordCid)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCircleOwnerStateDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CircleOwnerStateDto {
+        return
+            try CircleOwnerStateDto(
+                circleId: FfiConverterString.read(from: &buf),
+                spaceUri: FfiConverterString.read(from: &buf),
+                currentKeyVersion: FfiConverterUInt64.read(from: &buf),
+                joinedAtVersionJson: FfiConverterString.read(from: &buf),
+                pendingOpsJson: FfiConverterString.read(from: &buf),
+                updatedAt: FfiConverterString.read(from: &buf),
+                recordCid: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CircleOwnerStateDto, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.circleId, into: &buf)
+        FfiConverterString.write(value.spaceUri, into: &buf)
+        FfiConverterUInt64.write(value.currentKeyVersion, into: &buf)
+        FfiConverterString.write(value.joinedAtVersionJson, into: &buf)
+        FfiConverterString.write(value.pendingOpsJson, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+        FfiConverterOptionString.write(value.recordCid, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleOwnerStateDto_lift(_ buf: RustBuffer) throws -> CircleOwnerStateDto {
+    return try FfiConverterTypeCircleOwnerStateDto.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCircleOwnerStateDto_lower(_ value: CircleOwnerStateDto) -> RustBuffer {
+    return FfiConverterTypeCircleOwnerStateDto.lower(value)
+}
+
+/**
+ * Inputs for opening a stored `blue.catbird.circle.post` record.
+ *
+ * Raw-bytes contract: `record_json` is the record's raw canonical JSON as
+ * fetched from the PDS / AppView, passed through untouched. Re-encoding it
+ * through another codec (e.g. Petrel's typed models) injects nested `$type`
+ * fields and changes the bytes, which breaks the AAD/signature checks.
+ */
+public struct CirclePostOpenRequest {
+    public var recordJson: String
+    /**
+     * The URI the record was read from (bound into the AAD).
+     */
+    public var postUri: String
+    /**
+     * The repo the record was read from (bound into the AAD).
+     */
+    public var authorDid: String
+    public var circleKey: Data
+    /**
+     * The author's `mailboxKeys` record (or bare `epochPublic`) whose head
+     * is the record's `authorEpochHead`, fetched by the caller.
+     */
+    public var authorEpochJson: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(recordJson: String,
+                /* 
+                    * The URI the record was read from (bound into the AAD).
+                    */ postUri: String,
+                /* 
+                    * The repo the record was read from (bound into the AAD).
+                    */ authorDid: String, circleKey: Data,
+                /* 
+                    * The author's `mailboxKeys` record (or bare `epochPublic`) whose head
+                    * is the record's `authorEpochHead`, fetched by the caller.
+                    */ authorEpochJson: String)
+    {
+        self.recordJson = recordJson
+        self.postUri = postUri
+        self.authorDid = authorDid
+        self.circleKey = circleKey
+        self.authorEpochJson = authorEpochJson
+    }
+}
+
+extension CirclePostOpenRequest: Equatable, Hashable {
+    public static func == (lhs: CirclePostOpenRequest, rhs: CirclePostOpenRequest) -> Bool {
+        if lhs.recordJson != rhs.recordJson {
+            return false
+        }
+        if lhs.postUri != rhs.postUri {
+            return false
+        }
+        if lhs.authorDid != rhs.authorDid {
+            return false
+        }
+        if lhs.circleKey != rhs.circleKey {
+            return false
+        }
+        if lhs.authorEpochJson != rhs.authorEpochJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(recordJson)
+        hasher.combine(postUri)
+        hasher.combine(authorDid)
+        hasher.combine(circleKey)
+        hasher.combine(authorEpochJson)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCirclePostOpenRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CirclePostOpenRequest {
+        return
+            try CirclePostOpenRequest(
+                recordJson: FfiConverterString.read(from: &buf),
+                postUri: FfiConverterString.read(from: &buf),
+                authorDid: FfiConverterString.read(from: &buf),
+                circleKey: FfiConverterData.read(from: &buf),
+                authorEpochJson: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CirclePostOpenRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.recordJson, into: &buf)
+        FfiConverterString.write(value.postUri, into: &buf)
+        FfiConverterString.write(value.authorDid, into: &buf)
+        FfiConverterData.write(value.circleKey, into: &buf)
+        FfiConverterString.write(value.authorEpochJson, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCirclePostOpenRequest_lift(_ buf: RustBuffer) throws -> CirclePostOpenRequest {
+    return try FfiConverterTypeCirclePostOpenRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCirclePostOpenRequest_lower(_ value: CirclePostOpenRequest) -> RustBuffer {
+    return FfiConverterTypeCirclePostOpenRequest.lower(value)
+}
+
+/**
+ * Inputs for sealing a `blue.catbird.circle.post` record as this account.
+ */
+public struct CirclePostSealRequest {
+    public var circleId: String
+    public var keyVersion: UInt64
+    public var circleKey: Data
+    public var postUri: String
+    public var authorDid: String
+    public var createdAt: String
+    /**
+     * The inner `CirclePostPayload` JSON (`post`, `media`, `created_at`).
+     */
+    public var payloadJson: String
+    /**
+     * Plaintext `replyRef`; must equal the payload post's `reply`.
+     */
+    public var replyJson: String?
+    /**
+     * Plaintext `$type: blob` refs (at most [`MAX_ATTACHMENTS`]).
+     */
+    public var attachmentsJson: [String]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(circleId: String, keyVersion: UInt64, circleKey: Data, postUri: String, authorDid: String, createdAt: String,
+                /* 
+                    * The inner `CirclePostPayload` JSON (`post`, `media`, `created_at`).
+                    */ payloadJson: String,
+                /* 
+                    * Plaintext `replyRef`; must equal the payload post's `reply`.
+                    */ replyJson: String?,
+                /* 
+                    * Plaintext `$type: blob` refs (at most [`MAX_ATTACHMENTS`]).
+                    */ attachmentsJson: [String])
+    {
+        self.circleId = circleId
+        self.keyVersion = keyVersion
+        self.circleKey = circleKey
+        self.postUri = postUri
+        self.authorDid = authorDid
+        self.createdAt = createdAt
+        self.payloadJson = payloadJson
+        self.replyJson = replyJson
+        self.attachmentsJson = attachmentsJson
+    }
+}
+
+extension CirclePostSealRequest: Equatable, Hashable {
+    public static func == (lhs: CirclePostSealRequest, rhs: CirclePostSealRequest) -> Bool {
+        if lhs.circleId != rhs.circleId {
+            return false
+        }
+        if lhs.keyVersion != rhs.keyVersion {
+            return false
+        }
+        if lhs.circleKey != rhs.circleKey {
+            return false
+        }
+        if lhs.postUri != rhs.postUri {
+            return false
+        }
+        if lhs.authorDid != rhs.authorDid {
+            return false
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return false
+        }
+        if lhs.payloadJson != rhs.payloadJson {
+            return false
+        }
+        if lhs.replyJson != rhs.replyJson {
+            return false
+        }
+        if lhs.attachmentsJson != rhs.attachmentsJson {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(circleId)
+        hasher.combine(keyVersion)
+        hasher.combine(circleKey)
+        hasher.combine(postUri)
+        hasher.combine(authorDid)
+        hasher.combine(createdAt)
+        hasher.combine(payloadJson)
+        hasher.combine(replyJson)
+        hasher.combine(attachmentsJson)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCirclePostSealRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CirclePostSealRequest {
+        return
+            try CirclePostSealRequest(
+                circleId: FfiConverterString.read(from: &buf),
+                keyVersion: FfiConverterUInt64.read(from: &buf),
+                circleKey: FfiConverterData.read(from: &buf),
+                postUri: FfiConverterString.read(from: &buf),
+                authorDid: FfiConverterString.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf),
+                payloadJson: FfiConverterString.read(from: &buf),
+                replyJson: FfiConverterOptionString.read(from: &buf),
+                attachmentsJson: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: CirclePostSealRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.circleId, into: &buf)
+        FfiConverterUInt64.write(value.keyVersion, into: &buf)
+        FfiConverterData.write(value.circleKey, into: &buf)
+        FfiConverterString.write(value.postUri, into: &buf)
+        FfiConverterString.write(value.authorDid, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterString.write(value.payloadJson, into: &buf)
+        FfiConverterOptionString.write(value.replyJson, into: &buf)
+        FfiConverterSequenceString.write(value.attachmentsJson, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCirclePostSealRequest_lift(_ buf: RustBuffer) throws -> CirclePostSealRequest {
+    return try FfiConverterTypeCirclePostSealRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCirclePostSealRequest_lower(_ value: CirclePostSealRequest) -> RustBuffer {
+    return FfiConverterTypeCirclePostSealRequest.lower(value)
+}
+
+/**
  * UniFFI-safe device context. The platform gateway retains the opaque Nest
  * session and attaches account authentication only while submitting.
  */
@@ -4102,6 +5029,118 @@ public func FfiConverterTypeDecryptResult_lift(_ buf: RustBuffer) throws -> Decr
 #endif
 public func FfiConverterTypeDecryptResult_lower(_ value: DecryptResult) -> RustBuffer {
     return FfiConverterTypeDecryptResult.lower(value)
+}
+
+/**
+ * Per-step result of unified `revoke_device`, including atomic recovery-method rotation outputs.
+ */
+public struct DeviceRevocationReport {
+    public var targetDeviceId: String
+    public var dsRevoked: Bool
+    public var groupsUpdated: UInt32
+    public var labyrinthRotated: Bool
+    public var newEpochSeq: UInt64?
+    public var pdsRecordDeleted: Bool
+    public var rekeyedRecoveryCode: String?
+    public var rekeyedPasskeyIds: [Data]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(targetDeviceId: String, dsRevoked: Bool, groupsUpdated: UInt32, labyrinthRotated: Bool, newEpochSeq: UInt64?, pdsRecordDeleted: Bool, rekeyedRecoveryCode: String?, rekeyedPasskeyIds: [Data]) {
+        self.targetDeviceId = targetDeviceId
+        self.dsRevoked = dsRevoked
+        self.groupsUpdated = groupsUpdated
+        self.labyrinthRotated = labyrinthRotated
+        self.newEpochSeq = newEpochSeq
+        self.pdsRecordDeleted = pdsRecordDeleted
+        self.rekeyedRecoveryCode = rekeyedRecoveryCode
+        self.rekeyedPasskeyIds = rekeyedPasskeyIds
+    }
+}
+
+extension DeviceRevocationReport: Equatable, Hashable {
+    public static func == (lhs: DeviceRevocationReport, rhs: DeviceRevocationReport) -> Bool {
+        if lhs.targetDeviceId != rhs.targetDeviceId {
+            return false
+        }
+        if lhs.dsRevoked != rhs.dsRevoked {
+            return false
+        }
+        if lhs.groupsUpdated != rhs.groupsUpdated {
+            return false
+        }
+        if lhs.labyrinthRotated != rhs.labyrinthRotated {
+            return false
+        }
+        if lhs.newEpochSeq != rhs.newEpochSeq {
+            return false
+        }
+        if lhs.pdsRecordDeleted != rhs.pdsRecordDeleted {
+            return false
+        }
+        if lhs.rekeyedRecoveryCode != rhs.rekeyedRecoveryCode {
+            return false
+        }
+        if lhs.rekeyedPasskeyIds != rhs.rekeyedPasskeyIds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(targetDeviceId)
+        hasher.combine(dsRevoked)
+        hasher.combine(groupsUpdated)
+        hasher.combine(labyrinthRotated)
+        hasher.combine(newEpochSeq)
+        hasher.combine(pdsRecordDeleted)
+        hasher.combine(rekeyedRecoveryCode)
+        hasher.combine(rekeyedPasskeyIds)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceRevocationReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceRevocationReport {
+        return
+            try DeviceRevocationReport(
+                targetDeviceId: FfiConverterString.read(from: &buf),
+                dsRevoked: FfiConverterBool.read(from: &buf),
+                groupsUpdated: FfiConverterUInt32.read(from: &buf),
+                labyrinthRotated: FfiConverterBool.read(from: &buf),
+                newEpochSeq: FfiConverterOptionUInt64.read(from: &buf),
+                pdsRecordDeleted: FfiConverterBool.read(from: &buf),
+                rekeyedRecoveryCode: FfiConverterOptionString.read(from: &buf),
+                rekeyedPasskeyIds: FfiConverterSequenceData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: DeviceRevocationReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.targetDeviceId, into: &buf)
+        FfiConverterBool.write(value.dsRevoked, into: &buf)
+        FfiConverterUInt32.write(value.groupsUpdated, into: &buf)
+        FfiConverterBool.write(value.labyrinthRotated, into: &buf)
+        FfiConverterOptionUInt64.write(value.newEpochSeq, into: &buf)
+        FfiConverterBool.write(value.pdsRecordDeleted, into: &buf)
+        FfiConverterOptionString.write(value.rekeyedRecoveryCode, into: &buf)
+        FfiConverterSequenceData.write(value.rekeyedPasskeyIds, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceRevocationReport_lift(_ buf: RustBuffer) throws -> DeviceRevocationReport {
+    return try FfiConverterTypeDeviceRevocationReport.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceRevocationReport_lower(_ value: DeviceRevocationReport) -> RustBuffer {
+    return FfiConverterTypeDeviceRevocationReport.lower(value)
 }
 
 public struct DirectRequestInput {
@@ -5789,6 +6828,150 @@ public func FfiConverterTypeLabyrinthRotationExclusion_lower(_ value: LabyrinthR
     return FfiConverterTypeLabyrinthRotationExclusion.lower(value)
 }
 
+/**
+ * Outcome of `CatbirdMlsClient::leave_conversation`.
+ */
+public struct LeaveConversationOutcome {
+    public var leftImmediately: Bool
+    public var leaveRequestId: String?
+    public var rearchivedMessages: UInt32
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(leftImmediately: Bool, leaveRequestId: String?, rearchivedMessages: UInt32) {
+        self.leftImmediately = leftImmediately
+        self.leaveRequestId = leaveRequestId
+        self.rearchivedMessages = rearchivedMessages
+    }
+}
+
+extension LeaveConversationOutcome: Equatable, Hashable {
+    public static func == (lhs: LeaveConversationOutcome, rhs: LeaveConversationOutcome) -> Bool {
+        if lhs.leftImmediately != rhs.leftImmediately {
+            return false
+        }
+        if lhs.leaveRequestId != rhs.leaveRequestId {
+            return false
+        }
+        if lhs.rearchivedMessages != rhs.rearchivedMessages {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(leftImmediately)
+        hasher.combine(leaveRequestId)
+        hasher.combine(rearchivedMessages)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLeaveConversationOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LeaveConversationOutcome {
+        return
+            try LeaveConversationOutcome(
+                leftImmediately: FfiConverterBool.read(from: &buf),
+                leaveRequestId: FfiConverterOptionString.read(from: &buf),
+                rearchivedMessages: FfiConverterUInt32.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: LeaveConversationOutcome, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.leftImmediately, into: &buf)
+        FfiConverterOptionString.write(value.leaveRequestId, into: &buf)
+        FfiConverterUInt32.write(value.rearchivedMessages, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLeaveConversationOutcome_lift(_ buf: RustBuffer) throws -> LeaveConversationOutcome {
+    return try FfiConverterTypeLeaveConversationOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLeaveConversationOutcome_lower(_ value: LeaveConversationOutcome) -> RustBuffer {
+    return FfiConverterTypeLeaveConversationOutcome.lower(value)
+}
+
+/**
+ * Decrypted `OwnerMailbox` `readState` record (`MAX` CRDT).
+ */
+public struct MailboxReadStateRecord {
+    public var conversationId: String
+    public var readThroughSeq: UInt64
+    public var updatedAt: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(conversationId: String, readThroughSeq: UInt64, updatedAt: String) {
+        self.conversationId = conversationId
+        self.readThroughSeq = readThroughSeq
+        self.updatedAt = updatedAt
+    }
+}
+
+extension MailboxReadStateRecord: Equatable, Hashable {
+    public static func == (lhs: MailboxReadStateRecord, rhs: MailboxReadStateRecord) -> Bool {
+        if lhs.conversationId != rhs.conversationId {
+            return false
+        }
+        if lhs.readThroughSeq != rhs.readThroughSeq {
+            return false
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(conversationId)
+        hasher.combine(readThroughSeq)
+        hasher.combine(updatedAt)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMailboxReadStateRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MailboxReadStateRecord {
+        return
+            try MailboxReadStateRecord(
+                conversationId: FfiConverterString.read(from: &buf),
+                readThroughSeq: FfiConverterUInt64.read(from: &buf),
+                updatedAt: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: MailboxReadStateRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.conversationId, into: &buf)
+        FfiConverterUInt64.write(value.readThroughSeq, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMailboxReadStateRecord_lift(_ buf: RustBuffer) throws -> MailboxReadStateRecord {
+    return try FfiConverterTypeMailboxReadStateRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMailboxReadStateRecord_lower(_ value: MailboxReadStateRecord) -> RustBuffer {
+    return FfiConverterTypeMailboxReadStateRecord.lower(value)
+}
+
 public struct MemberCredential {
     public var credential: CredentialData
     public var signatureKey: Data
@@ -6066,10 +7249,11 @@ public struct NotificationPreview {
     public var fallbackGeneric: Bool
     public var darwinNotificationName: String
     public var receiptVerified: Bool
+    public var isOwnSiblingSender: Bool
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(messageId: String, conversationId: String, senderDid: String, senderDisplayName: String?, groupTitle: String?, body: String, epoch: Int64, seq: Int64, fromCache: Bool, fallbackGeneric: Bool, darwinNotificationName: String, receiptVerified: Bool) {
+    public init(messageId: String, conversationId: String, senderDid: String, senderDisplayName: String?, groupTitle: String?, body: String, epoch: Int64, seq: Int64, fromCache: Bool, fallbackGeneric: Bool, darwinNotificationName: String, receiptVerified: Bool, isOwnSiblingSender: Bool) {
         self.messageId = messageId
         self.conversationId = conversationId
         self.senderDid = senderDid
@@ -6082,6 +7266,7 @@ public struct NotificationPreview {
         self.fallbackGeneric = fallbackGeneric
         self.darwinNotificationName = darwinNotificationName
         self.receiptVerified = receiptVerified
+        self.isOwnSiblingSender = isOwnSiblingSender
     }
 }
 
@@ -6123,6 +7308,9 @@ extension NotificationPreview: Equatable, Hashable {
         if lhs.receiptVerified != rhs.receiptVerified {
             return false
         }
+        if lhs.isOwnSiblingSender != rhs.isOwnSiblingSender {
+            return false
+        }
         return true
     }
 
@@ -6139,6 +7327,7 @@ extension NotificationPreview: Equatable, Hashable {
         hasher.combine(fallbackGeneric)
         hasher.combine(darwinNotificationName)
         hasher.combine(receiptVerified)
+        hasher.combine(isOwnSiblingSender)
     }
 }
 
@@ -6160,7 +7349,8 @@ public struct FfiConverterTypeNotificationPreview: FfiConverterRustBuffer {
                 fromCache: FfiConverterBool.read(from: &buf),
                 fallbackGeneric: FfiConverterBool.read(from: &buf),
                 darwinNotificationName: FfiConverterString.read(from: &buf),
-                receiptVerified: FfiConverterBool.read(from: &buf)
+                receiptVerified: FfiConverterBool.read(from: &buf),
+                isOwnSiblingSender: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -6177,6 +7367,7 @@ public struct FfiConverterTypeNotificationPreview: FfiConverterRustBuffer {
         FfiConverterBool.write(value.fallbackGeneric, into: &buf)
         FfiConverterString.write(value.darwinNotificationName, into: &buf)
         FfiConverterBool.write(value.receiptVerified, into: &buf)
+        FfiConverterBool.write(value.isOwnSiblingSender, into: &buf)
     }
 }
 
@@ -6192,6 +7383,78 @@ public func FfiConverterTypeNotificationPreview_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeNotificationPreview_lower(_ value: NotificationPreview) -> RustBuffer {
     return FfiConverterTypeNotificationPreview.lower(value)
+}
+
+/**
+ * Initiator session handle returned when a new device writes an `otcSession` offer into `OwnerMailbox`.
+ */
+public struct OtcInitiatedSession {
+    public var sessionIdHex: String
+    public var expiresAtMs: Int64
+    public var initiatorMlkem768EkLen: UInt32
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(sessionIdHex: String, expiresAtMs: Int64, initiatorMlkem768EkLen: UInt32) {
+        self.sessionIdHex = sessionIdHex
+        self.expiresAtMs = expiresAtMs
+        self.initiatorMlkem768EkLen = initiatorMlkem768EkLen
+    }
+}
+
+extension OtcInitiatedSession: Equatable, Hashable {
+    public static func == (lhs: OtcInitiatedSession, rhs: OtcInitiatedSession) -> Bool {
+        if lhs.sessionIdHex != rhs.sessionIdHex {
+            return false
+        }
+        if lhs.expiresAtMs != rhs.expiresAtMs {
+            return false
+        }
+        if lhs.initiatorMlkem768EkLen != rhs.initiatorMlkem768EkLen {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(sessionIdHex)
+        hasher.combine(expiresAtMs)
+        hasher.combine(initiatorMlkem768EkLen)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOtcInitiatedSession: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OtcInitiatedSession {
+        return
+            try OtcInitiatedSession(
+                sessionIdHex: FfiConverterString.read(from: &buf),
+                expiresAtMs: FfiConverterInt64.read(from: &buf),
+                initiatorMlkem768EkLen: FfiConverterUInt32.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: OtcInitiatedSession, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.sessionIdHex, into: &buf)
+        FfiConverterInt64.write(value.expiresAtMs, into: &buf)
+        FfiConverterUInt32.write(value.initiatorMlkem768EkLen, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOtcInitiatedSession_lift(_ buf: RustBuffer) throws -> OtcInitiatedSession {
+    return try FfiConverterTypeOtcInitiatedSession.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOtcInitiatedSession_lower(_ value: OtcInitiatedSession) -> RustBuffer {
+    return FfiConverterTypeOtcInitiatedSession.lower(value)
 }
 
 /**
@@ -6336,6 +7599,118 @@ public func FfiConverterTypeOtcPairingOffer_lift(_ buf: RustBuffer) throws -> Ot
 #endif
 public func FfiConverterTypeOtcPairingOffer_lower(_ value: OtcPairingOffer) -> RustBuffer {
     return FfiConverterTypeOtcPairingOffer.lower(value)
+}
+
+/**
+ * Safety-number & 72-hour hold metadata for a peer mailbox full-chain reset (`repin_peer`).
+ */
+public struct PeerRepinProposalInfo {
+    public var did: String
+    public var previousSeq: UInt64?
+    public var oldSafetyNumber: String?
+    public var offeredSeq: UInt64
+    public var offeredHeadHex: String
+    public var safetyNumber: String
+    public var eligibleAtMs: Int64
+    public var holdRemainingMs: Int64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(did: String, previousSeq: UInt64?, oldSafetyNumber: String?, offeredSeq: UInt64, offeredHeadHex: String, safetyNumber: String, eligibleAtMs: Int64, holdRemainingMs: Int64) {
+        self.did = did
+        self.previousSeq = previousSeq
+        self.oldSafetyNumber = oldSafetyNumber
+        self.offeredSeq = offeredSeq
+        self.offeredHeadHex = offeredHeadHex
+        self.safetyNumber = safetyNumber
+        self.eligibleAtMs = eligibleAtMs
+        self.holdRemainingMs = holdRemainingMs
+    }
+}
+
+extension PeerRepinProposalInfo: Equatable, Hashable {
+    public static func == (lhs: PeerRepinProposalInfo, rhs: PeerRepinProposalInfo) -> Bool {
+        if lhs.did != rhs.did {
+            return false
+        }
+        if lhs.previousSeq != rhs.previousSeq {
+            return false
+        }
+        if lhs.oldSafetyNumber != rhs.oldSafetyNumber {
+            return false
+        }
+        if lhs.offeredSeq != rhs.offeredSeq {
+            return false
+        }
+        if lhs.offeredHeadHex != rhs.offeredHeadHex {
+            return false
+        }
+        if lhs.safetyNumber != rhs.safetyNumber {
+            return false
+        }
+        if lhs.eligibleAtMs != rhs.eligibleAtMs {
+            return false
+        }
+        if lhs.holdRemainingMs != rhs.holdRemainingMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(did)
+        hasher.combine(previousSeq)
+        hasher.combine(oldSafetyNumber)
+        hasher.combine(offeredSeq)
+        hasher.combine(offeredHeadHex)
+        hasher.combine(safetyNumber)
+        hasher.combine(eligibleAtMs)
+        hasher.combine(holdRemainingMs)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePeerRepinProposalInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PeerRepinProposalInfo {
+        return
+            try PeerRepinProposalInfo(
+                did: FfiConverterString.read(from: &buf),
+                previousSeq: FfiConverterOptionUInt64.read(from: &buf),
+                oldSafetyNumber: FfiConverterOptionString.read(from: &buf),
+                offeredSeq: FfiConverterUInt64.read(from: &buf),
+                offeredHeadHex: FfiConverterString.read(from: &buf),
+                safetyNumber: FfiConverterString.read(from: &buf),
+                eligibleAtMs: FfiConverterInt64.read(from: &buf),
+                holdRemainingMs: FfiConverterInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: PeerRepinProposalInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.did, into: &buf)
+        FfiConverterOptionUInt64.write(value.previousSeq, into: &buf)
+        FfiConverterOptionString.write(value.oldSafetyNumber, into: &buf)
+        FfiConverterUInt64.write(value.offeredSeq, into: &buf)
+        FfiConverterString.write(value.offeredHeadHex, into: &buf)
+        FfiConverterString.write(value.safetyNumber, into: &buf)
+        FfiConverterInt64.write(value.eligibleAtMs, into: &buf)
+        FfiConverterInt64.write(value.holdRemainingMs, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerRepinProposalInfo_lift(_ buf: RustBuffer) throws -> PeerRepinProposalInfo {
+    return try FfiConverterTypePeerRepinProposalInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypePeerRepinProposalInfo_lower(_ value: PeerRepinProposalInfo) -> RustBuffer {
+    return FfiConverterTypePeerRepinProposalInfo.lower(value)
 }
 
 /**
@@ -7449,6 +8824,142 @@ public func FfiConverterTypeQueuedLabyrinthArchivePayload_lift(_ buf: RustBuffer
 #endif
 public func FfiConverterTypeQueuedLabyrinthArchivePayload_lower(_ value: QueuedLabyrinthArchivePayload) -> RustBuffer {
     return FfiConverterTypeQueuedLabyrinthArchivePayload.lower(value)
+}
+
+/**
+ * Unified account device inventory entry combining `mls-ds` `getOwnDevices` and `OwnerMailbox` device metadata.
+ */
+public struct RegisteredDeviceInfo {
+    public var deviceId: String
+    public var deviceName: String?
+    public var signaturePublicKey: Data
+    public var keyId: String
+    public var authGeneration: Int64
+    public var status: String
+    public var createdAt: String
+    public var lastActiveAt: String?
+    public var dormantAt: String?
+    public var labyrinthDeviceKeyHex: String?
+    public var isCurrentDevice: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(deviceId: String, deviceName: String?, signaturePublicKey: Data, keyId: String, authGeneration: Int64, status: String, createdAt: String, lastActiveAt: String?, dormantAt: String?, labyrinthDeviceKeyHex: String?, isCurrentDevice: Bool) {
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        self.signaturePublicKey = signaturePublicKey
+        self.keyId = keyId
+        self.authGeneration = authGeneration
+        self.status = status
+        self.createdAt = createdAt
+        self.lastActiveAt = lastActiveAt
+        self.dormantAt = dormantAt
+        self.labyrinthDeviceKeyHex = labyrinthDeviceKeyHex
+        self.isCurrentDevice = isCurrentDevice
+    }
+}
+
+extension RegisteredDeviceInfo: Equatable, Hashable {
+    public static func == (lhs: RegisteredDeviceInfo, rhs: RegisteredDeviceInfo) -> Bool {
+        if lhs.deviceId != rhs.deviceId {
+            return false
+        }
+        if lhs.deviceName != rhs.deviceName {
+            return false
+        }
+        if lhs.signaturePublicKey != rhs.signaturePublicKey {
+            return false
+        }
+        if lhs.keyId != rhs.keyId {
+            return false
+        }
+        if lhs.authGeneration != rhs.authGeneration {
+            return false
+        }
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return false
+        }
+        if lhs.lastActiveAt != rhs.lastActiveAt {
+            return false
+        }
+        if lhs.dormantAt != rhs.dormantAt {
+            return false
+        }
+        if lhs.labyrinthDeviceKeyHex != rhs.labyrinthDeviceKeyHex {
+            return false
+        }
+        if lhs.isCurrentDevice != rhs.isCurrentDevice {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(deviceId)
+        hasher.combine(deviceName)
+        hasher.combine(signaturePublicKey)
+        hasher.combine(keyId)
+        hasher.combine(authGeneration)
+        hasher.combine(status)
+        hasher.combine(createdAt)
+        hasher.combine(lastActiveAt)
+        hasher.combine(dormantAt)
+        hasher.combine(labyrinthDeviceKeyHex)
+        hasher.combine(isCurrentDevice)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRegisteredDeviceInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RegisteredDeviceInfo {
+        return
+            try RegisteredDeviceInfo(
+                deviceId: FfiConverterString.read(from: &buf),
+                deviceName: FfiConverterOptionString.read(from: &buf),
+                signaturePublicKey: FfiConverterData.read(from: &buf),
+                keyId: FfiConverterString.read(from: &buf),
+                authGeneration: FfiConverterInt64.read(from: &buf),
+                status: FfiConverterString.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf),
+                lastActiveAt: FfiConverterOptionString.read(from: &buf),
+                dormantAt: FfiConverterOptionString.read(from: &buf),
+                labyrinthDeviceKeyHex: FfiConverterOptionString.read(from: &buf),
+                isCurrentDevice: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: RegisteredDeviceInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterOptionString.write(value.deviceName, into: &buf)
+        FfiConverterData.write(value.signaturePublicKey, into: &buf)
+        FfiConverterString.write(value.keyId, into: &buf)
+        FfiConverterInt64.write(value.authGeneration, into: &buf)
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterOptionString.write(value.lastActiveAt, into: &buf)
+        FfiConverterOptionString.write(value.dormantAt, into: &buf)
+        FfiConverterOptionString.write(value.labyrinthDeviceKeyHex, into: &buf)
+        FfiConverterBool.write(value.isCurrentDevice, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRegisteredDeviceInfo_lift(_ buf: RustBuffer) throws -> RegisteredDeviceInfo {
+    return try FfiConverterTypeRegisteredDeviceInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRegisteredDeviceInfo_lower(_ value: RegisteredDeviceInfo) -> RustBuffer {
+    return FfiConverterTypeRegisteredDeviceInfo.lower(value)
 }
 
 public struct RemoveMembersResult {
@@ -8790,6 +10301,134 @@ public func FfiConverterTypeUpdateProposalInfo_lower(_ value: UpdateProposalInfo
 }
 
 /**
+ * Encrypted conversation attachment uploaded into the conversation Space (`"{spaceURI}|{repoDID}|{cid}"`).
+ */
+public struct UploadedConversationAttachment {
+    public var locator: String
+    public var spaceUri: String
+    public var repoDid: String
+    public var cid: String
+    public var rkey: String
+    public var symmetricKey: Data
+    public var iv: Data
+    public var ciphertextSha256: Data
+    public var ciphertextSize: UInt64
+    public var mimeType: String
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(locator: String, spaceUri: String, repoDid: String, cid: String, rkey: String, symmetricKey: Data, iv: Data, ciphertextSha256: Data, ciphertextSize: UInt64, mimeType: String) {
+        self.locator = locator
+        self.spaceUri = spaceUri
+        self.repoDid = repoDid
+        self.cid = cid
+        self.rkey = rkey
+        self.symmetricKey = symmetricKey
+        self.iv = iv
+        self.ciphertextSha256 = ciphertextSha256
+        self.ciphertextSize = ciphertextSize
+        self.mimeType = mimeType
+    }
+}
+
+extension UploadedConversationAttachment: Equatable, Hashable {
+    public static func == (lhs: UploadedConversationAttachment, rhs: UploadedConversationAttachment) -> Bool {
+        if lhs.locator != rhs.locator {
+            return false
+        }
+        if lhs.spaceUri != rhs.spaceUri {
+            return false
+        }
+        if lhs.repoDid != rhs.repoDid {
+            return false
+        }
+        if lhs.cid != rhs.cid {
+            return false
+        }
+        if lhs.rkey != rhs.rkey {
+            return false
+        }
+        if lhs.symmetricKey != rhs.symmetricKey {
+            return false
+        }
+        if lhs.iv != rhs.iv {
+            return false
+        }
+        if lhs.ciphertextSha256 != rhs.ciphertextSha256 {
+            return false
+        }
+        if lhs.ciphertextSize != rhs.ciphertextSize {
+            return false
+        }
+        if lhs.mimeType != rhs.mimeType {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(locator)
+        hasher.combine(spaceUri)
+        hasher.combine(repoDid)
+        hasher.combine(cid)
+        hasher.combine(rkey)
+        hasher.combine(symmetricKey)
+        hasher.combine(iv)
+        hasher.combine(ciphertextSha256)
+        hasher.combine(ciphertextSize)
+        hasher.combine(mimeType)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUploadedConversationAttachment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UploadedConversationAttachment {
+        return
+            try UploadedConversationAttachment(
+                locator: FfiConverterString.read(from: &buf),
+                spaceUri: FfiConverterString.read(from: &buf),
+                repoDid: FfiConverterString.read(from: &buf),
+                cid: FfiConverterString.read(from: &buf),
+                rkey: FfiConverterString.read(from: &buf),
+                symmetricKey: FfiConverterData.read(from: &buf),
+                iv: FfiConverterData.read(from: &buf),
+                ciphertextSha256: FfiConverterData.read(from: &buf),
+                ciphertextSize: FfiConverterUInt64.read(from: &buf),
+                mimeType: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UploadedConversationAttachment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.locator, into: &buf)
+        FfiConverterString.write(value.spaceUri, into: &buf)
+        FfiConverterString.write(value.repoDid, into: &buf)
+        FfiConverterString.write(value.cid, into: &buf)
+        FfiConverterString.write(value.rkey, into: &buf)
+        FfiConverterData.write(value.symmetricKey, into: &buf)
+        FfiConverterData.write(value.iv, into: &buf)
+        FfiConverterData.write(value.ciphertextSha256, into: &buf)
+        FfiConverterUInt64.write(value.ciphertextSize, into: &buf)
+        FfiConverterString.write(value.mimeType, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUploadedConversationAttachment_lift(_ buf: RustBuffer) throws -> UploadedConversationAttachment {
+    return try FfiConverterTypeUploadedConversationAttachment.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUploadedConversationAttachment_lower(_ value: UploadedConversationAttachment) -> RustBuffer {
+    return FfiConverterTypeUploadedConversationAttachment.lower(value)
+}
+
+/**
  * Validation context passed to CredentialValidator
  */
 public struct ValidationContext {
@@ -8859,6 +10498,115 @@ public func FfiConverterTypeValidationContext_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypeValidationContext_lower(_ value: ValidationContext) -> RustBuffer {
     return FfiConverterTypeValidationContext.lower(value)
+}
+
+public struct VoicePrepareResult {
+    public var opusData: Data
+    public var encryptedBlob: Data
+    public var key: Data
+    public var iv: Data
+    public var sha256: String
+    public var durationMs: UInt64
+    public var waveform: [Float]
+    public var size: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(opusData: Data, encryptedBlob: Data, key: Data, iv: Data, sha256: String, durationMs: UInt64, waveform: [Float], size: UInt64) {
+        self.opusData = opusData
+        self.encryptedBlob = encryptedBlob
+        self.key = key
+        self.iv = iv
+        self.sha256 = sha256
+        self.durationMs = durationMs
+        self.waveform = waveform
+        self.size = size
+    }
+}
+
+extension VoicePrepareResult: Equatable, Hashable {
+    public static func == (lhs: VoicePrepareResult, rhs: VoicePrepareResult) -> Bool {
+        if lhs.opusData != rhs.opusData {
+            return false
+        }
+        if lhs.encryptedBlob != rhs.encryptedBlob {
+            return false
+        }
+        if lhs.key != rhs.key {
+            return false
+        }
+        if lhs.iv != rhs.iv {
+            return false
+        }
+        if lhs.sha256 != rhs.sha256 {
+            return false
+        }
+        if lhs.durationMs != rhs.durationMs {
+            return false
+        }
+        if lhs.waveform != rhs.waveform {
+            return false
+        }
+        if lhs.size != rhs.size {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(opusData)
+        hasher.combine(encryptedBlob)
+        hasher.combine(key)
+        hasher.combine(iv)
+        hasher.combine(sha256)
+        hasher.combine(durationMs)
+        hasher.combine(waveform)
+        hasher.combine(size)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVoicePrepareResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VoicePrepareResult {
+        return
+            try VoicePrepareResult(
+                opusData: FfiConverterData.read(from: &buf),
+                encryptedBlob: FfiConverterData.read(from: &buf),
+                key: FfiConverterData.read(from: &buf),
+                iv: FfiConverterData.read(from: &buf),
+                sha256: FfiConverterString.read(from: &buf),
+                durationMs: FfiConverterUInt64.read(from: &buf),
+                waveform: FfiConverterSequenceFloat.read(from: &buf),
+                size: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: VoicePrepareResult, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.opusData, into: &buf)
+        FfiConverterData.write(value.encryptedBlob, into: &buf)
+        FfiConverterData.write(value.key, into: &buf)
+        FfiConverterData.write(value.iv, into: &buf)
+        FfiConverterString.write(value.sha256, into: &buf)
+        FfiConverterUInt64.write(value.durationMs, into: &buf)
+        FfiConverterSequenceFloat.write(value.waveform, into: &buf)
+        FfiConverterUInt64.write(value.size, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoicePrepareResult_lift(_ buf: RustBuffer) throws -> VoicePrepareResult {
+    return try FfiConverterTypeVoicePrepareResult.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVoicePrepareResult_lower(_ value: VoicePrepareResult) -> RustBuffer {
+    return FfiConverterTypeVoicePrepareResult.lower(value)
 }
 
 public struct WelcomeResult {
@@ -9346,6 +11094,86 @@ extension ChatV2ValidationError: Foundation.LocalizedError {
     }
 }
 
+/**
+ * Every Circle failure, typed for the caller's UI. `reason` is short
+ * diagnostic text (an error code or fixed message, never payload bytes) safe
+ * to log; callers branch on the variant, not the text.
+ */
+public enum CircleFfiError {
+    /**
+     * Authentic-looking input that does not open for this key: AEAD tag,
+     * signature, or wrap failure.
+     */
+    case NotOpenable(reason: String)
+    /**
+     * The sender/author or its epoch chain failed verification
+     * (`UntrustedSender`, owner head, directory fork or rollback).
+     */
+    case Untrusted(reason: String)
+    /**
+     * Record, request or payload shape is invalid.
+     */
+    case Malformed(reason: String)
+    /**
+     * I/O, directory reachability, session or lock state; may succeed later.
+     */
+    case Unavailable(reason: String)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCircleFfiError: FfiConverterRustBuffer {
+    typealias SwiftType = CircleFfiError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CircleFfiError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return try .NotOpenable(
+                reason: FfiConverterString.read(from: &buf)
+            )
+        case 2: return try .Untrusted(
+                reason: FfiConverterString.read(from: &buf)
+            )
+        case 3: return try .Malformed(
+                reason: FfiConverterString.read(from: &buf)
+            )
+        case 4: return try .Unavailable(
+                reason: FfiConverterString.read(from: &buf)
+            )
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CircleFfiError, into buf: inout [UInt8]) {
+        switch value {
+        case let .NotOpenable(reason):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(reason, into: &buf)
+
+        case let .Untrusted(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(reason, into: &buf)
+
+        case let .Malformed(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+
+        case let .Unavailable(reason):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(reason, into: &buf)
+        }
+    }
+}
+
+extension CircleFfiError: Equatable, Hashable {}
+
+extension CircleFfiError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -9386,6 +11214,7 @@ public enum CleanChatOperationFfi {
     case revokeDevice
     case submitTransition
     case subscribeEvents
+    case approveDevice
 }
 
 #if swift(>=5.8)
@@ -9468,6 +11297,8 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
         case 35: return .submitTransition
 
         case 36: return .subscribeEvents
+
+        case 37: return .approveDevice
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -9582,6 +11413,9 @@ public struct FfiConverterTypeCleanChatOperationFfi: FfiConverterRustBuffer {
 
         case .subscribeEvents:
             writeInt(&buf, Int32(36))
+
+        case .approveDevice:
+            writeInt(&buf, Int32(37))
         }
     }
 }
@@ -10051,6 +11885,12 @@ public enum MlsError {
      * Refuse it before any operation; the app must wipe local state and re-enrol.
      */
     case LocalStateFormatUnsupported(message: String)
+
+    /**
+     * This 2nd+ enrolled device is awaiting existing-device approval (`pending_approval`)
+     * or Labyrinth pairing/recovery unlock before chat mutations or leaf fulfillment proceed.
+     */
+    case PendingDeviceAccess(message: String)
 }
 
 #if swift(>=5.8)
@@ -10266,6 +12106,10 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
                 message: FfiConverterString.read(from: &buf)
             )
 
+        case 52: return try .PendingDeviceAccess(
+                message: FfiConverterString.read(from: &buf)
+            )
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -10374,6 +12218,8 @@ public struct FfiConverterTypeMLSError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(50))
         case .LocalStateFormatUnsupported(_ /* message is ignored*/ ):
             writeInt(&buf, Int32(51))
+        case .PendingDeviceAccess(_ /* message is ignored*/ ):
+            writeInt(&buf, Int32(52))
         }
     }
 }
@@ -12089,6 +13935,54 @@ private struct FfiConverterOptionTypePushFetchTransport: FfiConverterRustBuffer 
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeCircleKeyOpenResult: FfiConverterRustBuffer {
+    typealias SwiftType = CircleKeyOpenResult?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCircleKeyOpenResult.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCircleKeyOpenResult.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeCircleOwnerStateDto: FfiConverterRustBuffer {
+    typealias SwiftType = CircleOwnerStateDto?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCircleOwnerStateDto.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCircleOwnerStateDto.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeCommitMetadataInfo: FfiConverterRustBuffer {
     typealias SwiftType = CommitMetadataInfo?
 
@@ -12201,6 +14095,30 @@ private struct FfiConverterOptionTypeGroupMetadataRow: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeGroupMetadataRow.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterOptionTypeMailboxReadStateRecord: FfiConverterRustBuffer {
+    typealias SwiftType = MailboxReadStateRecord?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMailboxReadStateRecord.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMailboxReadStateRecord.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -12329,6 +14247,31 @@ private struct FfiConverterOptionTypeRequestPreview: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceFloat: FfiConverterRustBuffer {
+    typealias SwiftType = [Float]
+
+    static func write(_ value: [Float], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterFloat.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Float] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Float]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterFloat.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -12346,6 +14289,31 @@ private struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]
+
+    static func write(_ value: [Data], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterData.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Data] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Data]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterData.read(from: &buf))
         }
         return seq
     }
@@ -12421,6 +14389,31 @@ private struct FfiConverterSequenceTypeChatV2Capability: FfiConverterRustBuffer 
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeChatV2Capability.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeCircleOwnerStateDto: FfiConverterRustBuffer {
+    typealias SwiftType = [CircleOwnerStateDto]
+
+    static func write(_ value: [CircleOwnerStateDto], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeCircleOwnerStateDto.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [CircleOwnerStateDto] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [CircleOwnerStateDto]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeCircleOwnerStateDto.read(from: &buf))
         }
         return seq
     }
@@ -12529,6 +14522,31 @@ private struct FfiConverterSequenceTypeLabyrinthRotationExclusion: FfiConverterR
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeMailboxReadStateRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [MailboxReadStateRecord]
+
+    static func write(_ value: [MailboxReadStateRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMailboxReadStateRecord.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MailboxReadStateRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MailboxReadStateRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeMailboxReadStateRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeMemberCredential: FfiConverterRustBuffer {
     typealias SwiftType = [MemberCredential]
 
@@ -12621,6 +14639,31 @@ private struct FfiConverterSequenceTypeQueuedLabyrinthArchivePayload: FfiConvert
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeQueuedLabyrinthArchivePayload.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeRegisteredDeviceInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [RegisteredDeviceInfo]
+
+    static func write(_ value: [RegisteredDeviceInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRegisteredDeviceInfo.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RegisteredDeviceInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RegisteredDeviceInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeRegisteredDeviceInfo.read(from: &buf))
         }
         return seq
     }
@@ -12953,6 +14996,29 @@ public func evaluateSpacesEligibility(input: SpacesEligibilityInput) -> SpacesEl
 }
 
 /**
+ * Decode Opus-in-OGG bytes back to 16-bit LE mono PCM at 48 kHz (`FC-09`).
+ */
+public func ffiDecodeOpusToPcm(opusData: Data) throws -> Data {
+    return try FfiConverterData.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_catbird_mls_fn_func_ffi_decode_opus_to_pcm(
+            FfiConverterData.lower(opusData), $0
+        )
+    })
+}
+
+/**
+ * Encode a recorded 16-bit LE mono PCM file to Opus-in-OGG, extract a 64-bar waveform, and seal an AES-256-GCM blob (`FC-09`).
+ */
+public func ffiPrepareVoiceMessage(pcmPath: String, sampleRate: UInt32) throws -> VoicePrepareResult {
+    return try FfiConverterTypeVoicePrepareResult.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+        uniffi_catbird_mls_fn_func_ffi_prepare_voice_message(
+            FfiConverterString.lower(pcmPath),
+            FfiConverterUInt32.lower(sampleRate), $0
+        )
+    })
+}
+
+/**
  * Returns the build identifier for this FFI version.
  *
  * Format: "mls-ffi-{version}-{build_timestamp}"
@@ -13066,6 +15132,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_func_evaluate_spaces_eligibility() != 54944 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_func_ffi_decode_opus_to_pcm() != 28947 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_func_ffi_prepare_voice_message() != 4921 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_func_get_ffi_build_id() != 34995 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13099,6 +15171,15 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_add_group_members() != 60833 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_advance_read_state() != 30573 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_approve_device() != 6630 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_approve_device_with_key() != 48294 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_build_signed_push_gateway_registration() != 29444 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13106,6 +15187,27 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_check_spaces_eligibility() != 37495 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_circle_key_generate() != 57627 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_circle_key_open() != 23637 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_circle_key_wrap() != 16788 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_circle_post_key() != 10443 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_circle_post_open() != 45184 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_circle_post_seal() != 65419 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_clear_circle_acl_tombstone() != 14316 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_close_conversation() != 13128 {
@@ -13120,13 +15222,25 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_decline_direct_request() != 39167 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_account_data() != 54098 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_enroll_device() != 1871 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_flush_labyrinth_queue() != 4710 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_fulfill_pending_group_leaves() != 2303 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_get_circle_owner_state() != 20514 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_get_group_metadata() != 6138 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_get_read_state() != 64266 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_handle_darwin_push_wakeup() != 14622 {
@@ -13138,13 +15252,25 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_initiate_otc_pairing() != 26079 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_is_device_pending_approval() != 40861 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_is_handle_closed() != 20885 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_labyrinth_status() != 9390 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_leave_conversation() != 37965 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_circle_owner_states() != 56965 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_conversations() != 13709 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_devices() != 46487 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_members() != 35716 {
@@ -13156,7 +15282,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_pending_labyrinth_queue() != 20194 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_read_states() != 57127 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_requests() != 27470 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_merge_circle_owner_state() != 24044 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_pending_group_creation_status() != 59446 {
@@ -13168,10 +15300,22 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_prepare_for_background() != 8843 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_process_push_wake() != 33180 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_propose_peer_repin() != 54408 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_put_circle_owner_state() != 37630 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_register_passkey_prf() != 59933 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_remove_group_member() != 53894 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_repin_peer() != 60466 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_replenish_key_packages() != 58152 {
@@ -13180,7 +15324,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_rescue_conversation_on_kick() != 59676 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_respond_otc_pairing() != 51211 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_restore_conversation_from_owner_mailbox() != 1893 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_restore_with_passkey_prf() != 25059 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_restore_with_recovery_code() != 46957 {
@@ -13189,7 +15339,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_resume_from_background() != 10481 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_retire_current_device() != 55277 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_retry_pending_group_creation() != 7292 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_device() != 58386 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_labyrinth_device() != 44837 {
@@ -13204,6 +15360,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sign_out_and_wipe() != 8292 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_start_otc_pairing() != 43591 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sync() != 27939 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -13211,6 +15370,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_update_group_metadata() != 6891 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_upload_conversation_attachment() != 18334 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_verify_and_reindex_history() != 54273 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_platformchangeobserver_on_change() != 43954 {
