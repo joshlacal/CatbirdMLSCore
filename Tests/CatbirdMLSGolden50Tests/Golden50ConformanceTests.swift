@@ -235,18 +235,6 @@ final class Golden50ConformanceTests: XCTestCase {
       candidates.append(URL(fileURLWithPath: explicit, isDirectory: true))
     }
     candidates.append(siblingRoot.appendingPathComponent("catbird-sim/fixtures/golden_50", isDirectory: true))
-    candidates.append(
-      URL(
-        fileURLWithPath: "/Users/joshlacalamito/Developer/.workspaces/dec1-w2/catbird-sim/fixtures/golden_50",
-        isDirectory: true
-      )
-    )
-    candidates.append(
-      URL(
-        fileURLWithPath: "/Users/joshlacalamito/Developer/Catbird+Petrel/catbird-sim/fixtures/golden_50",
-        isDirectory: true
-      )
-    )
 
     for candidate in candidates {
       let standardized = candidate.standardizedFileURL
