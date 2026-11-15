@@ -59,6 +59,7 @@ enum MLSOutboundHTTPValidator {
   /// passes only in the shape `mailboxKeysDeletionRepo(method:body:)` accepts.
   static let allowedPreparedRequestExactNSIDs: Set<String> = [
     "com.atproto.repo.uploadBlob",
+    "com.atproto.repo.createRecord",
     "com.atproto.repo.putRecord",
     "com.atproto.repo.getRecord",
     "com.atproto.repo.listRecords",

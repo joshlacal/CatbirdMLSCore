@@ -132,7 +132,7 @@
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "2707af3bd7565cb52d108b6e276206b1f142f4b8f37ec4ffe725d95cf007cf7e"
+    "canonical_sha256": "a11a9196bcfcb693e71dd76d444f4f0ec4f54c51d115145022aecb8b1b40a2fd"
   },
   "interface": {
     "generated_swift": {
@@ -155,10 +155,10 @@
   "package": {
     "local_dependencies": {
       "CatbirdMLSFFI": "../Sources/CatbirdMLSFFI.xcframework",
-      "Petrel": "../../../dec1-w0/wave1-cohesive/Petrel",
-      "PetrelCatbird": "../../../dec1-w0/wave1-cohesive/PetrelCatbird"
+      "Petrel": "../../Petrel",
+      "PetrelCatbird": "../../PetrelCatbird"
     },
-    "manifest_sha256": "5699ae72a711a02b44abff93824f9e2ebcfcb724f695567686a505320e0ffc92",
+    "manifest_sha256": "ab75b10d2e170b6c57e8a17e2d6bbce2e26dff69998a09a1968252eb5482ae3c",
     "path": ".."
   },
   "qualification": "unreviewed-candidate",
@@ -4619,15 +4619,15 @@
     "repositories": {
       "Petrel": {
         "commit": "932c82921092256c05788a5c348f56f901f26280",
-        "path": "../../../dec1-w0/wave1-cohesive/Petrel"
+        "path": "../../Petrel"
       },
       "PetrelCatbird": {
         "commit": "26380cefa2e4734925efabb178d83052e10a46c7",
-        "path": "../../../dec1-w0/wave1-cohesive/PetrelCatbird"
+        "path": "../../PetrelCatbird"
       },
       "catbird-atproto": {
         "commit": "729503e36c0684dd74722fc186d9703335eb871b",
-        "path": "../../../dec1-w0/wave1-catbird-atproto"
+        "path": "../../wave1-catbird-atproto"
       },
       "catbird-mls": {
         "commit": "6d9119b7082e644fff0d92846634fb788ed77298",
@@ -5481,7 +5481,7 @@
           "size_bytes": 1160
         }
       },
-      "root": "../../../dec1-w0/wave1-cohesive/PetrelCatbird/lexicons",
+      "root": "../../PetrelCatbird/lexicons",
       "sha256": "92f841f454f767d44528b19426c7d22f2c01bdfbed86f5d0549856d9ce237c6a"
     }
   }

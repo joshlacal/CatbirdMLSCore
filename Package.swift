@@ -9,30 +9,18 @@ let environment = ProcessInfo.processInfo.environment
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let siblingRoot = packageRoot.deletingLastPathComponent()
 
-func localPackagePathIfAvailable(_ candidates: [URL]) -> String? {
-  for raw in candidates {
-    let candidate = raw.standardizedFileURL
-    let manifest = candidate.appendingPathComponent("Package.swift")
-    var isDirectory: ObjCBool = false
-    if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
-       isDirectory.boolValue,
-       FileManager.default.fileExists(atPath: manifest.path),
-       candidate.resolvingSymlinksInPath() == candidate
-    {
-      return candidate.path
-    }
-  }
-  return nil
-}
-
 func siblingPathIfAvailable(_ name: String) -> String? {
-  let wave1CohesiveRoot = siblingRoot
-    .deletingLastPathComponent()
-    .appendingPathComponent("dec1-w0/wave1-cohesive", isDirectory: true)
-  return localPackagePathIfAvailable([
-    siblingRoot.appendingPathComponent(name, isDirectory: true),
-    wave1CohesiveRoot.appendingPathComponent(name, isDirectory: true),
-  ])
+  let candidate = siblingRoot.appendingPathComponent(name, isDirectory: true).standardizedFileURL
+  let manifest = candidate.appendingPathComponent("Package.swift")
+  var isDirectory: ObjCBool = false
+  guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+        isDirectory.boolValue,
+        FileManager.default.fileExists(atPath: manifest.path),
+        candidate.resolvingSymlinksInPath() == candidate
+  else {
+    return nil
+  }
+  return candidate.path
 }
 
 let forceRemote = environment["CATBIRD_MLS_LOCAL_INTEGRATION"] == "0"
@@ -148,6 +136,13 @@ let package = Package(
     ffiTarget,
     .testTarget(
       name: "CatbirdMLSCoreTests",
+      dependencies: ["CatbirdMLSCore", "CatbirdMLS"],
+      swiftSettings: [
+        .define("CATBIRD_MLS_CLEAN_SLATE"),
+      ]
+    ),
+    .testTarget(
+      name: "CatbirdMLSGolden50Tests",
       dependencies: ["CatbirdMLSCore", "CatbirdMLS"],
       swiftSettings: [
         .define("CATBIRD_MLS_CLEAN_SLATE"),
