@@ -132,7 +132,7 @@
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "a11a9196bcfcb693e71dd76d444f4f0ec4f54c51d115145022aecb8b1b40a2fd"
+    "canonical_sha256": "468368a92f27596a9ddf8c948ad1213c5bcd63caf26317825c3b442afef48ed8"
   },
   "interface": {
     "generated_swift": {
@@ -158,7 +158,7 @@
       "Petrel": "../../Petrel",
       "PetrelCatbird": "../../PetrelCatbird"
     },
-    "manifest_sha256": "ab75b10d2e170b6c57e8a17e2d6bbce2e26dff69998a09a1968252eb5482ae3c",
+    "manifest_sha256": "d2fb2393f0ced12d65aacc83626373d9fee13239b5a6d9fb314f7ffffa7e9a3d",
     "path": ".."
   },
   "qualification": "unreviewed-candidate",
@@ -4618,11 +4618,11 @@
     "native_source_sha256": "2c26d8c52101478fd7a70c8b7df9c07c4e322b46f67c0b9776fa79465a24102c",
     "repositories": {
       "Petrel": {
-        "commit": "932c82921092256c05788a5c348f56f901f26280",
+        "commit": "59a07d0300d697de8a021f2bceae5bae239c0434",
         "path": "../../Petrel"
       },
       "PetrelCatbird": {
-        "commit": "26380cefa2e4734925efabb178d83052e10a46c7",
+        "commit": "23977cc259011cec4010b816c4c14c46e72c59d7",
         "path": "../../PetrelCatbird"
       },
       "catbird-atproto": {
@@ -4673,8 +4673,8 @@
           "size_bytes": 2068
         },
         "blue/catbird/chat/blue.catbird.chat.authFull.json": {
-          "sha256": "5c1b7990cbe535d3f763c5be2544a44e5ea35c93a58518e572b5127872d2a124",
-          "size_bytes": 2688
+          "sha256": "4082c305fd4be83e6f9fce184274f84d2cc7be15f7ee5f5e89955cc0f032ff71",
+          "size_bytes": 2758
         },
         "blue/catbird/chat/blue.catbird.chat.cancelDirectRequestPreparation.json": {
           "sha256": "4054aea20ca6eb2ed53fe6ff11cde7f0bc2bf3d6b85656453d820e6cce420465",
@@ -4707,6 +4707,10 @@
         "blue/catbird/chat/blue.catbird.chat.device.json": {
           "sha256": "341762297606e8139481bee9db7de3bcf9817b6a3ca5a74edb1fe5c161bbef20",
           "size_bytes": 953
+        },
+        "blue/catbird/chat/blue.catbird.chat.deviceRevocation.json": {
+          "sha256": "7c6eaa28cf56826d4d858ae8faee63862d4481a9f801ac0a48cc6d18bcd5641e",
+          "size_bytes": 2250
         },
         "blue/catbird/chat/blue.catbird.chat.enrollDevice.json": {
           "sha256": "ad91d92c40368a72701880130cb68fbbd8e38b887f6d72c2882099aa9b74c23d",
@@ -5482,7 +5486,7 @@
         }
       },
       "root": "../../PetrelCatbird/lexicons",
-      "sha256": "92f841f454f767d44528b19426c7d22f2c01bdfbed86f5d0549856d9ce237c6a"
+      "sha256": "d074e672205bd42f24a34e168afd4697e0a1af9b15af1c1be01a2a8aafe4accc"
     }
   }
 }
