@@ -38,8 +38,8 @@
         "size_bytes": 66
       },
       "ios-arm64/libCatbirdMLSFFI.a": {
-        "sha256": "ea4301865b87ebfc0281ac43ff104c2e6be8269082b1645a0b463c8be8874506",
-        "size_bytes": 852030744
+        "sha256": "970dc2d80c746b25600f5cd5c0e4ad652d9a4897f8a6e4ff12a2ab0523c3c59c",
+        "size_bytes": 852442616
       },
       "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": {
         "sha256": "55a49350078affbad92fb39500ccee87c44184e7c92bf27161a7e250246cb97c",
@@ -50,8 +50,8 @@
         "size_bytes": 66
       },
       "ios-arm64_x86_64-maccatalyst/libCatbirdMLSFFI.a": {
-        "sha256": "cd6c7680eec1f077fbaf1f1b10d04ec15aeec43c2fa4ad771181cc671cb6497d",
-        "size_bytes": 1692367424
+        "sha256": "d096d4559f68f2f9c9cee3b0b2a0894d6918a2c589526af578b8957448f37176",
+        "size_bytes": 1693177792
       },
       "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": {
         "sha256": "55a49350078affbad92fb39500ccee87c44184e7c92bf27161a7e250246cb97c",
@@ -62,11 +62,11 @@
         "size_bytes": 66
       },
       "ios-arm64_x86_64-simulator/libCatbirdMLSFFI.a": {
-        "sha256": "2e432302829b388483e15444cfda987270684209c8e0e321c94de04c1dc619e3",
-        "size_bytes": 1690279560
+        "sha256": "9ea328a72aad48319bc7b02dbcddf0f931286b09eae46c0377ec89f0584ad777",
+        "size_bytes": 1691088720
       },
       "labyrinth-space-protocol.json": {
-        "sha256": "2117ba0c0cc008ca5ad42d0cd5dd4fc9a1d007a1a250be97627f9fe27fd4e4ee",
+        "sha256": "a97ea2841f3feb27882fc1b2bea5e4e36f8ac691b459e3db9c7552aa616baa1b",
         "size_bytes": 276
       },
       "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": {
@@ -78,8 +78,8 @@
         "size_bytes": 66
       },
       "macos-arm64_x86_64/libCatbirdMLSFFI.a": {
-        "sha256": "6590cea55cce7640b48667845ff6c7e780d62b6a653d3a2f0e4542caa94dd4f5",
-        "size_bytes": 1696783304
+        "sha256": "15a208271e6b26266ce4dbfadc42d9995cf63a4347e70c8e7ed533a1bfcd7c4d",
+        "size_bytes": 1697848952
       }
     },
     "libraries": [
@@ -128,11 +128,11 @@
       }
     ],
     "path": "../Sources/CatbirdMLSFFI.xcframework",
-    "sha256": "86eedfed033c95e9a05f846110bd5fd5f67e1d62ff5f0f5246259c48685f2f70"
+    "sha256": "64c699a1ee92f6037c0bad875275167da4524af8306235f9fd17dc75a46a0515"
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "468368a92f27596a9ddf8c948ad1213c5bcd63caf26317825c3b442afef48ed8"
+    "canonical_sha256": "9a73901702ab3f7cbcba96501b7c71acc62473dccf6baee24cc5c82afe91e3e1"
   },
   "interface": {
     "generated_swift": {
@@ -206,16 +206,16 @@
             "size_bytes": 40922
           },
           "atproto-spaces/src/http_signature.rs": {
-            "sha256": "e85fb028f04d5de480f831ca89d6be2048c002d20143f3b71b64c9720c3d2644",
-            "size_bytes": 24023
+            "sha256": "a6f2338f4d778309e7ae735018b30259c71df829adca9ef1cb011e64d6dada6f",
+            "size_bytes": 31476
           },
           "atproto-spaces/src/kem.rs": {
             "sha256": "8f8eb6da52fc24b3fc8933c516d277e27974cacd22d10e4566578414a84a258f",
             "size_bytes": 7665
           },
           "atproto-spaces/src/lib.rs": {
-            "sha256": "40b39845d5ec9820d5603ef768f18d999bde8fc762d681a62274839e647fb768",
-            "size_bytes": 12688
+            "sha256": "8bb1e942e50b796628b2e6dc323909d44bd6aec97d121da40163abdda0a08e19",
+            "size_bytes": 15316
           },
           "atproto-spaces/src/lthash.rs": {
             "sha256": "ef1eb024c27f6d55ef19a1e4d8855bcd502e300d3339290164c823602f659cc7",
@@ -242,8 +242,8 @@
             "size_bytes": 24955
           },
           "atproto-spaces/tests/crypto_and_tokens.rs": {
-            "sha256": "8cededc85dacdc4a782e8d8a8e0f67ca5973e192c59dadee3818f2bb3bab646a",
-            "size_bytes": 18804
+            "sha256": "dc39976f6b458302769bd1035992405451a7f6295b5b7a380c41bf7136824870",
+            "size_bytes": 24190
           },
           "atproto-spaces/tests/host_and_sync.rs": {
             "sha256": "923b305a3a5ab37c0cd1c9b8daf7a78eff5bdbb649f2b5925664530526506359",
@@ -962,8 +962,8 @@
             "size_bytes": 8654
           },
           "src/generated/blue_catbird/chat.rs": {
-            "sha256": "01103cd6bf8aebe547218fbdafa8e1b7d9d9766e6f36130698cbb1303ae04134",
-            "size_bytes": 5062084
+            "sha256": "646b4019414f87cdf718c41609c7f73da3e332d3ec51e8122f66b07f85c89f62",
+            "size_bytes": 5062111
           },
           "src/generated/blue_catbird/chat/accept_conversation.rs": {
             "sha256": "5e729db06605bcd83754504165c5de943d3ab5d0f6f0076809e2334c61181ea5",
@@ -1016,6 +1016,10 @@
           "src/generated/blue_catbird/chat/device.rs": {
             "sha256": "d38ac2b419e040468b617e0ae8075774d1333e02b1be6f0e4f831bc0e96512f8",
             "size_bytes": 15650
+          },
+          "src/generated/blue_catbird/chat/device_revocation.rs": {
+            "sha256": "f7e53ac27df049604662b99084a17e7520c6759d24007ba593db25667aab423e",
+            "size_bytes": 27472
           },
           "src/generated/blue_catbird/chat/enroll_device.rs": {
             "sha256": "3b9300e428a03e7feea784ec760f1df31f21bbd31cf13985be541e0e02689eaa",
@@ -3158,7 +3162,7 @@
             "size_bytes": 6120
           }
         },
-        "sha256": "746c130964cfc266a143d6bc0cd509a8ab90f83719eafbc232d21e86144578eb"
+        "sha256": "df10357b85b7679fb879fe0bc23002a34849113141de940a26fce5dc48b4908d"
       }
     },
     "native_source_files": {
@@ -3175,8 +3179,8 @@
         "size_bytes": 148529
       },
       "Cargo.toml": {
-        "sha256": "618e3ce3a5f16f85efa3d6ee53e89e9715187ab70715ea1a0c4fec9e5e5bbd56",
-        "size_bytes": 6728
+        "sha256": "e6a26eb7fe732f188f24f4f0e99032a051a1d90b7f00bae76de3906b68a06e45",
+        "size_bytes": 13139
       },
       "artifacts/team/20260422-074836/server/health.json": {
         "sha256": "da616848f65203a0d9f0a4e93064fe4a4c219d133b192e68a309ff847adbb0b5",
@@ -3215,8 +3219,8 @@
         "size_bytes": 7604
       },
       "examples/generate_mls_chat_crypto_wire.rs": {
-        "sha256": "0b77170afe6abd0fb6b53749c9e5e47ef8319b842ebf14e3a8c48d3f4fa0ddfa",
-        "size_bytes": 94757
+        "sha256": "8e17a0b7abc8dcc51df708ccbbbdbdcc69f5dc994c08dc310c861714709c82b2",
+        "size_bytes": 94743
       },
       "fuzz/Cargo.lock": {
         "sha256": "4cccba0774861e123ba928ce60fcb3e7fb31f380f0740ec48e367b6c35a14c88",
@@ -3567,40 +3571,40 @@
         "size_bytes": 21591
       },
       "src/client/chat_wire.rs": {
-        "sha256": "ae5b4127ec5c88089995ff68218ad50f549fdabf9e29b217635a8a2da30cfdaf",
-        "size_bytes": 141706
+        "sha256": "830834c305b5a8d91270633db9c7069e2aed1009783a18b832ae5c76a311ffba",
+        "size_bytes": 170986
       },
       "src/client/config.rs": {
         "sha256": "01440c25823a12a76f49bee733f687216a1e5567920796b733ca397e98d29d20",
         "size_bytes": 6285
       },
       "src/client/live_plane.rs": {
-        "sha256": "5a12dcb3068e2b4a29c6c939026467a79d86892963469d4d3550fbe35f56d640",
-        "size_bytes": 333371
+        "sha256": "07677ef8d9c5f6f9eaa2c7e6b2fd585db00d446de075e69541ca2d5df9fd3553",
+        "size_bytes": 353955
       },
       "src/client/live_sync.rs": {
-        "sha256": "cbff514d6e441d7c2d63a021673f6069d15a0e7bc3fe75c663c268e9edc06c90",
-        "size_bytes": 267746
+        "sha256": "5ce12fa1ca1275f712871dade80f629e289b3ae77372c02c2305e1d6c7ec7b5d",
+        "size_bytes": 268802
       },
       "src/client/mod.rs": {
-        "sha256": "eceae95c3ca842712f61baa91f55ccda855b1c906fb3a8fd52318c97485ad419",
-        "size_bytes": 111254
+        "sha256": "25e9a0f8b01b61163ec78e2aa0cfc9c88d5a045d551e1b85eef912b0ef67b794",
+        "size_bytes": 116876
       },
       "src/client/native_archive.rs": {
-        "sha256": "c425990d3f74a417337d87f1123d92f17c46562240013b7fe91e52ff8a390b86",
-        "size_bytes": 170844
+        "sha256": "66288cad78eac3ba7f8a0655d95589b6b78546f326fa019f29e19c7fbb2b504c",
+        "size_bytes": 186766
       },
       "src/client/native_archive_space.rs": {
-        "sha256": "ebc3a68ccedcd0cf0f819e594cdb66d3b3c4103a1cd4fb3c9110b1033354bd0e",
-        "size_bytes": 151255
+        "sha256": "0685044fdb6e60628e625f1736d092d0fc03c8a7e952e35630a7d1c233b8b9d4",
+        "size_bytes": 167318
       },
       "src/client/offline_archive.rs": {
-        "sha256": "6980f6e775429e77b5f4be405b0f3fd048b5a1cdd4df250d85f248a629b81223",
-        "size_bytes": 103160
+        "sha256": "bd6e1df66a1ca72e3fc3fc7a5a6b3731a81550a32c2b0da31850687d21267572",
+        "size_bytes": 103632
       },
       "src/client/spaces_gate.rs": {
-        "sha256": "d5eba1f1e49172fc2cf0a15285d462ce8cb640bde84dcb908cb3ebac465db0ca",
-        "size_bytes": 15344
+        "sha256": "e348bb357622e90270aa7aaafc107c43823bee8e3d0c6b7b48862b8f54532748",
+        "size_bytes": 16105
       },
       "src/client/traits.rs": {
         "sha256": "0c77df0d08cdad4423bd7fd0f146ee244cd2c9c6c70bab9db8bdddc1ed1fed26",
@@ -3671,12 +3675,12 @@
         "size_bytes": 13279
       },
       "src/labyrinth/hooks.rs": {
-        "sha256": "72b79616cb0b05c6cc8df97c56273f23b48a6bb8f05798ab221489e058f743ec",
-        "size_bytes": 35701
+        "sha256": "05faa729ccb36badc133c2e4cb43c026c19c659dad1e2e7fadcaa44ae715804e",
+        "size_bytes": 36662
       },
       "src/labyrinth/hooks_status.rs": {
-        "sha256": "73d8e29fd36b4b527446d71271d9edd8a70a4aa5a8900230e66cbeea57ba2a70",
-        "size_bytes": 6121
+        "sha256": "b569ee8a44f00d91085bf96780c2651cd84a7dd26273434be8cbe2f9cf37abbc",
+        "size_bytes": 6624
       },
       "src/labyrinth/journal.rs": {
         "sha256": "3d9428e61cbf995e416590a9ae4cb332999eae51f93794cfa41b24d00e925a06",
@@ -3687,28 +3691,28 @@
         "size_bytes": 11910
       },
       "src/labyrinth/mod.rs": {
-        "sha256": "fde06895d0e7cc8f84a220ab0ae95c4d403d0ee0164627c30102d869b0db0423",
-        "size_bytes": 6668
+        "sha256": "d053adbc54ee3782aebd9e3f1cacf5da2b475ac648c518325b158b12d7fb29d0",
+        "size_bytes": 6672
       },
       "src/labyrinth/queue.rs": {
         "sha256": "1da2537fb0403709773d768acb794c314e4735a12f31948a9d5f05f1d25699f9",
         "size_bytes": 12125
       },
       "src/labyrinth/repo_proof.rs": {
-        "sha256": "8cd2cceee31f1b84094f1bacf2f34cb784a0c5f1884a9fec6b6efd312138cbcb",
-        "size_bytes": 30181
+        "sha256": "115ee733b06dc346e2320d15d49c84fa43ac12adbe48e3ccc3f0c0a4cb83cc33",
+        "size_bytes": 36231
       },
       "src/labyrinth/session.rs": {
-        "sha256": "c404ff2686b2ad339644757df775444719b96a6bb975c003f33c34b4904c7071",
-        "size_bytes": 80099
+        "sha256": "6ac5dd0cede7434e1103f6668cc88c7dc77148953ebb3f5962141fdde5e2a08c",
+        "size_bytes": 81543
       },
       "src/labyrinth/signer.rs": {
         "sha256": "a5652f2d9cc0dd38dd8d183aa99ff44d53359b1817c1d66def3c879bb919fe08",
         "size_bytes": 4928
       },
       "src/labyrinth/space.rs": {
-        "sha256": "30cfb4e3c8594f879843ff99f72c94e0f3220deed9bdc32980daef39bfd95a3b",
-        "size_bytes": 36159
+        "sha256": "6ea72427dbe7e72b3a4ba2fed7f224daefef1c42c3838752ec482177f0b9cbdb",
+        "size_bytes": 38951
       },
       "src/labyrinth/state.rs": {
         "sha256": "ff811d5a69f7112030eca81d382cbd5a33346c3d741bcaf7c59f322cc1c29d0c",
@@ -3731,8 +3735,8 @@
         "size_bytes": 5065
       },
       "src/lib.rs": {
-        "sha256": "bdd78e666db69b0173e9c6ee79f5675e5ac886b1c77d923d37e79a56d0037e0f",
-        "size_bytes": 6372
+        "sha256": "319ed86525d900005f5454f5896ef353d4b240d00cace2289c690f04ba7284ae",
+        "size_bytes": 7049
       },
       "src/logging.rs": {
         "sha256": "7c04c88bafc48a47847ed0188fa1b7931aa45ba67ac5b20ffffbf1fdaac06d95",
@@ -3771,24 +3775,24 @@
         "size_bytes": 429155
       },
       "src/orchestrator/account_exit.rs": {
-        "sha256": "d081cac047a0db955e25864da4d1b033552de079268e84bcc41347576039d041",
-        "size_bytes": 35286
+        "sha256": "9bc6993abb8b5b1452b1e319dbc14ca2e28f72fe30a389d9caa57886df661597",
+        "size_bytes": 35419
       },
       "src/orchestrator/account_removal.rs": {
         "sha256": "17ca4c98072f215574ebfad06c356cadb0845f45a36458d1c62587cd1b7ae2ab",
         "size_bytes": 21813
       },
       "src/orchestrator/admission.rs": {
-        "sha256": "3d0a73dafc6f4ba21cbd5d82be54ce37a64c9de57f849c05dc1cee67ed29f35e",
-        "size_bytes": 41328
+        "sha256": "08f36bc49d97f357dcc648a1e57cb3407d5e11e303ff7e5c137d446864c0ed5c",
+        "size_bytes": 41471
       },
       "src/orchestrator/api_client.rs": {
         "sha256": "4b64d231aeb9653df4a74f028864910d8bd6fba5ae6aeeb0a646deed617644e3",
         "size_bytes": 8856
       },
       "src/orchestrator/authenticated_inventory.rs": {
-        "sha256": "13f95dfa05a0af6510f89cc00bad72ae41786a72b83cb0262c502c9a7697532c",
-        "size_bytes": 15856
+        "sha256": "49c239259b48ab4a76f7f33800b9a44dc3ebc2fbadb00de30e56c81c2df48193",
+        "size_bytes": 16058
       },
       "src/orchestrator/canonical_transport.rs": {
         "sha256": "aa19845ae3887190303f37921d3eb8e07ba5c4413720b2af431c121551cf13a9",
@@ -3803,16 +3807,16 @@
         "size_bytes": 3987
       },
       "src/orchestrator/control_journal.rs": {
-        "sha256": "0f19368d6f14c2653538ef6f63de66d4c3be8f2e73aab1e6bb7a9890ccd367a8",
-        "size_bytes": 62140
+        "sha256": "59c737cad91e22ac37da9479d5d9d7ad729a29039b21e89ab39b97344724ea00",
+        "size_bytes": 62281
       },
       "src/orchestrator/control_journal_resume_tests.rs": {
         "sha256": "3fa1ec2dcbc317d55cf4a0663e63278f9b19a630b23a36aad7605d98cc9dbe05",
         "size_bytes": 16638
       },
       "src/orchestrator/credential_binding.rs": {
-        "sha256": "aa64bb10462a17de25cdd605955d4d3d645555d7c5df222bd399d9e8bce5bac0",
-        "size_bytes": 69055
+        "sha256": "693a53fb9ddb475bda5a601cee9de16deb5a27ac460df4069b4fd1cc0ac782ee",
+        "size_bytes": 70350
       },
       "src/orchestrator/credentials.rs": {
         "sha256": "62ba35584c8a6becbd8785e290c09e4a1eb50207cca7560fb924ad00d49cf2c8",
@@ -3851,20 +3855,20 @@
         "size_bytes": 39383
       },
       "src/orchestrator/direct_request_keys.rs": {
-        "sha256": "4928caf4c46d0901590202d82a00073ff3582fdfc15c1ffdf028759b76309cec",
-        "size_bytes": 21966
+        "sha256": "99974e7d0260ec47b649a4e1a063ace6e07a7c433063163f6ccdfaff1c63bb6d",
+        "size_bytes": 22070
       },
       "src/orchestrator/direct_request_origin.rs": {
-        "sha256": "da1d108187460a0ce531c7750b4ab8b9e90754d781b43575800cfbe797d1e3c9",
-        "size_bytes": 7495
+        "sha256": "e1aad00d732f8fd07bd599a87dd1ed18e3a3855bfc5bc4dc2fed5019e02dbbc9",
+        "size_bytes": 7535
       },
       "src/orchestrator/direct_request_peer_keys.rs": {
         "sha256": "c721669fecef9545f0d0d94e335df6b6d6f6bff2ad32612fa22b9ff4b87c18d5",
         "size_bytes": 1930
       },
       "src/orchestrator/direct_request_projection.rs": {
-        "sha256": "c438108d8c284f9b0c7ccdc2a0d317c8709496f4b5d48e2684decd31059374c9",
-        "size_bytes": 32704
+        "sha256": "03fe8a26041471766600a464e8ff78c71826b83e5b9e9fc6a29d6a72c5deca88",
+        "size_bytes": 32744
       },
       "src/orchestrator/direct_request_receive.rs": {
         "sha256": "f698fb00b473ce31f954d63340cdc3da807dda6a8ef0b2f3d94d0d0ebe3338c6",
@@ -3879,8 +3883,8 @@
         "size_bytes": 4769
       },
       "src/orchestrator/direct_requests.rs": {
-        "sha256": "00c32530fb3ad60a7488abe5745f4fac6f0b456c6a6839f3ef2e81002b0aa0eb",
-        "size_bytes": 18088
+        "sha256": "27df0ff8f0e9f7764657b090ef1b476de6c875ba1ec931a0926f2fc09ac1e546",
+        "size_bytes": 19765
       },
       "src/orchestrator/error.rs": {
         "sha256": "225d4b05a613d6638f46fca8fcc85dc4df9e7dfd8b32eb93d7432c3c5504847e",
@@ -3931,8 +3935,8 @@
         "size_bytes": 17514
       },
       "src/orchestrator/lifecycle.rs": {
-        "sha256": "08818c0c8a88fd04f2ac09f81b7ff29e69f6a3e166e35dc7b8ce0a8f6ca6a0cb",
-        "size_bytes": 15605
+        "sha256": "aa5adf4b90171236877d83bad0fccd073284f380b1349480f0c2cff399424ee6",
+        "size_bytes": 15739
       },
       "src/orchestrator/local_delete_persistence_tests.rs": {
         "sha256": "f137925361405f8f2cc311b20414cccd3fae9362806f1c44047dcbf76151e6ef",
@@ -3951,8 +3955,8 @@
         "size_bytes": 46568
       },
       "src/orchestrator/mod.rs": {
-        "sha256": "4a17ad29567fcef08a57e1b3562115edcc822993906d6130f0c920d181c6be94",
-        "size_bytes": 3062
+        "sha256": "5509a7336324fb1556e46cdfba220639c5417318d607bfbd3cc59cd993bdc48c",
+        "size_bytes": 5023
       },
       "src/orchestrator/orchestrator.rs": {
         "sha256": "ad894dc0115fd6ec0bc582291132863aa9d4837783dd96a3f8bf722448249421",
@@ -3991,8 +3995,8 @@
         "size_bytes": 28969
       },
       "src/orchestrator/subscription.rs": {
-        "sha256": "dc408bf22ae36d7bf84e18153f581f460f1b7f3d0931e97391592516837d5b0a",
-        "size_bytes": 79173
+        "sha256": "752ffe4f5e729930f03d18fdc283ee34f04fad38ff36885d614de6f132f3501a",
+        "size_bytes": 83633
       },
       "src/orchestrator/sync.rs": {
         "sha256": "26901a137d66b4ba7a6a3440bd5c16280b724b4625232c3b66a46c0ce539cf6d",
@@ -4007,8 +4011,8 @@
         "size_bytes": 59140
       },
       "src/orchestrator/welcome_ack.rs": {
-        "sha256": "9401c3ae9e3a51b86285da27694ecacfb5dcbd06c007fb123a8b950251f3e5bf",
-        "size_bytes": 24438
+        "sha256": "2fcb535369e250bcba8737a312ca81c21c7079ea3f623131c6e829eeabcb710f",
+        "size_bytes": 24585
       },
       "src/orchestrator/welcome_ack/native.rs": {
         "sha256": "4415087b8800be0f2539c7a4bfb6ed73908603ccf67547982805582bd8afb1df",
@@ -4031,8 +4035,8 @@
         "size_bytes": 1698
       },
       "src/push/processor.rs": {
-        "sha256": "4a3147b6b3cff293d957b2cca855a4486449f3bcb92dbea8c0715ad23691f95c",
-        "size_bytes": 75491
+        "sha256": "0e4000196351135e800d1cc91659c06515d4b2ff5835d327c7d10ec1cce26e88",
+        "size_bytes": 78560
       },
       "src/recovery/coordinator.rs": {
         "sha256": "e63541bf9e3d46ef18f446581330e329d73d98fcb826ae34026ca457a2351e7c",
@@ -4147,8 +4151,8 @@
         "size_bytes": 14930
       },
       "tests/circles_ffi.rs": {
-        "sha256": "2611c0f56cb23861f1c077a646646b77d8cd1632edfe37d42dcf566fb7f7aa16",
-        "size_bytes": 45223
+        "sha256": "9022fcb4779fce75c2fd25f9ee2e006ddb0dadcc847bd72edb70269005b8a49f",
+        "size_bytes": 45209
       },
       "tests/clean_chat_account_exit_tests.rs": {
         "sha256": "544d3225601cd9c64dbeabe7e6b7391f42cbcfd52c15aa3344f2d57b12c52ec3",
@@ -4267,8 +4271,8 @@
         "size_bytes": 85306
       },
       "tests/client_live_chat_data_plane.rs": {
-        "sha256": "05f98626dd34b28c76ebfce12ffa009f54e383f7bc6112566a789c6dce169153",
-        "size_bytes": 538644
+        "sha256": "9e2b139be4d575551725a1ef731dd2dc004e6c34d464876ab148c7eff82d1d1e",
+        "size_bytes": 541348
       },
       "tests/client_live_chat_data_plane/leaf_recovery_signed.rs": {
         "sha256": "901f31411ac1aa792aef7b0de4ff6022a2d6e490a1e18ca3cabd78f89f894078",
@@ -4283,12 +4287,12 @@
         "size_bytes": 27505
       },
       "tests/client_live_chat_data_plane/wave2_unified.rs": {
-        "sha256": "f25407f7c5dda58556b473f615190882c0d9336524f1e6e4f8c6c215f2e29906",
-        "size_bytes": 31054
+        "sha256": "e8c7f5ae4e4d1f5cc0069130150e0834f68cf234530b8d26e5d22a173fcfaa3e",
+        "size_bytes": 51010
       },
       "tests/create_group_with_id_test.rs": {
-        "sha256": "22858c02587315dd250d18a3b01857d8155cdf5849ab0c67d02c0796fd1faf00",
-        "size_bytes": 17617
+        "sha256": "84f7eca11886bdf99431f7cc757674e508c4d606bd6c18f0835b8f5c4eeab329",
+        "size_bytes": 17841
       },
       "tests/credential_binding_tests.rs": {
         "sha256": "2188e5b0600cc7099d05d6497ef83aa3ff1764c29ee31889fa9fcc1d48ebafee",
@@ -4299,8 +4303,8 @@
         "size_bytes": 51370
       },
       "tests/determinism_seams_test.rs": {
-        "sha256": "7501dace27e45432932d08dc8e07aee8630e998b5bdb259b10839d644428d1fb",
-        "size_bytes": 67295
+        "sha256": "6bd852bd15520a7a35b28b3f47c03fbc603ea30b14275dd03351e72d711b37f5",
+        "size_bytes": 69999
       },
       "tests/e2e_harness.rs": {
         "sha256": "bed166d4f7330ad3ff12f10c57d41e90ecd90a2b2eec2cf07af00f5e865f6a86",
@@ -4431,8 +4435,8 @@
         "size_bytes": 15483
       },
       "tests/labyrinth_gate4_journal_and_gate7_mac.rs": {
-        "sha256": "8e8b322ddf891bef002912b12f7856f351d94badfd579522443276752c6d80a7",
-        "size_bytes": 18869
+        "sha256": "6f87031048269038b24df5988987f49c81ea3733870f206beff8337097720484",
+        "size_bytes": 18802
       },
       "tests/live_native_archive_g5.rs": {
         "sha256": "bf41449e16ea0a3f5e8de604f260dd265e6e542cb2b211a0eca8672d86a9301a",
@@ -4487,12 +4491,12 @@
         "size_bytes": 8865
       },
       "tests/public_api_compat_tests.rs": {
-        "sha256": "36c5c7ebbcf5bdfed5b5d90b3b04ef31d4ea69fbbf07977572fee1a3f6626bcd",
-        "size_bytes": 513
+        "sha256": "8ad5e98c6cefd2289adae2c95c18ee646bca029c93c8ed1b42c3f2b385e0e0af",
+        "size_bytes": 577
       },
       "tests/push_processor_memory_and_gap.rs": {
-        "sha256": "56b6d806c31aee498dd8c041085265c008c4df4361ca6e55d93a84e2ea30d27d",
-        "size_bytes": 99471
+        "sha256": "975745617413b7415887f2949ff0b6fca97dc9792bec48c8ee04ab8c4a2fd2f0",
+        "size_bytes": 102817
       },
       "tests/recovery_tracker_tests.rs": {
         "sha256": "d9a9564207f841298ad6a0784c474aba2ab82049c74e1c676ade9ff70924e0bd",
@@ -4531,12 +4535,12 @@
         "size_bytes": 39809
       },
       "tests/support/circles_live_platform.rs": {
-        "sha256": "a748f6978d69d931baf04995a9911a38b6ab4e6c87984c730d8e3a79322ccda4",
-        "size_bytes": 20897
+        "sha256": "f41bd0e92fb181fd8397b6ff62ba0c3224c034f91dbb5e76f66729d341f55f92",
+        "size_bytes": 22332
       },
       "tests/support/native_archive_auth.rs": {
-        "sha256": "80f618ef567e6e8df77f46e14216711ad83fd457a5eb94454bab9ddacc441975",
-        "size_bytes": 57146
+        "sha256": "362cec2496cdc20aa0a130ff92185a2eadcddb0bfa28fa065948b8cbf34e967e",
+        "size_bytes": 63007
       },
       "tests/support/ws5_recovery.rs": {
         "sha256": "30e197a76e08994b4812b35b95742f9dcc4ff586e67dbfb98e35719d0bd03629",
@@ -4575,8 +4579,8 @@
         "size_bytes": 305438
       },
       "tests/wave2_unified_client.rs": {
-        "sha256": "9a05300a2f455a007b893949dd71c6386e68d2ded466413e11c6761ad599ac75",
-        "size_bytes": 30693
+        "sha256": "dc05c0073691ed2a9a58e20e3d62ef30cf314f0b4730490466f1a23b1cda2bf4",
+        "size_bytes": 49124
       },
       "tests/welcome_epoch_secret_fail_closed_tests.rs": {
         "sha256": "e44118e5d1a6cb544ea624177acc29e52100f33830ccc6c5a6ca9a9b1bcfd586",
@@ -4615,7 +4619,7 @@
         "size_bytes": 2185
       }
     },
-    "native_source_sha256": "2c26d8c52101478fd7a70c8b7df9c07c4e322b46f67c0b9776fa79465a24102c",
+    "native_source_sha256": "d37300a09733b9ed48ebe079221de066a1103c4e7e36f70bf3fdd83d107801df",
     "repositories": {
       "Petrel": {
         "commit": "59a07d0300d697de8a021f2bceae5bae239c0434",
@@ -4626,12 +4630,12 @@
         "path": "../../PetrelCatbird"
       },
       "catbird-atproto": {
-        "commit": "729503e36c0684dd74722fc186d9703335eb871b",
-        "path": "../../wave1-catbird-atproto"
+        "commit": "86e1088ca11023ed9d25910b8500668604f8d647",
+        "path": "../../../dec1-w0/wave1-catbird-atproto"
       },
       "catbird-mls": {
-        "commit": "6d9119b7082e644fff0d92846634fb788ed77298",
-        "path": "../../catbird-mls-apple-build"
+        "commit": "0f4f6ff7f7e6827f0fb45fa7f723a773a1bba3eb",
+        "path": "../../y9b-catbird-mls"
       }
     },
     "schemas": {

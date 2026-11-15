@@ -339,7 +339,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
       ]
     )
     XCTAssertFalse(oldScopeSession.eligible)
-    XCTAssertEqual(oldScopeSession.reason, .missingOAuthScopes(missingScopes: Array(allScopes.suffix(2))))
+    XCTAssertEqual(oldScopeSession.reason, .missingOAuthScopes(missingScopes: Array(allScopes.suffix(3))))
 
     let ready = MLSClientCoordinator.evaluateEligibility(
       pdsSupportsSpaces: true,
