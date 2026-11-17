@@ -17,11 +17,12 @@ class RebuildPreservationTests(unittest.TestCase):
             core = workspace / "CatbirdMLSCore"
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
+            labyrinth = workspace / "labyrinth"
             scripts = core / "Scripts"
             sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / framework_name
             fake_bin = workspace / "bin"
-            for path in (scripts, sources, framework, native, atproto / "src", fake_bin):
+            for path in (scripts, sources, framework, native, atproto / "src", labyrinth / "labyrinth-protocol" / "src", fake_bin):
                 path.mkdir(parents=True, exist_ok=True)
 
             shutil.copy2(ROOT / "Scripts" / "rebuild-ffi.sh", scripts / "rebuild-ffi.sh")
@@ -34,6 +35,9 @@ class RebuildPreservationTests(unittest.TestCase):
             (native / "Cargo.lock").write_text("version = 4\n")
             (atproto / "Cargo.toml").write_text("[package]\nname = 'catbird-atproto'\n")
             (atproto / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
+            (labyrinth / "Cargo.toml").write_text("[workspace]\nmembers = ['.', 'labyrinth-protocol']\n")
+            (labyrinth / "labyrinth-protocol" / "Cargo.toml").write_text("[package]\nname = 'labyrinth-protocol'\n")
+            (labyrinth / "labyrinth-protocol" / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
             (native / "src").mkdir()
             (native / "src" / "lib.rs").write_text("pub fn fixture() {}\n")
             (native / framework_name).mkdir()
@@ -100,6 +104,23 @@ class RebuildPreservationTests(unittest.TestCase):
             import json
             marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
             self.assertEqual(marker["artifactScope"], scope)
+            expected_fingerprint = subprocess.run(
+                [
+                    "python3",
+                    str(scripts / "apple-artifact-manifest.py"),
+                    "source-fingerprint",
+                    "--native",
+                    str(native),
+                    "--dependency",
+                    str(atproto),
+                    "--dependency",
+                    str(labyrinth),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            self.assertEqual(marker["sourceFingerprint"], expected_fingerprint)
             import hashlib
             self.assertEqual(marker["generatedSwiftSHA256"], hashlib.sha256(b"new binding").hexdigest())
 
@@ -115,11 +136,12 @@ class RebuildPreservationTests(unittest.TestCase):
             core = workspace / "CatbirdMLSCore"
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
+            labyrinth = workspace / "labyrinth"
             scripts = core / "Scripts"
             sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
-            for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
+            for path in (scripts, sources, framework, native / "src", atproto / "src", labyrinth / "labyrinth-protocol" / "src", fake_bin):
                 path.mkdir(parents=True, exist_ok=True)
 
             shutil.copy2(ROOT / "Scripts" / "rebuild-ffi.sh", scripts / "rebuild-ffi.sh")
@@ -135,6 +157,9 @@ class RebuildPreservationTests(unittest.TestCase):
             (native / "src" / "lib.rs").write_text("pub fn before() {}\n")
             (atproto / "Cargo.toml").write_text("[package]\nname = 'catbird-atproto'\n")
             (atproto / "src" / "lib.rs").write_text("pub fn dependency() {}\n")
+            (labyrinth / "Cargo.toml").write_text("[workspace]\nmembers = ['.', 'labyrinth-protocol']\n")
+            (labyrinth / "labyrinth-protocol" / "Cargo.toml").write_text("[package]\nname = 'labyrinth-protocol'\n")
+            (labyrinth / "labyrinth-protocol" / "src" / "lib.rs").write_text("pub fn dependency() {}\n")
 
             builder = native / "create-xcframework.sh"
             builder.write_text(
@@ -168,17 +193,18 @@ class RebuildPreservationTests(unittest.TestCase):
             self.assertEqual((framework / "old-binary").read_text(), "old framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "old binding")
 
-    def test_rebuild_rejects_local_path_dependency_change_during_generation(self):
+    def test_rebuild_rejects_labyrinth_change_during_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             core = workspace / "CatbirdMLSCore"
             native = workspace / "catbird-mls"
             atproto = workspace / "catbird-atproto"
+            labyrinth = workspace / "labyrinth"
             scripts = core / "Scripts"
             sources = core / "Sources" / "CatbirdMLS"
             framework = core / "Sources" / "CatbirdMLSFFI.xcframework"
             fake_bin = workspace / "bin"
-            for path in (scripts, sources, framework, native / "src", atproto / "src", fake_bin):
+            for path in (scripts, sources, framework, native / "src", atproto / "src", labyrinth / "labyrinth-protocol" / "src", fake_bin):
                 path.mkdir(parents=True, exist_ok=True)
 
             shutil.copy2(ROOT / "Scripts" / "rebuild-ffi.sh", scripts / "rebuild-ffi.sh")
@@ -194,12 +220,15 @@ class RebuildPreservationTests(unittest.TestCase):
             (native / "src" / "lib.rs").write_text("pub fn native() {}\n")
             (atproto / "Cargo.toml").write_text("[package]\nname = 'catbird-atproto'\n")
             (atproto / "src" / "lib.rs").write_text("pub fn before() {}\n")
+            (labyrinth / "Cargo.toml").write_text("[workspace]\nmembers = ['.', 'labyrinth-protocol']\n")
+            (labyrinth / "labyrinth-protocol" / "Cargo.toml").write_text("[package]\nname = 'labyrinth-protocol'\n")
+            (labyrinth / "labyrinth-protocol" / "src" / "lib.rs").write_text("pub fn before() {}\n")
 
             builder = native / "create-xcframework.sh"
             builder.write_text(
                 "#!/bin/sh\n"
                 "set -eu\n"
-                "printf 'pub fn after() {}\\n' > ../catbird-atproto/src/lib.rs\n"
+                "printf 'pub fn after() {}\\n' > ../labyrinth/labyrinth-protocol/src/lib.rs\n"
                 "mkdir -p CatbirdMLSFFI.xcframework build/bindings\n"
                 "printf 'new framework' > CatbirdMLSFFI.xcframework/new-binary\n"
                 "printf 'new binding' > build/bindings/CatbirdMLS.swift\n"

@@ -22,7 +22,7 @@ EXCLUDED_NATIVE_PARTS = {
 # Rust embeds JSON contracts with include_str!, and shell/Python scripts drive
 # the native build and binding generation. A source receipt must detect changes
 # to those inputs even when the Rust declarations and UniFFI ABI stay identical.
-NATIVE_SOURCE_SUFFIXES = {".rs", ".toml", ".lock", ".json", ".sh", ".py"}
+NATIVE_SOURCE_SUFFIXES = {".rs", ".toml", ".lock", ".json", ".sql", ".sh", ".py"}
 
 APPLE_TARGETS = {
     "apple-all-targets": [
@@ -84,6 +84,9 @@ def native_source_files(native):
 
 
 def native_source_record(native):
+    native = Path(native).resolve()
+    if not native.is_dir() or not (native / "Cargo.toml").is_file():
+        raise RuntimeError(f"Native source tree is absent or has no Cargo.toml: {native}")
     files = file_map(native, native_source_files(native))
     return {"sha256": canonical_sha256(files), "files": files}
 
@@ -202,7 +205,7 @@ def recorded_path(path, base=None):
 
     Relative paths let the same manifest verify in any checkout that keeps
     the sibling layout (CatbirdMLSCore next to catbird-mls, catbird-atproto,
-    Petrel and PetrelCatbird).
+    labyrinth, Petrel and PetrelCatbird).
     """
     path = Path(path).resolve()
     if base is None:
@@ -314,6 +317,7 @@ def build_manifest(
     core,
     native,
     atproto,
+    labyrinth,
     petrel,
     petrel_catbird,
     selected_inputs,
@@ -326,6 +330,7 @@ def build_manifest(
     core = Path(core).resolve()
     native = Path(native).resolve()
     atproto = Path(atproto).resolve()
+    labyrinth = Path(labyrinth).resolve()
     petrel = Path(petrel).resolve()
     petrel_catbird = Path(petrel_catbird).resolve()
     selected_inputs = Path(selected_inputs).resolve()
@@ -333,7 +338,7 @@ def build_manifest(
     marker = json.loads((framework / "labyrinth-space-protocol.json").read_text())
     if marker.get("protocolVersion") != 20261023 or "labyrinth" not in marker.get("features", []):
         raise RuntimeError("Native artifact lacks the required Space protocol/feature marker")
-    if marker.get("sourceFingerprint") != source_bundle_fingerprint(native, [atproto]):
+    if marker.get("sourceFingerprint") != source_bundle_fingerprint(native, [atproto, labyrinth]):
         raise RuntimeError("Native artifact rebuild marker does not match current source inputs")
     base = Path(manifest_dir).resolve() if manifest_dir is not None else None
     interface = interface_record(core, framework, base)
@@ -350,12 +355,14 @@ def build_manifest(
     repositories = {
         "catbird-mls": native,
         "catbird-atproto": atproto,
+        "labyrinth": labyrinth,
         "Petrel": petrel,
         "PetrelCatbird": petrel_catbird,
     }
     identities = identities or {name: source_commit_identity(path) for name, path in repositories.items()}
     source = native_source_record(native)
     atproto_source = native_source_record(atproto)
+    labyrinth_source = native_source_record(labyrinth)
     manifest = {
         "schema_version": 1 if base is None else 2,
         "scope": "apple-native-uniffi-simulator-only" if artifact_scope == "ios-arm64-simulator-only" else "apple-native-uniffi",
@@ -373,6 +380,7 @@ def build_manifest(
             "native_source_files": source["files"],
             "local_path_dependencies": {
                 "catbird-atproto": atproto_source,
+                "labyrinth": labyrinth_source,
             },
             "cargo_lock_sha256": sha256_file(native / "Cargo.lock"),
             "schemas": schema_record(petrel_catbird, base),
@@ -439,16 +447,29 @@ def verify_manifest(path):
     def located(value):
         return resolve_recorded(value, base)
 
+    source_section = manifest.get("source", {})
+    repositories = source_section.get("repositories", {})
+    local_dependencies = source_section.get("local_path_dependencies", {})
+    for required in ("catbird-mls", "catbird-atproto", "labyrinth"):
+        if required not in repositories:
+            raise RuntimeError(
+                f"Apple artifact manifest mismatch: missing required source repository {required}"
+            )
+    for required in ("catbird-atproto", "labyrinth"):
+        if required not in local_dependencies:
+            raise RuntimeError(
+                f"Apple artifact manifest mismatch: missing required local path dependency {required}"
+            )
     selected = located(manifest["selected_inputs"]["path"])
     require_equal(sha256_file(selected), manifest["selected_inputs"]["sha256"], "selected inputs")
-    native = located(manifest["source"]["repositories"]["catbird-mls"]["path"])
+    native = located(repositories["catbird-mls"]["path"])
     require_equal(
         native_source_fingerprint(native),
         manifest["source"]["native_source_sha256"],
         "native source fingerprint",
     )
-    atproto_record = manifest["source"]["local_path_dependencies"]["catbird-atproto"]
-    atproto = located(manifest["source"]["repositories"]["catbird-atproto"]["path"])
+    atproto_record = local_dependencies["catbird-atproto"]
+    atproto = located(repositories["catbird-atproto"]["path"])
     require_equal(
         native_source_fingerprint(atproto),
         atproto_record["sha256"],
@@ -458,6 +479,18 @@ def verify_manifest(path):
         native_source_record(atproto)["files"],
         atproto_record["files"],
         "catbird-atproto source file map",
+    )
+    labyrinth_record = local_dependencies["labyrinth"]
+    labyrinth = located(repositories["labyrinth"]["path"])
+    require_equal(
+        native_source_fingerprint(labyrinth),
+        labyrinth_record["sha256"],
+        "labyrinth source fingerprint",
+    )
+    require_equal(
+        native_source_record(labyrinth)["files"],
+        labyrinth_record["files"],
+        "labyrinth source file map",
     )
     require_equal(
         sha256_file(native / "Cargo.lock"),
@@ -487,6 +520,11 @@ def verify_manifest(path):
     require_equal(current_interface, manifest["interface"], "generated interface")
     marker = json.loads((framework_path / "labyrinth-space-protocol.json").read_text())
     require_equal(marker.get("generatedSwiftSHA256"), current_interface["generated_swift"]["sha256"], "rebuild marker generated interface")
+    require_equal(
+        marker.get("sourceFingerprint"),
+        source_bundle_fingerprint(native, [atproto, labyrinth]),
+        "rebuild marker source fingerprint",
+    )
 
     for name, record in manifest["source"]["repositories"].items():
         repository = located(record["path"])
@@ -513,6 +551,7 @@ def main():
     generate.add_argument("--core", required=True, type=Path)
     generate.add_argument("--native", required=True, type=Path)
     generate.add_argument("--atproto", required=True, type=Path)
+    generate.add_argument("--labyrinth", required=True, type=Path)
     generate.add_argument("--petrel", required=True, type=Path)
     generate.add_argument("--petrel-catbird", required=True, type=Path)
     generate.add_argument("--selected-inputs", required=True, type=Path)
@@ -534,6 +573,7 @@ def main():
             core=args.core,
             native=args.native,
             atproto=args.atproto,
+            labyrinth=args.labyrinth,
             petrel=args.petrel,
             petrel_catbird=args.petrel_catbird,
             selected_inputs=args.selected_inputs,

@@ -17,7 +17,7 @@ A client offers Spaces-backed history only when the account's PDS supports Space
 
 ## Native artifacts
 
-The public `v1.5.21` native binary predates this integration and does not match the generated interface on this branch. Apple builds need a local framework rebuilt with `Scripts/rebuild-ffi.sh`, which writes the protocol marker only after a complete build and source-fingerprint check; `DevelopmentIntegration/spaces-apple-artifact-manifest.json` records the actual library hashes and source commits. Current local builds come from provisional Task 4 R1 sources and must be rebuilt after further source changes. Publishing a new binary and changing the public default remain release gates requiring approval.
+The public `v1.5.21` native binary predates this integration and does not match the generated interface on this branch. Apple builds need a local framework rebuilt with `Scripts/rebuild-ffi.sh`, which writes the protocol marker only after a complete build and a source-fingerprint check covering `catbird-mls`, `catbird-atproto` and the complete Labyrinth tree, including `labyrinth-protocol`. `DevelopmentIntegration/spaces-apple-artifact-manifest.json` records those source identities plus the actual interface and library hashes; receipts omitting Labyrinth are rejected. Publishing a new binary and changing the public default remain release gates requiring approval.
 
 The DS conversation-Space issuer is disabled by default. Enabling it requires a compatible hosted authority account, immutable generation provisioning, authenticated membership policy, and completed deletion notification delivery. Source tests and a healthy service are insufficient evidence of these operational prerequisites.
 

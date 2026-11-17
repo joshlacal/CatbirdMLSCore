@@ -75,6 +75,12 @@ if [ ! -d "$atproto_dir" ] || [ ! -f "$atproto_dir/Cargo.toml" ]; then
     exit 1
 fi
 atproto_dir="$(CDPATH= cd -- "$atproto_dir" && pwd)"
+labyrinth_dir="${CATBIRD_LABYRINTH_NATIVE_DIR:-$native_dir/../labyrinth}"
+if [ ! -d "$labyrinth_dir" ] || [ ! -f "$labyrinth_dir/Cargo.toml" ] || [ ! -f "$labyrinth_dir/labyrinth-protocol/Cargo.toml" ]; then
+    echo "❌ CATBIRD_LABYRINTH_NATIVE_DIR is not a complete labyrinth source tree: $labyrinth_dir"
+    exit 1
+fi
+labyrinth_dir="$(CDPATH= cd -- "$labyrinth_dir" && pwd)"
 cd "$native_dir"
 
 backup_timestamp="${FFI_BACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -109,13 +115,13 @@ preserve_if_present build/libs native-build-libs
 # Capture the full generator-relevant Rust input before the long multi-target
 # build. A mutable JJ working copy can otherwise change while the generator is
 # running and leave artifacts whose recorded revision does not describe them.
-source_fingerprint_before="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD" --dependency "$atproto_dir")"
+source_fingerprint_before="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD" --dependency "$atproto_dir" --dependency "$labyrinth_dir")"
 
 # Run the XCFramework build script
 echo "📦 Step 1: Building XCFramework..."
 ./create-xcframework.sh
 
-source_fingerprint_after="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD" --dependency "$atproto_dir")"
+source_fingerprint_after="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD" --dependency "$atproto_dir" --dependency "$labyrinth_dir")"
 if [ "$source_fingerprint_before" != "$source_fingerprint_after" ]; then
     echo "❌ Native source or local path dependency changed during FFI generation; refusing to install mixed-input artifacts."
     echo "   Before: $source_fingerprint_before"

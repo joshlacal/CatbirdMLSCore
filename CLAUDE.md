@@ -69,8 +69,8 @@ Never boot or touch the `iPhone 18 Pro Max` simulator (`51D953A5-461C-42C0-A947-
 
 ## FFI workflow
 
-1. Change Rust in `../catbird-mls` (or `../catbird-atproto`), then commit or checkpoint it; the receipt records published commits, not JJ working copies.
-2. `CMAKE_POLICY_VERSION_MINIMUM=3.5 Scripts/rebuild-ffi.sh` builds all seven Apple targets with `CATBIRD_MLS_FEATURES=labyrinth` (it refuses a build without `labyrinth`). It preserves the previous framework and interface under `_trash/ffi-rebuild/<UTC>/`, installs the new `Sources/CatbirdMLSFFI.xcframework` and `Sources/CatbirdMLS/CatbirdMLS.swift`, and writes the protocol marker only after the complete build. `CATBIRD_MLS_NATIVE_DIR` and `CATBIRD_ATPROTO_NATIVE_DIR` select other checkouts.
+1. Change Rust in `../catbird-mls`, `../catbird-atproto` or `../labyrinth`, then commit or checkpoint it; the receipt records published commits, not JJ working copies.
+2. `CMAKE_POLICY_VERSION_MINIMUM=3.5 Scripts/rebuild-ffi.sh` builds all seven Apple targets with `CATBIRD_MLS_FEATURES=labyrinth` (it refuses a build without `labyrinth`). It preserves the previous framework and interface under `_trash/ffi-rebuild/<UTC>/`, installs the new `Sources/CatbirdMLSFFI.xcframework` and `Sources/CatbirdMLS/CatbirdMLS.swift`, and writes the protocol marker only after proving `catbird-mls`, `catbird-atproto` and the complete Labyrinth tree stayed unchanged. `CATBIRD_MLS_NATIVE_DIR`, `CATBIRD_ATPROTO_NATIVE_DIR` and `CATBIRD_LABYRINTH_NATIVE_DIR` select other checkouts.
 3. Regenerate and verify `DevelopmentIntegration/spaces-apple-artifact-manifest.json` (commands in [DevelopmentIntegration/README.md](DevelopmentIntegration/README.md)).
 4. Run the tests through `DevelopmentIntegration/run-local.sh`.
 

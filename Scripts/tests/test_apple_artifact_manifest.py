@@ -33,6 +33,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
         self.petrel = self.root / "Petrel"
         self.petrel_catbird = self.root / "PetrelCatbird"
         self.atproto = self.root / "catbird-atproto"
+        self.labyrinth = self.root / "labyrinth"
 
         for directory in (
             self.native,
@@ -40,6 +41,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             self.petrel,
             self.petrel_catbird,
             self.atproto,
+            self.labyrinth,
         ):
             directory.mkdir(parents=True)
 
@@ -50,6 +52,10 @@ class AppleArtifactManifestTests(unittest.TestCase):
         write(self.native / "src/orchestrator/direct_request_types.rs", "pub enum RequestPreview {}\n")
         write(self.atproto / "Cargo.toml", "[package]\nname = 'catbird-atproto'\n")
         write(self.atproto / "src/lib.rs", "pub fn generated_contract() {}\n")
+        write(self.labyrinth / "Cargo.toml", "[workspace]\nmembers = ['.', 'labyrinth-protocol']\n")
+        write(self.labyrinth / "src/lib.rs", "pub fn archive_contract() {}\n")
+        write(self.labyrinth / "labyrinth-protocol/Cargo.toml", "[package]\nname = 'labyrinth-protocol'\n")
+        write(self.labyrinth / "labyrinth-protocol/src/lib.rs", "pub fn wire_contract() {}\n")
         write(self.core / "Package.swift", "// fixture\n")
         write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct Generated {}\n")
         schema = self.petrel_catbird / "lexicons/blue/catbird/chat/blue.catbird.chat.prepareDirectRequest.json"
@@ -86,7 +92,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
         self.selected.write_text(json.dumps({"repos": []}) + "\n")
         self.identities = {
             name: {"jj_commit": f"{name}-commit", "jj_change": f"{name}-change"}
-            for name in ("catbird-mls", "catbird-atproto", "Petrel", "PetrelCatbird")
+            for name in ("catbird-mls", "catbird-atproto", "labyrinth", "Petrel", "PetrelCatbird")
         }
         self.refresh_marker()
 
@@ -96,7 +102,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             "features": ["labyrinth"],
             "artifactScope": "apple-all-targets",
             "generatedSwiftSHA256": self.module.sha256_file(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift"),
-            "sourceFingerprint": self.module.source_bundle_fingerprint(self.native, [self.atproto]),
+            "sourceFingerprint": self.module.source_bundle_fingerprint(self.native, [self.atproto, self.labyrinth]),
         }))
 
     def tearDown(self):
@@ -107,6 +113,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             core=self.core,
             native=self.native,
             atproto=self.atproto,
+            labyrinth=self.labyrinth,
             petrel=self.petrel,
             petrel_catbird=self.petrel_catbird,
             selected_inputs=self.selected,
@@ -130,10 +137,14 @@ class AppleArtifactManifestTests(unittest.TestCase):
         self.assertEqual(manifest["build"]["explicit_features"], ["labyrinth"])
         self.assertEqual(manifest["build"]["default_features"], True)
         self.assertEqual(len(manifest["identity"]["canonical_sha256"]), 64)
+        self.assertIn(
+            "labyrinth-protocol/src/lib.rs",
+            manifest["source"]["local_path_dependencies"]["labyrinth"]["files"],
+        )
 
     def commit_fixture_repositories(self):
         """Give each recorded source a Git commit, as a fresh checkout has."""
-        for directory in (self.native, self.atproto, self.petrel, self.petrel_catbird):
+        for directory in (self.native, self.atproto, self.labyrinth, self.petrel, self.petrel_catbird):
             git = ("git", "-C", str(directory), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid")
             subprocess.run((*git, "init", "--quiet"), check=True)
             write(directory / ".gitignore", "build/\ntarget/\n")
@@ -148,6 +159,7 @@ class AppleArtifactManifestTests(unittest.TestCase):
             core=self.core,
             native=self.native,
             atproto=self.atproto,
+            labyrinth=self.labyrinth,
             petrel=self.petrel,
             petrel_catbird=self.petrel_catbird,
             selected_inputs=self.selected,
@@ -256,8 +268,8 @@ class AppleArtifactManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "native source fingerprint"):
             self.module.verify_manifest(path)
 
-    def test_source_fingerprint_includes_native_build_and_generator_scripts(self):
-        for relative in ("create-xcframework.sh", "scripts/generate_chat_schema.py"):
+    def test_source_fingerprint_includes_build_generator_and_sql_inputs(self):
+        for relative in ("create-xcframework.sh", "scripts/generate_chat_schema.py", "migrations/001.sql"):
             with self.subTest(relative=relative):
                 script = self.native / relative
                 write(script, "original\n")
@@ -286,6 +298,27 @@ class AppleArtifactManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "catbird-atproto source fingerprint"):
             self.module.verify_manifest(path)
 
+    def test_verify_rejects_changed_nested_labyrinth_protocol(self):
+        manifest = self.build()
+        path = self.root / "manifest.json"
+        self.module.write_manifest(path, manifest)
+        write(self.labyrinth / "labyrinth-protocol/src/lib.rs", "pub fn changed_wire_contract() {}\n")
+
+        with self.assertRaisesRegex(RuntimeError, "labyrinth source fingerprint"):
+            self.module.verify_manifest(path)
+
+    def test_verify_rejects_manifest_without_required_labyrinth_dependency(self):
+        manifest = self.build()
+        del manifest["source"]["local_path_dependencies"]["labyrinth"]
+        payload = dict(manifest)
+        payload.pop("identity")
+        manifest["identity"]["canonical_sha256"] = self.module.canonical_sha256(payload)
+        path = self.root / "manifest.json"
+        path.write_text(json.dumps(manifest) + "\n")
+
+        with self.assertRaisesRegex(RuntimeError, "missing required local path dependency labyrinth"):
+            self.module.verify_manifest(path)
+
     def test_build_rejects_binding_replaced_before_manifest_creation(self):
         write(self.core / "Sources/CatbirdMLS/CatbirdMLS.swift", "public struct DifferentNativeMetadata {}\n")
         with self.assertRaisesRegex(RuntimeError, "generated Swift binding"):
@@ -296,7 +329,12 @@ class AppleArtifactManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rebuild marker"):
             self.build()
 
-    def test_verify_rejects_changed_labyrinth_contract(self):
+    def test_build_rejects_missing_labyrinth_source_tree(self):
+        shutil.rmtree(self.labyrinth)
+        with self.assertRaisesRegex(RuntimeError, "Native source tree is absent.*labyrinth"):
+            self.build()
+
+    def test_verify_rejects_changed_labyrinth_lexicon_schema(self):
         manifest = self.build()
         path = self.root / "manifest.json"
         self.module.write_manifest(path, manifest)
@@ -322,13 +360,17 @@ class AppleArtifactManifestTests(unittest.TestCase):
 
         self.assertEqual(before, self.module.native_source_fingerprint(self.native))
 
-    def test_source_bundle_fingerprint_includes_local_path_dependencies(self):
-        before = self.module.source_bundle_fingerprint(self.native, [self.atproto])
-        write(self.atproto / "src/lib.rs", "pub fn changed_contract() {}\n")
+    def test_source_bundle_fingerprint_includes_nested_labyrinth_protocol(self):
+        dependencies = [self.atproto, self.labyrinth]
+        before = self.module.source_bundle_fingerprint(self.native, dependencies)
+        write(
+            self.labyrinth / "labyrinth-protocol/src/lib.rs",
+            "pub fn changed_wire_contract() {}\n",
+        )
 
         self.assertNotEqual(
             before,
-            self.module.source_bundle_fingerprint(self.native, [self.atproto]),
+            self.module.source_bundle_fingerprint(self.native, dependencies),
         )
 
 

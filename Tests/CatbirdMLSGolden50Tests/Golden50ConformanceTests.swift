@@ -2,83 +2,21 @@ import CatbirdMLS
 @testable import CatbirdMLSCore
 import CryptoKit
 import Foundation
-import Security
 import XCTest
 
-private final class GoldenInMemoryKeychainBackend: KeychainBackend, @unchecked Sendable {
-  private let lock = NSLock()
-  private var items: [String: [String: Any]] = [:]
-
-  private func key(for dict: [String: Any]) -> String {
-    let service = dict[kSecAttrService as String] as? String ?? ""
-    let account = dict[kSecAttrAccount as String] as? String ?? ""
-    return "\(service)|\(account)"
-  }
-
-  func add(_ attributes: [String: Any]) -> OSStatus {
-    lock.lock()
-    defer { lock.unlock() }
-    let k = key(for: attributes)
-    if items[k] != nil { return errSecDuplicateItem }
-    items[k] = attributes
-    return errSecSuccess
-  }
-
-  func copyMatching(_ query: [String: Any]) -> (OSStatus, AnyObject?) {
-    lock.lock()
-    defer { lock.unlock() }
-    let k = key(for: query)
-    guard let stored = items[k], let data = stored[kSecValueData as String] as? Data else {
-      return (errSecItemNotFound, nil)
-    }
-    return (errSecSuccess, data as NSData)
-  }
-
-  func update(_ query: [String: Any], _ attributesToUpdate: [String: Any]) -> OSStatus {
-    lock.lock()
-    defer { lock.unlock() }
-    let k = key(for: query)
-    guard var stored = items[k] else { return errSecItemNotFound }
-    for (attr, value) in attributesToUpdate {
-      stored[attr] = value
-    }
-    items[k] = stored
-    return errSecSuccess
-  }
-
-  func delete(_ query: [String: Any]) -> OSStatus {
-    lock.lock()
-    defer { lock.unlock() }
-    if query[kSecAttrAccount as String] is String {
-      return items.removeValue(forKey: key(for: query)) != nil ? errSecSuccess : errSecItemNotFound
-    }
-    let service = query[kSecAttrService as String] as? String ?? ""
-    let matching = items.keys.filter { $0.hasPrefix("\(service)|") }
-    guard !matching.isEmpty else { return errSecItemNotFound }
-    for k in matching { items.removeValue(forKey: k) }
-    return errSecSuccess
-  }
-}
-
-private final class GoldenNoopTransport: PlatformTransport, @unchecked Sendable {
-  func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
-    PlatformHttpResponse(status: 200, headers: [], body: Data("{}".utf8))
-  }
-  func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws {}
-  func disconnectRealtimeStream() throws {}
-}
-
-/// `T7-GOLDEN-50` Swift / `CatbirdMLSCore` + `CatbirdMLSFFI` Conformance Consumer (`C5`).
+/// `T7-GOLDEN-50` generated-fixture consumer for the Swift package and candidate UniFFI artifact.
 ///
-/// Loads all 50 deterministic multi-platform golden transcripts from `catbird-sim/fixtures/golden_50/`,
-/// verifies `MANIFEST.sha256` SHA-256 digests byte-for-byte, validates all 10 Wave 2 protocol categories
-/// (`5` transcripts each = `50` total), runs `CatbirdMLSCore`'s real outbound HTTP/NSID/SSRF/own-PDS
-/// validators (`MLSOutboundHTTPValidator`) and `MLSAppGroupStorage` / `CatbirdMLSFFI` identity hashing
-/// over every client wire frame and DID across all 50 transcripts, and exercises live SQLCipher +
-/// `MLSClientCoordinator` open/prepareForBackground/signOutAndWipe against canonical transcript actors.
+/// `Scripts/qualify-golden-50.sh` first exports these fixtures from the candidate `catbird-sim`,
+/// then asks that producer to replay all 50 scenarios against fresh real `CatbirdMlsClient` and
+/// `mls-ds` instances. The exported schema retains body digests and post-state, not the request /
+/// response bytes or cryptographic snapshots needed to replay those transitions through Swift.
+/// This consumer therefore validates the replay-verified export at the Swift boundary, applies
+/// CatbirdMLSCore's real outbound policy to recorded routes, and drives the paired Swift/Rust
+/// SQLCipher lifecycle. It does not claim that manifest hashing is protocol replay.
 final class Golden50ConformanceTests: XCTestCase {
   static let expectedTranscriptCount = 50
   static let expectedSchemaVersion = "catbird.golden-transcript.v1"
+  static let replayVerificationStamp = "catbird.golden50.replay-verified.v1"
 
   enum GoldenCategory: String, CaseIterable, Codable, Sendable {
     case direct1To1 = "direct1_to1"
@@ -224,26 +162,37 @@ final class Golden50ConformanceTests: XCTestCase {
   }
 
   private func resolveGolden50Directory() throws -> URL {
-    let packageRoot = URL(fileURLWithPath: #filePath)
-      .deletingLastPathComponent() // CatbirdMLSGolden50Tests
-      .deletingLastPathComponent() // Tests
-      .deletingLastPathComponent() // CatbirdMLSCore
-    let siblingRoot = packageRoot.deletingLastPathComponent()
-
-    var candidates: [URL] = []
-    if let explicit = ProcessInfo.processInfo.environment["CATBIRD_GOLDEN_50_DIR"], !explicit.isEmpty {
-      candidates.append(URL(fileURLWithPath: explicit, isDirectory: true))
+    guard let explicit = ProcessInfo.processInfo.environment["CATBIRD_GOLDEN_50_DIR"],
+          !explicit.isEmpty
+    else {
+      throw NSError(
+        domain: "CatbirdMLSGolden50Tests",
+        code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "CATBIRD_GOLDEN_50_DIR is required; run Scripts/qualify-golden-50.sh"
+        ]
+      )
     }
-    candidates.append(siblingRoot.appendingPathComponent("catbird-sim/fixtures/golden_50", isDirectory: true))
 
-    for candidate in candidates {
-      let standardized = candidate.standardizedFileURL
-      let manifest = standardized.appendingPathComponent("MANIFEST.sha256")
-      if FileManager.default.fileExists(atPath: manifest.path) {
-        return standardized
-      }
+    let directory = URL(fileURLWithPath: explicit, isDirectory: true).standardizedFileURL
+    let manifest = directory.appendingPathComponent("MANIFEST.sha256")
+    let stamp = directory.appendingPathComponent(".candidate-replay-verified")
+    guard FileManager.default.fileExists(atPath: manifest.path),
+          FileManager.default.fileExists(atPath: stamp.path),
+          try String(contentsOf: stamp, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines) == Self.replayVerificationStamp
+    else {
+      throw NSError(
+        domain: "CatbirdMLSGolden50Tests",
+        code: 2,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "Golden50 fixtures are absent or were not replay-verified by Scripts/qualify-golden-50.sh"
+        ]
+      )
     }
-    throw XCTSkip("golden_50 fixture directory not found in workspace; set CATBIRD_GOLDEN_50_DIR")
+    return directory
   }
 
   private static func sha256Hex(_ data: Data) -> String {
@@ -261,7 +210,7 @@ final class Golden50ConformanceTests: XCTestCase {
     return value == value.lowercased() && value.count == 36
   }
 
-  func testGolden50ManifestAndAllTenProtocolCategoriesThroughCatbirdMLSCore() async throws {
+  func testReplayVerifiedGolden50ContractAndCandidateSwiftFFIBinding() async throws {
     let goldenDir = try resolveGolden50Directory()
     let manifestURL = goldenDir.appendingPathComponent("MANIFEST.sha256")
     let manifestText = try String(contentsOf: manifestURL, encoding: .utf8)
@@ -404,31 +353,19 @@ final class Golden50ConformanceTests: XCTestCase {
           continue
         }
         if nsid == MLSOutboundHTTPValidator.deleteRecordNSID {
-          // Golden wire frames store BLAKE3 digests rather than raw request bodies; verify the
-          // validator's mailboxKeys swapRecord contract with a synthetic D-3 body for this actor.
-          let actorDid = transcript.devices.first(where: { $0.label == frame.deviceId })?.did
-            ?? "did:plc:alicesimuseraaaaaaaaaaaa"
-          let syntheticBody = try JSONSerialization.data(withJSONObject: [
-            "repo": actorDid,
-            "collection": "blue.catbird.labyrinth.mailboxKeys",
-            "rkey": "self",
-            "swapRecord": "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          ])
-          XCTAssertEqual(
-            try MLSOutboundHTTPValidator.mailboxKeysDeletionRepo(method: frame.method, body: syntheticBody),
-            actorDid
-          )
-        } else {
-          XCTAssertNoThrow(
-            try MLSOutboundHTTPValidator.validatePreparedRequestNSID(
-              nsid,
-              method: frame.method,
-              requestURL: frameURL,
-              ownPDSOrigins: ownPdsOrigins
-            ),
-            "CatbirdMLSCore MLSOutboundHTTPValidator rejected client wire frame \(frame.method) \(nsid) in \(filename)"
-          )
+          // The export intentionally retains only body digests. The producer replay verifies the
+          // real deleteRecord body; inventing a Swift-side body here would not test that frame.
+          continue
         }
+        XCTAssertNoThrow(
+          try MLSOutboundHTTPValidator.validatePreparedRequestNSID(
+            nsid,
+            method: frame.method,
+            requestURL: frameURL,
+            ownPDSOrigins: ownPdsOrigins
+          ),
+          "CatbirdMLSCore MLSOutboundHTTPValidator rejected client wire frame \(frame.method) \(nsid) in \(filename)"
+        )
         totalValidatedClientXrpcFrames += 1
       }
 
@@ -449,7 +386,7 @@ final class Golden50ConformanceTests: XCTestCase {
       )
     }
 
-    // Category-specific protocol assertions across the 50 transcripts:
+    // Category-specific assertions over the producer's replay results:
     // 1. Transcript 05: Space-backed attachment upload (`com.atproto.space.uploadBlob`) + MLSMessagePayload round-trip.
     let t05 = transcripts[4]
     XCTAssertEqual(t05.slug, "direct_1to1_attachment_space_locator")
@@ -522,38 +459,46 @@ final class Golden50ConformanceTests: XCTestCase {
       }
     }
 
-    // 9. Live CatbirdMLSFFI + MLSClientCoordinator SQLCipher smoke using transcript_01's canonical actor.
+    // 9. Drive the paired candidate Swift/UniFFI artifact and its real SQLCipher + Keychain lifecycle
+    // using transcript_01's canonical actor. Protocol replay already ran in the producer gate.
     let primaryDevice = try XCTUnwrap(transcripts[0].devices.first)
+    let accountHash = try MLSAppGroupStorage.accountDidHash(for: primaryDevice.did)
     let tempRoot = FileManager.default.temporaryDirectory
       .appendingPathComponent("Golden50SwiftFFI-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
     defer {
-      let trashRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("_trash-Golden50SwiftFFI", isDirectory: true)
-      try? FileManager.default.createDirectory(at: trashRoot, withIntermediateDirectories: true)
-      try? FileManager.default.moveItem(
-        at: tempRoot,
-        to: trashRoot.appendingPathComponent(tempRoot.lastPathComponent)
-      )
+      try? FileManager.default.removeItem(at: tempRoot)
     }
 
     let keystore = KeychainPlatformKeyStore(
       service: "blue.catbird.mls.golden50.\(UUID().uuidString)",
-      backend: GoldenInMemoryKeychainBackend()
+      accessGroup: nil
     )
+    defer {
+      try? keystore.deleteAccountKeys(accountDidHash: accountHash)
+    }
+    let homeDsEndpoint = try XCTUnwrap(URL(string: "https://chat.catbird.blue"))
+    let pdsEndpoint = try XCTUnwrap(URL(string: "https://pds.catbird.blue"))
     let config = CatbirdMlsClientConfig(
       storageRoot: tempRoot.path,
       accountDid: primaryDevice.did,
       deviceId: primaryDevice.deviceId,
       homeDsDid: primaryDevice.homeDsDid,
-      homeDsEndpoint: "https://chat.catbird.blue",
-      pdsEndpoint: "https://pds.catbird.blue"
+      homeDsEndpoint: homeDsEndpoint.absoluteString,
+      pdsEndpoint: pdsEndpoint.absoluteString
     )
     let coordinator = try await MLSClientCoordinator.open(
       config: config,
       keystore: keystore,
-      transport: GoldenNoopTransport()
+      transport: PetrelPlatformTransport(
+        homeDsEndpoint: homeDsEndpoint,
+        homeDsDid: primaryDevice.homeDsDid,
+        ownPdsEndpoint: pdsEndpoint,
+        actorDeviceId: primaryDevice.deviceId
+      )
     )
+    XCTAssertEqual(coordinator.accountDid, primaryDevice.did)
+    XCTAssertEqual(coordinator.accountDidHash, accountHash)
     let dbURL = try MLSAppGroupStorage.databaseURL(storageRoot: tempRoot, accountDid: primaryDevice.did)
     XCTAssertTrue(FileManager.default.fileExists(atPath: dbURL.path))
     let initialConversations = try await coordinator.listConversations()

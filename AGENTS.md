@@ -21,7 +21,7 @@ See `~/Developer/.claude/AGENTS.md` for global agent guidelines.
 ## Build, Test, and Development Commands
 - `DevelopmentIntegration/run-local.sh swift test --scratch-path .build-local-integration` — test against the exact sibling checkouts with graph and framework verification.
 - `swift build` / `swift test` — plain SwiftPM; also uses the siblings and a marker-verified local framework.
-- `CMAKE_POLICY_VERSION_MINIMUM=3.5 Scripts/rebuild-ffi.sh` — rebuild the framework and generated interface from `../catbird-mls`; then regenerate and verify `DevelopmentIntegration/spaces-apple-artifact-manifest.json` (see `DevelopmentIntegration/README.md`).
+- `CMAKE_POLICY_VERSION_MINIMUM=3.5 Scripts/rebuild-ffi.sh` — rebuild the framework and generated interface from sibling `catbird-mls`, `catbird-atproto` and `labyrinth`; then regenerate and verify `DevelopmentIntegration/spaces-apple-artifact-manifest.json` (see `DevelopmentIntegration/README.md`).
 - `python3 -m unittest discover -s Scripts/tests -v` — FFI tooling tests.
 
 ## Coding Style & Naming Conventions

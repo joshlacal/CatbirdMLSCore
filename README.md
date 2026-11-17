@@ -33,7 +33,7 @@ Spaces-backed chat needs the OAuth scopes in `MLSAppGroupStorage.requiredSpacesS
 `Package.swift` uses the sibling `Petrel` and `PetrelCatbird` checkouts when they exist and selects `Sources/CatbirdMLSFFI.xcframework` when its protocol marker is valid. Set `CATBIRD_MLS_LOCAL_INTEGRATION=0` to force the pinned remote revisions and the public `v1.5.21` binary instead. That binary does **not** match the checked-in `Sources/CatbirdMLS/CatbirdMLS.swift` interface, so on this branch a working build needs a locally rebuilt framework.
 
 ```sh
-# Rebuild the framework and generated interface from ../catbird-mls (all Apple targets, labyrinth feature)
+# Rebuild from sibling catbird-mls, catbird-atproto and Labyrinth sources (all Apple targets)
 CMAKE_POLICY_VERSION_MINIMUM=3.5 Scripts/rebuild-ffi.sh
 
 # Check the build receipt against the current sources and framework
