@@ -62,6 +62,13 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     let previousCID: String?
   }
 
+  private struct RecoveryShareRecord {
+    let share: Data
+    let fetchVerifier: Data
+    let mechanism: String
+    let createdAt: String
+  }
+
   private struct Fault: Error {
     let message: String
   }
@@ -91,6 +98,8 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   private var pendingWelcomes: [String: [JSON]] = [:]
   private var leafRecoveries: [String: [JSON]] = [:]
   private var epochHeads: [String: [JSON]] = [:]
+  private var recoveryShares: [String: RecoveryShareRecord] = [:]
+  private var recoveryShareDeletions: [String: String] = [:]
   /// Per conversation device leaf periods: `userDid`, `deviceId`, `joinedSeq`, `removedSeq`.
   private var leafPeriods: [String: [JSON]] = [:]
   /// Message IDs whose application entry `getEntries` serves with an altered `I13` receipt signature.
@@ -129,6 +138,8 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     pendingWelcomes = [:]
     leafRecoveries = [:]
     epochHeads = [:]
+    recoveryShares = [:]
+    recoveryShareDeletions = [:]
     leafPeriods = [:]
     forgedReceiptMessageIds = []
     spaceDenialForgery = nil
@@ -995,6 +1006,115 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
         signatureInput: try text(b, "signatureInput"), signature: try text(b, "signature"),
         acceptSignature: (b["acceptSignature"] as? String) ?? (b["wantMac"] as? String), now: nowSeconds()
       )
+    case "blue.catbird.labyrinth.getRecoveryShareCapabilities":
+      guard method == "GET", q.isEmpty else {
+        return xrpcError(400, "InvalidRequest", "invalid recovery-share capability query")
+      }
+      _ = try verifyRead(
+        request,
+        nsid: nsid,
+        rawQuery: rawQuery,
+        requiresActorDeviceQuery: false
+      )
+      return reply(200, [
+        "supported": true,
+        "version": 1,
+        "hpkeSuite": "DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_AES_256_GCM",
+        "keyId": "native-archive-fixture-kek",
+      ])
+    case "blue.catbird.labyrinth.putRecoveryShare":
+      guard method == "POST", Set(b.keys) == ["vdeviceId", "share", "fetchVerifier", "mechanism"],
+            let vdeviceId = bytes(b["vdeviceId"]), vdeviceId.count == 16,
+            let share = bytes(b["share"]), share.count == 32,
+            let fetchVerifier = bytes(b["fetchVerifier"]), fetchVerifier.count == 32,
+            let mechanism = b["mechanism"] as? String,
+            ["code", "passkey"].contains(mechanism)
+      else {
+        return xrpcError(400, "InvalidRequest", "malformed recovery-share put")
+      }
+      let account = try verifyLabyrinthProcedure(request, nsid: nsid, body: body)
+      let key = recoveryShareKey(account: account, vdeviceId: vdeviceId)
+      if recoveryShareDeletions[key] != nil {
+        return xrpcError(409, "RecoveryShareConflict", "recovery share was deleted")
+      }
+      if let existing = recoveryShares[key] {
+        guard existing.share == share,
+              existing.fetchVerifier == fetchVerifier,
+              existing.mechanism == mechanism
+        else {
+          return xrpcError(409, "RecoveryShareConflict", "different recovery share already stored")
+        }
+        return reply(200, [
+          "vdeviceId": ["$bytes": vdeviceId.base64EncodedString()],
+          "createdAt": existing.createdAt,
+        ])
+      }
+      let createdAt = "2026-11-16T00:00:00.000Z"
+      recoveryShares[key] = RecoveryShareRecord(
+        share: share,
+        fetchVerifier: fetchVerifier,
+        mechanism: mechanism,
+        createdAt: createdAt
+      )
+      return reply(200, [
+        "vdeviceId": ["$bytes": vdeviceId.base64EncodedString()],
+        "createdAt": createdAt,
+      ])
+    case "blue.catbird.labyrinth.getRecoveryShare":
+      guard method == "POST",
+            Set(b.keys).isSubset(of: ["vdeviceId", "fetchToken", "recipientPublicKey", "purpose"]),
+            Set(["vdeviceId", "fetchToken", "recipientPublicKey"]).isSubset(of: Set(b.keys)),
+            let vdeviceId = bytes(b["vdeviceId"]), vdeviceId.count == 16,
+            let fetchToken = bytes(b["fetchToken"]), fetchToken.count == 32,
+            let recipientPublicKey = bytes(b["recipientPublicKey"]), recipientPublicKey.count == 32,
+            (b["purpose"] == nil || ["restore", "verify"].contains(b["purpose"] as? String ?? ""))
+      else {
+        return xrpcError(400, "InvalidRequest", "malformed recovery-share fetch")
+      }
+      let account = try verifyLabyrinthProcedure(request, nsid: nsid, body: body)
+      let key = recoveryShareKey(account: account, vdeviceId: vdeviceId)
+      let expectedVerifier = recoveryFetchVerifier(
+        account: account,
+        vdeviceId: vdeviceId,
+        fetchToken: fetchToken
+      )
+      guard let stored = recoveryShares[key], stored.fetchVerifier == expectedVerifier else {
+        return xrpcError(404, "RecoveryShareUnavailable", "recovery share unavailable")
+      }
+      let sealed = try sealRecoveryShare(
+        stored.share,
+        account: account,
+        vdeviceId: vdeviceId,
+        recipientPublicKey: recipientPublicKey
+      )
+      return reply(200, [
+        "vdeviceId": ["$bytes": vdeviceId.base64EncodedString()],
+        "enc": ["$bytes": sealed.enc.base64EncodedString()],
+        "sealedShare": ["$bytes": sealed.ciphertext.base64EncodedString()],
+      ])
+    case "blue.catbird.labyrinth.deleteRecoveryShare":
+      guard method == "POST", Set(b.keys) == ["vdeviceId"],
+            let vdeviceId = bytes(b["vdeviceId"]), vdeviceId.count == 16
+      else {
+        return xrpcError(400, "InvalidRequest", "malformed recovery-share deletion")
+      }
+      let account = try verifyLabyrinthProcedure(request, nsid: nsid, body: body)
+      let key = recoveryShareKey(account: account, vdeviceId: vdeviceId)
+      if let deletedAt = recoveryShareDeletions[key] {
+        return reply(200, [
+          "vdeviceId": ["$bytes": vdeviceId.base64EncodedString()],
+          "deletedAt": deletedAt,
+        ])
+      }
+      guard recoveryShares.removeValue(forKey: key) != nil else {
+        return xrpcError(404, "RecoveryShareNotFound", "recovery share not found")
+      }
+      let deletedAt = "2026-11-16T00:00:01.000Z"
+      recoveryShareDeletions[key] = deletedAt
+      return reply(200, [
+        "vdeviceId": ["$bytes": vdeviceId.base64EncodedString()],
+        "deletedAt": deletedAt,
+      ])
     case "blue.catbird.labyrinth.publishEpochHead":
       let (write, account, key) = try deviceSignedClaim(request, header: "catbird-labyrinth-write", deviceField: "actorDeviceId", domain: "CATBIRD-LABYRINTH-WRITE\0")
       guard write["endpointNsid"] as? String == nsid, write["payloadSha256"] as? String == hex(Data(SHA256.hash(data: body))) else {
@@ -1160,6 +1280,178 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
     default:
       return reply(200, JSON())
     }
+  }
+
+  private func verifyLabyrinthProcedure(
+    _ request: URLRequest,
+    nsid: String,
+    body: Data
+  ) throws -> String {
+    let (claim, account, _) = try deviceSignedClaim(
+      request,
+      header: "catbird-labyrinth-write",
+      deviceField: "actorDeviceId",
+      domain: "CATBIRD-LABYRINTH-WRITE\0"
+    )
+    guard claim["endpointNsid"] as? String == nsid,
+          claim["payloadSha256"] as? String == hex(Data(SHA256.hash(data: body)))
+    else {
+      throw Fault(message: "Labyrinth procedure claim does not bind this route and payload")
+    }
+    return account
+  }
+
+  private func recoveryShareKey(account: String, vdeviceId: Data) -> String {
+    "\(account)|\(hex(vdeviceId))"
+  }
+
+  private func recoveryFetchVerifier(
+    account: String,
+    vdeviceId: Data,
+    fetchToken: Data
+  ) -> Data {
+    var input = Data("catbird.labyrinth.recovery_share.fetch.v1|".utf8)
+    input.append(Data(account.utf8))
+    input.append(Data("|".utf8))
+    input.append(Data(hex(vdeviceId).utf8))
+    input.append(Data("|".utf8))
+    input.append(fetchToken)
+    return Data(SHA256.hash(data: input))
+  }
+
+  private func sealRecoveryShare(
+    _ share: Data,
+    account: String,
+    vdeviceId: Data,
+    recipientPublicKey: Data
+  ) throws -> (enc: Data, ciphertext: Data) {
+    guard share.count == 32, vdeviceId.count == 16, recipientPublicKey.count == 32 else {
+      throw Fault(message: "invalid recovery-share HPKE input")
+    }
+    let recipient = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: recipientPublicKey)
+    let ephemeral = Curve25519.KeyAgreement.PrivateKey()
+    let enc = ephemeral.publicKey.rawRepresentation
+    let dh = try ephemeral.sharedSecretFromKeyAgreement(with: recipient).withUnsafeBytes { Data($0) }
+    let kemID = Data("KEM".utf8) + hpkeUInt16(0x0020)
+    let suiteID =
+      Data("HPKE".utf8) + hpkeUInt16(0x0020) + hpkeUInt16(0x0001) + hpkeUInt16(0x0002)
+    let eaePRK = hpkeLabeledExtract(id: kemID, salt: Data(), label: "eae_prk", input: dh)
+    let sharedSecret = try hpkeLabeledExpand(
+      id: kemID,
+      pseudorandomKey: eaePRK,
+      label: "shared_secret",
+      info: enc + recipientPublicKey,
+      outputByteCount: 32
+    )
+    let pskIDHash = hpkeLabeledExtract(
+      id: suiteID,
+      salt: Data(),
+      label: "psk_id_hash",
+      input: Data()
+    )
+    let infoHash = hpkeLabeledExtract(
+      id: suiteID,
+      salt: Data(),
+      label: "info_hash",
+      input: Data("catbird.labyrinth.recovery_share.seal.v1".utf8)
+    )
+    let keyScheduleContext = Data([0]) + pskIDHash + infoHash
+    let secret = hpkeLabeledExtract(
+      id: suiteID,
+      salt: sharedSecret,
+      label: "secret",
+      input: Data()
+    )
+    let key = try hpkeLabeledExpand(
+      id: suiteID,
+      pseudorandomKey: secret,
+      label: "key",
+      info: keyScheduleContext,
+      outputByteCount: 32
+    )
+    let baseNonce = try hpkeLabeledExpand(
+      id: suiteID,
+      pseudorandomKey: secret,
+      label: "base_nonce",
+      info: keyScheduleContext,
+      outputByteCount: 12
+    )
+    var aad = Data(account.utf8)
+    aad.append(0)
+    aad.append(vdeviceId)
+    let box = try AES.GCM.seal(
+      share,
+      using: SymmetricKey(data: key),
+      nonce: AES.GCM.Nonce(data: baseNonce),
+      authenticating: aad
+    )
+    return (enc, box.ciphertext + box.tag)
+  }
+
+  private func hpkeLabeledExtract(
+    id: Data,
+    salt: Data,
+    label: String,
+    input: Data
+  ) -> Data {
+    hpkeExtract(
+      salt: salt,
+      input: Data("HPKE-v1".utf8) + id + Data(label.utf8) + input
+    )
+  }
+
+  private func hpkeLabeledExpand(
+    id: Data,
+    pseudorandomKey: Data,
+    label: String,
+    info: Data,
+    outputByteCount: Int
+  ) throws -> Data {
+    guard outputByteCount > 0, outputByteCount <= Int(UInt16.max) else {
+      throw Fault(message: "invalid HPKE expansion length")
+    }
+    return try hpkeExpand(
+      pseudorandomKey: pseudorandomKey,
+      info: hpkeUInt16(UInt16(outputByteCount))
+        + Data("HPKE-v1".utf8) + id + Data(label.utf8) + info,
+      outputByteCount: outputByteCount
+    )
+  }
+
+  private func hpkeExtract(salt: Data, input: Data) -> Data {
+    let key = SymmetricKey(data: salt.isEmpty ? Data(repeating: 0, count: 32) : salt)
+    return Data(HMAC<SHA256>.authenticationCode(for: input, using: key))
+  }
+
+  private func hpkeExpand(
+    pseudorandomKey: Data,
+    info: Data,
+    outputByteCount: Int
+  ) throws -> Data {
+    guard outputByteCount <= 255 * 32 else {
+      throw Fault(message: "HPKE expansion is too long")
+    }
+    let key = SymmetricKey(data: pseudorandomKey)
+    var output = Data()
+    var previous = Data()
+    var counter: UInt8 = 1
+    while output.count < outputByteCount {
+      previous = Data(
+        HMAC<SHA256>.authenticationCode(
+          for: previous + info + Data([counter]),
+          using: key
+        )
+      )
+      output.append(previous.prefix(outputByteCount - output.count))
+      counter &+= 1
+    }
+    return output
+  }
+
+  private func hpkeUInt16(_ value: UInt16) -> Data {
+    var data = Data()
+    data.appendBigEndian(value)
+    return data
   }
 
   private func createConversation(_ b: JSON) throws -> Reply {
@@ -1588,14 +1880,24 @@ final class NativeArchiveMockNetwork: @unchecked Sendable {
   }
 
   /// `read_auth::verify`: the claim names its account, this route, and this exact canonical query.
-  /// Returns the verified caller account.
+  /// Fixed-query reads bind `actorDeviceId` in the query. The zero-parameter recovery-share
+  /// capability route instead binds the enrolled device only through the signed claim.
   @discardableResult
-  private func verifyRead(_ request: URLRequest, nsid: String, rawQuery: String) throws -> String {
+  private func verifyRead(
+    _ request: URLRequest,
+    nsid: String,
+    rawQuery: String,
+    requiresActorDeviceQuery: Bool = true
+  ) throws -> String {
     let (claim, account, _) = try deviceSignedClaim(request, header: "catbird-labyrinth-read", deviceField: "deviceId", domain: "CATBIRD-LABYRINTH-READ\0")
     let pairs = decodedPairs(rawQuery)
+    let actors = pairs.filter { $0.0 == "actorDeviceId" }.map(\.1)
+    let actorQueryMatches = requiresActorDeviceQuery
+      ? actors == [claim["deviceId"] as? String ?? ""]
+      : actors.isEmpty
     guard claim["did"] as? String == account, claim["nsid"] as? String == nsid,
           claim["query"] as? String == canonicalQuery(pairs),
-          pairs.filter({ $0.0 == "actorDeviceId" }).map(\.1) == [claim["deviceId"] as? String ?? ""]
+          actorQueryMatches
     else { throw Fault(message: "read claim does not bind this account, route, and query") }
     return account
   }

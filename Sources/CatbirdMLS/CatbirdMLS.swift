@@ -586,6 +586,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func acknowledgeEntriesUpTo(conversationId: String, upToSeq: Int64) throws
 
+    func acknowledgeRecoveryAttention() throws -> LabyrinthBackupStatus
+
     func addGroupMembers(conversationId: String, memberDids: [String]) throws -> ConversationRow
 
     func advanceReadState(conversationId: String, candidateSeq: UInt64) throws -> MailboxReadStateRecord
@@ -626,6 +628,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt
 
+    func exportConversationIntegrityEvidenceJson(conversationId: String) throws -> String
+
     func flushLabyrinthQueue() throws -> UInt32
 
     func fulfillPendingGroupLeaves() throws -> UInt32
@@ -646,6 +650,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func isHandleClosed() -> Bool
 
+    func labyrinthRecoveryPresence() throws -> LabyrinthRecoveryPresence
+
     func labyrinthStatus() throws -> LabyrinthBackupStatus
 
     func leaveConversation(conversationId: String) throws -> LeaveConversationOutcome
@@ -663,6 +669,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
     func listPendingLabyrinthQueue(conversationId: String?, limit: UInt32) throws -> [QueuedLabyrinthArchivePayload]
 
     func listReadStates() throws -> [MailboxReadStateRecord]
+
+    func listRecoveryMethods() throws -> [LabyrinthRecoveryMethodInfo]
 
     func listRequests(consentFilter: String?) throws -> [RequestRow]
 
@@ -706,7 +714,7 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func revokeDevice(targetDeviceId: String) throws -> DeviceRevocationReport
 
-    func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus
+    func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthRevocationOutcome
 
     func sendMessage(conversationId: String, messageId: String, text: String) throws -> MessageRow
 
@@ -815,6 +823,12 @@ open class CatbirdMlsClient:
                                                                                     FfiConverterString.lower(conversationId),
                                                                                     FfiConverterInt64.lower(upToSeq), $0)
         }
+    }
+
+    open func acknowledgeRecoveryAttention() throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_acknowledge_recovery_attention(self.uniffiClonePointer(), $0)
+        })
     }
 
     open func addGroupMembers(conversationId: String, memberDids: [String]) throws -> ConversationRow {
@@ -972,6 +986,13 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func exportConversationIntegrityEvidenceJson(conversationId: String) throws -> String {
+        return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_export_conversation_integrity_evidence_json(self.uniffiClonePointer(),
+                                                                                                      FfiConverterString.lower(conversationId), $0)
+        })
+    }
+
     open func flushLabyrinthQueue() throws -> UInt32 {
         return try FfiConverterUInt32.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_flush_labyrinth_queue(self.uniffiClonePointer(), $0)
@@ -1037,6 +1058,12 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func labyrinthRecoveryPresence() throws -> LabyrinthRecoveryPresence {
+        return try FfiConverterTypeLabyrinthRecoveryPresence.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_labyrinth_recovery_presence(self.uniffiClonePointer(), $0)
+        })
+    }
+
     open func labyrinthStatus() throws -> LabyrinthBackupStatus {
         return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_labyrinth_status(self.uniffiClonePointer(), $0)
@@ -1097,6 +1124,12 @@ open class CatbirdMlsClient:
     open func listReadStates() throws -> [MailboxReadStateRecord] {
         return try FfiConverterSequenceTypeMailboxReadStateRecord.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_list_read_states(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func listRecoveryMethods() throws -> [LabyrinthRecoveryMethodInfo] {
+        return try FfiConverterSequenceTypeLabyrinthRecoveryMethodInfo.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_list_recovery_methods(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -1250,8 +1283,8 @@ open class CatbirdMlsClient:
         })
     }
 
-    open func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthBackupStatus {
-        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+    open func revokeLabyrinthDevice(targetDeviceId: String) throws -> LabyrinthRevocationOutcome {
+        return try FfiConverterTypeLabyrinthRevocationOutcome.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_revoke_labyrinth_device(self.uniffiClonePointer(),
                                                                                   FfiConverterString.lower(targetDeviceId), $0)
         })
@@ -6581,6 +6614,11 @@ public struct LabyrinthBackupStatus {
     public var mailboxSpaceUri: String
     public var hasRecoveryCode: Bool
     public var hasPasskeyPrf: Bool
+    /**
+     * A rotation minted a replacement code that still needs to be saved or
+     * replaced by the account owner. Durable across app restarts.
+     */
+    public var recoveryNeedsAttention: Bool
     public var epochSeq: UInt64
     public var activeDeviceIds: [String]
     /**
@@ -6611,7 +6649,11 @@ public struct LabyrinthBackupStatus {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(backupEnabled: Bool, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool, epochSeq: UInt64, activeDeviceIds: [String],
+    public init(backupEnabled: Bool, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool,
+                /* 
+                    * A rotation minted a replacement code that still needs to be saved or
+                    * replaced by the account owner. Durable across app restarts.
+                    */ recoveryNeedsAttention: Bool, epochSeq: UInt64, activeDeviceIds: [String],
                 /* 
                     * Advisory only: this restored keychain/passkey method passed its
                     * client-clock freshness window but remains valid until rotation.
@@ -6636,6 +6678,7 @@ public struct LabyrinthBackupStatus {
         self.mailboxSpaceUri = mailboxSpaceUri
         self.hasRecoveryCode = hasRecoveryCode
         self.hasPasskeyPrf = hasPasskeyPrf
+        self.recoveryNeedsAttention = recoveryNeedsAttention
         self.epochSeq = epochSeq
         self.activeDeviceIds = activeDeviceIds
         self.recoveryMethodStale = recoveryMethodStale
@@ -6659,6 +6702,9 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
             return false
         }
         if lhs.hasPasskeyPrf != rhs.hasPasskeyPrf {
+            return false
+        }
+        if lhs.recoveryNeedsAttention != rhs.recoveryNeedsAttention {
             return false
         }
         if lhs.epochSeq != rhs.epochSeq {
@@ -6693,6 +6739,7 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
         hasher.combine(mailboxSpaceUri)
         hasher.combine(hasRecoveryCode)
         hasher.combine(hasPasskeyPrf)
+        hasher.combine(recoveryNeedsAttention)
         hasher.combine(epochSeq)
         hasher.combine(activeDeviceIds)
         hasher.combine(recoveryMethodStale)
@@ -6715,6 +6762,7 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
                 mailboxSpaceUri: FfiConverterString.read(from: &buf),
                 hasRecoveryCode: FfiConverterBool.read(from: &buf),
                 hasPasskeyPrf: FfiConverterBool.read(from: &buf),
+                recoveryNeedsAttention: FfiConverterBool.read(from: &buf),
                 epochSeq: FfiConverterUInt64.read(from: &buf),
                 activeDeviceIds: FfiConverterSequenceString.read(from: &buf),
                 recoveryMethodStale: FfiConverterBool.read(from: &buf),
@@ -6731,6 +6779,7 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
         FfiConverterString.write(value.mailboxSpaceUri, into: &buf)
         FfiConverterBool.write(value.hasRecoveryCode, into: &buf)
         FfiConverterBool.write(value.hasPasskeyPrf, into: &buf)
+        FfiConverterBool.write(value.recoveryNeedsAttention, into: &buf)
         FfiConverterUInt64.write(value.epochSeq, into: &buf)
         FfiConverterSequenceString.write(value.activeDeviceIds, into: &buf)
         FfiConverterBool.write(value.recoveryMethodStale, into: &buf)
@@ -6754,6 +6803,278 @@ public func FfiConverterTypeLabyrinthBackupStatus_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeLabyrinthBackupStatus_lower(_ value: LabyrinthBackupStatus) -> RustBuffer {
     return FfiConverterTypeLabyrinthBackupStatus.lower(value)
+}
+
+/**
+ * One verified virtual recovery method in the account's current epoch.
+ */
+public struct LabyrinthRecoveryMethodInfo {
+    public var vdeviceId: Data
+    public var mechanism: String
+    public var deviceKey: Data
+    public var createdAtMs: UInt64
+    public var lastUsedAtMs: UInt64?
+    public var staleAtMs: UInt64?
+    public var staleNow: Bool
+    public var revoked: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(vdeviceId: Data, mechanism: String, deviceKey: Data, createdAtMs: UInt64, lastUsedAtMs: UInt64?, staleAtMs: UInt64?, staleNow: Bool, revoked: Bool) {
+        self.vdeviceId = vdeviceId
+        self.mechanism = mechanism
+        self.deviceKey = deviceKey
+        self.createdAtMs = createdAtMs
+        self.lastUsedAtMs = lastUsedAtMs
+        self.staleAtMs = staleAtMs
+        self.staleNow = staleNow
+        self.revoked = revoked
+    }
+}
+
+extension LabyrinthRecoveryMethodInfo: Equatable, Hashable {
+    public static func == (lhs: LabyrinthRecoveryMethodInfo, rhs: LabyrinthRecoveryMethodInfo) -> Bool {
+        if lhs.vdeviceId != rhs.vdeviceId {
+            return false
+        }
+        if lhs.mechanism != rhs.mechanism {
+            return false
+        }
+        if lhs.deviceKey != rhs.deviceKey {
+            return false
+        }
+        if lhs.createdAtMs != rhs.createdAtMs {
+            return false
+        }
+        if lhs.lastUsedAtMs != rhs.lastUsedAtMs {
+            return false
+        }
+        if lhs.staleAtMs != rhs.staleAtMs {
+            return false
+        }
+        if lhs.staleNow != rhs.staleNow {
+            return false
+        }
+        if lhs.revoked != rhs.revoked {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(vdeviceId)
+        hasher.combine(mechanism)
+        hasher.combine(deviceKey)
+        hasher.combine(createdAtMs)
+        hasher.combine(lastUsedAtMs)
+        hasher.combine(staleAtMs)
+        hasher.combine(staleNow)
+        hasher.combine(revoked)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLabyrinthRecoveryMethodInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LabyrinthRecoveryMethodInfo {
+        return
+            try LabyrinthRecoveryMethodInfo(
+                vdeviceId: FfiConverterData.read(from: &buf),
+                mechanism: FfiConverterString.read(from: &buf),
+                deviceKey: FfiConverterData.read(from: &buf),
+                createdAtMs: FfiConverterUInt64.read(from: &buf),
+                lastUsedAtMs: FfiConverterOptionUInt64.read(from: &buf),
+                staleAtMs: FfiConverterOptionUInt64.read(from: &buf),
+                staleNow: FfiConverterBool.read(from: &buf),
+                revoked: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: LabyrinthRecoveryMethodInfo, into buf: inout [UInt8]) {
+        FfiConverterData.write(value.vdeviceId, into: &buf)
+        FfiConverterString.write(value.mechanism, into: &buf)
+        FfiConverterData.write(value.deviceKey, into: &buf)
+        FfiConverterUInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastUsedAtMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.staleAtMs, into: &buf)
+        FfiConverterBool.write(value.staleNow, into: &buf)
+        FfiConverterBool.write(value.revoked, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRecoveryMethodInfo_lift(_ buf: RustBuffer) throws -> LabyrinthRecoveryMethodInfo {
+    return try FfiConverterTypeLabyrinthRecoveryMethodInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRecoveryMethodInfo_lower(_ value: LabyrinthRecoveryMethodInfo) -> RustBuffer {
+    return FfiConverterTypeLabyrinthRecoveryMethodInfo.lower(value)
+}
+
+/**
+ * Independent account-archive presence used before offering fresh genesis.
+ */
+public struct LabyrinthRecoveryPresence {
+    public var localState: Bool
+    public var mailboxEpoch: Bool
+    public var pdsHead: Bool
+    public var dsHead: Bool
+    public var requiresRecovery: Bool
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(localState: Bool, mailboxEpoch: Bool, pdsHead: Bool, dsHead: Bool, requiresRecovery: Bool) {
+        self.localState = localState
+        self.mailboxEpoch = mailboxEpoch
+        self.pdsHead = pdsHead
+        self.dsHead = dsHead
+        self.requiresRecovery = requiresRecovery
+    }
+}
+
+extension LabyrinthRecoveryPresence: Equatable, Hashable {
+    public static func == (lhs: LabyrinthRecoveryPresence, rhs: LabyrinthRecoveryPresence) -> Bool {
+        if lhs.localState != rhs.localState {
+            return false
+        }
+        if lhs.mailboxEpoch != rhs.mailboxEpoch {
+            return false
+        }
+        if lhs.pdsHead != rhs.pdsHead {
+            return false
+        }
+        if lhs.dsHead != rhs.dsHead {
+            return false
+        }
+        if lhs.requiresRecovery != rhs.requiresRecovery {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(localState)
+        hasher.combine(mailboxEpoch)
+        hasher.combine(pdsHead)
+        hasher.combine(dsHead)
+        hasher.combine(requiresRecovery)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLabyrinthRecoveryPresence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LabyrinthRecoveryPresence {
+        return
+            try LabyrinthRecoveryPresence(
+                localState: FfiConverterBool.read(from: &buf),
+                mailboxEpoch: FfiConverterBool.read(from: &buf),
+                pdsHead: FfiConverterBool.read(from: &buf),
+                dsHead: FfiConverterBool.read(from: &buf),
+                requiresRecovery: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: LabyrinthRecoveryPresence, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.localState, into: &buf)
+        FfiConverterBool.write(value.mailboxEpoch, into: &buf)
+        FfiConverterBool.write(value.pdsHead, into: &buf)
+        FfiConverterBool.write(value.dsHead, into: &buf)
+        FfiConverterBool.write(value.requiresRecovery, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRecoveryPresence_lift(_ buf: RustBuffer) throws -> LabyrinthRecoveryPresence {
+    return try FfiConverterTypeLabyrinthRecoveryPresence.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRecoveryPresence_lower(_ value: LabyrinthRecoveryPresence) -> RustBuffer {
+    return FfiConverterTypeLabyrinthRecoveryPresence.lower(value)
+}
+
+/**
+ * A Labyrinth-only revocation result that does not discard a fresh code.
+ */
+public struct LabyrinthRevocationOutcome {
+    public var status: LabyrinthBackupStatus
+    public var rekeyedRecoveryCode: String?
+    public var rekeyedPasskeyIds: [Data]
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(status: LabyrinthBackupStatus, rekeyedRecoveryCode: String?, rekeyedPasskeyIds: [Data]) {
+        self.status = status
+        self.rekeyedRecoveryCode = rekeyedRecoveryCode
+        self.rekeyedPasskeyIds = rekeyedPasskeyIds
+    }
+}
+
+extension LabyrinthRevocationOutcome: Equatable, Hashable {
+    public static func == (lhs: LabyrinthRevocationOutcome, rhs: LabyrinthRevocationOutcome) -> Bool {
+        if lhs.status != rhs.status {
+            return false
+        }
+        if lhs.rekeyedRecoveryCode != rhs.rekeyedRecoveryCode {
+            return false
+        }
+        if lhs.rekeyedPasskeyIds != rhs.rekeyedPasskeyIds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(status)
+        hasher.combine(rekeyedRecoveryCode)
+        hasher.combine(rekeyedPasskeyIds)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLabyrinthRevocationOutcome: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LabyrinthRevocationOutcome {
+        return
+            try LabyrinthRevocationOutcome(
+                status: FfiConverterTypeLabyrinthBackupStatus.read(from: &buf),
+                rekeyedRecoveryCode: FfiConverterOptionString.read(from: &buf),
+                rekeyedPasskeyIds: FfiConverterSequenceData.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: LabyrinthRevocationOutcome, into buf: inout [UInt8]) {
+        FfiConverterTypeLabyrinthBackupStatus.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.rekeyedRecoveryCode, into: &buf)
+        FfiConverterSequenceData.write(value.rekeyedPasskeyIds, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRevocationOutcome_lift(_ buf: RustBuffer) throws -> LabyrinthRevocationOutcome {
+    return try FfiConverterTypeLabyrinthRevocationOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLabyrinthRevocationOutcome_lower(_ value: LabyrinthRevocationOutcome) -> RustBuffer {
+    return FfiConverterTypeLabyrinthRevocationOutcome.lower(value)
 }
 
 /**
@@ -8841,10 +9162,18 @@ public struct RegisteredDeviceInfo {
     public var dormantAt: String?
     public var labyrinthDeviceKeyHex: String?
     public var isCurrentDevice: Bool
+    /**
+     * An active PDS/DS device not explicitly recognized on this client, or a directory mismatch.
+     */
+    public var unrecognized: Bool
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(deviceId: String, deviceName: String?, signaturePublicKey: Data, keyId: String, authGeneration: Int64, status: String, createdAt: String, lastActiveAt: String?, dormantAt: String?, labyrinthDeviceKeyHex: String?, isCurrentDevice: Bool) {
+    public init(deviceId: String, deviceName: String?, signaturePublicKey: Data, keyId: String, authGeneration: Int64, status: String, createdAt: String, lastActiveAt: String?, dormantAt: String?, labyrinthDeviceKeyHex: String?, isCurrentDevice: Bool,
+                /* 
+                    * An active PDS/DS device not explicitly recognized on this client, or a directory mismatch.
+                    */ unrecognized: Bool)
+    {
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.signaturePublicKey = signaturePublicKey
@@ -8856,6 +9185,7 @@ public struct RegisteredDeviceInfo {
         self.dormantAt = dormantAt
         self.labyrinthDeviceKeyHex = labyrinthDeviceKeyHex
         self.isCurrentDevice = isCurrentDevice
+        self.unrecognized = unrecognized
     }
 }
 
@@ -8894,6 +9224,9 @@ extension RegisteredDeviceInfo: Equatable, Hashable {
         if lhs.isCurrentDevice != rhs.isCurrentDevice {
             return false
         }
+        if lhs.unrecognized != rhs.unrecognized {
+            return false
+        }
         return true
     }
 
@@ -8909,6 +9242,7 @@ extension RegisteredDeviceInfo: Equatable, Hashable {
         hasher.combine(dormantAt)
         hasher.combine(labyrinthDeviceKeyHex)
         hasher.combine(isCurrentDevice)
+        hasher.combine(unrecognized)
     }
 }
 
@@ -8929,7 +9263,8 @@ public struct FfiConverterTypeRegisteredDeviceInfo: FfiConverterRustBuffer {
                 lastActiveAt: FfiConverterOptionString.read(from: &buf),
                 dormantAt: FfiConverterOptionString.read(from: &buf),
                 labyrinthDeviceKeyHex: FfiConverterOptionString.read(from: &buf),
-                isCurrentDevice: FfiConverterBool.read(from: &buf)
+                isCurrentDevice: FfiConverterBool.read(from: &buf),
+                unrecognized: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -8945,6 +9280,7 @@ public struct FfiConverterTypeRegisteredDeviceInfo: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.dormantAt, into: &buf)
         FfiConverterOptionString.write(value.labyrinthDeviceKeyHex, into: &buf)
         FfiConverterBool.write(value.isCurrentDevice, into: &buf)
+        FfiConverterBool.write(value.unrecognized, into: &buf)
     }
 }
 
@@ -14497,6 +14833,31 @@ private struct FfiConverterSequenceTypeGroupMemberDebugInfo: FfiConverterRustBuf
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeLabyrinthRecoveryMethodInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [LabyrinthRecoveryMethodInfo]
+
+    static func write(_ value: [LabyrinthRecoveryMethodInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeLabyrinthRecoveryMethodInfo.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [LabyrinthRecoveryMethodInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [LabyrinthRecoveryMethodInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeLabyrinthRecoveryMethodInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeLabyrinthRotationExclusion: FfiConverterRustBuffer {
     typealias SwiftType = [LabyrinthRotationExclusion]
 
@@ -15168,6 +15529,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_entries_up_to() != 42076 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_recovery_attention() != 63245 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_add_group_members() != 60833 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15228,6 +15592,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_enroll_device() != 1871 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_export_conversation_integrity_evidence_json() != 24030 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_flush_labyrinth_queue() != 4710 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15258,6 +15625,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_is_handle_closed() != 20885 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_labyrinth_recovery_presence() != 40371 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_labyrinth_status() != 9390 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15283,6 +15653,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_read_states() != 57127 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_recovery_methods() != 51530 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_requests() != 27470 {
@@ -15348,7 +15721,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_device() != 58386 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_labyrinth_device() != 44837 {
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_revoke_labyrinth_device() != 17147 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_send_message() != 55190 {

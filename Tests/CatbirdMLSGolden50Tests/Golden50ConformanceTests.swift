@@ -497,8 +497,10 @@ final class Golden50ConformanceTests: XCTestCase {
         actorDeviceId: primaryDevice.deviceId
       )
     )
-    XCTAssertEqual(coordinator.accountDid, primaryDevice.did)
-    XCTAssertEqual(coordinator.accountDidHash, accountHash)
+    let coordinatorDid = await coordinator.accountDid
+    let coordinatorDidHash = await coordinator.accountDidHash
+    XCTAssertEqual(coordinatorDid, primaryDevice.did)
+    XCTAssertEqual(coordinatorDidHash, accountHash)
     let dbURL = try MLSAppGroupStorage.databaseURL(storageRoot: tempRoot, accountDid: primaryDevice.did)
     XCTAssertTrue(FileManager.default.fileExists(atPath: dbURL.path))
     let initialConversations = try await coordinator.listConversations()

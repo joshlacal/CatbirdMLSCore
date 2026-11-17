@@ -458,7 +458,7 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     XCTAssertEqual(network.contractViolations, [])
   }
 
-  func testKick403FallbackRescueConversationAndFreshDeviceMailboxRestoreEndToEnd() async throws {
+  func testKick403FallbackRescueConversationAndFreshRemovedDeviceArchiveRestoreBlockedWithoutDeletionInventory() async throws {
     let aliceDid = "did:plc:alicekickrestoreaaaaaaaa"
     let bobDid = "did:plc:bobpeerkickbbbbbbbbbbbbb"
     let aliceDevice1 = "a11ce002-0000-4000-8000-000000000001"
@@ -550,18 +550,13 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     try await device1.signOutAndWipe()
 
     // -------------------------------------------------------------------------
-    // Device 2: Completely fresh storageRoot + fresh KeychainBackend, zero shared local state.
-    // Restore via recovery code (with a 1-character typo inside Reed-Solomon budget!) + owner mailbox!
+    // Device 2: completely fresh storageRoot + fresh KeychainBackend, zero shared local state.
+    // Recover the account with the recovery code, then prove archived plaintext remains quarantined
+    // when the removed device cannot obtain the conversation's deletion inventory.
     // -------------------------------------------------------------------------
-    let recorder = await MainActor.run { EventRecorder() }
-    let device2Config = try device(did: aliceDid, deviceId: aliceDevice2, label: "Dev2")
-    let device2 = try await MainActor.run {
-      let c = try MLSClientCoordinator(config: device2Config.config, keystore: device2Config.keystore, transport: device2Config.transport)
-      c.onChangeCallback = { event in
-        recorder.events.append(event)
-      }
-      return c
-    }
+    let device2 = try await open(
+      try device(did: aliceDid, deviceId: aliceDevice2, label: "Dev2")
+    )
 
     _ = try await device2.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
 
@@ -598,48 +593,25 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     }
     network.forgeSpaceDenials(nil)
 
-    // The authority's signed denial, faithfully relayed, permits the owner restore.
-    let restoredMessagesCount = try await device2.restoreConversationFromOwnerMailbox(
-      conversationId: conversationId
-    )
-    XCTAssertEqual(restoredMessagesCount, 3)
-
-    // Second restore pass must be idempotent (0 duplicate inserts).
-    let secondRestoreCount = try await device2.restoreConversationFromOwnerMailbox(
-      conversationId: conversationId
-    )
-    XCTAssertEqual(secondRestoreCount, 0)
-
-    let conversations = try await device2.listConversations(limit: 10)
-    XCTAssertEqual(conversations.map(\.conversationId), [conversationId])
-
-    // listMessages returns newest-first or seq-ordered depending on query; sort by seq ascending to assert all 3.
-    let restoredMessages = try await device2.listMessages(conversationId: conversationId, limit: 20)
-      .sorted { $0.seq < $1.seq }
-    XCTAssertEqual(restoredMessages.count, 3)
-
-    XCTAssertEqual(restoredMessages[0].messageId, bobMessageId)
-    XCTAssertEqual(restoredMessages[0].senderDid, bobDid)
-    XCTAssertFalse(restoredMessages[0].isOwn, "Peer message restored from v5 attributed frame must have isOwn == false")
-    XCTAssertTrue(restoredMessages[0].plaintextJson.contains("Bob peer message before kick"))
-
-    XCTAssertEqual(restoredMessages[1].messageId, aliceCachedMessageId)
-    XCTAssertEqual(restoredMessages[1].senderDid, aliceDid)
-    XCTAssertTrue(restoredMessages[1].isOwn)
-    XCTAssertTrue(restoredMessages[1].plaintextJson.contains("Alice cached message before kick"))
-
-    XCTAssertEqual(restoredMessages[2].messageId, alicePostKickMessageId)
-    XCTAssertEqual(restoredMessages[2].senderDid, aliceDid)
-    XCTAssertTrue(restoredMessages[2].isOwn)
-    XCTAssertTrue(restoredMessages[2].plaintextJson.contains("Alice message queued right as 403 kick landed"))
-
-    // Give MainActor observer hop a moment to deliver PlatformChangeEvents.
-    try await waitUntil(timeoutSeconds: 2.0) {
-      await MainActor.run {
-        recorder.events.contains(.messagesUpdated(conversationId: conversationId))
-          && recorder.events.contains(.conversationsUpdated)
-      }
+    // A faithfully relayed signed denial proves removal and advances beyond ArchiveRestorePending,
+    // but it cannot confer access to `getConversationState`. Without that endpoint's account-deletion
+    // inventory, the native A1 gate must keep every owner archive entry quarantined.
+    let refusalsBeforeInventoryGate = network.overrideRejections(forSpace: convoSpaceURI)
+    do {
+      _ = try await device2.restoreConversationFromOwnerMailbox(conversationId: conversationId)
+      XCTFail("Restore must not expose archive plaintext without deletion inventory")
+    } catch MlsError.InvalidState(let message) {
+      XCTAssertTrue(message.contains("ArchiveDeletionInventoryUnavailable"), message)
     }
+    XCTAssertGreaterThan(
+      network.overrideRejections(forSpace: convoSpaceURI),
+      refusalsBeforeInventoryGate
+    )
+    let importedWithoutInventory = try await device2.listMessages(
+      conversationId: conversationId,
+      limit: 20
+    )
+    XCTAssertEqual(importedWithoutInventory.map(\.messageId), [])
 
     XCTAssertFalse(network.sawMainThreadRequest)
     await device2.close()
@@ -932,9 +904,24 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     await ipad.close()
     let oldIPadKey = try XCTUnwrap(network.labyrinthDeviceKeyHex(account: aliceDid, chatDeviceId: ipadDeviceId))
 
-    let revStatus = try await device1.revokeLabyrinthDevice(targetDeviceId: oldIPadKey)
-    XCTAssertEqual(revStatus.epochSeq, 3)
-    let recoveryCode = try await device1.setupRecoveryCode()
+    let revocation = try await device1.revokeLabyrinthDevice(targetDeviceId: oldIPadKey)
+    XCTAssertEqual(revocation.status.epochSeq, 3)
+    XCTAssertTrue(revocation.status.recoveryNeedsAttention)
+    let persistedAttentionStatus = try await device1.labyrinthStatus()
+    XCTAssertTrue(
+      persistedAttentionStatus.recoveryNeedsAttention,
+      "The replacement-code reminder must remain durable after the revocation return value is consumed"
+    )
+    XCTAssertTrue(revocation.rekeyedPasskeyIds.isEmpty)
+    let recoveryCode = try XCTUnwrap(
+      revocation.rekeyedRecoveryCode,
+      "Revoking with an enrolled recovery code must return its one replacement copy"
+    )
+    XCTAssertNotEqual(recoveryCode, preRevocationCode)
+    let acknowledgedStatus = try await device1.acknowledgeRecoveryAttention()
+    XCTAssertFalse(acknowledgedStatus.recoveryNeedsAttention)
+    let postAcknowledgementStatus = try await device1.labyrinthStatus()
+    XCTAssertFalse(postAcknowledgementStatus.recoveryNeedsAttention)
 
     _ = try await device1.createGroup(
       conversationId: ep3,

@@ -4,41 +4,41 @@
     {
       "path": "CatbirdMLSCore",
       "repository": "CatbirdMLSCore",
-      "source_git_head": "f1fa656e1dbfa3c1fa4a7fb60d5113982241abe7",
-      "source_jj_commit": "f1fa656e1dbfa3c1fa4a7fb60d5113982241abe7"
+      "source_git_head": "048a2f9f74e10657d332362d645151aa18a6b7b2",
+      "source_jj_commit": "048a2f9f74e10657d332362d645151aa18a6b7b2"
     },
     {
       "path": "Petrel",
       "repository": "Petrel",
-      "source_git_head": "e5b6039b6981d13ae42e242a36269349788bf5aa",
-      "source_jj_commit": "e5b6039b6981d13ae42e242a36269349788bf5aa"
+      "source_git_head": "278bd47fa47a676ce6cc30fd0fc083294fc29e1f",
+      "source_jj_commit": "278bd47fa47a676ce6cc30fd0fc083294fc29e1f"
     },
     {
       "path": "PetrelCatbird",
       "repository": "PetrelCatbird",
-      "source_git_head": "703ebbfee4ab115e22ff408ddcd83fb76228a3a8",
-      "source_jj_commit": "703ebbfee4ab115e22ff408ddcd83fb76228a3a8"
+      "source_git_head": "6d67a76c962d34d586fd4a45d1b7fee0eabaccfe",
+      "source_jj_commit": "6d67a76c962d34d586fd4a45d1b7fee0eabaccfe"
     },
     {
       "path": "catbird-atproto",
       "repository": "catbird-atproto",
-      "source_git_head": "a98aceb5fba88245fe0567092d6037482dcb71bc",
-      "source_jj_commit": "a98aceb5fba88245fe0567092d6037482dcb71bc"
+      "source_git_head": "708c2db8a7c703a0f0373db2e7e19bc8d8d729d8",
+      "source_jj_commit": "708c2db8a7c703a0f0373db2e7e19bc8d8d729d8"
     },
     {
       "path": "catbird-mls",
       "repository": "catbird-mls",
-      "source_git_head": "9131dbd227a217c28adb69ea8cd377656b4b2951",
-      "source_jj_commit": "9131dbd227a217c28adb69ea8cd377656b4b2951"
+      "source_git_head": "488e81363f56ece6a7801473eaaba1da655e63e9",
+      "source_jj_commit": "488e81363f56ece6a7801473eaaba1da655e63e9"
     },
     {
+      "path": "labyrinth",
       "repository": "labyrinth",
-      "source": "Cargo git dependency of catbird-mls, pinned in its Cargo.toml and Cargo.lock; not a sibling checkout",
-      "source_git_head": "385d1ee40ce1c3924c6a02234282e27b29607f2d",
-      "source_jj_commit": "385d1ee40ce1c3924c6a02234282e27b29607f2d"
+      "source_git_head": "f077bee176f21c0f847b2e8a745cf47429ab5548",
+      "source_jj_commit": "f077bee176f21c0f847b2e8a745cf47429ab5548"
     }
   ],
   "schema_version": 2,
-  "scope": "October 29 Spaces local Apple integration, built from merged main commits",
+  "scope": "Dec 1 local readiness candidate; includes unpublished source repairs and is not release-qualified.",
   "source_policy": "Selected baselines must remain ancestors; the artifact manifest separately records the final exact source identities and hashes."
 }

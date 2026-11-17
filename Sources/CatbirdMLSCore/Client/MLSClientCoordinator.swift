@@ -13,6 +13,7 @@ extension SpacesEligibilityInput: @unchecked Sendable {}
 extension SpacesEligibilityStatus: @unchecked Sendable {}
 extension SpacesUnavailableReason: @unchecked Sendable {}
 extension LabyrinthBackupStatus: @unchecked Sendable {}
+extension LabyrinthRevocationOutcome: @unchecked Sendable {}
 extension OtcPairingOffer: @unchecked Sendable {}
 extension OtcPairingCompletion: @unchecked Sendable {}
 extension PreCutoverWipeReport: @unchecked Sendable {}
@@ -990,6 +991,13 @@ public final class MLSClientCoordinator {
     }
   }
 
+  public func acknowledgeRecoveryAttention() async throws -> LabyrinthBackupStatus {
+    let c = client
+    return try await runOffMain {
+      try c.acknowledgeRecoveryAttention()
+    }
+  }
+
   public func setupRecoveryCode() async throws -> String {
     let c = client
     let code = try await runOffMain {
@@ -1033,7 +1041,9 @@ public final class MLSClientCoordinator {
     return completion
   }
 
-  public func revokeLabyrinthDevice(targetDeviceId: String) async throws -> LabyrinthBackupStatus {
+  public func revokeLabyrinthDevice(
+    targetDeviceId: String
+  ) async throws -> LabyrinthRevocationOutcome {
     let c = client
     return try await runOffMain {
       try c.revokeLabyrinthDevice(targetDeviceId: targetDeviceId)
