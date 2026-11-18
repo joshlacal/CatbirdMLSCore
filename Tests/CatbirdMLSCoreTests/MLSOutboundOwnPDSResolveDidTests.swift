@@ -11,6 +11,20 @@ struct MLSOutboundOwnPDSResolveDidTests {
 
   private func url(_ raw: String) -> URL { URL(string: raw)! }
 
+  @Test func directsPersonalProofToTheAccountPDS() throws {
+    let did = "did:plc:fixture"
+    let gateway = url("https://gateway.example")
+    let source = url("https://gateway.example/xrpc/com.atproto.space.getRecord?repo=did%3Aplc%3Afixture&space=test")
+    var request = URLRequest(url: source)
+    request.httpMethod = "GET"
+    request.setValue(did, forHTTPHeaderField: "Atproto-Space-Audience")
+    let direct = try PetrelPlatformTransport.personalSpaceReadURL(for: request, accountDID: did, sessionOrigin: gateway, pds: ownPDS)
+    #expect(direct.absoluteString == "https://pds.catbird.blue/xrpc/com.atproto.space.getRecord?repo=did%3Aplc%3Afixture&space=test")
+    #expect(throws: (any Error).self) {
+      try PetrelPlatformTransport.personalSpaceReadURL(for: request, accountDID: "did:plc:other", sessionOrigin: gateway, pds: ownPDS)
+    }
+  }
+
   @Test func homeServiceAuthUsesExactBackupOrChatMethod() {
     let home = url("https://delivery.example")
     for method in ["blue.catbird.chat.getOwnDevices", "blue.catbird.labyrinth.getRecoveryShareCapabilities",

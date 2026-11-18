@@ -101,6 +101,22 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       urlRequest.setValue(header.value, forHTTPHeaderField: header.name)
     }
 
+    // Account-session XRPCs use Petrel's gateway. A personal Space read carries native
+    // proof of possession for the writer DID and must go directly to that DID's PDS.
+    if let client = atProtoClient, let authorization = urlRequest.value(forHTTPHeaderField: "Authorization"),
+       authorization.hasPrefix("Atproto-Space-Credential ") {
+      let immutable = urlRequest
+      return try Self.runAsyncAuthBridge(timeoutSeconds: 25) {
+        let did = try await client.getDid()
+        let sessionOrigin = await client.networkService.baseURL
+        let pds = try await client.resolveDIDToPDSURL(did: did)
+        var direct = immutable
+        direct.url = try Self.personalSpaceReadURL(for: immutable, accountDID: did, sessionOrigin: sessionOrigin, pds: pds)
+        let (data, http) = try await self.boundedSession.data(for: direct, maxBytes: Self.maxHttpResponseBytes)
+        return Self.makePlatformHttpResponse(data: data, http: http)
+      }.get()
+    }
+
     if !hasAuthorizationHeader, let atProtoClient = self.atProtoClient {
       let immutableRequest = urlRequest
       let configuredHomeDs = self.homeDsEndpoint
@@ -524,6 +540,24 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     } catch {
       throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
     }
+  }
+
+  static func personalSpaceReadURL(for request: URLRequest, accountDID: String, sessionOrigin: URL, pds: URL) throws -> URL {
+    let readMethods = ["getRecord", "listRecords", "listRepoOps", "getRepo", "getLatestCommit", "getBlob", "getSpace", "listWriters"]
+    guard request.httpMethod == "GET", let source = request.url, sameOrigin(source, sessionOrigin),
+          let nsid = extractXrpcNsid(source), readMethods.contains(where: { nsid == "com.atproto.space." + $0 }),
+          request.value(forHTTPHeaderField: "Atproto-Space-Audience") == accountDID,
+          let components = URLComponents(url: source, resolvingAgainstBaseURL: false),
+          let query = components.percentEncodedQuery
+    else { throw CatbirdMLS.MlsError.InvalidInput(message: "Personal Space read does not match the signed-in account") }
+    try MLSOutboundHTTPValidator.validatePublicHTTPSServiceEndpoint(pds)
+    let destination = pds.appendingPathComponent("xrpc").appendingPathComponent(nsid)
+    guard var target = URLComponents(url: destination, resolvingAgainstBaseURL: false), pds.query == nil else {
+      throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid personal Space endpoint")
+    }
+    target.percentEncodedQuery = query
+    guard let result = target.url else { throw CatbirdMLS.MlsError.InvalidInput(message: "Invalid personal Space URL") }
+    return result
   }
 
   static func deliveryServiceMethod(for url: URL, home: URL?) -> String? {
