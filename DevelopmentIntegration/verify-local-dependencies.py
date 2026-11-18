@@ -275,7 +275,7 @@ def generated_binding_record(manifest, core=CORE):
 def verify_local_ffi_manifest(framework, manifest_path=None):
     framework = canonical(framework)
     manifest_path = canonical(manifest_path or (
-        HERE / "spaces-simulator-artifact-manifest.json"
+        CORE / ".build/qualified-simulator-ffi.json"
         if framework.name == "CatbirdMLSFFISimulator.xcframework" else APPLE_ARTIFACT_MANIFEST))
     if not framework.is_dir():
         return

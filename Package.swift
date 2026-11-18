@@ -26,7 +26,11 @@ func siblingPathIfAvailable(_ name: String) -> String? {
   return candidate.path
 }
 
-let forceRemote = environment["CATBIRD_MLS_LOCAL_INTEGRATION"] == "0"
+let localIntegration = environment["CATBIRD_MLS_LOCAL_INTEGRATION"]
+if let localIntegration, !["0", "1"].contains(localIntegration) {
+  fatalError("CATBIRD_MLS_LOCAL_INTEGRATION must be exactly 0 or 1")
+}
+let forceRemote = localIntegration == "0"
 let sdkDependencies: [Package.Dependency]
 if !forceRemote,
    let localPetrel = siblingPathIfAvailable("Petrel"),
