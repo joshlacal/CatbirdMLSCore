@@ -698,6 +698,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func removeGroupMember(actorRole: MemberRole, conversationId: String, targetDid: String) throws
 
+    func removeRecoveryMethod(vdeviceId: Data) throws -> LabyrinthRevocationOutcome
+
     func repinPeer(peerDid: String, confirmedHead: Data) throws
 
     func replenishKeyPackages(count: UInt32) throws -> UInt32
@@ -1233,6 +1235,13 @@ open class CatbirdMlsClient:
                                                                               FfiConverterString.lower(conversationId),
                                                                               FfiConverterString.lower(targetDid), $0)
         }
+    }
+
+    open func removeRecoveryMethod(vdeviceId: Data) throws -> LabyrinthRevocationOutcome {
+        return try FfiConverterTypeLabyrinthRevocationOutcome.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_remove_recovery_method(self.uniffiClonePointer(),
+                                                                                 FfiConverterData.lower(vdeviceId), $0)
+        })
     }
 
     open func repinPeer(peerDid: String, confirmedHead: Data) throws {
@@ -15832,6 +15841,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_remove_group_member() != 53894 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_remove_recovery_method() != 30675 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_repin_peer() != 60466 {

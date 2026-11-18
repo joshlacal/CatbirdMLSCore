@@ -1060,6 +1060,24 @@ public final class MLSClientCoordinator {
     return completion
   }
 
+  public func listRecoveryMethods() async throws -> [LabyrinthRecoveryMethodInfo] {
+    let c = client
+    return try await runOffMain {
+      try c.listRecoveryMethods()
+    }
+  }
+
+  public func removeRecoveryMethod(
+    vdeviceId: Data
+  ) async throws -> LabyrinthRevocationOutcome {
+    let c = client
+    let outcome = try await runOffMain {
+      try c.removeRecoveryMethod(vdeviceId: vdeviceId)
+    }
+    scheduleBackgroundOutboxDrain()
+    return outcome
+  }
+
   public func revokeLabyrinthDevice(
     targetDeviceId: String
   ) async throws -> LabyrinthRevocationOutcome {
