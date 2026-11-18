@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -57,12 +58,38 @@ class RebuildPreservationTests(unittest.TestCase):
             other.mkdir()
             (other / "keep").write_text("unselected framework")
 
+            # Use the same slice layout the rebuild hashes before replacing the package.
+            # The simulator path also issues a source receipt; only the VCS/tool identities are fixtures.
+            slice_id = "ios-arm64-simulator"
+            slice_library = Path(slice_id) / "libCatbirdMLSFFI.a"
+            with (workspace / "slice-info.plist").open("wb") as file:
+                plistlib.dump({"AvailableLibraries": [{
+                    "LibraryIdentifier": slice_id, "LibraryPath": "libCatbirdMLSFFI.a",
+                    "SupportedPlatform": "ios", "SupportedPlatformVariant": "simulator",
+                    "SupportedArchitectures": ["arm64"],
+                }]}, file)
+            if scope == "ios-arm64-simulator-only":
+                (core / "DevelopmentIntegration").mkdir()
+                (core / "DevelopmentIntegration/spaces-selected-inputs.json").write_text('{"repos":[]}')
+                (core / "Package.swift").write_text("// fixture")
+                (workspace / "PetrelCatbird/lexicons").mkdir(parents=True)
+                for repository in (native, atproto, labyrinth, workspace / "Petrel", workspace / "PetrelCatbird"):
+                    (repository / ".jj").mkdir(parents=True)
+                jj = fake_bin / "jj"
+                jj.write_text("#!/bin/sh\nset -eu\n[ \"$1\" = log ]\nprintf 'empty\\n%040d\\n' 1\n")
+                jj.chmod(0o755)
+                for name in ("swift", "rustc", "cargo", "xcodebuild"):
+                    tool = fake_bin / name
+                    tool.write_text("#!/bin/sh\necho fixture-toolchain\n")
+                    tool.chmod(0o755)
+
             builder = native / "create-xcframework.sh"
             builder.write_text(
                 "#!/bin/sh\n"
                 "set -eu\n"
-                f"mkdir -p {framework_name} build/bindings\n"
-                f"printf 'new framework' > {framework_name}/new-binary\n"
+                f"mkdir -p {framework_name}/{slice_id} build/bindings\n"
+                f"cp ../slice-info.plist {framework_name}/Info.plist\n"
+                f"printf 'new framework' > {framework_name}/{slice_library}\n"
                 "printf 'new binding' > build/bindings/CatbirdMLS.swift\n"
             )
             builder.chmod(0o755)
@@ -96,7 +123,7 @@ class RebuildPreservationTests(unittest.TestCase):
                 (backup / "native-build-bindings" / "old-binding").read_text(),
                 "old native binding",
             )
-            self.assertEqual((core / "Sources" / framework_name / "new-binary").read_text(), "new framework")
+            self.assertEqual((framework / slice_library).read_text(), "new framework")
             self.assertEqual((sources / "CatbirdMLS.swift").read_text(), "new binding")
             self.assertFalse((sources / "MLSFFI.swift").exists())
             self.assertEqual((legacy_sources / "CatbirdMLS.swift").read_text(), "legacy split binding")

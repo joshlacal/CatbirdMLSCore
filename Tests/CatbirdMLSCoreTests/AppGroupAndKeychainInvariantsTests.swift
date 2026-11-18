@@ -2,6 +2,7 @@ import CatbirdMLS
 @testable import CatbirdMLSCore
 import Darwin
 import Foundation
+import os
 import Petrel
 import Security
 import XCTest
@@ -460,12 +461,7 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
       )
     }
     let ffiOutcome = await Task.detached { Result { try transport.executeHttp(request: request) } }.value
-    XCTAssertThrowsError(try ffiOutcome.get()) { error in
-      guard case .InvalidInput = (error as? CatbirdMLS.MlsError) else {
-        XCTFail("Expected FFI-safe MlsError.InvalidInput, got \(error)")
-        return
-      }
-    }
+    XCTAssertEqual(try ffiOutcome.get().status, 400)
   }
 
   /// `P0-7`: `MLSClientCoordinator.open` runs SQLCipher/FFI initialization off `@MainActor`,
@@ -610,14 +606,50 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     )
 
     let outcome = await Task.detached { Result { try transport.executeHttp(request: request) } }.value
-    XCTAssertThrowsError(try outcome.get()) { error in
-      XCTAssertNotNil(error as? CatbirdMLS.MlsError, "Expected MlsError on getServiceAuth failure, got \(error)")
-    }
+    XCTAssertGreaterThanOrEqual(try outcome.get().status, 400)
     XCTAssertEqual(
       HomeDsSpyProtocol.snapshot(),
       [],
       "P0-8: getServiceAuth failure must fail closed with zero unauthenticated requests sent to homeDs"
     )
+  }
+
+  func testMissingReplyIsRecoverableThroughTheGeneratedTransportCallback() async throws {
+    let root = tempRoot.path
+    try await Task.detached {
+      let account = "did:plc:transportlossaaaaaaaaaaa"
+      let device = UUID().uuidString.lowercased()
+      let network = NativeArchiveMockNetwork()
+      let dropped = OSAllocatedUnfairLock(initialState: false)
+      let transport = PetrelPlatformTransport(
+        homeDsEndpoint: URL(string: NativeArchiveMockNetwork.dsEndpoint),
+        homeDsDid: NativeArchiveMockNetwork.dsDid,
+        ownPdsEndpoint: URL(string: NativeArchiveMockNetwork.pdsEndpoint(for: account)),
+        actorDeviceId: device,
+        httpOverride: { request in
+          if request.url.hasSuffix("/blue.catbird.labyrinth.deleteAccountData"),
+             dropped.withLock({ alreadyDropped in
+               if alreadyDropped { return false }
+               alreadyDropped = true
+               return true
+             }) {
+            throw URLError(.networkConnectionLost)
+          }
+          return network.handle(request)
+        }
+      )
+      let config = CatbirdMlsClientConfig(storageRoot: root, accountDid: account, deviceId: device,
+        homeDsDid: NativeArchiveMockNetwork.dsDid, homeDsEndpoint: NativeArchiveMockNetwork.dsEndpoint,
+        pdsEndpoint: NativeArchiveMockNetwork.pdsEndpoint(for: account))
+      let keys = KeychainPlatformKeyStore(service: "blue.catbird.mls.test." + device, backend: RecordingKeychainBackend())
+      let client = try CatbirdMlsClient.open(config: config, keystore: keys, transport: transport, observer: nil)
+      _ = try client.enrollDevice(grantedOauthScopes: MLSAppGroupStorage.requiredSpacesScopes)
+      XCTAssertThrowsError(try client.deleteAccountData())
+      XCTAssertTrue(dropped.withLock { $0 })
+      XCTAssertFalse(client.isHandleClosed())
+      try client.deleteAccountData()
+      XCTAssertTrue(client.isHandleClosed())
+    }.value
   }
 
   private func openFileDescriptorPaths(matching targetPath: String) -> [String] {

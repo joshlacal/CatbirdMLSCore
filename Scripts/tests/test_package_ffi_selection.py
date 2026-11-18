@@ -68,6 +68,27 @@ class PackageFFISelection(unittest.TestCase):
             self.assertNotEqual(missing_release.returncode, 0)
             self.assertIn("No published CatbirdMLSFFI release matches", missing_release.stderr)
 
+            sources = {"catbird-mls": "1" * 40, "catbird-atproto": "2" * 40, "labyrinth": "3" * 40}
+            qualified = json.loads(receipt.read_text())
+            qualified["source"]["repositories"] = {name: {"commit": commit} for name, commit in sources.items()}
+            receipt.write_text(json.dumps(qualified))
+            release = json.loads(published.read_text())
+            release.update(generated_swift_sha256=binding_digest, sources=sources)
+            published.write_text(json.dumps(release))
+            valid = dump(force_remote=True)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            # Identical generated Swift does not establish which Rust code or archive was published.
+            for changed in (
+                {"sources": {**sources, "catbird-mls": "4" * 40}},
+                {"sources": {name: sha for name, sha in sources.items() if name != "labyrinth"}},
+                {"archive_sha256": "0" * 64}, {"release_tag": "v0.0.0"}
+            ):
+                with self.subTest(changed=changed):
+                    published.write_text(json.dumps({**release, **changed}))
+                    rejected = dump(force_remote=True)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("No published CatbirdMLSFFI release matches", rejected.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,9 +66,39 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   }
 
   public func executeHttp(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
-    try Self.mapCallbackError {
-      try executeHttpRaw(request: request)
+    do {
+      return try executeHttpRaw(request: request)
+    } catch {
+      return Self.httpFailure(error)
     }
+  }
+
+  // A failed Swift callback cannot return a flat Rust error through UniFFI 0.28.
+  // A synthetic failure response leaves the native operation unconfirmed and retryable when appropriate.
+  static func httpFailure(_ error: Error) -> PlatformHttpResponse {
+    let result: (UInt16, String, String)
+    switch error {
+    case is MLSOutboundHTTPValidator.ValidationError, CatbirdMLS.MlsError.InvalidInput,
+         NetworkError.invalidURL, NetworkError.invalidRequest, NetworkError.badRequest:
+      result = (400, "InvalidRequest", "The requested operation is not allowed.")
+    case NetworkError.authenticationRequired, NetworkError.authenticationFailed, NetworkError.unauthorized,
+         AuthError.noActiveAccount, AuthError.invalidCredentials, AuthError.authorizationFailed,
+         NetworkError.expiredToken, NetworkError.oauthManagerNotSet, NetworkError.responseError(401),
+         NetworkError.serverError(401, _):
+      result = (401, "AuthenticationRequired", "This operation requires authentication.")
+    case CatbirdMLS.MlsError.InsufficientPermissions, CatbirdMLS.MlsError.PendingDeviceAccess,
+         NetworkError.securityViolation, NetworkError.responseError(403), NetworkError.serverError(403, _):
+      result = (403, "Forbidden", "This account or device cannot perform the operation.")
+    case MLSBoundedURLSession.BoundedFetchError.responseTooLarge, NetworkError.responseLimitExceeded:
+      result = (413, "ResponseTooLarge", "The response exceeds the permitted size.")
+    case let error as URLError where error.code == .userAuthenticationRequired:
+      result = (401, "AuthenticationRequired", "This operation requires authentication.")
+    default:
+      result = (503, "ServiceUnavailable", "No response was received. Retry to confirm the result.")
+    }
+    let body = Data("{\"error\":\"\(result.1)\",\"message\":\"\(result.2)\"}".utf8)
+    return PlatformHttpResponse(status: result.0,
+      headers: [PlatformHttpHeader(name: "content-type", value: "application/json")], body: body)
   }
 
   func executeHttpRaw(request: PlatformHttpRequest) throws -> PlatformHttpResponse {
@@ -132,9 +162,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
             )
           )
           guard (200..<300).contains(code), let token = authOut?.token, !token.isEmpty else {
-            throw CatbirdMLS.MlsError.Internal(
-              message: "getServiceAuth(\(nsid)) failed closed with HTTP \(code)"
-            )
+            if code == 403 { throw NetworkError.securityViolation }
+            if (400..<500).contains(code) && code != 429 { throw NetworkError.authenticationRequired }
+            if (200..<300).contains(code) { throw NetworkError.authenticationRequired }
+            throw NetworkError.requestFailed
           }
           var authedRequest = immutableRequest
           authedRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -166,21 +197,12 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       throw MLSOutboundHTTPValidator.ValidationError.disallowedNSID(MLSOutboundHTTPValidator.deleteRecordNSID)
     }
 
-    do {
-      let (data, http) = try self.boundedSession.performSync(
-        for: urlRequest,
-        maxBytes: Self.maxHttpResponseBytes,
-        timeoutSeconds: 25.0
-      )
-      return Self.makePlatformHttpResponse(data: data, http: http)
-    } catch let err as MLSBoundedURLSession.BoundedFetchError {
-      if case .timedOut = err {
-        throw CatbirdMLS.MlsError.Internal(message: "HTTP request timed out")
-      }
-      throw CatbirdMLS.MlsError.Internal(message: err.localizedDescription)
-    } catch {
-      throw CatbirdMLS.MlsError.Internal(message: error.localizedDescription)
-    }
+    let (data, http) = try self.boundedSession.performSync(
+      for: urlRequest,
+      maxBytes: Self.maxHttpResponseBytes,
+      timeoutSeconds: 25.0
+    )
+    return Self.makePlatformHttpResponse(data: data, http: http)
   }
 
   public func connectRealtimeStream(homeDsEndpoint: String, cursorSeq: Int64?) throws {

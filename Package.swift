@@ -118,15 +118,31 @@ let selectedLocalRelativeFFI: String? = {
 }()
 
 func publishedArtifact() -> Target {
-  let receipt = readObject(packageRoot.appendingPathComponent("Scripts/ffi-release-inputs.json"))
-  guard let bindingHash, receipt?["generated_swift_sha256"] as? String == bindingHash else {
-    fatalError("No published CatbirdMLSFFI release matches these Swift bindings. Supply the locally verified XCFramework or publish a matching binary release.")
-  }
-  return .binaryTarget(
+  let target: Target = .binaryTarget(
     name: "CatbirdMLSFFI",
     url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.21/CatbirdMLSFFI.xcframework.zip",
     checksum: "ee9bbc95e2aeed94e1cf400eac202fb35f1be15f8e2668f7980e7e818a92bf72"
   )
+  let qualified = readObject(packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-apple-artifact-manifest.json"))
+  let selectedInputs = packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-selected-inputs.json")
+  let nativeDependencies = ["catbird-mls", "catbird-atproto", "labyrinth"]
+  guard let published = readObject(packageRoot.appendingPathComponent("Scripts/ffi-release-inputs.json")),
+        let bindingHash, published["generated_swift_sha256"] as? String == bindingHash,
+        let tag = published["release_tag"] as? String, let checksum = published["archive_sha256"] as? String,
+        target.url == "https://github.com/joshlacal/CatbirdMLSCore/releases/download/\(tag)/CatbirdMLSFFI.xcframework.zip",
+        target.checksum == checksum,
+        let selection = qualified?["selected_inputs"] as? [String: Any],
+        let selectionHash = digest(selectedInputs), selection["sha256"] as? String == selectionHash,
+        let source = qualified?["source"] as? [String: Any],
+        let repositories = source["repositories"] as? [String: [String: Any]],
+        let publishedSources = published["sources"] as? [String: String],
+        nativeDependencies.allSatisfy({ name in
+          guard let commit = repositories[name]?["commit"] as? String, commit.count == 40 else { return false }
+          return publishedSources[name] == commit
+        }) else {
+    fatalError("No published CatbirdMLSFFI release matches the selected native sources, Swift bindings and archive. Supply the locally verified XCFramework or publish a matching binary release.")
+  }
+  return target
 }
 
 let ffiTarget: Target = selectedLocalRelativeFFI.map {

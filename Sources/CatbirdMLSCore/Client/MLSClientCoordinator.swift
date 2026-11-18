@@ -485,15 +485,7 @@ private final class UniFFINonThrowingPlatformTransportProxy: PlatformTransport, 
     do {
       return try inner.executeHttp(request: request)
     } catch {
-      let body = (try? JSONSerialization.data(withJSONObject: [
-        "error": "PlatformTransportError",
-        "message": String(describing: error),
-      ])) ?? Data("{\"error\":\"PlatformTransportError\"}".utf8)
-      return PlatformHttpResponse(
-        status: 503,
-        headers: [PlatformHttpHeader(name: "content-type", value: "application/json")],
-        body: body
-      )
+      return PetrelPlatformTransport.httpFailure(error)
     }
   }
 
