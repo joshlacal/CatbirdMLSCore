@@ -16,6 +16,10 @@ on:
         description: Full catbird-atproto commit SHA
         required: true
         type: string
+      labyrinth_ref:
+        description: Full Labyrinth commit SHA
+        required: true
+        type: string
       petrel_ref:
         description: Full Petrel commit SHA matching Package.swift
         required: true
@@ -42,6 +46,7 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag }}
   CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref }}
   CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref }}
+  LABYRINTH_REF: ${{ github.event.inputs.labyrinth_ref }}
   PETREL_REF: ${{ github.event.inputs.petrel_ref }}
   PETREL_CATBIRD_REF: ${{ github.event.inputs.petrel_catbird_ref }}
 
@@ -63,6 +68,11 @@ jobs:
           repository: joshlacal/catbird-atproto
           ref: ${{ env.CATBIRD_ATPROTO_REF }}
           path: catbird-atproto
+      - uses: actions/checkout@v4
+        with:
+          repository: joshlacal/labyrinth
+          ref: ${{ env.LABYRINTH_REF }}
+          path: labyrinth
       - uses: actions/checkout@v4
         with:
           repository: joshlacal/Petrel

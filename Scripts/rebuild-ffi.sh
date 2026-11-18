@@ -164,7 +164,10 @@ import sys
 framework = Path(sys.argv[1]).parent
 def file_hash(path):
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+        return digest.hexdigest()
 library_hashes = {str(p.relative_to(framework)): file_hash(p) for p in sorted(framework.glob("*/libCatbirdMLSFFI.a"))}
 if not library_hashes:
     raise SystemExit("The built XCFramework contains no static libraries")
@@ -184,6 +187,14 @@ echo "📄 Step 4: Updating Swift bindings..."
 mkdir -p "$space_bindings_dir"
 cp build/bindings/CatbirdMLS.swift "$space_bindings_dir/"
 echo "✅ Swift bindings updated"
+if [ "$CATBIRD_MLS_APPLE_SCOPE" = ios-arm64-simulator-only ]; then
+    python3 "$artifact_manifest_tool" generate --qualification unreviewed-candidate \
+        --core "$core_dir" --native "$native_dir" --atproto "$atproto_dir" --labyrinth "$labyrinth_dir" \
+        --petrel "$core_dir/../Petrel" --petrel-catbird "$core_dir/../PetrelCatbird" \
+        --selected-inputs "$core_dir/DevelopmentIntegration/spaces-selected-inputs.json" \
+        --framework "$core_dir/Sources/$framework_name" --output "$core_dir/.build/qualified-simulator-ffi.json"
+fi
+
 
 echo ""
 echo "✅ FFI rebuild complete!"

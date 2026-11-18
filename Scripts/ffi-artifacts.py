@@ -132,6 +132,8 @@ def publication(root, expected, receipt, final_sha, tag):
     for name in ('Petrel', 'PetrelCatbird'):
         ffi.require(ffi.dependency_pin(manifest, name) == expected['sources'][name], 'Final SDK dependency mismatch')
     ffi.require(ffi.sha(root / 'Sources/CatbirdMLS/CatbirdMLS.swift') == receipt['metadata_files_sha256']['CatbirdMLS.swift'], 'Final Swift binding mismatch')
+    ffi.require(expected['generated_swift_sha256'] == receipt['metadata_files_sha256']['CatbirdMLS.swift'], 'Published binding selection digest mismatch')
+    ffi.require(expected['archive_sha256'] == receipt['archive_sha256'], 'Published archive selection digest mismatch')
 
 
 if __name__ == '__main__':

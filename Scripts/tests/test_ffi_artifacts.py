@@ -109,6 +109,7 @@ class ArtifactGuards(unittest.TestCase):
         manifest = '\n'.join([f'.package(url: "https://github.com/joshlacal/{name}.git", revision: "{self.expected["sources"][name]}")' for name in ('Petrel', 'PetrelCatbird')])
         manifest += '\n.binaryTarget(name: "CatbirdMLSFFI", url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.18/CatbirdMLSFFI.xcframework.zip", checksum: "' + receipt['archive_sha256'] + '")'
         (root / 'Package.swift').write_text(manifest)
+        self.expected.update(generated_swift_sha256=receipt['metadata_files_sha256']['CatbirdMLS.swift'], archive_sha256=receipt['archive_sha256'])
         final = 'a' * 40
         tag = {'ref': 'refs/tags/v1.5.18', 'object': {'type': 'commit', 'sha': final}}
         with patch.object(a.ffi, 'run', side_effect=[final, '']):

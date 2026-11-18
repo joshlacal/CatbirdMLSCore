@@ -520,6 +520,8 @@ def verify_manifest(path):
     current_interface = interface_record(core, framework_path, base if relative else None)
     require_equal(current_interface, manifest["interface"], "generated interface")
     marker = json.loads((framework_path / "labyrinth-space-protocol.json").read_text())
+    if "bundle_sha256" in source_section or "librarySHA256" in marker:
+        require_equal(source_section.get("bundle_sha256"), marker.get("sourceFingerprint"), "recorded source bundle")
     require_equal(marker.get("generatedSwiftSHA256"), current_interface["generated_swift"]["sha256"], "rebuild marker generated interface")
     require_equal(
         marker.get("sourceFingerprint"),

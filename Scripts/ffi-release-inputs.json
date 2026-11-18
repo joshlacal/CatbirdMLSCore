@@ -9,5 +9,7 @@
     "catbird-atproto": "279df8f5a698e9adafdee7a017fe92e84ee381c0",
     "Petrel": "329b5fbe412286ff4c094246b6f30c2989e58f94",
     "PetrelCatbird": "ff98deedc748777537f912fa4dcd208f9bbc840e"
-  }
+  },
+  "generated_swift_sha256": "4c24377c1545f81ca40f56bff26cc43a7bf44685742412005657cac7775a39e3",
+  "archive_sha256": "ee9bbc95e2aeed94e1cf400eac202fb35f1be15f8e2668f7980e7e818a92bf72"
 }

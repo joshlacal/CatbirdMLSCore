@@ -11,7 +11,7 @@ import shutil
 import subprocess
 
 REPOSITORIES = {
-    'catbird-mls': 'CATBIRD_MLS_REF', 'catbird-atproto': 'CATBIRD_ATPROTO_REF',
+    'catbird-mls': 'CATBIRD_MLS_REF', 'catbird-atproto': 'CATBIRD_ATPROTO_REF', 'labyrinth': 'LABYRINTH_REF',
     'Petrel': 'PETREL_REF', 'PetrelCatbird': 'PETREL_CATBIRD_REF',
 }
 MATRIX = {
@@ -55,6 +55,12 @@ def local_manifest(manifest):
         '.binaryTarget(name: "CatbirdMLSFFI", path: "Sources/CatbirdMLSFFI.xcframework")', manifest,
     )
     require(count == 1, 'Expected one public URL binary target')
+    # CI has just verified and recorded every newly built slice and its binding. The
+    # release being prepared can legitimately differ from the previous qualified copy.
+    start, end = 'let selectedLocalRelativeFFI:', 'let package = Package('
+    if start in patched:
+        first, last = patched.index(start), patched.index(end)
+        patched = patched[:first] + 'let ffiTarget: Target = .binaryTarget(name: "CatbirdMLSFFI", path: "Sources/CatbirdMLSFFI.xcframework")\n\n' + patched[last:]
     return patched
 
 
