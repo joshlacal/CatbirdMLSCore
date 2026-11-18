@@ -588,6 +588,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func acknowledgeRecoveryAttention() throws -> LabyrinthBackupStatus
 
+    func acknowledgeRecoveryGeneration(expectedGeneration: UInt64) throws -> LabyrinthBackupStatus
+
     func addGroupMembers(conversationId: String, memberDids: [String]) throws -> ConversationRow
 
     func advanceReadState(conversationId: String, candidateSeq: UInt64) throws -> MailboxReadStateRecord
@@ -641,6 +643,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
     func getReadState(conversationId: String) throws -> MailboxReadStateRecord?
 
     func handleDarwinPushWakeup() throws
+
+    func historyBackupEnabled(conversationId: String) throws -> Bool
 
     func importConversationHistory(conversationId: String, messages: [MessageRow]) throws -> UInt32
 
@@ -718,7 +722,11 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func sendMessage(conversationId: String, messageId: String, text: String) throws -> MessageRow
 
+    func setHistoryBackupEnabled(conversationId: String, enabled: Bool) throws -> MessageRow
+
     func setupRecoveryCode() throws -> String
+
+    func setupRecoveryCodeWithReceipt() throws -> GeneratedRecoveryCode
 
     func signOutAndWipe() throws
 
@@ -828,6 +836,13 @@ open class CatbirdMlsClient:
     open func acknowledgeRecoveryAttention() throws -> LabyrinthBackupStatus {
         return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_acknowledge_recovery_attention(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func acknowledgeRecoveryGeneration(expectedGeneration: UInt64) throws -> LabyrinthBackupStatus {
+        return try FfiConverterTypeLabyrinthBackupStatus.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_acknowledge_recovery_generation(self.uniffiClonePointer(),
+                                                                                          FfiConverterUInt64.lower(expectedGeneration), $0)
         })
     }
 
@@ -1030,6 +1045,13 @@ open class CatbirdMlsClient:
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_handle_darwin_push_wakeup(self.uniffiClonePointer(), $0)
         }
+    }
+
+    open func historyBackupEnabled(conversationId: String) throws -> Bool {
+        return try FfiConverterBool.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_history_backup_enabled(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(conversationId), $0)
+        })
     }
 
     open func importConversationHistory(conversationId: String, messages: [MessageRow]) throws -> UInt32 {
@@ -1299,9 +1321,23 @@ open class CatbirdMlsClient:
         })
     }
 
+    open func setHistoryBackupEnabled(conversationId: String, enabled: Bool) throws -> MessageRow {
+        return try FfiConverterTypeMessageRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_set_history_backup_enabled(self.uniffiClonePointer(),
+                                                                                     FfiConverterString.lower(conversationId),
+                                                                                     FfiConverterBool.lower(enabled), $0)
+        })
+    }
+
     open func setupRecoveryCode() throws -> String {
         return try FfiConverterString.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_setup_recovery_code(self.uniffiClonePointer(), $0)
+        })
+    }
+
+    open func setupRecoveryCodeWithReceipt() throws -> GeneratedRecoveryCode {
+        return try FfiConverterTypeGeneratedRecoveryCode.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_setup_recovery_code_with_receipt(self.uniffiClonePointer(), $0)
         })
     }
 
@@ -5070,6 +5106,10 @@ public func FfiConverterTypeDecryptResult_lower(_ value: DecryptResult) -> RustB
 public struct DeviceRevocationReport {
     public var targetDeviceId: String
     public var dsRevoked: Bool
+    /**
+     * Identifies the recovery receipt minted on this device. Zero identifies older state.
+     */
+    public var recoveryGeneration: UInt64
     public var groupsUpdated: UInt32
     public var labyrinthRotated: Bool
     public var newEpochSeq: UInt64?
@@ -5079,9 +5119,14 @@ public struct DeviceRevocationReport {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(targetDeviceId: String, dsRevoked: Bool, groupsUpdated: UInt32, labyrinthRotated: Bool, newEpochSeq: UInt64?, pdsRecordDeleted: Bool, rekeyedRecoveryCode: String?, rekeyedPasskeyIds: [Data]) {
+    public init(targetDeviceId: String, dsRevoked: Bool,
+                /* 
+                    * Identifies the recovery receipt minted on this device. Zero identifies older state.
+                    */ recoveryGeneration: UInt64 = UInt64(0), groupsUpdated: UInt32, labyrinthRotated: Bool, newEpochSeq: UInt64?, pdsRecordDeleted: Bool, rekeyedRecoveryCode: String?, rekeyedPasskeyIds: [Data])
+    {
         self.targetDeviceId = targetDeviceId
         self.dsRevoked = dsRevoked
+        self.recoveryGeneration = recoveryGeneration
         self.groupsUpdated = groupsUpdated
         self.labyrinthRotated = labyrinthRotated
         self.newEpochSeq = newEpochSeq
@@ -5097,6 +5142,9 @@ extension DeviceRevocationReport: Equatable, Hashable {
             return false
         }
         if lhs.dsRevoked != rhs.dsRevoked {
+            return false
+        }
+        if lhs.recoveryGeneration != rhs.recoveryGeneration {
             return false
         }
         if lhs.groupsUpdated != rhs.groupsUpdated {
@@ -5123,6 +5171,7 @@ extension DeviceRevocationReport: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(targetDeviceId)
         hasher.combine(dsRevoked)
+        hasher.combine(recoveryGeneration)
         hasher.combine(groupsUpdated)
         hasher.combine(labyrinthRotated)
         hasher.combine(newEpochSeq)
@@ -5141,6 +5190,7 @@ public struct FfiConverterTypeDeviceRevocationReport: FfiConverterRustBuffer {
             try DeviceRevocationReport(
                 targetDeviceId: FfiConverterString.read(from: &buf),
                 dsRevoked: FfiConverterBool.read(from: &buf),
+                recoveryGeneration: FfiConverterUInt64.read(from: &buf),
                 groupsUpdated: FfiConverterUInt32.read(from: &buf),
                 labyrinthRotated: FfiConverterBool.read(from: &buf),
                 newEpochSeq: FfiConverterOptionUInt64.read(from: &buf),
@@ -5153,6 +5203,7 @@ public struct FfiConverterTypeDeviceRevocationReport: FfiConverterRustBuffer {
     public static func write(_ value: DeviceRevocationReport, into buf: inout [UInt8]) {
         FfiConverterString.write(value.targetDeviceId, into: &buf)
         FfiConverterBool.write(value.dsRevoked, into: &buf)
+        FfiConverterUInt64.write(value.recoveryGeneration, into: &buf)
         FfiConverterUInt32.write(value.groupsUpdated, into: &buf)
         FfiConverterBool.write(value.labyrinthRotated, into: &buf)
         FfiConverterOptionUInt64.write(value.newEpochSeq, into: &buf)
@@ -5884,6 +5935,70 @@ public func FfiConverterTypeFetchedPushEntry_lift(_ buf: RustBuffer) throws -> F
 #endif
 public func FfiConverterTypeFetchedPushEntry_lower(_ value: FetchedPushEntry) -> RustBuffer {
     return FfiConverterTypeFetchedPushEntry.lower(value)
+}
+
+/**
+ * One displayable recovery code and the local receipt needed to acknowledge it.
+ */
+public struct GeneratedRecoveryCode {
+    public var code: String
+    public var recoveryGeneration: UInt64
+
+    /// Default memberwise initializers are never public by default, so we
+    /// declare one manually.
+    public init(code: String, recoveryGeneration: UInt64) {
+        self.code = code
+        self.recoveryGeneration = recoveryGeneration
+    }
+}
+
+extension GeneratedRecoveryCode: Equatable, Hashable {
+    public static func == (lhs: GeneratedRecoveryCode, rhs: GeneratedRecoveryCode) -> Bool {
+        if lhs.code != rhs.code {
+            return false
+        }
+        if lhs.recoveryGeneration != rhs.recoveryGeneration {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(code)
+        hasher.combine(recoveryGeneration)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGeneratedRecoveryCode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GeneratedRecoveryCode {
+        return
+            try GeneratedRecoveryCode(
+                code: FfiConverterString.read(from: &buf),
+                recoveryGeneration: FfiConverterUInt64.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: GeneratedRecoveryCode, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.code, into: &buf)
+        FfiConverterUInt64.write(value.recoveryGeneration, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGeneratedRecoveryCode_lift(_ buf: RustBuffer) throws -> GeneratedRecoveryCode {
+    return try FfiConverterTypeGeneratedRecoveryCode.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGeneratedRecoveryCode_lower(_ value: GeneratedRecoveryCode) -> RustBuffer {
+    return FfiConverterTypeGeneratedRecoveryCode.lower(value)
 }
 
 public struct GroupConfig {
@@ -6619,6 +6734,10 @@ public struct LabyrinthBackupStatus {
      * replaced by the account owner. Durable across app restarts.
      */
     public var recoveryNeedsAttention: Bool
+    /**
+     * Identifies the recovery receipt minted on this device. Zero identifies older state.
+     */
+    public var recoveryGeneration: UInt64
     public var epochSeq: UInt64
     public var activeDeviceIds: [String]
     /**
@@ -6653,7 +6772,10 @@ public struct LabyrinthBackupStatus {
                 /* 
                     * A rotation minted a replacement code that still needs to be saved or
                     * replaced by the account owner. Durable across app restarts.
-                    */ recoveryNeedsAttention: Bool, epochSeq: UInt64, activeDeviceIds: [String],
+                    */ recoveryNeedsAttention: Bool,
+                /* 
+                    * Identifies the recovery receipt minted on this device. Zero identifies older state.
+                    */ recoveryGeneration: UInt64 = UInt64(0), epochSeq: UInt64, activeDeviceIds: [String],
                 /* 
                     * Advisory only: this restored keychain/passkey method passed its
                     * client-clock freshness window but remains valid until rotation.
@@ -6679,6 +6801,7 @@ public struct LabyrinthBackupStatus {
         self.hasRecoveryCode = hasRecoveryCode
         self.hasPasskeyPrf = hasPasskeyPrf
         self.recoveryNeedsAttention = recoveryNeedsAttention
+        self.recoveryGeneration = recoveryGeneration
         self.epochSeq = epochSeq
         self.activeDeviceIds = activeDeviceIds
         self.recoveryMethodStale = recoveryMethodStale
@@ -6705,6 +6828,9 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
             return false
         }
         if lhs.recoveryNeedsAttention != rhs.recoveryNeedsAttention {
+            return false
+        }
+        if lhs.recoveryGeneration != rhs.recoveryGeneration {
             return false
         }
         if lhs.epochSeq != rhs.epochSeq {
@@ -6740,6 +6866,7 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
         hasher.combine(hasRecoveryCode)
         hasher.combine(hasPasskeyPrf)
         hasher.combine(recoveryNeedsAttention)
+        hasher.combine(recoveryGeneration)
         hasher.combine(epochSeq)
         hasher.combine(activeDeviceIds)
         hasher.combine(recoveryMethodStale)
@@ -6763,6 +6890,7 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
                 hasRecoveryCode: FfiConverterBool.read(from: &buf),
                 hasPasskeyPrf: FfiConverterBool.read(from: &buf),
                 recoveryNeedsAttention: FfiConverterBool.read(from: &buf),
+                recoveryGeneration: FfiConverterUInt64.read(from: &buf),
                 epochSeq: FfiConverterUInt64.read(from: &buf),
                 activeDeviceIds: FfiConverterSequenceString.read(from: &buf),
                 recoveryMethodStale: FfiConverterBool.read(from: &buf),
@@ -6780,6 +6908,7 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
         FfiConverterBool.write(value.hasRecoveryCode, into: &buf)
         FfiConverterBool.write(value.hasPasskeyPrf, into: &buf)
         FfiConverterBool.write(value.recoveryNeedsAttention, into: &buf)
+        FfiConverterUInt64.write(value.recoveryGeneration, into: &buf)
         FfiConverterUInt64.write(value.epochSeq, into: &buf)
         FfiConverterSequenceString.write(value.activeDeviceIds, into: &buf)
         FfiConverterBool.write(value.recoveryMethodStale, into: &buf)
@@ -15532,6 +15661,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_recovery_attention() != 63245 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_acknowledge_recovery_generation() != 18748 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_add_group_members() != 60833 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15611,6 +15743,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_handle_darwin_push_wakeup() != 14622 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_history_backup_enabled() != 1129 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_import_conversation_history() != 55518 {
@@ -15727,7 +15862,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_send_message() != 55190 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_set_history_backup_enabled() != 41785 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_setup_recovery_code() != 11225 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_setup_recovery_code_with_receipt() != 27064 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_sign_out_and_wipe() != 8292 {
