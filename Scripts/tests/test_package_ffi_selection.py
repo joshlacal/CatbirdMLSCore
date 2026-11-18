@@ -33,7 +33,10 @@ class PackageFFISelection(unittest.TestCase):
             }))
             receipt = core / "DevelopmentIntegration/spaces-apple-artifact-manifest.json"
             receipt.parent.mkdir()
+            selected = receipt.with_name("spaces-selected-inputs.json")
+            selected.write_text("fixture source revision")
             receipt.write_text(json.dumps({
+                "selected_inputs": {"sha256": hashlib.sha256(selected.read_bytes()).hexdigest()},
                 "source": {"bundle_sha256": "1" * 64},
                 "framework": {"files": {str(p.relative_to(framework)): {"sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
                                         for p in (library, marker)}}
@@ -49,6 +52,11 @@ class PackageFFISelection(unittest.TestCase):
             targets = json.loads(initial.stdout)["targets"]
             self.assertEqual(next(t["path"] for t in targets if t["name"] == "CatbirdMLSFFI"),
                              "Sources/CatbirdMLSFFI.xcframework")
+            selected.write_text("a subsequent native build")
+            stale = dump()
+            self.assertNotEqual(stale.returncode, 0)
+            self.assertIn("Local XCFramework does not match", stale.stderr)
+            selected.write_text("fixture source revision")
             library.write_bytes(b"different library")
             mismatch = dump()
             self.assertNotEqual(mismatch.returncode, 0)

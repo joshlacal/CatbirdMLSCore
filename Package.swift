@@ -73,7 +73,10 @@ let bindingHash = digest(packageRoot.appendingPathComponent("Sources/CatbirdMLS/
 func qualifiedLocalArtifact(_ url: URL, scope: String) -> Bool {
   let receiptPath = scope == "apple-all-targets" ? "DevelopmentIntegration/spaces-apple-artifact-manifest.json" : ".build/qualified-simulator-ffi.json"
   let receiptURL = packageRoot.appendingPathComponent(receiptPath)
+  let selectedInputs = packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-selected-inputs.json")
   guard let receipt = readObject(receiptURL),
+        let selection = receipt["selected_inputs"] as? [String: Any],
+        let selectionHash = digest(selectedInputs), selection["sha256"] as? String == selectionHash,
         let source = receipt["source"] as? [String: Any], let bundle = source["bundle_sha256"] as? String,
         let marker = readObject(url.appendingPathComponent("labyrinth-space-protocol.json")),
         marker["sourceFingerprint"] as? String == bundle, marker["artifactScope"] as? String == scope,
