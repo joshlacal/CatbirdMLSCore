@@ -13,6 +13,7 @@ extension SpacesEligibilityInput: @unchecked Sendable {}
 extension SpacesEligibilityStatus: @unchecked Sendable {}
 extension SpacesUnavailableReason: @unchecked Sendable {}
 extension LabyrinthBackupStatus: @unchecked Sendable {}
+extension GeneratedRecoveryCode: @unchecked Sendable {}
 extension LabyrinthRevocationOutcome: @unchecked Sendable {}
 extension OtcPairingOffer: @unchecked Sendable {}
 extension OtcPairingCompletion: @unchecked Sendable {}
@@ -950,6 +951,18 @@ public final class MLSClientCoordinator {
     }
   }
 
+  public func historyBackupEnabled(conversationId: String) async throws -> Bool {
+    let c = client
+    return try await runOffMain { try c.historyBackupEnabled(conversationId: conversationId) }
+  }
+
+  public func setHistoryBackupEnabled(conversationId: String, enabled: Bool) async throws {
+    let c = client
+    try await runOffMain {
+      _ = try c.setHistoryBackupEnabled(conversationId: conversationId, enabled: enabled)
+    }
+  }
+
   public func updateGroupMetadata(
     conversationId: String,
     title: String,
@@ -996,6 +1009,20 @@ public final class MLSClientCoordinator {
     return try await runOffMain {
       try c.acknowledgeRecoveryAttention()
     }
+  }
+
+  public func acknowledgeRecoveryGeneration(expectedGeneration: UInt64) async throws -> LabyrinthBackupStatus {
+    let c = client
+    return try await runOffMain {
+      try c.acknowledgeRecoveryGeneration(expectedGeneration: expectedGeneration)
+    }
+  }
+
+  public func setupRecoveryCodeWithReceipt() async throws -> GeneratedRecoveryCode {
+    let c = client
+    let receipt = try await runOffMain { try c.setupRecoveryCodeWithReceipt() }
+    scheduleBackgroundOutboxDrain()
+    return receipt
   }
 
   public func setupRecoveryCode() async throws -> String {

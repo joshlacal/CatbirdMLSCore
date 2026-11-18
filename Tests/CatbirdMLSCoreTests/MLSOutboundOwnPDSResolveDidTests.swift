@@ -11,6 +11,18 @@ struct MLSOutboundOwnPDSResolveDidTests {
 
   private func url(_ raw: String) -> URL { URL(string: raw)! }
 
+  @Test func homeServiceAuthUsesExactBackupOrChatMethod() {
+    let home = url("https://delivery.example")
+    for method in ["blue.catbird.chat.getOwnDevices", "blue.catbird.labyrinth.getRecoveryShareCapabilities",
+                   "blue.catbird.labyrinth.deleteAccountData"] {
+      let request = home.appendingPathComponent("xrpc").appendingPathComponent(method)
+      #expect(PetrelPlatformTransport.deliveryServiceMethod(for: request, home: home) == method)
+      #expect(PetrelPlatformTransport.deliveryServiceMethod(for: request, home: ownPDS) == nil)
+    }
+    #expect(PetrelPlatformTransport.deliveryServiceMethod(
+      for: home.appendingPathComponent("xrpc/com.atproto.repo.getRecord"), home: home) == nil)
+  }
+
   @Test func resolveDidToOwnPDSIsAllowed() throws {
     try MLSOutboundHTTPValidator.validatePreparedRequestNSID(
       nsid,

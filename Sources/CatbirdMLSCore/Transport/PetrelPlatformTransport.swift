@@ -1,6 +1,10 @@
 import CatbirdMLS
 import Foundation
+#if DEBUG
+@_spi(Fixtures) import Petrel
+#else
 import Petrel
+#endif
 import PetrelCatbird
 
 /// Thin network transport implementing `PlatformTransport` and `PushFetchTransport` (`Spec §6.3`, `D1`, `Gate 7`, `A-3`, `A-5`, `I10`).
@@ -102,21 +106,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       let configuredHomeDs = self.homeDsEndpoint
       let configuredHomeDsDid = self.homeDsDid
       let bridged = Self.runAsyncAuthBridge(timeoutSeconds: 25.0) { () -> PlatformHttpResponse? in
-        let clientBaseURL = await atProtoClient.networkService.baseURL
-        if Self.sameOrigin(url, clientBaseURL) {
-          if let mailboxKeysDeletionRepo, try await atProtoClient.getDid() != mailboxKeysDeletionRepo {
-            throw MLSOutboundHTTPValidator.ValidationError.disallowedNSID(MLSOutboundHTTPValidator.deleteRecordNSID)
-          }
-          let (data, http) = try await atProtoClient.networkService.performRequestReturningHTTPErrorResponses(
-            immutableRequest,
-            skipTokenRefresh: false
-          )
-          return Self.makePlatformHttpResponse(data: data, http: http)
-        }
-        if let configuredHomeDs,
-           Self.sameOrigin(url, configuredHomeDs),
-           let nsid = Self.extractXrpcNsid(url),
-           nsid.hasPrefix("blue.catbird.chat.")
+        if let nsid = Self.deliveryServiceMethod(for: url, home: configuredHomeDs)
         {
           let (code, authOut) = try await atProtoClient.com.atproto.server.getServiceAuth(
             input: .init(
@@ -135,6 +125,17 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
           let (data, http) = try await self.boundedSession.data(
             for: authedRequest,
             maxBytes: Self.maxHttpResponseBytes
+          )
+          return Self.makePlatformHttpResponse(data: data, http: http)
+        }
+        let clientBaseURL = await atProtoClient.networkService.baseURL
+        if Self.sameOrigin(url, clientBaseURL) {
+          if let mailboxKeysDeletionRepo, try await atProtoClient.getDid() != mailboxKeysDeletionRepo {
+            throw MLSOutboundHTTPValidator.ValidationError.disallowedNSID(MLSOutboundHTTPValidator.deleteRecordNSID)
+          }
+          let (data, http) = try await atProtoClient.networkService.performRequestReturningHTTPErrorResponses(
+            immutableRequest,
+            skipTokenRefresh: false
           )
           return Self.makePlatformHttpResponse(data: data, http: http)
         }
@@ -193,7 +194,17 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       let config = URLSessionConfiguration.ephemeral
       config.httpCookieStorage = nil
       config.urlCredentialStorage = nil
-      let session = URLSession(configuration: config)
+      let session: URLSession
+      #if DEBUG && canImport(Network) && canImport(Security)
+      if let fixture = DebugFixtureTransport.current {
+        guard fixture.permits(baseURL) else { throw URLError(.unsupportedURL) }
+        session = try fixture.makeSession()
+      } else {
+        session = URLSession(configuration: config)
+      }
+      #else
+      session = URLSession(configuration: config)
+      #endif
       let task = session.webSocketTask(with: wsURL)
       self.webSocketSession = session
       self.webSocketTask = task
@@ -515,6 +526,13 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     }
   }
 
+  static func deliveryServiceMethod(for url: URL, home: URL?) -> String? {
+    guard let home, sameOrigin(url, home), let nsid = extractXrpcNsid(url),
+          nsid.hasPrefix("blue.catbird.chat.") || nsid.hasPrefix("blue.catbird.labyrinth.")
+    else { return nil }
+    return nsid
+  }
+
   private static func extractXrpcNsid(_ url: URL) -> String? {
     guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
           components.path.hasPrefix("/xrpc/")
@@ -570,6 +588,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       }
       if components.path.hasPrefix("/xrpc/") {
         let nsid = String(components.path.dropFirst("/xrpc/".count))
+        if ["com.atproto.sync.getBlocks", "com.atproto.sync.getLatestCommit", "com.atproto.sync.getRepo"].contains(nsid),
+           method.uppercased() != "GET" {
+          throw MLSOutboundHTTPValidator.ValidationError.disallowedNSID(nsid)
+        }
         if !(permittingMailboxKeysDeletion && nsid == MLSOutboundHTTPValidator.deleteRecordNSID) {
           if MLSOutboundHTTPValidator.ownPDSOnlyExactNSIDs.contains(nsid) {
             try MLSOutboundHTTPValidator.validatePreparedRequestNSID(

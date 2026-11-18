@@ -64,6 +64,9 @@ enum MLSOutboundHTTPValidator {
     "com.atproto.repo.getRecord",
     "com.atproto.repo.listRecords",
     "com.atproto.sync.getRecord",
+    "com.atproto.sync.getBlocks",
+    "com.atproto.sync.getLatestCommit",
+    "com.atproto.sync.getRepo",
   ]
 
   /// NSIDs permitted only as a `GET` to the signed-in account's OWN PDS origin
@@ -152,7 +155,8 @@ enum MLSOutboundHTTPValidator {
   /// scheme downgrade, non-default ports, fragments, userinfo, and local/private IP ranges.
   static func validatePublicHTTPSServiceEndpoint(_ url: URL) throws {
     #if DEBUG && canImport(Network) && canImport(Security)
-    if let fixture = DebugFixtureTransport.current, fixture.permits(url) {
+    if let fixture = DebugFixtureTransport.current {
+      guard fixture.permits(url) else { throw ValidationError.disallowedHost(url.host ?? "") }
       return
     }
     #endif
@@ -489,8 +493,14 @@ final class MLSBoundedURLSession: @unchecked Sendable {
   private let delegateQueue: OperationQueue
   let underlyingSession: URLSession
 
-  init(protocolClasses: [AnyClass]? = nil) {
-    let delegate = Delegate()
+  convenience init(protocolClasses: [AnyClass]? = nil) {
+    let configuration = URLSessionConfiguration.ephemeral
+    if let protocolClasses { configuration.protocolClasses = protocolClasses }
+    self.init(configuration: configuration, trustDelegate: nil)
+  }
+
+  private init(configuration: URLSessionConfiguration, trustDelegate: (any URLSessionDelegate)?) {
+    let delegate = Delegate(trustDelegate: trustDelegate)
     let underlyingQueue = DispatchQueue(
       label: "blue.catbird.mls.bounded-url-session",
       qos: .userInitiated,
@@ -501,14 +511,10 @@ final class MLSBoundedURLSession: @unchecked Sendable {
     queue.qualityOfService = .userInitiated
     queue.underlyingQueue = underlyingQueue
 
-    let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
     configuration.urlCredentialStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-    if let protocolClasses {
-      configuration.protocolClasses = protocolClasses
-    }
     self.sessionDelegate = delegate
     self.delegateQueue = queue
     self.underlyingSession = URLSession(
@@ -518,16 +524,42 @@ final class MLSBoundedURLSession: @unchecked Sendable {
     )
   }
 
+  #if DEBUG && canImport(Network) && canImport(Security)
+  // Petrel installs exactly one immutable fixture per process. Its session supplies the
+  // no-failover CONNECT configuration and pinned CA, while our delegate preserves streaming limits.
+  private static let fixtureSessionLock = NSLock()
+  nonisolated(unsafe) private static var fixtureSession: MLSBoundedURLSession?
+  #endif
+
+  private func session(for request: URLRequest) throws -> MLSBoundedURLSession {
+    #if DEBUG && canImport(Network) && canImport(Security)
+    if let fixture = DebugFixtureTransport.current {
+      guard let url = request.url, fixture.permits(url) else { throw URLError(.unsupportedURL) }
+      return try Self.fixtureSessionLock.withLock {
+        if let session = Self.fixtureSession { return session }
+        let pinned = try fixture.makeSession()
+        defer { pinned.finishTasksAndInvalidate() }
+        guard let trustDelegate = pinned.delegate else { throw URLError(.secureConnectionFailed) }
+        let session = MLSBoundedURLSession(configuration: pinned.configuration, trustDelegate: trustDelegate)
+        Self.fixtureSession = session
+        return session
+      }
+    }
+    #endif
+    return self
+  }
+
   func invalidateAndCancel() {
     underlyingSession.invalidateAndCancel()
   }
 
   func data(for request: URLRequest, maxBytes: Int) async throws -> (Data, HTTPURLResponse) {
     precondition(maxBytes > 0, "maxBytes must be positive")
-    let task = underlyingSession.dataTask(with: request)
+    let session = try session(for: request)
+    let task = session.underlyingSession.dataTask(with: request)
     return try await withTaskCancellationHandler {
       try await withCheckedThrowingContinuation { continuation in
-        sessionDelegate.register(
+        session.sessionDelegate.register(
           taskIdentifier: task.taskIdentifier,
           maxBytes: maxBytes,
           target: .async(continuation)
@@ -552,8 +584,9 @@ final class MLSBoundedURLSession: @unchecked Sendable {
     precondition(timeoutSeconds > 0, "timeoutSeconds must be positive")
 
     let waiter = SyncWaiter()
-    let task = underlyingSession.dataTask(with: request)
-    sessionDelegate.register(
+    let session = try session(for: request)
+    let task = session.underlyingSession.dataTask(with: request)
+    session.sessionDelegate.register(
       taskIdentifier: task.taskIdentifier,
       maxBytes: maxBytes,
       target: .sync(waiter)
@@ -561,7 +594,7 @@ final class MLSBoundedURLSession: @unchecked Sendable {
     task.resume()
 
     guard let outcome = waiter.wait(timeoutSeconds: timeoutSeconds) else {
-      sessionDelegate.remove(taskIdentifier: task.taskIdentifier)
+      session.sessionDelegate.remove(taskIdentifier: task.taskIdentifier)
       task.cancel()
       throw BoundedFetchError.timedOut(seconds: timeoutSeconds)
     }
@@ -643,6 +676,24 @@ final class MLSBoundedURLSession: @unchecked Sendable {
   }
 
   private final class Delegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let trustDelegate: (any URLSessionDelegate)?
+
+    init(trustDelegate: (any URLSessionDelegate)?) {
+      self.trustDelegate = trustDelegate
+    }
+
+    func urlSession(
+      _ session: URLSession,
+      didReceive challenge: URLAuthenticationChallenge,
+      completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+      if let delegate = trustDelegate, let handle = delegate.urlSession(_:didReceive:completionHandler:) {
+        handle(session, challenge, completionHandler)
+      } else {
+        completionHandler(.performDefaultHandling, nil)
+      }
+    }
+
     enum CompletionTarget {
       case async(CheckedContinuation<(Data, HTTPURLResponse), Error>)
       case sync(SyncWaiter)
