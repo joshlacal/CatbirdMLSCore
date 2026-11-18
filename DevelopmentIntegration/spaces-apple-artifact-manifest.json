@@ -132,7 +132,7 @@
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "932b4227905a0444b2bbe461718c2d58d7ea9f7aec99f904db05afc6c4874551"
+    "canonical_sha256": "8cebad607255d869921aefc6bec789489d414c6d817f39eed39950ea6fbfc4a3"
   },
   "interface": {
     "generated_swift": {
@@ -158,7 +158,7 @@
       "Petrel": "../../Petrel",
       "PetrelCatbird": "../../PetrelCatbird"
     },
-    "manifest_sha256": "37626da2ee34b75196f7b7240efbf83a3dab7400d02a27ba3cf045df6ed187ec",
+    "manifest_sha256": "952cb9c9f0ffd5a82a63e69d069b1dc0eab48b2e046e5d1702d794ecba02bb81",
     "path": ".."
   },
   "qualification": "unreviewed-candidate",
