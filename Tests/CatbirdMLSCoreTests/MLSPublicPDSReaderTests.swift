@@ -117,4 +117,63 @@ struct MLSPublicPDSReaderTests {
     let port8443 = URL(string: "https://chat.catbird.blue:8443/.well-known/did.json")!
     #expect(!MLSPublicPDSReader.isMatchingEndpoint(port8443, expected: base))
   }
+
+  // MARK: - Public GET Request Configuration
+
+  private final class RequestCaptureURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var captured: [URLRequest] = []
+
+    static func reset() {
+      lock.withLock { captured.removeAll() }
+    }
+
+    static func requests() -> [URLRequest] {
+      lock.withLock { captured }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+      Self.lock.withLock { Self.captured.append(request) }
+      let url = request.url ?? URL(string: "https://pds.example.com")!
+      let response = HTTPURLResponse(
+        url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+        headerFields: ["Content-Type": "application/json"]
+      )!
+      let body = #"{"records":[]}"#.data(using: .utf8)!
+      client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      client?.urlProtocol(self, didLoad: body)
+      client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+  }
+
+  @Test func publicDeviceRecordReadsEnforceShortRequestTimeout() async throws {
+    RequestCaptureURLProtocol.reset()
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [RequestCaptureURLProtocol.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+
+    let pds = URL(string: "https://pds.example.com")!
+    let did = "did:plc:abc123456789012345678901"
+
+    _ = try await MLSPublicPDSReader.fetchDeviceSignatureKeys(
+      did: did, resolvePDS: { _ in pds }, session: session
+    )
+    _ = try await MLSPublicPDSReader.fetchAuthorizedDeviceRecords(
+      did: did, resolvePDS: { _ in pds }, session: session
+    )
+
+    let requests = RequestCaptureURLProtocol.requests()
+    #expect(requests.count == 2)
+    for req in requests {
+      #expect(req.timeoutInterval == 10.0)
+      #expect(req.value(forHTTPHeaderField: "Accept") == "application/json")
+      #expect(req.cachePolicy == URLRequest.CachePolicy.reloadIgnoringLocalCacheData)
+    }
+  }
 }

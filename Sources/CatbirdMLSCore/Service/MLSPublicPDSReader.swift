@@ -32,6 +32,7 @@ enum MLSPublicPDSReader {
   }()
   static let deviceCollection = "blue.catbird.chat.device"
   static let declarationCollection = "blue.catbird.chat.declaration"
+  static let publicReadTimeoutSeconds: TimeInterval = 10.0
 
   private static let logger = Logger(subsystem: "blue.catbird", category: "MLSPublicPDSReader")
 
@@ -85,6 +86,7 @@ enum MLSPublicPDSReader {
     }
 
     var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+    request.timeoutInterval = publicReadTimeoutSeconds
     request.httpMethod = "GET"
     request.setValue("application/json", forHTTPHeaderField: "Accept")
 

@@ -64,6 +64,7 @@ extension MLSPublicPDSReader {
     #if DEBUG && canImport(Network) && canImport(Security)
     if let fixture = DebugFixtureTransport.current, fixture.permits(url) {
       var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.timeoutInterval = publicReadTimeoutSeconds
       request.setValue("application/json", forHTTPHeaderField: "Accept")
       let (data, response) = try await session.data(for: request)
       guard let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -232,6 +233,7 @@ extension MLSPublicPDSReader {
       var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
       if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
       var request = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData)
+      request.timeoutInterval = publicReadTimeoutSeconds
       request.setValue("application/json", forHTTPHeaderField: "Accept")
       let (data, http): (Data, HTTPURLResponse)
       do {
