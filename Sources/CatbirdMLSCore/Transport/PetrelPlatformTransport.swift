@@ -91,6 +91,8 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       result = (403, "Forbidden", "This account or device cannot perform the operation.")
     case MLSBoundedURLSession.BoundedFetchError.responseTooLarge, NetworkError.responseLimitExceeded:
       result = (413, "ResponseTooLarge", "The response exceeds the permitted size.")
+    case let error as URLError where [.badURL, .unsupportedURL].contains(error.code):
+      result = (400, "InvalidRequest", "The requested operation is not allowed.")
     case let error as URLError where error.code == .userAuthenticationRequired:
       result = (401, "AuthenticationRequired", "This operation requires authentication.")
     default:

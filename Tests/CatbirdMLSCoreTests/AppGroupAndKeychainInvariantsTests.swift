@@ -614,6 +614,23 @@ final class AppGroupAndKeychainInvariantsTests: XCTestCase {
     )
   }
 
+  func testHostTransportPreservesTerminalErrorsAndRedactsFailureDetails() throws {
+    let cases: [(Error, UInt16, String)] = [
+      (URLError(.badURL), 400, "InvalidRequest"),
+      (URLError(.userAuthenticationRequired), 401, "AuthenticationRequired"),
+      (NetworkError.securityViolation, 403, "Forbidden"),
+      (NetworkError.responseLimitExceeded("PRIVATE-SENTINEL"), 413, "ResponseTooLarge"),
+      (URLError(.networkConnectionLost, userInfo: [NSLocalizedDescriptionKey: "PRIVATE-SENTINEL"]), 503, "ServiceUnavailable"),
+    ]
+    for (error, status, reason) in cases {
+      let response = PetrelPlatformTransport.httpFailure(error)
+      XCTAssertEqual(response.status, status)
+      let body = try XCTUnwrap(JSONSerialization.jsonObject(with: response.body) as? [String: String])
+      XCTAssertEqual(body["error"], reason)
+      XCTAssertFalse(String(decoding: response.body, as: UTF8.self).contains("PRIVATE-SENTINEL"))
+    }
+  }
+
   func testMissingReplyIsRecoverableThroughTheGeneratedTransportCallback() async throws {
     let root = tempRoot.path
     try await Task.detached {
