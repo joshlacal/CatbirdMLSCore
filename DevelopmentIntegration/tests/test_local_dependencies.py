@@ -76,7 +76,17 @@ class PackageSelectionTests(unittest.TestCase):
         scripts.mkdir()
         published = json.loads((ROOT / "Scripts/ffi-release-inputs.json").read_text())
         published["generated_swift_sha256"] = hashlib.sha256(self.binding.read_bytes()).hexdigest()
+        sources = {name: str(index) * 40 for index, name in enumerate(("catbird-mls", "catbird-atproto", "labyrinth"), 1)}
+        published["sources"] = sources
         (scripts / "ffi-release-inputs.json").write_text(json.dumps(published))
+        integration = self.package / "DevelopmentIntegration"
+        integration.mkdir()
+        selected = integration / "spaces-selected-inputs.json"
+        selected.write_text(json.dumps(sources))
+        (integration / "spaces-apple-artifact-manifest.json").write_text(json.dumps({
+            "selected_inputs": {"sha256": hashlib.sha256(selected.read_bytes()).hexdigest()},
+            "source": {"repositories": {name: {"commit": commit} for name, commit in sources.items()}},
+        }))
 
     def test_remote_mode_selects_pinned_remote_sdks(self):
         result, manifest = dump_package(self.package, extra_environment={"CATBIRD_MLS_LOCAL_INTEGRATION": "0"})
