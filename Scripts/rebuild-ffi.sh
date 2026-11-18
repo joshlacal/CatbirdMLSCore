@@ -161,7 +161,15 @@ import json
 from pathlib import Path
 import re
 import sys
+framework = Path(sys.argv[1]).parent
+def file_hash(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+library_hashes = {str(p.relative_to(framework)): file_hash(p) for p in sorted(framework.glob("*/libCatbirdMLSFFI.a"))}
+if not library_hashes:
+    raise SystemExit("The built XCFramework contains no static libraries")
 Path(sys.argv[1]).write_text(json.dumps({
+    "librarySHA256": library_hashes,
     "protocolVersion": 20261023,
     "sourceFingerprint": sys.argv[2],
     "features": sorted(set(filter(None, re.split(r"[\s,]+", sys.argv[3])))),

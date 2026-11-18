@@ -376,6 +376,7 @@ def build_manifest(
                 name: repository_record(path, identities[name], base)
                 for name, path in repositories.items()
             },
+            "bundle_sha256": marker["sourceFingerprint"],
             "native_source_sha256": source["sha256"],
             "native_source_files": source["files"],
             "local_path_dependencies": {
