@@ -4,8 +4,8 @@
     {
       "path": "CatbirdMLSCore",
       "repository": "CatbirdMLSCore",
-      "source_git_head": "c1a271be1920989cd217d95a3d0d14a743d29cb6",
-      "source_jj_commit": "c1a271be1920989cd217d95a3d0d14a743d29cb6"
+      "source_git_head": "e48c6135c8e01f42cb06b29abe976fc325621a3c",
+      "source_jj_commit": "e48c6135c8e01f42cb06b29abe976fc325621a3c"
     },
     {
       "path": "Petrel",
@@ -16,20 +16,20 @@
     {
       "path": "PetrelCatbird",
       "repository": "PetrelCatbird",
-      "source_git_head": "746b107512b9d4b003598aadfd57b4c77a3d4c7c",
-      "source_jj_commit": "746b107512b9d4b003598aadfd57b4c77a3d4c7c"
+      "source_git_head": "7bfa54bcdcc56fad4f3e245e6772a8e2ca7cae1d",
+      "source_jj_commit": "7bfa54bcdcc56fad4f3e245e6772a8e2ca7cae1d"
     },
     {
       "path": "catbird-atproto",
       "repository": "catbird-atproto",
-      "source_git_head": "9e3ed5ec0235f105e643c5af563eb09a2bbbca86",
-      "source_jj_commit": "9e3ed5ec0235f105e643c5af563eb09a2bbbca86"
+      "source_git_head": "e3356fd4f3349de1d647e3558964d08449c03b13",
+      "source_jj_commit": "e3356fd4f3349de1d647e3558964d08449c03b13"
     },
     {
       "path": "catbird-mls",
       "repository": "catbird-mls",
-      "source_git_head": "c38a604b77e45963da8e539af1ea4c7f68530f41",
-      "source_jj_commit": "c38a604b77e45963da8e539af1ea4c7f68530f41"
+      "source_git_head": "bc2762a004219fa562d5d9b9077f90a949931af9",
+      "source_jj_commit": "bc2762a004219fa562d5d9b9077f90a949931af9"
     },
     {
       "path": "labyrinth",

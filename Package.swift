@@ -48,7 +48,7 @@ if !forceRemote,
     ),
     .package(
       url: "https://github.com/joshlacal/PetrelCatbird.git",
-      revision: "746b107512b9d4b003598aadfd57b4c77a3d4c7c"
+      revision: "7bfa54bcdcc56fad4f3e245e6772a8e2ca7cae1d"
     ),
   ]
 }
