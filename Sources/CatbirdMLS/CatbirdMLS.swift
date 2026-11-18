@@ -628,6 +628,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func deleteAccountData() throws
 
+    func deleteAccountDataForHostedAccount() throws
+
     func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt
 
     func exportConversationIntegrityEvidenceJson(conversationId: String) throws -> String
@@ -991,6 +993,12 @@ open class CatbirdMlsClient:
     open func deleteAccountData() throws {
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_delete_account_data(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    open func deleteAccountDataForHostedAccount() throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_delete_account_data_for_hosted_account(self.uniffiClonePointer(), $0)
         }
     }
 
@@ -15719,6 +15727,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_account_data() != 54098 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_account_data_for_hosted_account() != 4833 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_enroll_device() != 1871 {
