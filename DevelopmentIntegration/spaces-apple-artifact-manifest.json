@@ -38,8 +38,8 @@
         "size_bytes": 66
       },
       "ios-arm64/libCatbirdMLSFFI.a": {
-        "sha256": "97b2d5dee936a259f41a84a451a4074f52f858648605962cf692d1af5c4d7db9",
-        "size_bytes": 867648104
+        "sha256": "17911bda7b37a6bd056b6c55706c340cdddbc810d5103898e20a96d083c8a5cb",
+        "size_bytes": 867649416
       },
       "ios-arm64_x86_64-maccatalyst/Headers/CatbirdMLSFFI.h": {
         "sha256": "eb9561d4cc7fe776046325f45c74f51d88a4798dc64d6885ac6dd4176ab43be3",
@@ -50,8 +50,8 @@
         "size_bytes": 66
       },
       "ios-arm64_x86_64-maccatalyst/libCatbirdMLSFFI.a": {
-        "sha256": "2fecf32cb73f267718b940279ddd365405dd8637971610c303f3563a1f0b1432",
-        "size_bytes": 1727724856
+        "sha256": "334f6a53009f7db71ba048337901f9c1968e2aad2406fb5efd5ae21e8b848fff",
+        "size_bytes": 1727726432
       },
       "ios-arm64_x86_64-simulator/Headers/CatbirdMLSFFI.h": {
         "sha256": "eb9561d4cc7fe776046325f45c74f51d88a4798dc64d6885ac6dd4176ab43be3",
@@ -62,11 +62,11 @@
         "size_bytes": 66
       },
       "ios-arm64_x86_64-simulator/libCatbirdMLSFFI.a": {
-        "sha256": "c60202bf1cd7fcb14d94e33b152abeca3a225ccd2bbf9604b449a7e2ee94fb90",
-        "size_bytes": 1725887856
+        "sha256": "caadbf27e6114eabec2a1e92ca36122f3328ad134d28379477105519896bbc25",
+        "size_bytes": 1725886920
       },
       "labyrinth-space-protocol.json": {
-        "sha256": "d8bf54ae8c24458a9327e7a70128032b17134fbcb430d27a566e39a8c583ebca",
+        "sha256": "8ee1cea09cfd8d633cfc4baf2f2b61ba1d8f8c6e22d76b5d474bf4f5cdb85a44",
         "size_bytes": 740
       },
       "macos-arm64_x86_64/Headers/CatbirdMLSFFI.h": {
@@ -78,8 +78,8 @@
         "size_bytes": 66
       },
       "macos-arm64_x86_64/libCatbirdMLSFFI.a": {
-        "sha256": "d4e941661723c8e0167235e603c7efed0113e7fbcf9a58d5168a45b732f75bf3",
-        "size_bytes": 1733887088
+        "sha256": "7ede04c0edf97d8469cb7615b599c263cf116d3cf101a11d165a24ba002d76bb",
+        "size_bytes": 1733888200
       }
     },
     "libraries": [
@@ -128,11 +128,11 @@
       }
     ],
     "path": "../Sources/CatbirdMLSFFI.xcframework",
-    "sha256": "96de9fccff61aa90bf9adee0ebce7bb9eaf8669b6e74988a081624cdad32e53f"
+    "sha256": "6c176eed2d5ca27973ae83e9809fdf6d6f4ce57a72c720ab300b8918a010a952"
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "fc5dbcb470d74397da15757e214741a9b6a15a87860bc636b8dcb1b7850edd4a"
+    "canonical_sha256": "6c87352502eda76d2baccaa91cceea92aa0fed63349e7ad8bc455306b0fdcb0b"
   },
   "interface": {
     "generated_swift": {
@@ -5505,15 +5505,15 @@
       },
       "catbird-atproto": {
         "commit": "e3356fd4f3349de1d647e3558964d08449c03b13",
-        "path": "../../catbird-atproto"
+        "path": "../../_test/apple-ffi45/offline/catbird-atproto"
       },
       "catbird-mls": {
         "commit": "53d02fc296f7d5c20930802ed9f2d0363d8c5d8c",
-        "path": "../../catbird-mls"
+        "path": "../../_test/apple-ffi45/offline/catbird-mls"
       },
       "labyrinth": {
         "commit": "182e76d00d66f7a1b72bbc4248438bd68e25a2fa",
-        "path": "../../labyrinth"
+        "path": "../../_test/apple-ffi45/offline/labyrinth"
       }
     },
     "schemas": {
