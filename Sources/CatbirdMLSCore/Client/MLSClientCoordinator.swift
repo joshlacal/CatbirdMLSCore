@@ -1254,6 +1254,15 @@ public final class MLSClientCoordinator {
     isClosedForSession = true
   }
 
+  /// Requires completion on every participating delivery service before deleting a hosted account.
+  /// The native journal and signing keys stay available if the provider requires another email code.
+  public func deleteAccountDataForHostedAccount() async throws {
+    let c = client
+    try await runOffMain {
+      try c.deleteAccountDataForHostedAccount()
+    }
+  }
+
   public func startOtcPairing(sixDigitCode: String) async throws -> OtcInitiatedSession {
     let c = client
     return try await runOffMain {
