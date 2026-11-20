@@ -15,6 +15,11 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   public static let maxHttpResponseBytes = 16 * 1024 * 1024
 
   private let atProtoClient: ATProtoClient?
+  /// The account whose engine this transport serves. The app has one `ATProtoClient` that
+  /// follows the active account, so after an account switch a request still in flight for
+  /// the previous account would be signed with the new account's session. With a bound
+  /// account, such a request is refused before any credential is minted.
+  private let boundAccountDid: String?
   private let homeDsEndpoint: URL?
   private let homeDsDid: String
   private let ownPdsEndpoint: URL?
@@ -28,6 +33,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
 
   public init(
     atProtoClient: ATProtoClient? = nil,
+    boundAccountDid: String? = nil,
     homeDsEndpoint: URL? = URL(string: "https://chat.catbird.blue"),
     homeDsDid: String = "did:web:chat.catbird.blue",
     ownPdsEndpoint: URL? = nil,
@@ -36,6 +42,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     httpOverride: (@Sendable (PlatformHttpRequest) throws -> PlatformHttpResponse)? = nil
   ) {
     self.atProtoClient = atProtoClient
+    self.boundAccountDid = boundAccountDid
     self.homeDsEndpoint = homeDsEndpoint
     self.homeDsDid = Self.stripDidFragment(homeDsDid)
     self.ownPdsEndpoint = ownPdsEndpoint
@@ -47,6 +54,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
 
   init(
     atProtoClient: ATProtoClient? = nil,
+    boundAccountDid: String? = nil,
     homeDsEndpoint: URL? = URL(string: "https://chat.catbird.blue"),
     homeDsDid: String = "did:web:chat.catbird.blue",
     ownPdsEndpoint: URL? = nil,
@@ -56,6 +64,7 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     httpOverride: (@Sendable (PlatformHttpRequest) throws -> PlatformHttpResponse)? = nil
   ) {
     self.atProtoClient = atProtoClient
+    self.boundAccountDid = boundAccountDid
     self.homeDsEndpoint = homeDsEndpoint
     self.homeDsDid = Self.stripDidFragment(homeDsDid)
     self.ownPdsEndpoint = ownPdsEndpoint
@@ -70,6 +79,15 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       return try executeHttpRaw(request: request)
     } catch {
       return Self.httpFailure(error)
+    }
+  }
+
+  /// Refuses a request when the client's active account is not the one this transport was
+  /// opened for. `bound == nil` (extensions, tests, token-override transports) checks nothing.
+  static func requireBoundAccount(active: String, bound: String?) throws {
+    guard let bound else { return }
+    guard active.caseInsensitiveCompare(bound) == .orderedSame else {
+      throw AuthError.noActiveAccount
     }
   }
 
@@ -138,8 +156,10 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
     if let client = atProtoClient, let authorization = urlRequest.value(forHTTPHeaderField: "Authorization"),
        authorization.hasPrefix("Atproto-Space-Credential ") {
       let immutable = urlRequest
+      let boundAccountDid = self.boundAccountDid
       return try Self.runAsyncAuthBridge(timeoutSeconds: 25) {
         let did = try await client.getDid()
+        try Self.requireBoundAccount(active: did, bound: boundAccountDid)
         let sessionOrigin = await client.networkService.baseURL
         let pds = try await client.resolveDIDToPDSURL(did: did)
         var direct = immutable
@@ -153,7 +173,12 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
       let immutableRequest = urlRequest
       let configuredHomeDs = self.homeDsEndpoint
       let configuredHomeDsDid = self.homeDsDid
+      let boundAccountDid = self.boundAccountDid
       let bridged = Self.runAsyncAuthBridge(timeoutSeconds: 25.0) { () -> PlatformHttpResponse? in
+        // Before a service token is minted or the account session is used.
+        if boundAccountDid != nil {
+          try Self.requireBoundAccount(active: try await atProtoClient.getDid(), bound: boundAccountDid)
+        }
         if let nsid = Self.deliveryServiceMethod(for: url, home: configuredHomeDs)
         {
           let (code, authOut) = try await atProtoClient.com.atproto.server.getServiceAuth(
