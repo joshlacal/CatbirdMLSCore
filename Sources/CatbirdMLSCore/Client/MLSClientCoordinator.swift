@@ -1506,7 +1506,14 @@ public final class MLSClientCoordinator {
       }
       repeat {
         if !c.isHandleClosed() {
-          _ = try? c.flushLabyrinthQueue()
+          // A failed flush is retried on the next trigger, but it is not silent.
+          let failures = MLSBackupFlushFailureLog.shared
+          do {
+            _ = try c.flushLabyrinthQueue()
+            failures.write(failures.succeeded())
+          } catch {
+            failures.write(failures.failed(error))
+          }
         }
       } while coalescer.completeAndShouldRepeat(isHandleClosed: { c.isHandleClosed() })
     }
