@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import CatbirdMLSCore
 
@@ -37,5 +38,33 @@ struct MLSBackupFlushFailureLogTests {
     #expect(log.succeeded() == .recovered)
     #expect(log.succeeded() == nil)
     #expect(log.failed(Failure(description: "xrpc 404")) == .failure("xrpc 404"))
+  }
+
+  @Test("Each account's last outcome is kept for a status screen")
+  func lastOutcomeIsKeptPerAccount() {
+    let log = MLSBackupFlushFailureLog()
+    let first = Date(timeIntervalSince1970: 10)
+    let second = Date(timeIntervalSince1970: 20)
+    #expect(log.lastOutcome(account: "did:plc:a") == nil)
+
+    _ = log.failed(Failure(description: "xrpc 404"), account: "did:plc:a", at: first)
+    #expect(log.lastOutcome(account: "did:plc:a") == MLSBackupFlushOutcome(failure: "xrpc 404", date: first))
+    #expect(log.lastOutcome(account: "did:plc:b") == nil)
+
+    // A repeated failure is not logged again, but its time still moves forward.
+    #expect(log.failed(Failure(description: "xrpc 404"), account: "did:plc:a", at: second) == nil)
+    #expect(log.lastOutcome(account: "did:plc:a")?.date == second)
+
+    _ = log.succeeded(account: "did:plc:a", at: second)
+    #expect(log.lastOutcome(account: "did:plc:a") == MLSBackupFlushOutcome(failure: nil, date: second))
+  }
+
+  @Test("One account's failure does not hide the same failure on another account")
+  func failuresAreTrackedPerAccount() {
+    let log = MLSBackupFlushFailureLog()
+    #expect(log.failed(Failure(description: "xrpc 404"), account: "did:plc:a") == .failure("xrpc 404"))
+    #expect(log.failed(Failure(description: "xrpc 404"), account: "did:plc:b") == .failure("xrpc 404"))
+    #expect(log.succeeded(account: "did:plc:a") == .recovered)
+    #expect(log.failed(Failure(description: "xrpc 404"), account: "did:plc:b") == nil)
   }
 }

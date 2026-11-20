@@ -1,7 +1,20 @@
 import Foundation
 import OSLog
 
-/// Reports a failed encrypted-backup flush to the device log.
+/// How an account's most recent encrypted-backup flush ended.
+public struct MLSBackupFlushOutcome: Equatable, Sendable {
+  /// The engine's error text when the flush failed; nil when it succeeded.
+  public let failure: String?
+  public let date: Date
+
+  public init(failure: String?, date: Date) {
+    self.failure = failure
+    self.date = date
+  }
+}
+
+/// Reports a failed encrypted-backup flush to the device log, and remembers how each
+/// account's last flush ended so a status screen can say whether backup is working.
 ///
 /// The flush runs in the background after almost every chat action, and its error used to
 /// be discarded. Backup could fail on every attempt for weeks with nothing to show for it:
@@ -13,7 +26,8 @@ final class MLSBackupFlushFailureLog: @unchecked Sendable {
   static let shared = MLSBackupFlushFailureLog()
 
   private let lock = NSLock()
-  private var lastFailure: String?
+  private var lastFailure: [String: String] = [:]
+  private var outcomes: [String: MLSBackupFlushOutcome] = [:]
   private let logger = Logger(subsystem: "blue.catbird", category: "LabyrinthBackup")
 
   /// What a flush outcome should write to the log, if anything.
@@ -22,23 +36,32 @@ final class MLSBackupFlushFailureLog: @unchecked Sendable {
     case recovered
   }
 
-  /// Records a failed flush. Returns the entry to log, or nil when this failure repeats the last.
-  func failed(_ error: Error) -> Entry? {
+  /// Records a failed flush. Returns the entry to log, or nil when this failure repeats the
+  /// account's last one.
+  func failed(_ error: Error, account: String = "", at date: Date = Date()) -> Entry? {
     let message = String(describing: error)
     lock.lock()
     defer { lock.unlock() }
-    guard lastFailure != message else { return nil }
-    lastFailure = message
+    outcomes[account] = MLSBackupFlushOutcome(failure: message, date: date)
+    guard lastFailure[account] != message else { return nil }
+    lastFailure[account] = message
     return .failure(message)
   }
 
   /// Records a successful flush. Returns `.recovered` when it follows a failure.
-  func succeeded() -> Entry? {
+  func succeeded(account: String = "", at date: Date = Date()) -> Entry? {
     lock.lock()
     defer { lock.unlock() }
-    guard lastFailure != nil else { return nil }
-    lastFailure = nil
+    outcomes[account] = MLSBackupFlushOutcome(failure: nil, date: date)
+    guard lastFailure.removeValue(forKey: account) != nil else { return nil }
     return .recovered
+  }
+
+  /// How this account's most recent flush ended; nil when none has run in this process.
+  func lastOutcome(account: String) -> MLSBackupFlushOutcome? {
+    lock.lock()
+    defer { lock.unlock() }
+    return outcomes[account]
   }
 
   func write(_ entry: Entry?) {

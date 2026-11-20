@@ -1495,10 +1495,17 @@ public final class MLSClientCoordinator {
     attributes: .concurrent
   )
 
+  /// How this account's most recent background backup flush ended; nil when none has run
+  /// since the app started.
+  public var lastBackupFlushOutcome: MLSBackupFlushOutcome? {
+    MLSBackupFlushFailureLog.shared.lastOutcome(account: accountDid)
+  }
+
   private func scheduleBackgroundOutboxDrain() {
     guard !isHandleClosed else { return }
     let coalescer = outboxDrainCoalescer
     let c = client
+    let account = accountDid
     guard coalescer.requestDrain(isHandleClosed: { c.isHandleClosed() }) else { return }
     Self.ffiDispatchQueue.async {
       guard coalescer.beginFirstIteration(isHandleClosed: { c.isHandleClosed() }) else {
@@ -1510,9 +1517,9 @@ public final class MLSClientCoordinator {
           let failures = MLSBackupFlushFailureLog.shared
           do {
             _ = try c.flushLabyrinthQueue()
-            failures.write(failures.succeeded())
+            failures.write(failures.succeeded(account: account))
           } catch {
-            failures.write(failures.failed(error))
+            failures.write(failures.failed(error, account: account))
           }
         }
       } while coalescer.completeAndShouldRepeat(isHandleClosed: { c.isHandleClosed() })
