@@ -6743,6 +6743,12 @@ public func FfiConverterTypeKeyPackageResult_lower(_ value: KeyPackageResult) ->
  */
 public struct LabyrinthBackupStatus {
     public var backupEnabled: Bool
+    /**
+     * True once this device has opened or created the account's archive on the server: a
+     * session verified the mailbox Space with its device and epoch records. Never reset.
+     * Until then `epoch_seq` and `active_device_ids` are first-open placeholders.
+     */
+    public var archiveEstablished: Bool
     public var mailboxSpaceUri: String
     public var hasRecoveryCode: Bool
     public var hasPasskeyPrf: Bool
@@ -6785,7 +6791,12 @@ public struct LabyrinthBackupStatus {
 
     /// Default memberwise initializers are never public by default, so we
     /// declare one manually.
-    public init(backupEnabled: Bool, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool,
+    public init(backupEnabled: Bool,
+                /* 
+                    * True once this device has opened or created the account's archive on the server: a
+                    * session verified the mailbox Space with its device and epoch records. Never reset.
+                    * Until then `epoch_seq` and `active_device_ids` are first-open placeholders.
+                    */ archiveEstablished: Bool = false, mailboxSpaceUri: String, hasRecoveryCode: Bool, hasPasskeyPrf: Bool,
                 /* 
                     * A rotation minted a replacement code that still needs to be saved or
                     * replaced by the account owner. Durable across app restarts.
@@ -6814,6 +6825,7 @@ public struct LabyrinthBackupStatus {
                     */ directoryPublicationError: String?)
     {
         self.backupEnabled = backupEnabled
+        self.archiveEstablished = archiveEstablished
         self.mailboxSpaceUri = mailboxSpaceUri
         self.hasRecoveryCode = hasRecoveryCode
         self.hasPasskeyPrf = hasPasskeyPrf
@@ -6833,6 +6845,9 @@ public struct LabyrinthBackupStatus {
 extension LabyrinthBackupStatus: Equatable, Hashable {
     public static func == (lhs: LabyrinthBackupStatus, rhs: LabyrinthBackupStatus) -> Bool {
         if lhs.backupEnabled != rhs.backupEnabled {
+            return false
+        }
+        if lhs.archiveEstablished != rhs.archiveEstablished {
             return false
         }
         if lhs.mailboxSpaceUri != rhs.mailboxSpaceUri {
@@ -6879,6 +6894,7 @@ extension LabyrinthBackupStatus: Equatable, Hashable {
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(backupEnabled)
+        hasher.combine(archiveEstablished)
         hasher.combine(mailboxSpaceUri)
         hasher.combine(hasRecoveryCode)
         hasher.combine(hasPasskeyPrf)
@@ -6903,6 +6919,7 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
         return
             try LabyrinthBackupStatus(
                 backupEnabled: FfiConverterBool.read(from: &buf),
+                archiveEstablished: FfiConverterBool.read(from: &buf),
                 mailboxSpaceUri: FfiConverterString.read(from: &buf),
                 hasRecoveryCode: FfiConverterBool.read(from: &buf),
                 hasPasskeyPrf: FfiConverterBool.read(from: &buf),
@@ -6921,6 +6938,7 @@ public struct FfiConverterTypeLabyrinthBackupStatus: FfiConverterRustBuffer {
 
     public static func write(_ value: LabyrinthBackupStatus, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.backupEnabled, into: &buf)
+        FfiConverterBool.write(value.archiveEstablished, into: &buf)
         FfiConverterString.write(value.mailboxSpaceUri, into: &buf)
         FfiConverterBool.write(value.hasRecoveryCode, into: &buf)
         FfiConverterBool.write(value.hasPasskeyPrf, into: &buf)
