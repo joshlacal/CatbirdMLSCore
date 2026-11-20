@@ -132,7 +132,7 @@
   },
   "identity": {
     "algorithm": "sha256",
-    "canonical_sha256": "37a2f92e5ea90cbc97e7197ef15a4ec00362208b6c399aa048176733ef5cd68e"
+    "canonical_sha256": "71990ccf66c4d5eb3b1df1ddb5e96305309fc3214ea32b4d459f5c7afb8b5ed6"
   },
   "interface": {
     "generated_swift": {
@@ -5512,7 +5512,7 @@
         "path": "../../catbird-atproto"
       },
       "catbird-mls": {
-        "commit": "33419408b827e88d03cda9af2439d2d175fe53b8",
+        "commit": "bea537375ae07fed39f281750cd0f8b560c015ee",
         "path": "../../catbird-mls"
       },
       "labyrinth": {
