@@ -43,6 +43,13 @@ env:
   IPHONEOS_DEPLOYMENT_TARGET: "18.0"
   MACOSX_DEPLOYMENT_TARGET: "15.0"
   RUSTUP_TOOLCHAIN: "1.97.1"
+  # jacquard is a git dependency on tangled.org, whose fetches can stall
+  # for hours under libgit2. Fetch with the git CLI, abort a stalled
+  # transfer after 60 s below 1 KB/s, and let cargo retry.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_NET_RETRY: "10"
+  GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+  GIT_HTTP_LOW_SPEED_TIME: "60"
   RELEASE_TAG: ${{ github.event.inputs.release_tag }}
   CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref }}
   CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref }}
@@ -54,6 +61,8 @@ jobs:
   build-xcframework:
     name: Build paired Swift and CatbirdMLSFFI.xcframework
     runs-on: macos-15
+    # Good builds take 45-120 min; fail fast instead of the 6 h default.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
