@@ -107,6 +107,25 @@ jobs:
             aarch64-apple-ios-macabi x86_64-apple-ios-macabi \
             aarch64-apple-darwin x86_64-apple-darwin
 
+      # uniffi-bindgen formats the Swift bindings with whichever swiftformat is
+      # first on PATH. The committed bindings were formatted by SwiftFormat
+      # 0.64.0; the runner image's newer Homebrew copy formats differently and
+      # fails the committed-bindings comparison. Pin the upstream release.
+      - name: Install pinned SwiftFormat for binding generation
+        env:
+          SWIFTFORMAT_VERSION: "0.64.0"
+          SWIFTFORMAT_SHA256: "95ea62625d0b898a7af870293311ae6f09e4a3147ecd900593687e4b9ab2fd98"
+        run: |
+          dir="$RUNNER_TEMP/swiftformat-$SWIFTFORMAT_VERSION"
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 -o "$dir/swiftformat.zip" \
+            "https://github.com/nicklockwood/SwiftFormat/releases/download/$SWIFTFORMAT_VERSION/swiftformat.zip"
+          echo "$SWIFTFORMAT_SHA256  $dir/swiftformat.zip" | shasum -a 256 -c -
+          unzip -q -o "$dir/swiftformat.zip" -d "$dir"
+          chmod +x "$dir/swiftformat"
+          test "$("$dir/swiftformat" --version)" = "$SWIFTFORMAT_VERSION"
+          echo "$dir" >> "$GITHUB_PATH"
+
       - name: Free disposable runner tool caches
         run: |
           df -h /
