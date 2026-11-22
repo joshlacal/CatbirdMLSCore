@@ -120,8 +120,8 @@ let selectedLocalRelativeFFI: String? = {
 func publishedArtifact() -> Target {
   let target: Target = .binaryTarget(
     name: "CatbirdMLSFFI",
-    url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.22/CatbirdMLSFFI.xcframework.zip",
-    checksum: "83b331d69726aa4195b4a31e4b4c5fe44a989447f9b24229d3e3724027bb882c"
+    url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.23/CatbirdMLSFFI.xcframework.zip",
+    checksum: "5c1c25e136688f46888f8b6383246064c8171efc0ac617a36b7042ee4c17221e"
   )
   let qualified = readObject(packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-apple-artifact-manifest.json"))
   let selectedInputs = packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-selected-inputs.json")
