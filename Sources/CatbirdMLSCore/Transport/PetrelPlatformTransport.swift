@@ -646,7 +646,14 @@ public final class PetrelPlatformTransport: PlatformTransport, PushFetchTranspor
   ) -> Result<T, Error> {
     let box = AsyncAuthBridgeBox<T>()
     let task = Task {
-      let outcome = await Result { try await operation() }
+      // Result's async catching initializer needs Swift 6.2; the FFI
+      // release runner builds with an older toolchain.
+      let outcome: Result<T, Error>
+      do {
+        outcome = .success(try await operation())
+      } catch {
+        outcome = .failure(error)
+      }
       box.complete(outcome)
     }
     let nanos = Int64(max(1.0, timeoutSeconds * 1_000_000_000.0))
