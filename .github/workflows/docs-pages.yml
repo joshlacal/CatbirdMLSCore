@@ -1,0 +1,70 @@
+name: Publish DocC site
+
+# Builds the DocC site for CatbirdMLSCore and serves it with GitHub Pages at
+# https://joshlacal.github.io/CatbirdMLSCore/. Pull requests build the site but never
+# deploy; only pushes to main and manual runs deploy.
+#
+# Needs Settings > Pages > Build and deployment > Source set to "GitHub Actions".
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-site:
+    name: Build DocC site
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      CATBIRD_MLS_LOCAL_INTEGRATION: "0"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Show toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun swift --version
+      - name: Build the DocC site
+        shell: bash
+        run: Scripts/build-docs-site.sh
+      - name: Package the site for GitHub Pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GitHub Pages takes one tar file in an artifact named github-pages.
+          COPYFILE_DISABLE=1 tar -cf "$RUNNER_TEMP/artifact.tar" -C _site .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build-site
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
