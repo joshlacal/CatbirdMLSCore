@@ -4,6 +4,10 @@ Thin Swift package over the Rust `catbird-mls` SDK, shared by the Catbird app an
 
 > **Branch status (2026-11-08).** Bookmark `clean-slate-2026-10-31` (`ad63968c` in this repo) remains the last sealed state. The unsealed Task 4 R4 artifact candidate rebuilds the generated interface and all-target Apple XCFramework from exact `catbird-mls@085e8a7435c2b1c61189040e626b680f7572559f` (R4 signed Space denial), `catbird-atproto@49c6fdb00671ffe96e58e3b5ebec7d5e6532f51f`, `labyrinth@f771b9c26558ce6a39ed87c657dc8bd6e331d94a`, `Petrel@f381cb844d33d76ad7ca948698480d381712304b` and `PetrelCatbird@e782e46ca8489c881517186fe0bf1a9c35c99634`. `DevelopmentIntegration/spaces-apple-artifact-manifest.json` is the verified schema-2 receipt (identity `595a2c0aaa3969a2744e1bb69fb76f091742c186a1384cd6ead7b03644faf304`). This candidate awaits independent R4 review and is neither sealed nor release-qualified; rebuild after any source change.
 
+## Documentation
+
+API reference (DocC): <https://joshlacal.github.io/CatbirdMLSCore/>. Build it locally with `Scripts/build-docs-site.sh`.
+
 ## Layout
 
 ```text
