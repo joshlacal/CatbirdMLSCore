@@ -468,7 +468,7 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     let aliceCachedMessageId = "7a2d3b4c-5e6f-4a70-8b81-c2d3e4f5a612"
     let alicePostKickMessageId = "7a2d3b4c-5e6f-4a70-8b81-c2d3e4f5a613"
     let convoSpaceURI = conversationSpace(conversationId)
-    let personalMailboxSpaceURI = "at://\(aliceDid)/space/blue.catbird.labyrinth.mailbox/self"
+    let personalMailboxSpaceURI = "at:space/\(aliceDid)/blue.catbird.labyrinth.mailbox/self"
 
     // -------------------------------------------------------------------------
     // Device 1 and peer Bob: enroll, live group invite/accept/Welcome, seed Bob + Alice history
@@ -1058,7 +1058,7 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
   // MARK: - Helpers
 
   private func conversationSpace(_ conversationId: String) -> String {
-    "at://\(dsDid)/space/blue.catbird.labyrinth.conversation/\(conversationId)-0"
+    "at:space/\(dsDid)/blue.catbird.labyrinth.conversation/\(conversationId)-0"
   }
 
   /// One device: fresh storage root, fresh Keychain backend, the account's own PDS host.
