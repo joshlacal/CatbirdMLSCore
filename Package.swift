@@ -44,11 +44,11 @@ if !forceRemote,
   sdkDependencies = [
     .package(
       url: "https://github.com/joshlacal/Petrel.git",
-      revision: "74b89dfb58fca288ee2003177fe1b287dbaf7ee8"
+      revision: "a390b43bf50ed0a48d7c2d9ad46e0588bbcd622d"
     ),
     .package(
       url: "https://github.com/joshlacal/PetrelCatbird.git",
-      revision: "ac51194baf1442b9f4428cfbf4ce35ead7086e57"
+      revision: "896808005a892fa5044d2c5e067573bbb9f352c0"
     ),
   ]
 }
