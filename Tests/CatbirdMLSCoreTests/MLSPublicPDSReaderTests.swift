@@ -176,4 +176,31 @@ struct MLSPublicPDSReaderTests {
       #expect(req.cachePolicy == URLRequest.CachePolicy.reloadIgnoringLocalCacheData)
     }
   }
+
+  // MARK: declaration
+
+  private static func declarationRecord(protocolVersion: String) -> Data {
+    Data("""
+    {"uri":"at://did:plc:abc123/blue.catbird.chat.declaration/self","cid":"bafyreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",\
+    "value":{"$type":"blue.catbird.chat.declaration","allowIncoming":"all",\
+    "deliveryService":"did:web:chat.catbird.blue","protocolVersion":"\(protocolVersion)",\
+    "createdAt":"2026-11-26T11:20:00.000Z"}}
+    """.utf8)
+  }
+
+  /// catbird-mls publishes protocol version "2"; a reader that took only "1" called every
+  /// current account unable to chat.
+  @Test(arguments: ["1", "2"])
+  func acceptsEveryPublishedDeclarationVersion(version: String) throws {
+    let declaration = try MLSPublicPDSReader.declaration(
+      from: Self.declarationRecord(protocolVersion: version), statusCode: 200)
+    #expect(declaration?.protocolVersion == version)
+  }
+
+  @Test func rejectsAnUnknownDeclarationVersion() {
+    #expect(throws: MLSPublicPDSReader.ReaderError.self) {
+      try MLSPublicPDSReader.declaration(
+        from: Self.declarationRecord(protocolVersion: "3"), statusCode: 200)
+    }
+  }
 }
