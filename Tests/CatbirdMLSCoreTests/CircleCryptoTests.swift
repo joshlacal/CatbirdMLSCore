@@ -56,7 +56,7 @@ struct CircleCryptoTests {
     let crypto = FFICircleCrypto(client: client)
 
     let circleKey = Data((0 ..< 32).map { UInt8($0) })
-    let postURI = "at://did:plc:owner/space/blue.catbird.circle.encrypted/c1/blue.catbird.circle.post/3k"
+    let postURI = "at:space/did:plc:owner/blue.catbird.circle.encrypted/c1/blue.catbird.circle.post/3k"
     let a = try crypto.postKey(circleKey: circleKey, circleID: "c1", postURI: postURI)
     let b = try crypto.postKey(circleKey: circleKey, circleID: "c1", postURI: postURI)
     #expect(a.count == 32)
@@ -88,7 +88,7 @@ struct CircleCryptoTests {
     await #expect(throws: CircleCryptoError.self) {
       _ = try await crypto.openCircleKey(
         recordJSON: "{not json",
-        spaceURI: "at://did:plc:owner/space/blue.catbird.circle.encrypted/c1",
+        spaceURI: "at:space/did:plc:owner/blue.catbird.circle.encrypted/c1",
         ownerDID: "did:plc:owner"
       )
     }
@@ -104,7 +104,7 @@ struct CircleCryptoTests {
     do {
       _ = try await crypto.openCircleKey(
         recordJSON: "{}",
-        spaceURI: "at://did:plc:realowner/space/blue.catbird.circle.encrypted/3m5circle2aa",
+        spaceURI: "at:space/did:plc:realowner/blue.catbird.circle.encrypted/3m5circle2aa",
         ownerDID: "did:plc:bogusowner"
       )
       Issue.record("open with a bogus owner must throw")

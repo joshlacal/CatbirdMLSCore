@@ -44,11 +44,11 @@ if !forceRemote,
   sdkDependencies = [
     .package(
       url: "https://github.com/joshlacal/Petrel.git",
-      revision: "a390b43bf50ed0a48d7c2d9ad46e0588bbcd622d"
+      revision: "d3d352a96c2f6111bd3cbd3166e54ac0105b5dca"
     ),
     .package(
       url: "https://github.com/joshlacal/PetrelCatbird.git",
-      revision: "896808005a892fa5044d2c5e067573bbb9f352c0"
+      revision: "2d58e1cc6e1877cd6e4687eba5d77d814d2f4cf9"
     ),
   ]
 }
@@ -120,8 +120,8 @@ let selectedLocalRelativeFFI: String? = {
 func publishedArtifact() -> Target {
   let target: Target = .binaryTarget(
     name: "CatbirdMLSFFI",
-    url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.23/CatbirdMLSFFI.xcframework.zip",
-    checksum: "5c1c25e136688f46888f8b6383246064c8171efc0ac617a36b7042ee4c17221e"
+    url: "https://github.com/joshlacal/CatbirdMLSCore/releases/download/v1.5.24/CatbirdMLSFFI.xcframework.zip",
+    checksum: "f73493acf9e4300357040da91b5e0f6eec1947cf1fced24e747fc62f4b9b9a75"
   )
   let qualified = readObject(packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-apple-artifact-manifest.json"))
   let selectedInputs = packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-selected-inputs.json")
