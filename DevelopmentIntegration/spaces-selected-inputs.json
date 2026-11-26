@@ -4,41 +4,41 @@
     {
       "path": "CatbirdMLSCore",
       "repository": "CatbirdMLSCore",
-      "source_git_head": "e48c6135c8e01f42cb06b29abe976fc325621a3c",
-      "source_jj_commit": "e48c6135c8e01f42cb06b29abe976fc325621a3c"
+      "source_git_head": "1eb8ccd40b170f16aeea2d7867c752283667a0ab",
+      "source_jj_commit": "1eb8ccd40b170f16aeea2d7867c752283667a0ab"
     },
     {
       "path": "Petrel",
       "repository": "Petrel",
-      "source_git_head": "74b89dfb58fca288ee2003177fe1b287dbaf7ee8",
-      "source_jj_commit": "74b89dfb58fca288ee2003177fe1b287dbaf7ee8"
+      "source_git_head": "d3d352a96c2f6111bd3cbd3166e54ac0105b5dca",
+      "source_jj_commit": "d3d352a96c2f6111bd3cbd3166e54ac0105b5dca"
     },
     {
       "path": "PetrelCatbird",
       "repository": "PetrelCatbird",
-      "source_git_head": "7bfa54bcdcc56fad4f3e245e6772a8e2ca7cae1d",
-      "source_jj_commit": "7bfa54bcdcc56fad4f3e245e6772a8e2ca7cae1d"
+      "source_git_head": "2d58e1cc6e1877cd6e4687eba5d77d814d2f4cf9",
+      "source_jj_commit": "2d58e1cc6e1877cd6e4687eba5d77d814d2f4cf9"
     },
     {
       "path": "catbird-atproto",
       "repository": "catbird-atproto",
-      "source_git_head": "e3356fd4f3349de1d647e3558964d08449c03b13",
-      "source_jj_commit": "e3356fd4f3349de1d647e3558964d08449c03b13"
+      "source_git_head": "4299c438ff92d13cd554cdf686ca74156c987f84",
+      "source_jj_commit": "4299c438ff92d13cd554cdf686ca74156c987f84"
     },
     {
       "path": "catbird-mls",
       "repository": "catbird-mls",
-      "source_git_head": "53d02fc296f7d5c20930802ed9f2d0363d8c5d8c",
-      "source_jj_commit": "53d02fc296f7d5c20930802ed9f2d0363d8c5d8c"
+      "source_git_head": "89cdf3955509c307d3fe310f6603dae3d4077d4d",
+      "source_jj_commit": "89cdf3955509c307d3fe310f6603dae3d4077d4d"
     },
     {
       "path": "labyrinth",
       "repository": "labyrinth",
-      "source_git_head": "182e76d00d66f7a1b72bbc4248438bd68e25a2fa",
-      "source_jj_commit": "182e76d00d66f7a1b72bbc4248438bd68e25a2fa"
+      "source_git_head": "f53b4c6dff681b8b81e3755dbaadb356803eb5ed",
+      "source_jj_commit": "f53b4c6dff681b8b81e3755dbaadb356803eb5ed"
     }
   ],
   "schema_version": 2,
-  "scope": "Dec 1 local readiness candidate; includes unpublished source repairs and is not release-qualified.",
+  "scope": "v1.5.24 FFI release source tuple; every selected commit is published. The local framework built from it is not release-qualified.",
   "source_policy": "Selected baselines must remain ancestors; the artifact manifest separately records the final exact source identities and hashes."
 }
