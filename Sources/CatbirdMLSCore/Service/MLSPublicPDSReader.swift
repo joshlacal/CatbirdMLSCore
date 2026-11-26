@@ -159,10 +159,14 @@ enum MLSPublicPDSReader {
     return try declaration(from: data, statusCode: http.statusCode)
   }
 
+  /// The declaration versions this client can chat with. The Rust core publishes "2" and the
+  /// delivery service accepts both, so reading only "1" hides every current account.
+  static let supportedDeclarationProtocolVersions: Set<String> = ["1", "2"]
+
   static func declaration(from data: Data, statusCode: Int) throws -> BlueCatbirdChatDeclaration? {
     if (200...299).contains(statusCode) {
       let declaration = try decodeDeclaration(fromGetRecordJSON: data)
-      guard declaration.protocolVersion == "1",
+      guard supportedDeclarationProtocolVersions.contains(declaration.protocolVersion),
             declaration.deliveryService.didString().hasPrefix("did:web:")
       else { throw ReaderError.invalidResponse }
       return declaration
