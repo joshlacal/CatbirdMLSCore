@@ -176,4 +176,23 @@ struct MLSPublicPDSReaderTests {
       #expect(req.cachePolicy == URLRequest.CachePolicy.reloadIgnoringLocalCacheData)
     }
   }
+
+  @Test func acceptsEveryDeclarationVersionTheDeliveryServiceAccepts() throws {
+    func record(version: String) -> Data {
+      Data("""
+      {"uri":"at://did:plc:peer/blue.catbird.chat.declaration/self","cid":"bafyreieymn2udcgksuit2cvmzpj2gngftjfes5dnlwhtdc4hztksz3bg2y",
+       "value":{"$type":"blue.catbird.chat.declaration","createdAt":"2026-11-26T11:20:08.379Z",
+                "allowIncoming":"all","deliveryService":"did:web:chat.catbird.blue","protocolVersion":"\(version)"}}
+      """.utf8)
+    }
+    for version in ["1", "2"] {
+      let declaration = try MLSPublicPDSReader.declaration(from: record(version: version), statusCode: 200)
+      #expect(declaration?.protocolVersion == version)
+    }
+    #expect(throws: MLSPublicPDSReader.ReaderError.self) {
+      try MLSPublicPDSReader.declaration(from: record(version: "3"), statusCode: 200)
+    }
+    let missing = Data(#"{"error":"RecordNotFound","message":"Could not locate record"}"#.utf8)
+    #expect(try MLSPublicPDSReader.declaration(from: missing, statusCode: 400) == nil)
+  }
 }
