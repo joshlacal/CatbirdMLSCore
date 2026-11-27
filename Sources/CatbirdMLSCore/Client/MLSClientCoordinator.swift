@@ -897,6 +897,17 @@ public final class MLSClientCoordinator {
     }
   }
 
+  /// Erases one message (anyone's) from this account only. The native client deletes the
+  /// local copy first and keeps a durable marker so no later sync or restore brings it back;
+  /// with history backup on, it also files a tombstone in this account's own mailbox Space so
+  /// the account's other devices erase it too. Other members keep their copies. Idempotent.
+  public func deleteMessageForMe(conversationId: String, messageId: String) async throws {
+    let c = client
+    try await runOffMain {
+      try c.deleteMessageForMe(conversationId: conversationId, messageId: messageId)
+    }
+  }
+
   public func acceptDirectRequest(requestId: String) async throws {
     let c = client
     try await runOffMain {

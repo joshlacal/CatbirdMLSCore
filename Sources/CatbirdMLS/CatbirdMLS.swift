@@ -630,6 +630,12 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func deleteAccountDataForHostedAccount() throws
 
+    /**
+     * Delete for me: erase the message's local content on this device and queue an owner
+     * tombstone so this account's other devices erase it too. Other members keep theirs.
+     */
+    func deleteMessageForMe(conversationId: String, messageId: String) throws
+
     func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt
 
     func exportConversationIntegrityEvidenceJson(conversationId: String) throws -> String
@@ -1003,6 +1009,18 @@ open class CatbirdMlsClient:
     open func deleteAccountDataForHostedAccount() throws {
         try rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_delete_account_data_for_hosted_account(self.uniffiClonePointer(), $0)
+        }
+    }
+
+    /**
+     * Delete for me: erase the message's local content on this device and queue an owner
+     * tombstone so this account's other devices erase it too. Other members keep theirs.
+     */
+    open func deleteMessageForMe(conversationId: String, messageId: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_delete_message_for_me(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(conversationId),
+                                                                                FfiConverterString.lower(messageId), $0)
         }
     }
 
@@ -15767,6 +15785,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_account_data_for_hosted_account() != 4833 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_message_for_me() != 50918 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_enroll_device() != 1871 {

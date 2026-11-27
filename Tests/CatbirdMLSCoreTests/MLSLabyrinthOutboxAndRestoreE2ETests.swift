@@ -1055,6 +1055,46 @@ final class MLSLabyrinthOutboxAndRestoreE2ETests: XCTestCase {
     XCTAssertEqual(network.contractViolations, [])
   }
 
+  /// "Delete for Me" erases a peer's message on this device only: it leaves the local list,
+  /// stays gone across a later sync, and a repeated call is a harmless no-op.
+  func testDeleteMessageForMeErasesPeerMessageLocallyAndSyncDoesNotResurrectIt() async throws {
+    let aliceDid = "did:plc:alicedeleteformeaaaaaaaa"
+    let bobDid = "did:plc:bobdeleteformebbbbbbbbbb"
+    let conversationId = "d0e1f7a2-92a3-4eb4-8fc5-a6b7c8d9e001"
+    let erasedId = "d0e1f7a2-92a3-4eb4-8fc5-a6b7c8d9e011"
+    let keptId = "d0e1f7a2-92a3-4eb4-8fc5-a6b7c8d9e012"
+
+    let bob = try await open(try device(did: bobDid, deviceId: "b0b00007-0000-4000-8000-000000000001", label: "Bob"))
+    _ = try await bob.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    let alice = try await open(try device(did: aliceDid, deviceId: "a11ce007-0000-4000-8000-000000000001", label: "Alice"))
+    _ = try await alice.enrollDevice(grantedScopes: MLSAppGroupStorage.requiredSpacesScopes)
+    _ = try await createGroup(conversationId, title: "Delete for me", owner: alice, peer: bob, peerDid: bobDid)
+    _ = try await bob.sendMessage(conversationId: conversationId, messageId: erasedId, text: "erase me here")
+    _ = try await bob.sendMessage(conversationId: conversationId, messageId: keptId, text: "keep me")
+    _ = try await alice.sync()
+    let before = try await alice.listMessages(conversationId: conversationId, limit: 20).map(\.messageId)
+    XCTAssertTrue(before.contains(erasedId))
+    XCTAssertTrue(before.contains(keptId))
+
+    try await alice.deleteMessageForMe(conversationId: conversationId, messageId: erasedId)
+
+    let after = try await alice.listMessages(conversationId: conversationId, limit: 20).map(\.messageId)
+    XCTAssertFalse(after.contains(erasedId), "the erased message must leave this device's list")
+    XCTAssertTrue(after.contains(keptId), "only the chosen message is erased")
+
+    try await alice.deleteMessageForMe(conversationId: conversationId, messageId: erasedId)
+    _ = try await alice.sync()
+    let afterSync = try await alice.listMessages(conversationId: conversationId, limit: 20).map(\.messageId)
+    XCTAssertFalse(afterSync.contains(erasedId), "a later sync must not bring the message back")
+
+    let bobView = try await bob.listMessages(conversationId: conversationId, limit: 20).map(\.messageId)
+    XCTAssertTrue(bobView.contains(erasedId), "the sender keeps their copy")
+
+    await alice.close()
+    await bob.close()
+    XCTAssertEqual(network.contractViolations, [])
+  }
+
   // MARK: - Helpers
 
   private func conversationSpace(_ conversationId: String) -> String {
