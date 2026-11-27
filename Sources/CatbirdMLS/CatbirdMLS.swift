@@ -680,6 +680,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func listRequests(consentFilter: String?) throws -> [RequestRow]
 
+    func markConversationRead(conversationId: String, readThroughSeq: Int64) throws -> Int64
+
     func mergeCircleOwnerState(update: CircleOwnerStateDto) throws -> CircleOwnerStateDto
 
     func pendingGroupCreationStatus(conversationId: String) throws -> PendingGroupCreationStatus?
@@ -1169,6 +1171,14 @@ open class CatbirdMlsClient:
         return try FfiConverterSequenceTypeRequestRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_list_requests(self.uniffiClonePointer(),
                                                                         FfiConverterOptionString.lower(consentFilter), $0)
+        })
+    }
+
+    open func markConversationRead(conversationId: String, readThroughSeq: Int64) throws -> Int64 {
+        return try FfiConverterInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_mark_conversation_read(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(conversationId),
+                                                                                 FfiConverterInt64.lower(readThroughSeq), $0)
         })
     }
 
@@ -15832,6 +15842,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_requests() != 27470 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_mark_conversation_read() != 40550 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_merge_circle_owner_state() != 24044 {

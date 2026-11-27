@@ -912,6 +912,16 @@ public final class MLSClientCoordinator {
     }
   }
 
+  /// Marks the conversation read through `readThroughSeq` in local storage and returns the
+  /// number of peer messages still unread above that point.
+  @discardableResult
+  public func markConversationRead(conversationId: String, readThroughSeq: Int64) async throws -> Int64 {
+    let c = client
+    return try await runOffMain {
+      try c.markConversationRead(conversationId: conversationId, readThroughSeq: readThroughSeq)
+    }
+  }
+
   public func acknowledgeEntriesUpTo(conversationId: String, upToSeq: Int64) async throws {
     let c = client
     try await runOffMain {
