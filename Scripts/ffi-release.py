@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import runpy
 import shutil
 import subprocess
 
@@ -80,14 +81,36 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
 
 
+def native_checkout(root):
+    path = Path(os.environ.get('CATBIRD_MLS_NATIVE_DIR', '../catbird-mls'))
+    return (root / path).resolve()
+
+
+def native_sdks(native):
+    manifest_tools = runpy.run_path(str(Path(__file__).with_name('apple-artifact-manifest.py')))
+    return {name: manifest_tools['native_source_fingerprint'](path)
+            for name, path in manifest_tools['petrel_rust_sources'](native).items()}
+
+
 def preflight(root):
     release = os.environ['RELEASE_TAG']
     require(re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', release), 'Use a new versioned release tag')
+    native = native_checkout(root)
+    sdk_hashes = native_sdks(native)
+    native_refs = {'Petrel-rust': 'PETREL_RUST_REF', 'PetrelCatbird-rust': 'PETREL_CATBIRD_RUST_REF'}
     sources = {}
-    for name, env_name in {'CatbirdMLSCore': 'GITHUB_SHA', **REPOSITORIES}.items():
-        expected = os.environ[env_name]
+    for name, env_name in {'CatbirdMLSCore': 'GITHUB_SHA', **REPOSITORIES,
+                           **{name: native_refs[name] for name in sdk_hashes}}.items():
+        expected = os.environ.get(env_name, '')
+        if name in native_refs and not expected:
+            expected = os.environ[REPOSITORIES[name[:-5]]]
         require(re.fullmatch(r'[0-9a-f]{40}', expected), f'{env_name} must be a full commit SHA')
-        repo = root if name == 'CatbirdMLSCore' else root.parent / name
+        if name in native_refs:
+            repo = native.parent / name[:-5]
+        elif name in ('catbird-mls', 'catbird-atproto', 'labyrinth'):
+            repo = native if name == 'catbird-mls' else native.parent / name
+        else:
+            repo = root if name == 'CatbirdMLSCore' else root.parent / name
         actual = run('git', 'rev-parse', 'HEAD', cwd=repo)
         require(actual == expected, f'{name} checkout differs from requested revision')
         require(not run('git', 'status', '--porcelain', '--untracked-files=no', cwd=repo), f'Dirty tracked input in {name}')
@@ -102,21 +125,25 @@ def preflight(root):
     support.mkdir(exist_ok=False)
     save(support / 'inputs.json', {
         'sources': sources, 'release_tag': release,
+        **({'native_sdk_sources_sha256': sdk_hashes} if sdk_hashes else {}),
         'committed_swift_sha256': sha(root / 'Sources/CatbirdMLS/CatbirdMLS.swift'),
         'package_manifest_sha256': sha(root / 'Package.swift'),
-        'cargo_lock_sha256': sha(root.parent / 'catbird-mls/Cargo.lock'),
+        'cargo_lock_sha256': sha(native / 'Cargo.lock'),
         'workflow_sha256': sha(root / '.github/workflows/build-ffi.yml'),
         'rebuild_script_sha256': sha(root / 'Scripts/rebuild-ffi.sh'),
-        'native_build_script_sha256': sha(root.parent / 'catbird-mls/create-xcframework.sh'),
+        'native_build_script_sha256': sha(native / 'create-xcframework.sh'),
     })
 
 
 def verify(root):
     support = root / 'release-support'
     inputs = json.loads((support / 'inputs.json').read_text())
-    native = root.parent / 'catbird-mls'
+    native = native_checkout(root)
     require(sha(native / 'Cargo.lock') == inputs['cargo_lock_sha256'], 'Native build changed Cargo.lock')
     require(sha(root / 'Package.swift') == inputs['package_manifest_sha256'], 'Package.swift changed during native build')
+    if 'native_sdk_sources_sha256' in inputs:
+        current = native_sdks(native)
+        require(current == inputs['native_sdk_sources_sha256'], 'Native SDK sources changed during build')
     binding = native / 'build/bindings/CatbirdMLS.swift'
     require(sha(binding) == inputs['committed_swift_sha256'], 'Generated Swift differs from committed paired bindings')
     require(sha(root / 'Sources/CatbirdMLS/CatbirdMLS.swift') == inputs['committed_swift_sha256'], 'Committed Swift was replaced')

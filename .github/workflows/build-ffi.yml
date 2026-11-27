@@ -29,6 +29,15 @@ on:
         required: true
         type: string
 
+      petrel_rust_ref:
+        description: Full native Petrel commit SHA (defaults to petrel_ref)
+        required: false
+        type: string
+      petrel_catbird_rust_ref:
+        description: Full native PetrelCatbird commit SHA (defaults to petrel_catbird_ref)
+        required: false
+        type: string
+
 permissions:
   contents: read
 
@@ -43,8 +52,7 @@ env:
   IPHONEOS_DEPLOYMENT_TARGET: "18.0"
   MACOSX_DEPLOYMENT_TARGET: "15.0"
   RUSTUP_TOOLCHAIN: "1.97.1"
-  # jacquard is a git dependency on tangled.org, whose fetches can stall
-  # for hours under libgit2. Fetch with the git CLI, abort a stalled
+  # Historical lockfiles include git dependencies. Fetch with the git CLI, abort a stalled
   # transfer after 60 s below 1 KB/s, and let cargo retry.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_NET_RETRY: "10"
@@ -53,6 +61,9 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.release_tag }}
   CATBIRD_MLS_REF: ${{ github.event.inputs.catbird_mls_ref }}
   CATBIRD_ATPROTO_REF: ${{ github.event.inputs.catbird_atproto_ref }}
+  CATBIRD_MLS_NATIVE_DIR: ../native-inputs/catbird-mls
+  PETREL_RUST_REF: ${{ inputs.petrel_rust_ref || inputs.petrel_ref }}
+  PETREL_CATBIRD_RUST_REF: ${{ inputs.petrel_catbird_rust_ref || inputs.petrel_catbird_ref }}
   LABYRINTH_REF: ${{ github.event.inputs.labyrinth_ref }}
   PETREL_REF: ${{ github.event.inputs.petrel_ref }}
   PETREL_CATBIRD_REF: ${{ github.event.inputs.petrel_catbird_ref }}
@@ -71,17 +82,17 @@ jobs:
         with:
           repository: joshlacal/catbird-mls
           ref: ${{ env.CATBIRD_MLS_REF }}
-          path: catbird-mls
+          path: native-inputs/catbird-mls
       - uses: actions/checkout@v4
         with:
           repository: joshlacal/catbird-atproto
           ref: ${{ env.CATBIRD_ATPROTO_REF }}
-          path: catbird-atproto
+          path: native-inputs/catbird-atproto
       - uses: actions/checkout@v4
         with:
           repository: joshlacal/labyrinth
           ref: ${{ env.LABYRINTH_REF }}
-          path: labyrinth
+          path: native-inputs/labyrinth
       - uses: actions/checkout@v4
         with:
           repository: joshlacal/Petrel
@@ -92,6 +103,17 @@ jobs:
           repository: joshlacal/PetrelCatbird
           ref: ${{ env.PETREL_CATBIRD_REF }}
           path: PetrelCatbird
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joshlacal/Petrel
+          ref: ${{ env.PETREL_RUST_REF }}
+          path: native-inputs/Petrel
+      - uses: actions/checkout@v4
+        with:
+          repository: joshlacal/PetrelCatbird
+          ref: ${{ env.PETREL_CATBIRD_RUST_REF }}
+          path: native-inputs/PetrelCatbird
 
       - name: Check immutable sources and package dependency pins
         working-directory: CatbirdMLSCore
@@ -142,8 +164,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            catbird-mls/target
-          key: ${{ runner.os }}-ffi-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('catbird-mls/Cargo.lock') }}
+            native-inputs/catbird-mls/target
+          key: ${{ runner.os }}-ffi-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('native-inputs/catbird-mls/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-ffi-${{ env.RUSTUP_TOOLCHAIN }}-
 

@@ -83,6 +83,11 @@ fi
 labyrinth_dir="$(CDPATH= cd -- "$labyrinth_dir" && pwd)"
 cd "$native_dir"
 
+# Capture the full generator-relevant Rust input before the long multi-target
+# build. A mutable JJ working copy can otherwise change while the generator is
+# running and leave artifacts whose recorded revision does not describe them.
+source_fingerprint_before="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD" --dependency "$atproto_dir" --dependency "$labyrinth_dir")"
+
 backup_timestamp="${FFI_BACKUP_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 case "$backup_timestamp" in
     *[!0-9TZ]*)
@@ -111,11 +116,6 @@ preserve_if_present "$framework_name" "native-$framework_name"
 preserve_if_present build/frameworks native-build-frameworks
 preserve_if_present build/bindings native-build-bindings
 preserve_if_present build/libs native-build-libs
-
-# Capture the full generator-relevant Rust input before the long multi-target
-# build. A mutable JJ working copy can otherwise change while the generator is
-# running and leave artifacts whose recorded revision does not describe them.
-source_fingerprint_before="$(python3 "$artifact_manifest_tool" source-fingerprint --native "$PWD" --dependency "$atproto_dir" --dependency "$labyrinth_dir")"
 
 # Run the XCFramework build script
 echo "📦 Step 1: Building XCFramework..."

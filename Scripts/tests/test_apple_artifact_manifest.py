@@ -289,6 +289,41 @@ class AppleArtifactManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "framework file map"):
             self.module.verify_manifest(path)
 
+    def test_migrated_lock_fingerprints_both_native_sdk_checkouts(self):
+        write(self.petrel / "rust/Cargo.toml", '[workspace]\nmembers = ["petrel-core"]\n')
+        for repo, crate in [(self.petrel, "petrel-core"), (self.petrel_catbird, "petrel-catbird")]:
+            crate_dir = repo / "rust" / crate
+            write(crate_dir / "Cargo.toml", f'[package]\nname = "{crate}"\nversion = "0.1.0"\n')
+            write(crate_dir / "src/lib.rs", "pub fn original() {}\n")
+        write(self.native / "Cargo.toml", '[package]\nname = "client"\nversion = "0.1.0"\n'
+              '[dependencies]\npetrel-core = {path="../Petrel/rust/petrel-core"}\n'
+              'petrel-catbird = {path="../PetrelCatbird/rust/petrel-catbird"}\n')
+        write(self.native / "Cargo.lock", 'version = 4\n[[package]]\nname = "petrel-core"\nversion = "0.1.0"\n'
+              '[[package]]\nname = "petrel-catbird"\nversion = "0.1.0"\n')
+        self.identities.update({repo + "-rust": self.identities[repo] for repo in ("Petrel", "PetrelCatbird")})
+        self.refresh_marker()
+        manifest = self.build()
+        dependencies = manifest["source"]["local_path_dependencies"]
+        self.assertEqual(set(dependencies), {"catbird-atproto", "labyrinth", "Petrel-rust", "PetrelCatbird-rust"})
+        path = self.root / "manifest.json"
+        self.module.write_manifest(path, manifest)
+        self.module.verify_manifest(path)
+        for repo, crate in [(self.petrel, "petrel-core"), (self.petrel_catbird, "petrel-catbird")]:
+            with self.subTest(crate=crate):
+                source = repo / "rust" / crate / "src/lib.rs"
+                original = source.read_bytes()
+                write(source, "pub fn changed() {}\n")
+                with self.assertRaisesRegex(RuntimeError, f"{repo.name}-rust source fingerprint"):
+                    self.module.verify_manifest(path)
+                source.write_bytes(original)
+        wrong = self.native / "Cargo.toml"
+        other = self.root / "different-sdk"
+        # A different checkout with byte-identical package metadata cannot stand in for the pinned checkout.
+        shutil.copytree(self.petrel_catbird, other)
+        write(wrong, wrong.read_text().replace("../PetrelCatbird/", "../different-sdk/"))
+        with self.assertRaisesRegex(RuntimeError, "must resolve to the candidate"):
+            self.module.source_bundle_record(self.native, [self.atproto, self.labyrinth])
+
     def test_verify_rejects_changed_local_path_dependency(self):
         manifest = self.build()
         path = self.root / "manifest.json"

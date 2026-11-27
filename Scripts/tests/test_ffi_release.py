@@ -24,6 +24,8 @@ class ReleaseGuards(unittest.TestCase):
         self.env.update({env: self.revisions[name] for name, env in ffi.REPOSITORIES.items()})
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, self.env).start()
+        for name in ('CATBIRD_MLS_NATIVE_DIR', 'PETREL_RUST_REF', 'PETREL_CATBIRD_RUST_REF'):
+            os.environ.pop(name, None)
         def vcs(*args, cwd=None):
             if args[:2] == ('git', 'rev-parse'):
                 return self.revisions[cwd.name]
@@ -78,6 +80,20 @@ class ReleaseGuards(unittest.TestCase):
         proof = json.loads((self.root / 'release-support/framework-verification.json').read_text())
         self.assertEqual(len(proof['libraries']), 4)
         self.assertEqual(len(proof['paired_files_sha256']), 3)
+
+    def test_migrated_release_records_independent_native_sdk_pins(self):
+        hashes = {'Petrel-rust': 'a' * 64, 'PetrelCatbird-rust': 'b' * 64}
+        with patch.object(ffi, 'native_sdks', return_value=hashes):
+            with patch.dict(os.environ, {'PETREL_RUST_REF': '0' * 40}):
+                with self.assertRaisesRegex(ValueError, 'Petrel-rust checkout differs'):
+                    ffi.preflight(self.root)
+            ffi.preflight(self.root)
+        inputs = json.loads((self.root / 'release-support/inputs.json').read_text())
+        self.assertEqual(inputs['native_sdk_sources_sha256'], hashes)
+        self.assertEqual(inputs['sources']['Petrel-rust'], self.revisions['Petrel'])
+        with patch.object(ffi, 'native_sdks', return_value={**hashes, 'Petrel-rust': 'c' * 64}):
+            with self.assertRaisesRegex(ValueError, 'Native SDK sources changed'):
+                ffi.verify(self.root)
 
     def test_rejects_moving_ref(self):
         with patch.dict(os.environ, {'CATBIRD_MLS_REF': 'main'}):
