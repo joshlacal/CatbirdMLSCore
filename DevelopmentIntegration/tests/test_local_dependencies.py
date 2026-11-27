@@ -85,7 +85,8 @@ class PackageSelectionTests(unittest.TestCase):
         selected.write_text(json.dumps(sources))
         (integration / "spaces-apple-artifact-manifest.json").write_text(json.dumps({
             "selected_inputs": {"sha256": hashlib.sha256(selected.read_bytes()).hexdigest()},
-            "source": {"repositories": {name: {"commit": commit} for name, commit in sources.items()}},
+            "source": {"repositories": {name: {"commit": commit} for name, commit in sources.items()},
+                       "local_path_dependencies": {"catbird-atproto": {}, "labyrinth": {}}},
         }))
 
     def test_remote_mode_selects_pinned_remote_sdks(self):

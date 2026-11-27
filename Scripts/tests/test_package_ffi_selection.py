@@ -71,15 +71,27 @@ class PackageFFISelection(unittest.TestCase):
             sources = {"catbird-mls": "1" * 40, "catbird-atproto": "2" * 40, "labyrinth": "3" * 40}
             qualified = json.loads(receipt.read_text())
             qualified["source"]["repositories"] = {name: {"commit": commit} for name, commit in sources.items()}
+            qualified["source"]["local_path_dependencies"] = {"catbird-atproto": {}, "labyrinth": {}}
             receipt.write_text(json.dumps(qualified))
             release = json.loads(published.read_text())
             release.update(generated_swift_sha256=binding_digest, sources=sources)
             published.write_text(json.dumps(release))
             valid = dump(force_remote=True)
             self.assertEqual(valid.returncode, 0, valid.stderr)
+            for name in ("Petrel-rust", "PetrelCatbird-rust"):
+                sources[name] = "5" * 40
+                qualified["source"]["local_path_dependencies"][name] = {}
+                qualified["source"]["repositories"][name] = {"commit": sources[name]}
+            receipt.write_text(json.dumps(qualified))
+            self.assertNotEqual(dump(force_remote=True).returncode, 0)
+            published.write_text(json.dumps(release))
+            current = dump(force_remote=True)
+            self.assertEqual(current.returncode, 0, current.stderr)
             # Identical generated Swift does not establish which Rust code or archive was published.
             for changed in (
                 {"sources": {**sources, "catbird-mls": "4" * 40}},
+                {"sources": {**sources, "Petrel-rust": "4" * 40}},
+                {"sources": {**sources, "PetrelCatbird-rust": "4" * 40}},
                 {"sources": {name: sha for name, sha in sources.items() if name != "labyrinth"}},
                 {"archive_sha256": "0" * 64}, {"release_tag": "v0.0.0"}
             ):

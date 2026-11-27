@@ -125,7 +125,6 @@ func publishedArtifact() -> Target {
   )
   let qualified = readObject(packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-apple-artifact-manifest.json"))
   let selectedInputs = packageRoot.appendingPathComponent("DevelopmentIntegration/spaces-selected-inputs.json")
-  let nativeDependencies = ["catbird-mls", "catbird-atproto", "labyrinth"]
   guard let published = readObject(packageRoot.appendingPathComponent("Scripts/ffi-release-inputs.json")),
         let bindingHash, published["generated_swift_sha256"] as? String == bindingHash,
         let tag = published["release_tag"] as? String, let checksum = published["archive_sha256"] as? String,
@@ -136,7 +135,9 @@ func publishedArtifact() -> Target {
         let source = qualified?["source"] as? [String: Any],
         let repositories = source["repositories"] as? [String: [String: Any]],
         let publishedSources = published["sources"] as? [String: String],
-        nativeDependencies.allSatisfy({ name in
+        let pathDependencies = source["local_path_dependencies"] as? [String: Any],
+        pathDependencies["catbird-atproto"] != nil, pathDependencies["labyrinth"] != nil,
+        (["catbird-mls"] + Array(pathDependencies.keys)).allSatisfy({ name in
           guard let commit = repositories[name]?["commit"] as? String, commit.count == 40 else { return false }
           return publishedSources[name] == commit
         }) else {

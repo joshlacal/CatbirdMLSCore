@@ -28,6 +28,8 @@ python3 Scripts/apple-artifact-manifest.py generate --qualification reviewed-sou
   --output DevelopmentIntegration/spaces-apple-artifact-manifest.json
 ```
 
+When the native Cargo lockfile includes the Petrel SDK, the rebuild, manifest verifier and Golden50 replay also fingerprint the Rust sources in `Petrel/rust` and `PetrelCatbird/rust/petrel-catbird`. Both checkouts belong beside `catbird-mls`. The release workflow accepts immutable `petrel_rust_ref` and `petrel_catbird_rust_ref` inputs and records them as `Petrel-rust` and `PetrelCatbird-rust`. Each defaults to its corresponding Swift SDK revision. Pin the Rust revisions explicitly when the Swift package revisions predate the Rust crates. The existing `catbird_atproto_ref` still supplies the `atproto-spaces` compatibility crate. Historical release receipts keep their original source tuple and digest.
+
 Check an existing receipt against the current checkouts and framework (prints the manifest identity, fails on any drift):
 
 ```sh

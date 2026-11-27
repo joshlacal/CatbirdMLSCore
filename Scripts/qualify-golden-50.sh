@@ -65,7 +65,7 @@ marker = json.loads(marker_path.read_text())
 if marker.get("protocolVersion") != 20261023:
     raise SystemExit("Candidate FFI has the wrong clean-slate protocol version")
 if marker.get("sourceFingerprint") != expected_fingerprint:
-    raise SystemExit("Candidate FFI source fingerprint does not match candidate catbird-mls + catbird-atproto + labyrinth")
+    raise SystemExit("Candidate FFI source fingerprint does not match the candidate native source bundle")
 if "labyrinth" not in marker.get("features", []):
     raise SystemExit("Candidate FFI was not built with the labyrinth feature")
 if marker.get("artifactScope") != "apple-all-targets":
@@ -147,7 +147,7 @@ replay_fingerprint_after=$(
     --dependency "$labyrinth_dir"
 )
 if [ "$replay_fingerprint_after" != "$replay_fingerprint_before" ]; then
-  echo "Candidate simulator, server, native, atproto, or Labyrinth source changed during Golden50 replay" >&2
+  echo "Candidate simulator or native dependency source changed during Golden50 replay" >&2
   exit 1
 fi
 printf '%s\n' 'catbird.golden50.replay-verified.v1' > "$fixture_dir/.candidate-replay-verified"
