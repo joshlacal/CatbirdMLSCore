@@ -1,16 +1,18 @@
 {
-  "source_run_id": 45730805019,
-  "source_run_attempt": 2,
-  "release_tag": "v1.5.24",
+  "source_run_id": 46086550966,
+  "source_run_attempt": 1,
+  "release_tag": "v1.5.25",
   "artifact_name": "catbird-mls-ffi",
   "sources": {
-    "CatbirdMLSCore": "525222a90bb0b0bd6822c2ce48d59a7ab5eb52c4",
+    "CatbirdMLSCore": "1ac8be305f084d2f983bf141ee76df0f2cf39c1a",
     "Petrel": "d3d352a96c2f6111bd3cbd3166e54ac0105b5dca",
+    "Petrel-rust": "74c72f7b03245552ca94782b8ac8bb0a5f1309d8",
     "PetrelCatbird": "2d58e1cc6e1877cd6e4687eba5d77d814d2f4cf9",
-    "catbird-atproto": "4299c438ff92d13cd554cdf686ca74156c987f84",
-    "catbird-mls": "89cdf3955509c307d3fe310f6603dae3d4077d4d",
-    "labyrinth": "f53b4c6dff681b8b81e3755dbaadb356803eb5ed"
+    "PetrelCatbird-rust": "7658265cdc4eebd6cbb37b30fc1f385892168b19",
+    "catbird-atproto": "8089d162141807a62887bf76c93943dc2de78808",
+    "catbird-mls": "bd0d0413cff14759ec813c7cc914d9bfb086cf15",
+    "labyrinth": "bb2d1679dfcc3bf077c7e1e44ec8988e33314142"
   },
-  "generated_swift_sha256": "ab07bbe34404ffda759145cff8ea9cf475f49f05d77b5ff8528f5461ef3a4a37",
-  "archive_sha256": "f73493acf9e4300357040da91b5e0f6eec1947cf1fced24e747fc62f4b9b9a75"
+  "generated_swift_sha256": "9dfcad46dd51eeb2e007718564b27c84d6b0bdbcb923b0e551fdaec5ff66dbd9",
+  "archive_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
 }
