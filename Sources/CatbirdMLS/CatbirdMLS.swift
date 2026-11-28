@@ -630,6 +630,12 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
 
     func deleteAccountDataForHostedAccount() throws
 
+    /**
+     * Delete for me: erase the message's local content on this device and queue an owner
+     * tombstone so this account's other devices erase it too. Other members keep theirs.
+     */
+    func deleteMessageForMe(conversationId: String, messageId: String) throws
+
     func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt
 
     func exportConversationIntegrityEvidenceJson(conversationId: String) throws -> String
@@ -679,6 +685,8 @@ public protocol CatbirdMlsClientProtocol: AnyObject {
     func listRecoveryMethods() throws -> [LabyrinthRecoveryMethodInfo]
 
     func listRequests(consentFilter: String?) throws -> [RequestRow]
+
+    func markConversationRead(conversationId: String, readThroughSeq: Int64) throws -> Int64
 
     func mergeCircleOwnerState(update: CircleOwnerStateDto) throws -> CircleOwnerStateDto
 
@@ -1004,6 +1012,18 @@ open class CatbirdMlsClient:
         }
     }
 
+    /**
+     * Delete for me: erase the message's local content on this device and queue an owner
+     * tombstone so this account's other devices erase it too. Other members keep theirs.
+     */
+    open func deleteMessageForMe(conversationId: String, messageId: String) throws {
+        try rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_delete_message_for_me(self.uniffiClonePointer(),
+                                                                                FfiConverterString.lower(conversationId),
+                                                                                FfiConverterString.lower(messageId), $0)
+        }
+    }
+
     open func enrollDevice(grantedOauthScopes: [String]) throws -> EnrollmentReceipt {
         return try FfiConverterTypeEnrollmentReceipt.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_enroll_device(self.uniffiClonePointer(),
@@ -1169,6 +1189,14 @@ open class CatbirdMlsClient:
         return try FfiConverterSequenceTypeRequestRow.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
             uniffi_catbird_mls_fn_method_catbirdmlsclient_list_requests(self.uniffiClonePointer(),
                                                                         FfiConverterOptionString.lower(consentFilter), $0)
+        })
+    }
+
+    open func markConversationRead(conversationId: String, readThroughSeq: Int64) throws -> Int64 {
+        return try FfiConverterInt64.lift(rustCallWithError(FfiConverterTypeMLSError.lift) {
+            uniffi_catbird_mls_fn_method_catbirdmlsclient_mark_conversation_read(self.uniffiClonePointer(),
+                                                                                 FfiConverterString.lower(conversationId),
+                                                                                 FfiConverterInt64.lower(readThroughSeq), $0)
         })
     }
 
@@ -15759,6 +15787,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_account_data_for_hosted_account() != 4833 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_delete_message_for_me() != 50918 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_enroll_device() != 1871 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -15832,6 +15863,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_list_requests() != 27470 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_catbird_mls_checksum_method_catbirdmlsclient_mark_conversation_read() != 40550 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_catbird_mls_checksum_method_catbirdmlsclient_merge_circle_owner_state() != 24044 {
